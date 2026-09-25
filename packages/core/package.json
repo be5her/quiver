@@ -1,0 +1,14 @@
+{
+  "name": "@quiver/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Quiver engine: command registry, models, variable resolution, storage. No Electron or React imports.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./node": "./src/node/index.ts"
+  },
+  "dependencies": {
+    "zod": "^4.6.5"
+  }
+}

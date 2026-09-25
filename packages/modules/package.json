@@ -1,0 +1,16 @@
+{
+  "name": "@quiver/modules",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Quiver feature modules. One folder per module with a main (Node) side and a ui (React) side.",
+  "exports": {
+    "./main": "./src/main.ts",
+    "./ui": "./src/ui.ts"
+  },
+  "dependencies": {
+    "ioredis": "^6.0.0",
+    "mysql2": "^3.24.4",
+    "undici": "^7.29.1"
+  }
+}

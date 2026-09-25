@@ -1,0 +1,23 @@
+{
+  "name": "@quiver/ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Quiver host UI contract: stores, IPC client, primitives shared by the shell and modules.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@codemirror/lang-html": "^6.4.12",
+    "@codemirror/lang-javascript": "^6.2.5",
+    "@codemirror/lang-json": "^6.0.2",
+    "@codemirror/lang-sql": "^6.10.0",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.13",
+    "@uiw/react-codemirror": "^4.25.12",
+    "clsx": "^2.1.1",
+    "cmdk": "^1.1.1",
+    "lucide-react": "^1.48.0",
+    "zustand": "^5.0.15"
+  }
+}

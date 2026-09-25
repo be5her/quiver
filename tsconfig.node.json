@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "composite": false
+  },
+  "include": ["electron.vite.config.ts", "vitest.config.ts", "src/main", "src/preload", "packages/core/src", "packages/mcp/src", "packages/modules/src/main.ts", "packages/modules/src/api/main.ts", "packages/modules/src/db/main.ts", "packages/modules/src/teleport/main.ts", "packages/modules/src/tools/main.ts"]
+}

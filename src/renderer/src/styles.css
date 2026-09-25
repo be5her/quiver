@@ -1,0 +1,126 @@
+@import 'tailwindcss';
+@source '../../../packages/ui/src';
+@source '../../../packages/modules/src';
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --canvas: #ffffff;
+  --surface: #f7f8fa;
+  --elevated: #eceef2;
+  --fg: #1b1e25;
+  --muted: #6b7280;
+  --edge: #e2e5ea;
+  --accent: #4f6bf0;
+  --accent-hover: #3d59dd;
+  --accent-fg: #ffffff;
+  --danger: #dc2626;
+  --success: #15803d;
+  --warning: #b45309;
+  --font-mono: ui-monospace, 'Cascadia Code', 'JetBrains Mono', Consolas, 'Liberation Mono', monospace;
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+}
+
+.dark {
+  --canvas: #121419;
+  --surface: #181b21;
+  --elevated: #22262e;
+  --fg: #e4e7ee;
+  --muted: #8b93a3;
+  --edge: #2a2f39;
+  --accent: #7089ff;
+  --accent-hover: #8397ff;
+  --accent-fg: #0f1117;
+  --danger: #f87171;
+  --success: #4ade80;
+  --warning: #fbbf24;
+}
+
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-elevated: var(--elevated);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-edge: var(--edge);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-fg: var(--accent-fg);
+  --color-danger: var(--danger);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --font-mono: var(--font-mono);
+  --font-sans: var(--font-sans);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--canvas);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--muted) 35%, transparent) transparent;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* cmdk palette */
+[cmdk-root] {
+  width: 100%;
+}
+[cmdk-input] {
+  width: 100%;
+  height: 44px;
+  padding: 0 14px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--edge);
+  outline: none;
+  font-size: 14px;
+  color: var(--fg);
+}
+[cmdk-list] {
+  max-height: 360px;
+  overflow: auto;
+  padding: 6px;
+}
+[cmdk-group-heading] {
+  padding: 8px 8px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+[cmdk-item] {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--fg);
+}
+[cmdk-item][data-selected='true'] {
+  background: var(--elevated);
+}
+[cmdk-empty] {
+  padding: 16px;
+  font-size: 13px;
+  color: var(--muted);
+  text-align: center;
+}
