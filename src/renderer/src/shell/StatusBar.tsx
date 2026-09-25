@@ -1,7 +1,8 @@
 import type { Environment } from '@quiver/core';
 import { cn, invoke, selectActiveWorkspace, useAppStore, useInvoke } from '@quiver/ui';
-import { Moon, Plug, Sun } from 'lucide-react';
+import { Download, ExternalLink, Moon, Plug, RotateCw, Sun } from 'lucide-react';
 import { openSettings, toggleTheme } from './actions';
+import { downloadUpdate, installUpdate, openExternal } from './updates';
 
 export function StatusBar() {
   const workspace = useAppStore(selectActiveWorkspace);
@@ -23,6 +24,7 @@ export function StatusBar() {
         <span>No workspace</span>
       )}
       <div className="flex-1" />
+      <UpdateItem />
       <button type="button" onClick={openSettings} className="flex items-center gap-1 hover:text-fg" title={mcp?.error ?? 'MCP server'}>
         <Plug className="size-3" />
         <span className={cn('size-1.5 rounded-full', mcp?.running ? 'bg-success' : 'bg-danger')} />
@@ -33,6 +35,50 @@ export function StatusBar() {
       </button>
     </footer>
   );
+}
+
+/** One entry that follows the updater: checking, a version to fetch, progress, or a restart to finish. */
+function UpdateItem() {
+  const update = useAppStore((s) => s.update);
+  if (!update?.supported) return null;
+  const button = 'flex items-center gap-1 text-accent hover:text-fg';
+  switch (update.status) {
+    case 'checking':
+      return (
+        <span className="flex items-center gap-1" data-testid="update-status">
+          <RotateCw className="size-3 animate-spin" />
+          Checking for updates…
+        </span>
+      );
+    case 'available':
+      return update.installable ? (
+        <button type="button" onClick={() => void downloadUpdate()} className={button} title={`Download Quiver ${update.version}; it installs when you restart`} data-testid="update-status">
+          <Download className="size-3" />
+          Update to {update.version}
+        </button>
+      ) : (
+        <button type="button" onClick={() => openExternal(update.url)} className={button} title={update.reason} data-testid="update-status">
+          <ExternalLink className="size-3" />
+          Quiver {update.version} available
+        </button>
+      );
+    case 'downloading':
+      return (
+        <span className="flex items-center gap-1" data-testid="update-status">
+          <Download className="size-3 animate-pulse" />
+          Downloading {update.version}… {update.progress?.percent ?? 0}%
+        </span>
+      );
+    case 'downloaded':
+      return (
+        <button type="button" onClick={() => void installUpdate()} className={cn(button, 'font-medium')} title={`Quiver ${update.version} is downloaded`} data-testid="update-status">
+          <RotateCw className="size-3" />
+          Restart to update
+        </button>
+      );
+    default:
+      return null;
+  }
 }
 
 function EnvironmentPicker() {

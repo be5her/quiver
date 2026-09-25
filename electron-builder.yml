@@ -1,5 +1,11 @@
+# Packaging and publishing.
+#   npm run package               builds the installer for this platform into release/ without publishing.
+#   .github/workflows/release.yml runs the same build on Windows, macOS and Linux runners and uploads
+#   the installers plus the latest*.yml manifests to a draft GitHub release. The `publish` block below
+#   also makes electron-builder write app-update.yml into the app, which the in-app updater reads.
 appId: dev.quiver.app
 productName: Quiver
+copyright: Copyright © 2026 Besher Karam
 directories:
   output: release
   buildResources: resources
@@ -7,7 +13,19 @@ files:
   - out/**
   - package.json
   - "!**/*.map"
+extraResources:
+  # Window icon for Linux and dev runs; Windows and macOS use the icon baked into the executable and bundle.
+  - from: resources/icon.png
+    to: icon.png
 asar: true
+# No native modules: nothing to rebuild against Electron's Node.
+npmRebuild: false
+publish:
+  provider: github
+  owner: be5her
+  repo: quiver
+  releaseType: draft
+
 win:
   target:
     - nsis
@@ -15,11 +33,23 @@ win:
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
+
 mac:
   target:
-    - dmg
+    - target: dmg
+      arch: [x64, arm64]
+    # The zip is what electron-updater downloads on macOS.
+    - target: zip
+      arch: [x64, arm64]
   category: public.app-category.developer-tools
+  artifactName: ${productName}-${version}-mac-${arch}.${ext}
+  # Unsigned until an Apple Developer certificate is added; see README "Releasing".
+  identity: null
+
 linux:
   target:
     - AppImage
+    - deb
   category: Development
+  maintainer: Besher Karam <besher.karam.1998@gmail.com>
+  artifactName: ${productName}-${version}-linux-${arch}.${ext}

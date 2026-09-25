@@ -12,6 +12,8 @@ import {
   type HostEvents,
   type RecentWorkspace,
   type SecretsApi,
+  type UpdateState,
+  type UpdatesApi,
   type WorkspaceApi,
 } from '@quiver/core';
 import { GlobalStore, WorkspaceManager, workspaceIdFor, type WorkspaceSession } from '@quiver/core/node';
@@ -26,6 +28,8 @@ export interface HostOptions {
   broadcast(message: { event: HostEventName; payload: unknown }): void;
   pickFolder?(): Promise<string | undefined>;
   pickFile?(options?: { title?: string; filters?: { name: string; extensions: string[] }[]; defaultPath?: string }): Promise<string | undefined>;
+  /** In-app updates; absent in development and smoke runs. */
+  updates?: UpdatesApi;
 }
 
 export interface InvokeOptions {
@@ -200,6 +204,10 @@ export class Host {
     return { running: this.mcp !== null, port: this.config.get().mcp.port };
   }
 
+  private updateState(): UpdateState {
+    return this.opts.updates?.state() ?? { supported: false, installable: false, reason: 'Updates are only checked in installed builds.', current: this.opts.version, status: 'idle' };
+  }
+
   // ---------- host commands ----------
 
   private hostCommands() {
@@ -341,7 +349,40 @@ export class Host {
         description: 'Version, platform and MCP server status.',
         scope: 'global',
         input: z.object({}),
-        handler: async () => ({ version: this.opts.version, platform: process.platform, mcp: this.mcpStatus(), secretsAvailable: this.opts.secrets.available }),
+        handler: async () => ({ version: this.opts.version, platform: process.platform, mcp: this.mcpStatus(), secretsAvailable: this.opts.secrets.available, update: this.updateState() }),
+      }),
+      defineCommand({
+        id: 'app.update.check',
+        title: 'Check for updates',
+        description: 'Asks GitHub Releases for a newer Quiver and returns the updater state. Nothing is downloaded.',
+        scope: 'global',
+        input: z.object({}),
+        handler: async () => (this.opts.updates ? this.opts.updates.check('manual') : this.updateState()),
+      }),
+      defineCommand({
+        id: 'app.update.download',
+        title: 'Download update',
+        description: 'Downloads the available update in the background. It is installed on the next restart.',
+        scope: 'global',
+        mutating: true,
+        input: z.object({}),
+        handler: async () => {
+          if (!this.opts.updates) throw new QuiverError('INVALID_INPUT', 'Updates are not available in this build.');
+          return this.opts.updates.download();
+        },
+      }),
+      defineCommand({
+        id: 'app.update.install',
+        title: 'Restart and install update',
+        description: 'Quits Quiver, installs the downloaded update and starts it again.',
+        scope: 'global',
+        mutating: true,
+        input: z.object({}),
+        handler: async () => {
+          if (!this.opts.updates) throw new QuiverError('INVALID_INPUT', 'Updates are not available in this build.');
+          await this.opts.updates.install();
+          return { restarting: true };
+        },
       }),
       defineCommand({
         id: 'mcp.restart',

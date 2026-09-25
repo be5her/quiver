@@ -2,6 +2,7 @@ import { IconButton, Kbd, cn, useAppStore, useTabsStore } from '@quiver/ui';
 import { FolderOpen, Search, Settings, X } from 'lucide-react';
 import { useMemo } from 'react';
 import { closeWorkspace, openSettings, openWorkspace } from './actions';
+import { QuiverMark } from './Logo';
 
 export function TitleBar() {
   const workspaces = useAppStore((s) => s.workspaces);
@@ -17,7 +18,7 @@ export function TitleBar() {
   return (
     <header className="flex items-center h-10 px-2 gap-2 border-b border-edge bg-surface shrink-0 select-none">
       <div className="flex items-center gap-1.5 px-1.5 font-semibold text-sm tracking-tight">
-        <span className="inline-block size-2.5 rounded-sm bg-accent" />
+        <QuiverMark className="size-5" />
         Quiver
       </div>
 

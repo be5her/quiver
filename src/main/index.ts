@@ -6,9 +6,13 @@ import type { SecretsApi } from '@quiver/core';
 import { Host } from './host';
 import { registerIpc } from './ipc';
 import { runSmokeTest } from './smoke';
+import { runUpdateSmoke } from './smoke-update';
+import { Updater } from './updater';
 import { createMainWindow } from './window';
 
 process.env.QUIVER_VERSION = app.getVersion();
+// Windows groups taskbar entries and notifications by this id; the installer gives the shortcut the same one.
+app.setAppUserModelId('dev.quiver.app');
 
 function makeSecrets(): SecretsApi {
   const available = safeStorage.isEncryptionAvailable();
@@ -55,6 +59,8 @@ async function main(): Promise<void> {
   }
   await app.whenReady();
 
+  // The smoke test checks the "no updater" path; with QUIVER_UPDATE_FEED it drives the real one against a local feed instead.
+  const updates = process.env.QUIVER_SMOKE && !process.env.QUIVER_UPDATE_FEED ? undefined : new Updater({ version: app.getVersion(), emit: (state) => broadcast({ event: 'app.update', payload: state }) });
   host = new Host({
     userDataDir: app.getPath('userData'),
     version: app.getVersion(),
@@ -62,12 +68,14 @@ async function main(): Promise<void> {
     broadcast,
     pickFolder,
     pickFile,
+    updates,
   });
   registerIpc(host);
   await host.start();
 
   if (process.env.QUIVER_SMOKE) {
-    const code = await runSmokeTest(host, () => createMainWindow({ show: Boolean(process.env.QUIVER_SMOKE_SHOTS) }));
+    const code =
+      updates && process.env.QUIVER_UPDATE_FEED ? await runUpdateSmoke(updates) : await runSmokeTest(host, () => createMainWindow({ show: Boolean(process.env.QUIVER_SMOKE_SHOTS) }));
     await host.stop();
     await fs.rm(app.getPath('userData'), { recursive: true, force: true }).catch(() => {});
     // Piped stdout is asynchronous on Windows; give the final summary line a moment to leave the process.
@@ -77,6 +85,12 @@ async function main(): Promise<void> {
   }
 
   createMainWindow();
+
+  // Look for a newer release shortly after launch and every six hours; nothing is downloaded until asked.
+  if (updates?.state().supported) {
+    setTimeout(() => void updates.check('auto'), 10_000);
+    setInterval(() => void updates.check('auto'), 6 * 60 * 60 * 1000);
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createMainWindow();

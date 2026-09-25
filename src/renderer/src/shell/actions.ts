@@ -1,6 +1,7 @@
 import { toErrorPayload, type WorkspaceInfo } from '@quiver/core';
 import { applyTheme, confirmDialog, invoke, notify, registerActions, selectScope, useAppStore, useTabsStore, type UIAction } from '@quiver/ui';
 import { modules } from './modules';
+import { checkForUpdates } from './updates';
 
 export function openSettings(): void {
   const scope = selectScope(useAppStore.getState());
@@ -45,6 +46,7 @@ const shellActions: UIAction[] = [
   },
   { id: 'settings.open', title: 'Settings', group: 'App', shortcut: 'Ctrl+,', run: openSettings },
   { id: 'theme.toggle', title: 'Toggle light / dark theme', group: 'App', run: () => toggleTheme() },
+  { id: 'app.update.check', title: 'Check for updates', group: 'App', run: () => checkForUpdates() },
   {
     id: 'tab.close',
     title: 'Close tab',

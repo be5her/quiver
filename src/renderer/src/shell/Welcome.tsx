@@ -2,6 +2,7 @@ import type { RecentWorkspace } from '@quiver/core';
 import { Button, Kbd, invoke, selectActiveWorkspace, useAppStore, useInvoke } from '@quiver/ui';
 import { FolderOpen, X } from 'lucide-react';
 import { openWorkspace } from './actions';
+import { QuiverMark } from './Logo';
 
 export function Welcome() {
   const active = useAppStore(selectActiveWorkspace);
@@ -23,7 +24,10 @@ export function Welcome() {
           </>
         ) : (
           <>
-            <h1 className="text-xl font-semibold">Open a project</h1>
+            <div className="flex items-center gap-3">
+              <QuiverMark className="size-10" />
+              <h1 className="text-xl font-semibold">Open a project</h1>
+            </div>
             <p className="text-sm text-muted mt-1">
               Each folder gets its own API requests, environments, database connections and mock servers. The small tools on the left work without one.
             </p>
