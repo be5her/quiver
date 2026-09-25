@@ -1,0 +1,5 @@
+# Keep LF everywhere so Windows, Mac and Linux checkouts match the repo and each other.
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.icns binary
