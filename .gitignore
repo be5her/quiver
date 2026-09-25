@@ -7,3 +7,4 @@ release/
 Thumbs.db
 .vite/
 coverage/
+quiver-brand/*
