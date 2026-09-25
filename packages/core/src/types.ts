@@ -175,6 +175,8 @@ export interface HostEvents {
   'mcp.call': { tool: string; workspaceId?: string; ok: boolean; durationMs: number; at: string };
   /** Teleport session status, login progress, pins or tunnel list changed. Fetch teleport.status for details. */
   'teleport.changed': { reason: 'status' | 'tunnels' | 'login' | 'pins' };
+  /** A mock server started or stopped, its definition changed, or it captured requests. */
+  'mock.changed': { workspaceId: string; serverId: string; reason: 'status' | 'requests' | 'servers' };
 }
 
 export type HostEventName = keyof HostEvents;

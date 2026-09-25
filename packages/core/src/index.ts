@@ -8,5 +8,6 @@ export * from './curl';
 export * from './models/api';
 export * from './models/db';
 export * from './models/teleport';
+export * from './models/mock';
 export * from './sql';
 export { defaultGlobalConfig, DEFAULT_MCP_PORT } from './defaults';
