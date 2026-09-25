@@ -15,6 +15,10 @@ describe('palettes', () => {
     }
   });
 
+  it('defaults to Slate & Mint', () => {
+    expect(DEFAULT_PALETTE).toBe('slate-mint');
+  });
+
   it('falls back to the default palette for unknown keys', () => {
     expect(resolvePalette('nope').key).toBe(DEFAULT_PALETTE);
     expect(resolvePalette(undefined).key).toBe(DEFAULT_PALETTE);
