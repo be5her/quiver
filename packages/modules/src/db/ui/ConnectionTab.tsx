@@ -10,6 +10,8 @@ import {
   type DbConnectionTest,
   type DbKind,
   type TeleportDatabase,
+  type TeleportStatus,
+  clusterLabel,
 } from '@quiver/core';
 import { Button, Checkbox, Input, Label, Select, Spinner, invoke, notify, selectActiveWorkspace, useAppStore, useInvoke, useTabsStore, type TabProps } from '@quiver/ui';
 import { FolderOpen, PlugZap, Save } from 'lucide-react';
@@ -287,19 +289,34 @@ export function ConnectionTab({ tab, scope }: TabProps) {
   function switchAccess(type: AccessType) {
     if (!conn || type === conn.access.type) return;
     if (type === 'direct') patch({ access: { type: 'direct' } });
-    else if (type === 'teleport') patch({ access: { type: 'teleport', database: '', dbUser: conn.user }, host: '127.0.0.1', port: 0, user: conn.kind === 'mysql' ? conn.user : '' });
+    else if (type === 'teleport') patch({ access: { type: 'teleport', proxy: '', database: '', dbUser: conn.user }, host: '127.0.0.1', port: 0, user: conn.kind === 'mysql' ? conn.user : '' });
     else patch({ access: { type: 'command', command: '' }, host: '127.0.0.1', port: 0 });
   }
 }
 
-/** Teleport database name and user, with suggestions from `tsh db ls` when logged in. */
+/** Teleport cluster, database name and user, with suggestions from `tsh db ls` when logged in. */
 function TeleportAccessFields({ access, kind, onChange }: { access: Extract<DbAccess, { type: 'teleport' }>; kind: DbKind; onChange(access: Extract<DbAccess, { type: 'teleport' }>): void }) {
-  const dbs = useInvoke<TeleportDatabase[]>('teleport.db.list', {}, { workspaceId: null, refreshOnEvents: ['teleport.changed'] });
+  const status = useInvoke<TeleportStatus>('teleport.status', {}, { workspaceId: null, refreshOnEvents: ['teleport.changed'] });
+  const dbs = useInvoke<TeleportDatabase[]>('teleport.db.list', access.proxy ? { proxy: access.proxy } : {}, { workspaceId: null, refreshOnEvents: ['teleport.changed'] });
   const match = dbs.data?.find((d) => d.name === access.database);
   const users = match?.allowedUsers.filter((u) => u !== '*') ?? [];
   const mismatch = match && match.protocol !== kind;
+  const clusters = status.data?.clusters ?? [];
+  const knownProxy = !access.proxy || clusters.some((c) => c.proxy === access.proxy);
   return (
     <div>
+      <div className="mb-2">
+        <Label>Cluster</Label>
+        <Select value={access.proxy} onChange={(e) => onChange({ ...access, proxy: e.target.value })} data-testid="db-teleport-cluster">
+          <option value="">Current tsh profile</option>
+          {clusters.map((c) => (
+            <option key={c.proxy} value={c.proxy}>
+              {clusterLabel(c)} ({c.proxy}){c.state === 'logged-in' || c.state === 'expiring' ? '' : ` · ${c.state}`}
+            </option>
+          ))}
+          {!knownProxy && <option value={access.proxy}>{access.proxy}</option>}
+        </Select>
+      </div>
       <div className="grid grid-cols-2 gap-2">
         <div>
           <Label>Teleport database</Label>

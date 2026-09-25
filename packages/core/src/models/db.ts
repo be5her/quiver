@@ -26,6 +26,8 @@ export const DbAccessSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('direct') }),
   z.object({
     type: z.literal('teleport'),
+    /** Proxy address of the cluster; empty means tsh's current profile. */
+    proxy: z.string().default(''),
     /** Teleport database resource name (see teleport.db.list). */
     database: z.string(),
     /** Database user the tunnel authenticates as. */

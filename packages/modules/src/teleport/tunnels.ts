@@ -1,9 +1,9 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { connect, createServer } from 'node:net';
-import { QuiverError, isLoginRequiredMessage, newId, nowIso, tokenizeShell, type TeleportTunnel } from '@quiver/core';
+import { QuiverError, isLoginRequiredMessage, newId, normalizeProxy, nowIso, sameProxy, tokenizeShell, type TeleportTunnel } from '@quiver/core';
 import { lineSplitter, type TshCommand } from './tsh';
 
-export type TunnelSpec = { kind: 'teleport'; database: string; dbUser: string } | { kind: 'command'; command: string };
+export type TunnelSpec = { kind: 'teleport'; proxy: string; database: string; dbUser: string } | { kind: 'command'; command: string };
 
 interface LiveTunnel {
   key: string;
@@ -20,8 +20,8 @@ interface LiveTunnel {
 export interface TunnelManagerOptions {
   /** Resolved tsh, or throws NOT_FOUND. */
   tsh(): Promise<TshCommand>;
-  /** Throws TELEPORT_LOGIN_REQUIRED when the session cannot back a tunnel. */
-  requireSession(): Promise<void>;
+  /** Throws TELEPORT_LOGIN_REQUIRED when the cluster cannot back a tunnel; returns the canonical proxy. */
+  requireSession(proxy: string): Promise<string>;
   onChange(): void;
   /** How long a tunnel outlives its last user before it is stopped. */
   graceMs?: number;
@@ -31,13 +31,13 @@ export interface TunnelManagerOptions {
 const OUTPUT_TAIL = 60;
 
 export function tunnelKey(spec: TunnelSpec): string {
-  return spec.kind === 'teleport' ? `teleport:${spec.database}:${spec.dbUser}` : `command:${spec.command.trim()}`;
+  return spec.kind === 'teleport' ? `teleport:${normalizeProxy(spec.proxy)}:${spec.database}:${spec.dbUser}` : `command:${spec.command.trim()}`;
 }
 
 /**
- * App-wide local tunnels: `tsh proxy db --tunnel` per Teleport database and user, or any
- * command with a `{port}` placeholder. Shared by every workspace; a tunnel stays up while
- * something uses it and for a short grace period after, so reconnects are cheap.
+ * App-wide local tunnels: `tsh proxy db --tunnel` per cluster, database and database user,
+ * or any command with a `{port}` placeholder. Shared by every workspace; a tunnel stays up
+ * while something uses it and for a short grace period after, so reconnects are cheap.
  */
 export class TunnelManager {
   private readonly tunnels = new Map<string, LiveTunnel>();
@@ -52,11 +52,6 @@ export class TunnelManager {
   find(spec: TunnelSpec): TeleportTunnel | null {
     const live = this.tunnels.get(tunnelKey(spec));
     return live && !live.exited ? toInfo(live) : null;
-  }
-
-  get(id: string): TeleportTunnel | null {
-    const live = [...this.tunnels.values()].find((t) => t.info.id === id);
-    return live ? toInfo(live) : null;
   }
 
   /** Start the tunnel unless one is already running, and register `user` as holding it open. */
@@ -110,12 +105,24 @@ export class TunnelManager {
     return true;
   }
 
-  /** Stop every tunnel for a Teleport database (optionally only for one db user). */
-  async stopTeleport(database: string, dbUser?: string): Promise<number> {
+  /** Stop Teleport tunnels for a database, optionally narrowed to one cluster and one db user. */
+  async stopTeleport(database: string, options: { proxy?: string | null; dbUser?: string | null } = {}): Promise<number> {
     let n = 0;
     for (const live of [...this.tunnels.values()]) {
       if (live.info.kind !== 'teleport' || live.info.target !== database) continue;
-      if (dbUser && live.info.dbUser !== dbUser) continue;
+      if (options.proxy && !sameProxy(live.info.proxy, options.proxy)) continue;
+      if (options.dbUser && live.info.dbUser !== options.dbUser) continue;
+      await this.kill(live);
+      n++;
+    }
+    return n;
+  }
+
+  /** Stop every tunnel of one cluster, e.g. on logout. */
+  async stopCluster(proxy: string): Promise<number> {
+    let n = 0;
+    for (const live of [...this.tunnels.values()]) {
+      if (live.info.kind !== 'teleport' || !sameProxy(live.info.proxy, proxy)) continue;
       await this.kill(live);
       n++;
     }
@@ -129,10 +136,11 @@ export class TunnelManager {
   private async start(spec: TunnelSpec, key: string): Promise<LiveTunnel> {
     const port = await freePort();
     let argv: string[];
+    let proxy = '';
     if (spec.kind === 'teleport') {
-      await this.opts.requireSession();
+      proxy = await this.opts.requireSession(spec.proxy);
       const tsh = await this.opts.tsh();
-      argv = [...tsh.argv, 'proxy', 'db', spec.database, '--tunnel', `--db-user=${spec.dbUser}`, `--port=${port}`];
+      argv = [...tsh.argv, 'proxy', 'db', spec.database, '--tunnel', `--db-user=${spec.dbUser}`, `--port=${port}`, `--proxy=${proxy}`];
     } else {
       argv = tokenizeShell(spec.command.replaceAll('{port}', String(port)));
       if (!argv.length) throw new QuiverError('INVALID_INPUT', 'Tunnel command is empty');
@@ -151,6 +159,7 @@ export class TunnelManager {
       info: {
         id: newId(),
         kind: spec.kind,
+        proxy,
         target: spec.kind === 'teleport' ? spec.database : spec.command,
         dbUser: spec.kind === 'teleport' ? spec.dbUser : null,
         port,
@@ -183,8 +192,8 @@ export class TunnelManager {
         const detail = live.output.findLast((l) => /error/i.test(l)) ?? live.output[live.output.length - 1] ?? `exited with code ${code ?? 'null'}`;
         const message = detail.replace(/^ERROR:\s*/i, '');
         exitError = isLoginRequiredMessage(text)
-          ? new QuiverError('TELEPORT_LOGIN_REQUIRED', `Teleport tunnel for ${live.info.target} could not start: ${message}`, { output: live.output })
-          : new QuiverError('REQUEST_FAILED', `Tunnel for ${live.info.target} exited: ${message}`, { output: live.output, code });
+          ? new QuiverError('TELEPORT_LOGIN_REQUIRED', `Teleport tunnel for ${live.info.target} could not start: ${message}`, { output: live.output, proxy })
+          : new QuiverError('REQUEST_FAILED', `Tunnel for ${live.info.target} exited: ${message}`, { output: live.output, code, proxy });
         reject(exitError);
       });
     });

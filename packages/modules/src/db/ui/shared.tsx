@@ -19,11 +19,12 @@ export function AccessBadge({ access, className }: { access: DbAccess; className
   return <Icon className={cn('size-3 shrink-0 text-muted', className)} aria-label={title} />;
 }
 
-/** Run `tsh login` from anywhere in the app and report the outcome. Returns true when a session is now valid. */
-export async function teleportLoginAgain(): Promise<boolean> {
+/** Run `tsh login` for a cluster from anywhere in the app and report the outcome. Returns true when its session is now valid. */
+export async function teleportLoginAgain(proxy?: string | null): Promise<boolean> {
   try {
-    const result = await invoke<TeleportLoginResult>('teleport.login', {}, null);
-    if (result.ok) notify(`Logged in to Teleport as ${result.status.user ?? 'user'}`, 'success');
+    const result = await invoke<TeleportLoginResult>('teleport.login', proxy ? { proxy } : {}, null);
+    const cluster = result.status.clusters.find((c) => c.proxy === result.proxy);
+    if (result.ok) notify(`Logged in to ${cluster?.cluster ?? result.proxy} as ${cluster?.user ?? 'user'}`, 'success');
     else notify(result.output.at(-1) ?? 'Teleport login did not complete', 'error');
     return result.ok;
   } catch (err) {
@@ -39,10 +40,11 @@ export async function teleportLoginAgain(): Promise<boolean> {
 export function DbError({ error, onRetry, compact }: { error: ErrorPayload; onRetry?(): void; compact?: boolean }) {
   const [busy, setBusy] = useState(false);
   const loginRequired = error.code === 'TELEPORT_LOGIN_REQUIRED';
+  const proxy = typeof (error.details as { proxy?: unknown } | undefined)?.proxy === 'string' ? ((error.details as { proxy: string }).proxy || undefined) : undefined;
   const relogin = async () => {
     setBusy(true);
     try {
-      if (await teleportLoginAgain()) onRetry?.();
+      if (await teleportLoginAgain(proxy)) onRetry?.();
     } finally {
       setBusy(false);
     }

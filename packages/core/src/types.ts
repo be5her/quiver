@@ -32,13 +32,22 @@ export interface McpConfig {
   allowMutating: boolean;
 }
 
-/** App-wide Teleport settings. The session itself lives in the standard tsh home, shared with the terminal. */
-export interface TeleportConfig {
-  /** Proxy address passed to `tsh login --proxy`, e.g. `teleport.example.com:443`. */
+/** A favourite Teleport resource, shown at the top of the Teleport sidebar. */
+export interface TeleportPin {
+  /** Proxy address of the cluster the resource lives in. */
   proxy: string;
+  kind: 'db' | 'kube';
+  name: string;
+}
+
+/** App-wide Teleport settings. Sessions live in the standard tsh home, shared with the terminal. */
+export interface TeleportConfig {
+  /** Proxy addresses of the clusters to show, e.g. `teleport.example.com:443`. Profiles tsh already knows are added automatically. */
+  proxies: string[];
+  pins: TeleportPin[];
   /** Optional explicit tsh binary (or wrapper command). Empty means discover it. */
   tshPath: string;
-  /** Start `tsh login` on launch when the stored certificate has expired. */
+  /** Start `tsh login` on launch for every cluster whose certificate has expired. */
   loginOnLaunch: boolean;
 }
 
@@ -164,8 +173,8 @@ export interface HostEvents {
   'state.changed': { workspaceId: string; key: string };
   'mcp.status': { running: boolean; port: number; error?: string };
   'mcp.call': { tool: string; workspaceId?: string; ok: boolean; durationMs: number; at: string };
-  /** Teleport session status, login progress or tunnel list changed. Fetch teleport.status for details. */
-  'teleport.changed': { reason: 'status' | 'tunnels' | 'login' };
+  /** Teleport session status, login progress, pins or tunnel list changed. Fetch teleport.status for details. */
+  'teleport.changed': { reason: 'status' | 'tunnels' | 'login' | 'pins' };
 }
 
 export type HostEventName = keyof HostEvents;

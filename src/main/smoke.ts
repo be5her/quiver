@@ -22,6 +22,7 @@ import type {
   TeleportDatabase,
   TeleportKubeCluster,
   TeleportLoginResult,
+  TeleportPin,
   TeleportStatus,
   TeleportTunnel,
   WorkspaceInfo,
@@ -211,34 +212,67 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     const redisCmds = await run<DbQueryResult[]>('db.query.run', { connectionId: redis.id, query: 'SET smoke "hello world"\nGET smoke\nLRANGE queue 0 -1' }, ws.id);
     check('db: redis console commands', redisCmds.length === 3 && redisCmds[1].value === 'hello world' && Array.isArray(redisCmds[2].value) && redisCmds[2].value.length === 3, redisCmds.map((r) => r.value));
 
-    // ---------- teleport: fake tsh driving status, login, db/kube listing and tunnels ----------
+    // ---------- teleport: fake tsh driving status, login, db/kube listing, pins and tunnels across two clusters ----------
     interface ConnectOut {
       tunnel: TeleportTunnel;
       connection: DbConnectionSummary | null;
       message: string | null;
     }
-    await run('config.update', { patch: { teleport: { proxy: 'smoke.teleport.local:443', tshPath: fakeTsh.command, loginOnLaunch: false } } }, null);
+    const { first, second } = fakeTsh.proxies;
+    const clusterOf = (s: TeleportStatus, proxy: string) => s.clusters.find((c) => c.proxy === proxy);
+    await run('config.update', { patch: { teleport: { proxies: [first], pins: [], tshPath: fakeTsh.command, loginOnLaunch: false } } }, null);
     const t0 = await run<TeleportStatus>('teleport.status', { refresh: true }, null);
     check('teleport: tsh from settings', t0.tshSource === 'settings' && t0.tshVersion === '16.0.0-fake', { tsh: t0.tsh, version: t0.tshVersion, error: t0.error });
-    check('teleport: logged out before login', t0.state === 'logged-out' && t0.proxy === 'smoke.teleport.local:443', t0.state);
-    const dbsWhileOut = await host.invoke('teleport.db.list', {}, { caller: 'ui', workspaceId: null });
-    check('teleport: db list needs a session', !dbsWhileOut.ok && dbsWhileOut.error.code === 'TELEPORT_LOGIN_REQUIRED', dbsWhileOut.ok ? 'ok?' : dbsWhileOut.error.code);
+    check('teleport: configured cluster shows as logged out', t0.state === 'logged-out' && t0.clusters.length === 1 && clusterOf(t0, first)?.state === 'logged-out' && clusterOf(t0, first)?.configured === true, t0.clusters);
+    const dbsWhileOut = await host.invoke('teleport.db.list', { proxy: first }, { caller: 'ui', workspaceId: null });
+    check('teleport: db list needs a session', !dbsWhileOut.ok && dbsWhileOut.error.code === 'TELEPORT_LOGIN_REQUIRED' && (dbsWhileOut.error.details as { proxy?: string })?.proxy === first, dbsWhileOut.ok ? 'ok?' : dbsWhileOut.error);
     const loginResult = await run<TeleportLoginResult>('teleport.login', {}, null);
-    check('teleport: login completes', loginResult.ok && loginResult.status.state === 'logged-in' && loginResult.status.user === 'smoke-user' && loginResult.status.cluster === 'smoke.teleport.local', loginResult.output);
+    const c1 = clusterOf(loginResult.status, first);
+    check('teleport: login completes', loginResult.ok && loginResult.proxy === first && c1?.state === 'logged-in' && c1.user === 'smoke-user' && c1.cluster === 'smoke.teleport.local' && c1.current, loginResult.output);
     check('teleport: login output shows the browser link', loginResult.output.some((l) => l.includes('http://127.0.0.1:61234')));
-    check('teleport: certificate expiry parsed', typeof loginResult.status.validUntil === 'string' && new Date(loginResult.status.validUntil).getTime() > Date.now(), loginResult.status.validUntil);
+    check('teleport: certificate expiry parsed', typeof c1?.validUntil === 'string' && new Date(c1.validUntil).getTime() > Date.now(), c1?.validUntil);
+    const added = await run<TeleportStatus>('teleport.cluster.add', { proxy: second }, null);
+    check('teleport: cluster add lists it as logged out', added.clusters.length === 2 && clusterOf(added, second)?.state === 'logged-out' && clusterOf(added, second)?.configured === true, added.clusters.map((c) => [c.proxy, c.state]));
+    const ambiguousLogin = await host.invoke('teleport.login', {}, { caller: 'ui', workspaceId: null });
+    check('teleport: login needs a proxy with several clusters', !ambiguousLogin.ok && ambiguousLogin.error.code === 'INVALID_INPUT' && ambiguousLogin.error.message.includes(second), ambiguousLogin.ok ? 'ok?' : ambiguousLogin.error.message);
+    const login2 = await run<TeleportLoginResult>('teleport.login', { proxy: second }, null);
+    check(
+      'teleport: second cluster logs in independently',
+      login2.ok && clusterOf(login2.status, second)?.state === 'logged-in' && clusterOf(login2.status, first)?.state === 'logged-in' && clusterOf(login2.status, second)?.current === true && clusterOf(login2.status, first)?.current === false,
+      login2.status.clusters.map((c) => [c.proxy, c.state, c.current]),
+    );
     const dbs = await run<TeleportDatabase[]>('teleport.db.list', {}, null);
-    check('teleport: db ls parsed', dbs.length === 4 && dbs.find((d) => d.name === 'orders-mysql')?.allowedUsers.join(',') === 'app,readonly' && dbs.find((d) => d.name === 'analytics-pg')?.protocol === 'postgres', dbs.map((d) => d.name));
+    check(
+      'teleport: db ls across clusters',
+      dbs.length === 6 && dbs.filter((d) => d.proxy === first).length === 4 && dbs.find((d) => d.name === 'second-redis')?.proxy === second && dbs.find((d) => d.name === 'orders-mysql')?.allowedUsers.join(',') === 'app,readonly',
+      dbs.map((d) => [d.proxy, d.name]),
+    );
+    const dbsSecond = await run<TeleportDatabase[]>('teleport.db.list', { proxy: second }, null);
+    check('teleport: db ls for one cluster', dbsSecond.length === 2 && dbsSecond.every((d) => d.proxy === second && d.clusterName === 'second.teleport.local'), dbsSecond.map((d) => d.name));
     const kubes = await run<TeleportKubeCluster[]>('teleport.kube.list', {}, null);
-    check('teleport: kube ls parsed', kubes.length === 2 && kubes.every((k) => !k.selected), kubes);
-    const kubeLogin = await run<{ cluster: string; output: string }>('teleport.kube.login', { cluster: 'dev-eks' }, null);
+    check('teleport: kube ls across clusters', kubes.length === 3 && kubes.every((k) => !k.selected) && kubes.find((k) => k.name === 'eu-eks')?.proxy === second, kubes);
+    const kubeLogin = await run<{ proxy: string; cluster: string; output: string }>('teleport.kube.login', { cluster: 'dev-eks' }, null);
     const kubesAfter = await run<TeleportKubeCluster[]>('teleport.kube.list', { refresh: true }, null);
     const statusKube = await run<TeleportStatus>('teleport.status', { refresh: true }, null);
-    check('teleport: kube login selects the cluster', kubeLogin.output.includes('dev-eks') && kubesAfter.find((k) => k.name === 'dev-eks')?.selected === true && statusKube.kubeCluster === 'dev-eks', kubesAfter);
+    check(
+      'teleport: kube login selects the cluster on the right proxy',
+      kubeLogin.proxy === first && kubeLogin.output.includes('dev-eks') && kubesAfter.find((k) => k.name === 'dev-eks')?.selected === true && clusterOf(statusKube, first)?.kubeCluster === 'dev-eks' && !clusterOf(statusKube, second)?.kubeCluster,
+      kubesAfter,
+    );
+    const pins1 = await run<TeleportPin[]>('teleport.pin', { proxy: first, kind: 'db', name: 'smoke-redis' }, null);
+    const pins2 = await run<TeleportPin[]>('teleport.pin', { proxy: second, kind: 'kube', name: 'eu-eks', pinned: true }, null);
+    check('teleport: pins from both clusters', pins1.length === 1 && pins2.length === 2 && pins2.some((p) => p.proxy === second && p.kind === 'kube' && p.name === 'eu-eks'), pins2);
+    const pinnedDbs = await run<TeleportDatabase[]>('teleport.db.list', {}, null);
+    check('teleport: db list flags pinned', pinnedDbs.find((d) => d.name === 'smoke-redis')?.pinned === true && pinnedDbs.find((d) => d.name === 'second-redis')?.pinned === false);
+    const pinsToggled = await run<TeleportPin[]>('teleport.pin', { proxy: 'SMOKE.teleport.local', kind: 'db', name: 'smoke-redis' }, null);
+    check('teleport: pin toggles off with a loosely written proxy', pinsToggled.length === 1 && pinsToggled[0].kind === 'kube', pinsToggled);
+    await run('teleport.pin', { proxy: first, kind: 'db', name: 'smoke-redis', pinned: true }, null);
+    const statusPins = await run<TeleportStatus>('teleport.status', {}, null);
+    check('teleport: status carries pins and the config keeps them', statusPins.pins.length === 2 && host.config.get().teleport.pins.length === 2);
     const connected = await run<ConnectOut>('teleport.db.connect', { database: 'smoke-redis' }, ws.id);
     check(
-      'teleport: db connect starts a tunnel and creates a connection',
-      connected.tunnel.port > 0 && connected.connection?.kind === 'redis' && connected.connection.access.type === 'teleport' && connected.connection.access.dbUser === 'default',
+      'teleport: db connect infers the cluster, starts a tunnel and creates a connection',
+      connected.tunnel.port > 0 && connected.tunnel.proxy === first && connected.connection?.kind === 'redis' && connected.connection.access.type === 'teleport' && connected.connection.access.proxy === first && connected.connection.access.dbUser === 'default',
       { tunnel: connected.tunnel.port, connection: connected.connection?.access },
     );
     const teleportConn = connected.connection!;
@@ -246,24 +280,36 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     check('teleport: query through the tunnel', viaTunnel[0].value === 'PONG' && viaTunnel[1].value === 3, viaTunnel.map((r) => r.value));
     const again = await run<ConnectOut>('teleport.db.connect', { database: 'smoke-redis' }, ws.id);
     check('teleport: connect reuses tunnel and connection', again.tunnel.id === connected.tunnel.id && again.connection?.id === teleportConn.id);
+    const onSecond = await run<ConnectOut>('teleport.db.connect', { proxy: second, database: 'second-redis' }, ws.id);
+    check(
+      'teleport: connect on the second cluster',
+      onSecond.tunnel.proxy === second && onSecond.connection?.access.type === 'teleport' && onSecond.connection.access.proxy === second && onSecond.connection.id !== teleportConn.id,
+      onSecond.connection?.access,
+    );
+    const viaSecond = await run<DbQueryResult[]>('db.query.run', { connectionId: onSecond.connection!.id, query: 'PING', record: false }, ws.id);
+    check('teleport: query through the second cluster tunnel', viaSecond[0].value === 'PONG');
     const pgOnly = await run<ConnectOut>('teleport.db.connect', { database: 'analytics-pg', dbUser: 'readonly' }, ws.id);
     check('teleport: unsupported protocol still gets a tunnel', pgOnly.connection === null && pgOnly.tunnel.port > 0 && /no postgres client/.test(pgOnly.message ?? ''), pgOnly.message);
     const ambiguous = await host.invoke('teleport.db.connect', { database: 'orders-mysql' }, { caller: 'ui', workspaceId: ws.id });
     check('teleport: ambiguous db user is refused with the allowed list', !ambiguous.ok && ambiguous.error.code === 'INVALID_INPUT' && /app, readonly/.test(ambiguous.error.message), ambiguous.ok ? 'ok?' : ambiguous.error.message);
     const status1 = await run<TeleportStatus>('teleport.status', {}, null);
     const redisTunnel = status1.tunnels.find((t) => t.target === 'smoke-redis');
-    check('teleport: status lists tunnels with their users', status1.tunnels.length === 2 && Boolean(redisTunnel?.users.includes('pinned')) && Boolean(redisTunnel?.users.some((u) => u.endsWith(`/${teleportConn.id}`))), status1.tunnels.map((t) => [t.target, t.users]));
+    check(
+      'teleport: status lists tunnels per cluster with their users',
+      status1.tunnels.length === 3 && Boolean(redisTunnel?.users.includes('pinned')) && Boolean(redisTunnel?.users.some((u) => u.endsWith(`/${teleportConn.id}`))) && status1.tunnels.some((t) => t.proxy === second),
+      status1.tunnels.map((t) => [t.proxy, t.target, t.users]),
+    );
     const dbsWithTunnel = await run<TeleportDatabase[]>('teleport.db.list', {}, null);
     check('teleport: db list shows the tunnel', dbsWithTunnel.find((d) => d.name === 'smoke-redis')?.tunnel?.port === connected.tunnel.port);
     const stopped = await run<{ stopped: number }>('teleport.db.disconnect', { database: 'smoke-redis' }, null);
     const statusStopped = await run<TeleportStatus>('teleport.status', {}, null);
-    check('teleport: disconnect stops the tunnel', stopped.stopped === 1 && !statusStopped.tunnels.some((t) => t.target === 'smoke-redis'), statusStopped.tunnels.map((t) => t.target));
+    check('teleport: disconnect stops one tunnel and leaves the others', stopped.stopped === 1 && !statusStopped.tunnels.some((t) => t.target === 'smoke-redis') && statusStopped.tunnels.some((t) => t.target === 'second-redis'), statusStopped.tunnels.map((t) => t.target));
     const auto = await run<DbQueryResult[]>('db.query.run', { connectionId: teleportConn.id, query: 'PING', record: false }, ws.id);
     const status2 = await run<TeleportStatus>('teleport.status', {}, null);
     const restarted = status2.tunnels.find((t) => t.target === 'smoke-redis');
     check('teleport: query restarts a stopped tunnel', auto[0].value === 'PONG' && Boolean(restarted) && restarted?.id !== connected.tunnel.id, restarted?.id);
     await run('teleport.db.disconnect', { tunnelId: pgOnly.tunnel.id }, null);
-    const broken = await run<DbConnectionSummary>('db.connection.save', { connection: { kind: 'redis', name: 'broken', access: { type: 'teleport', database: 'broken-db', dbUser: 'default' } } }, ws.id);
+    const broken = await run<DbConnectionSummary>('db.connection.save', { connection: { kind: 'redis', name: 'broken', access: { type: 'teleport', proxy: first, database: 'broken-db', dbUser: 'default' } } }, ws.id);
     const brokenTest = await host.invoke('db.connection.test', { id: broken.id }, { caller: 'ui', workspaceId: ws.id });
     check('teleport: tunnel stderr surfaces as the connection error', !brokenTest.ok && brokenTest.error.code === 'REQUEST_FAILED' && /broken-db.*not found/.test(brokenTest.error.message), brokenTest.ok ? 'ok?' : brokenTest.error.message);
     const cmdConn = await run<DbConnectionSummary>(
@@ -277,16 +323,21 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     check('teleport: command tunnel listed', status3.tunnels.some((t) => t.kind === 'command' && t.target.includes('__forward')), status3.tunnels.map((t) => t.kind));
     const badCmd = await host.invoke('db.connection.test', { connection: { kind: 'redis', name: 'x', access: { type: 'command', command: 'definitely-not-a-program-xyz {port}' } } }, { caller: 'ui', workspaceId: ws.id });
     check('teleport: missing tunnel program is reported', !badCmd.ok && /definitely-not-a-program-xyz/.test(badCmd.error.message), badCmd.ok ? 'ok?' : badCmd.error.message);
-    // Expired certificate: the tunnel is down, so the next query must ask for a login instead of hanging.
+    // Expired certificate on one cluster only: its tunnel is down, so the next query must ask for a login while the other cluster keeps working.
     await run('teleport.db.disconnect', { database: 'smoke-redis' }, null);
-    const state = await fakeTsh.getState();
-    await fakeTsh.setState({ ...state!, validUntil: new Date(Date.now() - 60_000).toISOString() });
+    await fakeTsh.expire(first);
     const expired = await run<TeleportStatus>('teleport.status', { refresh: true }, null);
-    check('teleport: expired certificate detected', expired.state === 'expired' && expired.user === 'smoke-user', expired.state);
+    check('teleport: expired certificate detected per cluster', clusterOf(expired, first)?.state === 'expired' && clusterOf(expired, second)?.state === 'logged-in' && expired.state === 'logged-in', expired.clusters.map((c) => [c.proxy, c.state]));
     const expiredQuery = await host.invoke('db.query.run', { connectionId: teleportConn.id, query: 'PING', record: false }, { caller: 'ui', workspaceId: ws.id });
-    check('teleport: expired session yields TELEPORT_LOGIN_REQUIRED', !expiredQuery.ok && expiredQuery.error.code === 'TELEPORT_LOGIN_REQUIRED', expiredQuery.ok ? 'ok?' : expiredQuery.error);
-    const relogin = await run<TeleportLoginResult>('teleport.login', {}, null);
-    check('teleport: log in again restores the session', relogin.ok && relogin.status.state === 'logged-in', relogin.status.state);
+    check(
+      'teleport: expired session yields TELEPORT_LOGIN_REQUIRED naming the cluster',
+      !expiredQuery.ok && expiredQuery.error.code === 'TELEPORT_LOGIN_REQUIRED' && (expiredQuery.error.details as { proxy?: string })?.proxy === first,
+      expiredQuery.ok ? 'ok?' : expiredQuery.error,
+    );
+    const stillSecond = await run<DbQueryResult[]>('db.query.run', { connectionId: onSecond.connection!.id, query: 'PING', record: false }, ws.id);
+    check('teleport: the other cluster keeps working', stillSecond[0].value === 'PONG');
+    const relogin = await run<TeleportLoginResult>('teleport.login', { proxy: first }, null);
+    check('teleport: log in again restores the cluster', relogin.ok && clusterOf(relogin.status, first)?.state === 'logged-in', relogin.status.clusters.map((c) => [c.proxy, c.state]));
     const afterRelogin = await run<DbQueryResult[]>('db.query.run', { connectionId: teleportConn.id, query: 'PING', record: false }, ws.id);
     check('teleport: query works after re-login', afterRelogin[0].value === 'PONG');
 
@@ -352,20 +403,26 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     check('mcp connection list has no password', !(mcpConnections.result?.content?.[0]?.text ?? '').includes('hunter2'));
     check(
       'mcp lists teleport tools',
-      ['teleport_status', 'teleport_db_list', 'teleport_db_connect', 'teleport_kube_list'].every((n) => names.includes(n)) && !names.includes('teleport_login_cancel'),
+      ['teleport_status', 'teleport_db_list', 'teleport_db_connect', 'teleport_kube_list', 'teleport_pin', 'teleport_cluster_add'].every((n) => names.includes(n)) && !names.includes('teleport_login_cancel'),
       { total: names.length, teleport: names.filter((n) => n.startsWith('teleport')) },
     );
     const mcpTeleport = await rpc('tools/call', { name: 'teleport_status', arguments: {} });
     const mcpTeleportText = mcpTeleport.result?.content?.[0]?.text ?? '';
-    check('mcp reads teleport status', mcpTeleportText.startsWith('{') && JSON.parse(mcpTeleportText).state === 'logged-in', mcpTeleportText.slice(0, 200) || mcpTeleport.error);
+    const mcpTeleportStatus = mcpTeleportText.startsWith('{') ? (JSON.parse(mcpTeleportText) as TeleportStatus) : null;
+    check('mcp reads teleport status with every cluster', mcpTeleportStatus?.state === 'logged-in' && mcpTeleportStatus.clusters.length === 2, mcpTeleportText.slice(0, 200) || mcpTeleport.error);
     const mcpDbs = await rpc('tools/call', { name: 'teleport_db_list', arguments: {} });
-    check('mcp lists teleport databases', (JSON.parse(mcpDbs.result?.content?.[0]?.text ?? '[]') as unknown[]).length === 4);
-    for (const tool of ['teleport_login', 'teleport_logout', 'teleport_kube_login', 'teleport_db_disconnect']) {
-      const blockedTool = await rpc('tools/call', { name: tool, arguments: tool === 'teleport_kube_login' ? { cluster: 'prod-eks' } : tool === 'teleport_db_disconnect' ? { database: 'smoke-redis' } : {} });
+    check('mcp lists teleport databases across clusters', (JSON.parse(mcpDbs.result?.content?.[0]?.text ?? '[]') as unknown[]).length === 6);
+    for (const tool of ['teleport_login', 'teleport_logout', 'teleport_kube_login', 'teleport_db_disconnect', 'teleport_cluster_remove']) {
+      const blockedTool = await rpc('tools/call', {
+        name: tool,
+        arguments: tool === 'teleport_kube_login' ? { cluster: 'prod-eks' } : tool === 'teleport_db_disconnect' ? { database: 'smoke-redis' } : tool === 'teleport_cluster_remove' ? { proxy: second } : {},
+      });
       check(`mcp blocks ${tool} by default`, blockedTool.result?.isError === true && (blockedTool.result.content?.[0]?.text ?? '').includes('MUTATION_BLOCKED'));
     }
     const mcpConnect = await rpc('tools/call', { name: 'teleport_db_connect', arguments: { database: 'smoke-redis' } });
     check('mcp can open a teleport tunnel for reads', mcpConnect.result?.isError !== true && (JSON.parse(mcpConnect.result?.content?.[0]?.text ?? '{}') as ConnectOut).tunnel?.port > 0, mcpConnect.result?.content?.[0]?.text?.slice(0, 200));
+    const mcpPin = await rpc('tools/call', { name: 'teleport_pin', arguments: { proxy: second, kind: 'db', name: 'second-mysql', pinned: true } });
+    check('mcp can pin a resource', mcpPin.result?.isError !== true && (JSON.parse(mcpPin.result?.content?.[0]?.text ?? '[]') as TeleportPin[]).length === 3, mcpPin.result?.content?.[0]?.text?.slice(0, 200));
 
     // Renderer boots without console errors.
     const win = openWindow();
@@ -467,26 +524,35 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       check('ui: redis hash rendered', hashRendered === true);
       await shot('08-redis-dark');
 
-      // Teleport module: status card, databases with tunnel state, kube clusters.
+      // Teleport module: one section per cluster, pinned resources from both, tunnels, kube clusters.
       const clickedTeleport = await js(
         `(() => { const btn = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.title || '') === 'Teleport'); if (btn) btn.click(); return Boolean(btn); })()`,
       );
       check('ui: teleport module button', clickedTeleport === true);
-      await wait(1200);
-      const cardState = await js(`document.querySelector('[data-testid=teleport-status]')?.getAttribute('data-state') ?? null`);
-      check('ui: teleport status card logged in', cardState === 'logged-in', cardState);
-      const cardText = await js(`document.querySelector('[data-testid=teleport-status]')?.textContent ?? ''`);
-      check('ui: status card shows user, cluster and countdown', typeof cardText === 'string' && cardText.includes('smoke-user') && cardText.includes('smoke.teleport.local') && /\d+h \d+m left/.test(cardText), cardText);
+      await wait(1500);
+      const clusterRows = await js(`[...document.querySelectorAll('[data-testid=teleport-cluster]')].map((r) => [r.getAttribute('data-proxy'), r.getAttribute('data-state')])`);
+      check('ui: both clusters listed as logged in', Array.isArray(clusterRows) && clusterRows.length === 2 && clusterRows.every((r: string[]) => r[1] === 'logged-in'), clusterRows);
+      const clusterText = await js(`[...document.querySelectorAll('[data-testid=teleport-cluster]')].map((r) => r.textContent).join(' | ')`);
+      check('ui: cluster headers show name, user and countdown', typeof clusterText === 'string' && clusterText.includes('smoke.teleport.local') && clusterText.includes('second.teleport.local') && clusterText.includes('smoke-user') && /\d+h \d+m/.test(clusterText), clusterText);
+      const pinRows = await js(`[...document.querySelectorAll('[data-testid=teleport-pin]')].map((r) => r.textContent)`);
+      check('ui: pinned resources from both clusters', Array.isArray(pinRows) && pinRows.length === 3 && pinRows.some((t: string) => t.includes('smoke-redis')) && pinRows.some((t: string) => t.includes('eu-eks')) && pinRows.some((t: string) => t.includes('second-mysql')), pinRows);
       const dbRows = await js(`document.querySelectorAll('[data-testid=teleport-db]').length`);
-      check('ui: teleport databases listed', dbRows === 4, dbRows);
+      check('ui: databases of both clusters listed', dbRows === 6, dbRows);
       const tunnelShown = await js(`[...document.querySelectorAll('[data-testid=teleport-db]')].find((r) => r.textContent.includes('smoke-redis'))?.textContent ?? ''`);
       check('ui: running tunnel shown on its database row', typeof tunnelShown === 'string' && /:\d+/.test(tunnelShown) && tunnelShown.includes('as default'), tunnelShown);
       const kubeRows = await js(`[...document.querySelectorAll('[data-testid=teleport-kube]')].map((r) => r.textContent)`);
-      check('ui: kube clusters listed with the active one', Array.isArray(kubeRows) && kubeRows.length === 2 && kubeRows.some((t: string) => t.includes('dev-eks') && t.includes('active')), kubeRows);
+      check('ui: kube clusters of both clusters with the active one', Array.isArray(kubeRows) && kubeRows.length === 3 && kubeRows.some((t: string) => t.includes('dev-eks') && t.includes('active')) && kubeRows.some((t: string) => t.includes('eu-eks')), kubeRows);
       await shot('09-teleport-dark');
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(300);
       await shot('10-teleport-light');
+      const clickedUnpin = await js(
+        `(() => { const row = [...document.querySelectorAll('[data-testid=teleport-pin]')].find((r) => r.textContent.includes('second-mysql')); const btn = row && row.querySelector('button[aria-label="Unpin"]'); if (btn) btn.click(); return Boolean(btn); })()`,
+      );
+      check('ui: unpin button on a pinned row', clickedUnpin === true);
+      await wait(1000);
+      const pinsAfter = await js(`document.querySelectorAll('[data-testid=teleport-pin]').length`);
+      check('ui: unpin removes the row', pinsAfter === 2, pinsAfter);
       const clickedStop = await js(
         `(() => { const row = [...document.querySelectorAll('[data-testid=teleport-db]')].find((r) => r.textContent.includes('smoke-redis')); const btn = row && [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Stop'); if (btn) btn.click(); return Boolean(btn); })()`,
       );
@@ -495,9 +561,9 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       const afterStop = await js(`[...document.querySelectorAll('[data-testid=teleport-db]')].find((r) => r.textContent.includes('smoke-redis'))?.textContent ?? ''`);
       check('ui: row shows Connect after stopping', typeof afterStop === 'string' && !/:\d+/.test(afterStop), afterStop);
       const clickedConnect = await js(
-        `(() => { const row = [...document.querySelectorAll('[data-testid=teleport-db]')].find((r) => r.textContent.includes('smoke-redis')); const btn = row && [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Connect'); if (btn) btn.click(); return Boolean(btn); })()`,
+        `(() => { const row = [...document.querySelectorAll('[data-testid=teleport-pin]')].find((r) => r.textContent.includes('smoke-redis')); if (row) row.click(); return Boolean(row); })()`,
       );
-      check('ui: connect button on the database row', clickedConnect === true);
+      check('ui: connect from the pinned row', clickedConnect === true);
       await wait(2500);
       const revealed = await js(`(() => { const aside = document.querySelector('aside'); return aside ? aside.textContent.includes('Databases') && aside.textContent.includes('smoke-redis') : false; })()`);
       check('ui: connect reveals the connection in the Databases tree', revealed === true);
@@ -506,9 +572,16 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await shot('11-teleport-revealed-light');
     }
 
+    const outSecond = await run<TeleportStatus>('teleport.logout', { proxy: second }, null);
+    check(
+      'teleport: logout of one cluster keeps the other',
+      clusterOf(outSecond, second)?.state === 'logged-out' && clusterOf(outSecond, first)?.state === 'logged-in' && !outSecond.tunnels.some((t) => t.proxy === second),
+      outSecond.clusters.map((c) => [c.proxy, c.state]),
+    );
+    const removed = await run<TeleportStatus>('teleport.cluster.remove', { proxy: second }, null);
+    check('teleport: cluster remove drops it and its pins', removed.clusters.length === 1 && removed.pins.every((p) => p.proxy === first), { clusters: removed.clusters.map((c) => c.proxy), pins: removed.pins });
     const loggedOut = await run<TeleportStatus>('teleport.logout', {}, null);
-    check('teleport: logout clears the session and tunnels', loggedOut.state === 'logged-out' && loggedOut.tunnels.length === 0, { state: loggedOut.state, tunnels: loggedOut.tunnels.length });
-
+    check('teleport: logout of all clears every session and tunnel', loggedOut.state === 'logged-out' && loggedOut.clusters.every((c) => c.state === 'logged-out') && loggedOut.tunnels.length === 0, { state: loggedOut.state, tunnels: loggedOut.tunnels.length });
     check('renderer has no console errors', errors.length === 0, errors);
     win.destroy();
   } catch (err) {

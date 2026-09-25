@@ -17,9 +17,7 @@ export function getTeleport(host: HostApi): TeleportRuntime {
   if (runtime) return runtime;
   const tunnels = new TunnelManager({
     tsh: () => session.tshCommand(),
-    requireSession: async () => {
-      await session.requireSession();
-    },
+    requireSession: async (proxy) => (await session.requireSession(proxy)).proxy,
     onChange: () => host.emit('teleport.changed', { reason: 'tunnels' }),
     graceMs: 30_000,
   });

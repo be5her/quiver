@@ -1,4 +1,4 @@
-import { DbConnectionSchema, QuiverError, isLoginRequiredMessage, newId, type DbConnection, type DbConnectionSummary, type HostApi, type WorkspaceApi } from '@quiver/core';
+import { DbConnectionSchema, QuiverError, clusterLabel, findCluster, isLoginRequiredMessage, newId, type DbConnection, type DbConnectionSummary, type HostApi, type WorkspaceApi } from '@quiver/core';
 import { getTeleport } from '../teleport/runtime';
 import { createDriver, type Driver } from './drivers';
 
@@ -63,7 +63,7 @@ export async function resolveAccess(connection: DbConnection, host: HostApi, use
   if (access.type === 'direct') return connection;
   const { tunnels } = getTeleport(host);
   if (access.type === 'teleport') {
-    const tunnel = await tunnels.ensure({ kind: 'teleport', database: access.database, dbUser: access.dbUser }, user);
+    const tunnel = await tunnels.ensure({ kind: 'teleport', proxy: access.proxy, database: access.database, dbUser: access.dbUser }, user);
     // Teleport's local tunnel is plaintext and already authenticated as --db-user: no TLS, MySQL still
     // needs a handshake user, and Redis must not send AUTH at all.
     const dialUser = connection.kind === 'mysql' ? connection.user || access.dbUser : '';
@@ -87,15 +87,21 @@ export async function explainAccessError(host: HostApi, connection: Pick<DbConne
   if (connection.access.type !== 'teleport') return err;
   if (err instanceof QuiverError && err.code === 'TELEPORT_LOGIN_REQUIRED') return err;
   const { session, tunnels } = getTeleport(host);
-  const { database, dbUser } = connection.access;
+  const { proxy, database, dbUser } = connection.access;
   const cause = err instanceof Error ? err.message : String(err);
-  const tunnel = tunnels.find({ kind: 'teleport', database, dbUser });
+  const tunnel = tunnels.find({ kind: 'teleport', proxy, database, dbUser });
   if (tunnel && isLoginRequiredMessage(tunnel.output.join('\n'))) {
-    return new QuiverError('TELEPORT_LOGIN_REQUIRED', `Teleport rejected the tunnel for ${database}: ${cause}`, { output: tunnel.output });
+    return new QuiverError('TELEPORT_LOGIN_REQUIRED', `Teleport rejected the tunnel for ${database}: ${cause}`, { output: tunnel.output, proxy: tunnel.proxy });
   }
   const status = await session.refresh().catch(() => null);
-  if (status && (status.state === 'expired' || status.state === 'logged-out')) {
-    return new QuiverError('TELEPORT_LOGIN_REQUIRED', `Your Teleport certificate ${status.state === 'expired' ? 'has expired' : 'is missing'}; the query failed with: ${cause}`, { cause });
+  const cluster = status ? findCluster(status.clusters, proxy) : undefined;
+  if (status && (!cluster || cluster.state === 'expired' || cluster.state === 'logged-out')) {
+    const label = cluster ? clusterLabel(cluster) : proxy || 'the current tsh profile';
+    return new QuiverError(
+      'TELEPORT_LOGIN_REQUIRED',
+      `Your Teleport certificate for ${label} ${cluster?.state === 'expired' ? 'has expired' : 'is missing'}; the query failed with: ${cause}`,
+      { cause, proxy: cluster?.proxy ?? proxy },
+    );
   }
   return err;
 }

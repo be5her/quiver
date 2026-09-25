@@ -1,6 +1,6 @@
 import type { GlobalConfig, TeleportStatus, Variable } from '@quiver/core';
 import { Button, Checkbox, Input, KeyValueEditor, Label, Select, applyTheme, cn, invoke, notify, useAppStore, useInvoke, type TabProps } from '@quiver/ui';
-import { Copy } from 'lucide-react';
+import { Copy, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
 export function SettingsTab(_props: TabProps) {
@@ -8,7 +8,7 @@ export function SettingsTab(_props: TabProps) {
   const mcp = useAppStore((s) => s.mcpStatus);
   const [globals, setGlobals] = useState<Variable[]>([]);
   const [port, setPort] = useState(0);
-  const [teleportProxy, setTeleportProxy] = useState('');
+  const [newProxy, setNewProxy] = useState('');
   const [tshPath, setTshPath] = useState('');
   const teleport = useInvoke<TeleportStatus>('teleport.status', {}, { workspaceId: null, refreshOnEvents: ['teleport.changed'] });
 
@@ -16,7 +16,6 @@ export function SettingsTab(_props: TabProps) {
     if (config) {
       setGlobals(config.globalVariables);
       setPort(config.mcp.port);
-      setTeleportProxy(config.teleport.proxy);
       setTshPath(config.teleport.tshPath);
     }
   }, [config]);
@@ -26,6 +25,17 @@ export function SettingsTab(_props: TabProps) {
   const update = async (patch: Partial<GlobalConfig>) => {
     try {
       await invoke('config.update', { patch }, null);
+    } catch (err) {
+      notify((err as Error).message, 'error');
+    }
+  };
+
+  const addProxy = async () => {
+    const proxy = newProxy.trim();
+    if (!proxy) return;
+    try {
+      await invoke('teleport.cluster.add', { proxy }, null);
+      setNewProxy('');
     } catch (err) {
       notify((err as Error).message, 'error');
     }
@@ -86,21 +96,40 @@ export function SettingsTab(_props: TabProps) {
 
         <Section title="Teleport">
           <p className="text-xs text-muted mb-3">
-            Quiver drives the <code className="font-mono">tsh</code> CLI and shares its session with the tsh and kubectl in your terminal. Databases and Kubernetes clusters
-            appear in the Teleport module; tunnels are app-wide.
+            Quiver drives the <code className="font-mono">tsh</code> CLI and shares its profiles with the tsh and kubectl in your terminal. Each cluster is a proxy address; clusters
+            you have logged into with tsh appear on their own. Databases, Kubernetes clusters and pins live in the Teleport module; tunnels are app-wide.
           </p>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <Label>Proxy address</Label>
+          <Label>Clusters</Label>
+          <div className="flex flex-col gap-1 mb-2">
+            {config.teleport.proxies.map((proxy) => (
+              <div key={proxy} className="flex items-center gap-2" data-testid="teleport-proxy">
+                <code className="flex-1 text-xs font-mono bg-surface border border-edge rounded-md px-2 py-1.5 truncate">{proxy}</code>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  icon={<X className="size-3.5" />}
+                  onClick={() => void invoke('teleport.cluster.remove', { proxy }, null).catch((err) => notify((err as Error).message, 'error'))}
+                  title="Remove this cluster and its pins"
+                >
+                  Remove
+                </Button>
+              </div>
+            ))}
+            {config.teleport.proxies.length === 0 && <p className="text-xs text-muted">No clusters configured.</p>}
+            <div className="flex items-center gap-2">
               <Input
                 className="font-mono"
-                value={teleportProxy}
+                value={newProxy}
                 placeholder="teleport.example.com:443"
-                onChange={(e) => setTeleportProxy(e.target.value)}
-                onBlur={() => teleportProxy.trim() !== config.teleport.proxy && void update({ teleport: { ...config.teleport, proxy: teleportProxy.trim() } })}
-                data-testid="teleport-proxy"
+                onChange={(e) => setNewProxy(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && void addProxy()}
               />
+              <Button size="sm" variant="secondary" disabled={!newProxy.trim()} onClick={() => void addProxy()}>
+                Add
+              </Button>
             </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
             <div>
               <Label>tsh path (optional)</Label>
               <Input
@@ -121,7 +150,7 @@ export function SettingsTab(_props: TabProps) {
           </p>
           <label className="flex items-center gap-2 text-sm mt-3">
             <Checkbox checked={config.teleport.loginOnLaunch} onChange={(e) => void update({ teleport: { ...config.teleport, loginOnLaunch: e.target.checked } })} />
-            Log in on launch when the certificate has expired (opens the browser)
+            Log in on launch to every cluster whose certificate has expired (opens the browser, one cluster at a time)
           </label>
         </Section>
 
