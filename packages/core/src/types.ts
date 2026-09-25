@@ -66,6 +66,8 @@ export interface MockConfig {
 
 export interface GlobalConfig {
   theme: 'system' | 'light' | 'dark';
+  /** Colour palette key from `PALETTES`; unknown keys fall back to the default. */
+  palette: string;
   recentWorkspaces: RecentWorkspace[];
   /** Workspace paths reopened on startup. */
   openWorkspaces: string[];

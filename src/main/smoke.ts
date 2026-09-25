@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import type { BrowserWindow } from 'electron';
 import { buildSchema, graphql as executeGraphql } from 'graphql';
 import type { WebSocket as WsSocket } from 'ws';
-import { capabilityLabels, contentText, expandUriTemplate, skeletonFromSchema } from '@quiver/core';
+import { DEFAULT_PALETTE, capabilityLabels, contentText, expandUriTemplate, resolvePalette, skeletonFromSchema } from '@quiver/core';
 import type {
   ApiRequest,
   ApiResponse,
@@ -1305,6 +1305,31 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     const title = await win.webContents.executeJavaScript('document.querySelector("[data-testid=app-ready]") ? "ready" : "not-ready"');
     check('renderer mounted', title === 'ready', title);
 
+    // Theme: the brand palette is the default, and a palette saved in config recolours the running UI in both modes.
+    {
+      const cssVar = (name: string) => win.webContents.executeJavaScript(`getComputedStyle(document.documentElement).getPropertyValue('${name}').trim()`) as Promise<string>;
+      const isDark = () => win.webContents.executeJavaScript(`document.documentElement.classList.contains('dark')`) as Promise<boolean>;
+      const setDark = (dark: boolean) => win.webContents.executeJavaScript(`document.documentElement.classList.toggle('dark', ${dark})`);
+      const waitFor = async (predicate: () => Promise<boolean>) => {
+        for (let i = 0; i < 40 && !(await predicate()); i++) await new Promise((r) => setTimeout(r, 50));
+      };
+      check('theme: default palette in config', host.config.get().palette === DEFAULT_PALETTE, host.config.get().palette);
+      const mode = (await isDark()) ? 'dark' : 'light';
+      check('theme: default palette applied', (await cssVar('--accent')) === resolvePalette(DEFAULT_PALETTE)[mode].accent, await cssVar('--accent'));
+      await run('config.update', { patch: { palette: 'signal-blue' } }, null);
+      const blue = resolvePalette('signal-blue');
+      await waitFor(async () => (await cssVar('--accent')) === blue[mode].accent);
+      check('theme: palette change recolours the UI', (await cssVar('--accent')) === blue[mode].accent, await cssVar('--accent'));
+      await setDark(mode === 'light');
+      const other = mode === 'light' ? 'dark' : 'light';
+      check('theme: palette follows the dark class', (await cssVar('--canvas')) === blue[other].canvas, await cssVar('--canvas'));
+      await setDark(mode === 'dark');
+      await run('config.update', { patch: { palette: 'no-such-palette' } }, null);
+      await waitFor(async () => (await cssVar('--accent')) === resolvePalette(DEFAULT_PALETTE)[mode].accent);
+      check('theme: unknown palette falls back to the default', (await cssVar('--accent')) === resolvePalette(DEFAULT_PALETTE)[mode].accent, await cssVar('--accent'));
+      await run('config.update', { patch: { palette: DEFAULT_PALETTE } }, null);
+    }
+
     // Optional: drive the UI and capture screenshots for visual review.
     const shotsDir = process.env.QUIVER_SMOKE_SHOTS;
     if (shotsDir) {
@@ -1732,6 +1757,24 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       check('ui: title bar shows the logo mark', markInTitle === true);
       await wait(200);
       await shot('25-settings-about-light');
+
+      // Settings: the palette picker lists every brand palette and applies the one clicked.
+      const paletteCount = await js(`document.querySelectorAll('[data-testid=palette-option]').length`);
+      check('ui: settings lists the palettes', paletteCount === 6, paletteCount);
+      await js(`(() => { const el = document.querySelector('[data-testid=palette-option][data-palette=ember]'); el.scrollIntoView({ block: 'center' }); el.click(); })()`);
+      await wait(500);
+      const emberAccent = await js(`getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()`);
+      const emberMode = (await js(`document.documentElement.classList.contains('dark')`)) ? 'dark' : 'light';
+      await js(`document.documentElement.classList.remove('dark')`);
+      await wait(200);
+      check('ui: clicking a palette applies it', emberAccent === resolvePalette('ember')[emberMode].accent && host.config.get().palette === 'ember', { emberAccent, saved: host.config.get().palette });
+      await shot('26-settings-palette-ember-light');
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(200);
+      await shot('27-settings-palette-ember-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
+      await js(`document.querySelector('[data-testid=palette-option][data-palette=${DEFAULT_PALETTE}]').click()`);
+      await wait(300);
     }
 
     const outSecond = await run<TeleportStatus>('teleport.logout', { proxy: second }, null);

@@ -13,4 +13,5 @@ export * from './models/realtime';
 export * from './models/mcp';
 export * from './models/env';
 export * from './sql';
+export * from './palettes';
 export { defaultGlobalConfig, DEFAULT_MCP_PORT } from './defaults';

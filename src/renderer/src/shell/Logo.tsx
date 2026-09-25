@@ -1,30 +1,22 @@
 /**
- * The Quiver mark drawn with theme colours, for the title bar and other places inside the app.
- * resources/icon.svg is the same drawing on a dark badge, used for the installers.
+ * The Quiver mark (Project Folder, C1 Tucked) drawn with theme colours, for the title bar and
+ * other places inside the app. resources/icon.svg is the C4 Solid mark on a dark badge, for installers.
+ * Strokes use the fg token; the middle arrow uses the accent token.
  */
 export function QuiverMark({ className }: { className?: string }) {
   return (
-    <svg viewBox="0 0 1024 1024" className={className} aria-hidden="true" focusable="false" data-testid="quiver-mark">
-      <g transform="rotate(28 512 512)" strokeLinecap="round" strokeLinejoin="round">
-        <ellipse cx="512" cy="500" rx="142" ry="44" className="fill-accent" opacity="0.45" />
-        <g className="fill-fg stroke-fg" strokeWidth="38">
-          <g transform="rotate(-16 512 760)">
-            <line x1="512" y1="520" x2="512" y2="220" />
-            <path d="M512 120 L566 250 L512 222 L458 250 Z" stroke="none" />
-          </g>
-          <g>
-            <line x1="512" y1="520" x2="512" y2="220" />
-            <path d="M512 120 L566 250 L512 222 L458 250 Z" stroke="none" />
-          </g>
-          <g transform="rotate(16 512 760)">
-            <line x1="512" y1="520" x2="512" y2="220" />
-            <path d="M512 120 L566 250 L512 222 L458 250 Z" stroke="none" />
-          </g>
-        </g>
-        <path d="M370 500 Q512 588 654 500 L630 890 Q512 950 394 890 Z" className="fill-accent" />
-        <path d="M370 500 Q512 588 654 500" fill="none" className="stroke-accent-fg" strokeWidth="16" opacity="0.7" />
-        <path d="M384 690 Q512 748 640 690" fill="none" className="stroke-accent-fg" strokeOpacity="0.35" strokeWidth="26" />
+    <svg viewBox="0 0 100 100" className={className} aria-hidden="true" focusable="false" data-testid="quiver-mark">
+      <g className="stroke-fg" fill="none" strokeWidth="5.5" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M40 52 V25 M33 33 L40 25 L47 33" />
+        <path d="M64 52 V25 M57 33 L64 25 L71 33" />
       </g>
+      <path d="M52 52 V15 M45 23 L52 15 L59 23" className="stroke-accent" fill="none" strokeWidth="5.5" strokeLinecap="round" strokeLinejoin="round" />
+      <path
+        d="M12 40 V84 a8 8 0 0 0 8 8 H80 a8 8 0 0 0 8 -8 V52 a8 8 0 0 0 -8 -8 H50 l-8 -8 H20 a8 8 0 0 0 -8 8 Z"
+        className="stroke-fg fill-canvas"
+        strokeWidth="9"
+        strokeLinejoin="round"
+      />
     </svg>
   );
 }

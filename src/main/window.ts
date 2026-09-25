@@ -12,7 +12,7 @@ export function createMainWindow(options: { show?: boolean } = {}): BrowserWindo
     minHeight: 560,
     show: false,
     autoHideMenuBar: true,
-    backgroundColor: '#14161b',
+    backgroundColor: '#15171c',
     title: 'Quiver',
     icon: process.platform === 'darwin' ? undefined : iconPath,
     webPreferences: {

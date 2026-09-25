@@ -1,0 +1,26 @@
+# Sections of the notes GitHub generates for a release (`gh release create --generate-notes` in
+# .github/workflows/release.yml). A merged pull request lands in the first section whose labels it
+# carries; label pull requests before merging so the draft notes need little editing.
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+  categories:
+    - title: Breaking changes
+      labels:
+        - breaking
+    - title: New
+      labels:
+        - enhancement
+    - title: Look and feel
+      labels:
+        - design
+    - title: Fixes
+      labels:
+        - bug
+    - title: Documentation
+      labels:
+        - documentation
+    - title: Other changes
+      labels:
+        - '*'

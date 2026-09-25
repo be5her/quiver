@@ -54,7 +54,7 @@ function useBootstrap() {
       ]);
       if (disposed) return;
       store.setConfig(config);
-      applyTheme(config.theme);
+      applyTheme(config.theme, config.palette);
       store.setCommands(commands);
       store.setWorkspaces(workspaces);
       store.setMcpStatus(info.mcp);
@@ -66,7 +66,7 @@ function useBootstrap() {
       onHostEvent('workspace.changed', ({ workspaces }) => useAppStore.getState().setWorkspaces(workspaces)),
       onHostEvent('config.changed', ({ config }) => {
         useAppStore.getState().setConfig(config);
-        applyTheme(config.theme);
+        applyTheme(config.theme, config.palette);
       }),
       onHostEvent('mcp.status', (status) => useAppStore.getState().setMcpStatus(status)),
       onHostEvent('app.update', handleUpdateEvent),
