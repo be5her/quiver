@@ -10,5 +10,6 @@ export * from './models/db';
 export * from './models/teleport';
 export * from './models/mock';
 export * from './models/realtime';
+export * from './models/mcp';
 export * from './sql';
 export { defaultGlobalConfig, DEFAULT_MCP_PORT } from './defaults';

@@ -1,5 +1,5 @@
 import { EmptyState, defineModuleUI, type ModuleUI } from '@quiver/ui';
-import { FileKey, Plug } from 'lucide-react';
+import { FileKey } from 'lucide-react';
 
 function comingSoon(title: string, hint: string) {
   return function ComingSoon() {
@@ -12,15 +12,6 @@ function comingSoon(title: string, hint: string) {
  * activity bar so the shape of the app is visible from day one.
  */
 export const placeholderModules: ModuleUI[] = [
-  defineModuleUI({
-    id: 'mcp',
-    title: 'MCP inspector',
-    icon: Plug,
-    order: 40,
-    availability: 'always',
-    Sidebar: comingSoon('MCP inspector', 'Connect to other MCP servers, browse their tools and call them.'),
-    tabs: {},
-  }),
   defineModuleUI({
     id: 'env',
     title: 'Env files',

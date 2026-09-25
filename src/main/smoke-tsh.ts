@@ -65,7 +65,7 @@ export async function writeFakeTsh(dir: string, redisPort: number): Promise<Fake
 }
 
 /** `npm run smoke` always has node on PATH; resolve it to an absolute path so spawn needs no shell. */
-function findNode(): string {
+export function findNode(): string {
   const name = process.platform === 'win32' ? 'node.exe' : 'node';
   for (const dir of (process.env.PATH ?? '').split(path.delimiter)) {
     const candidate = path.join(dir, name);

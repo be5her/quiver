@@ -193,6 +193,8 @@ export interface HostEvents {
   'mock.changed': { workspaceId: string; serverId: string; reason: 'status' | 'requests' | 'servers' };
   /** A WebSocket or SSE connection changed state, its definition changed, or messages arrived. */
   'realtime.changed': { workspaceId: string; connectionId: string; reason: 'status' | 'messages' | 'connections' };
+  /** MCP inspector: a server connected or dropped, its definition changed, its tool/resource/prompt lists changed, or the log grew. */
+  'mcp.changed': { workspaceId: string; serverId: string; reason: 'status' | 'servers' | 'lists' | 'log' };
 }
 
 export type HostEventName = keyof HostEvents;

@@ -4,5 +4,5 @@
     "types": ["node"],
     "composite": false
   },
-  "include": ["electron.vite.config.ts", "vitest.config.ts", "src/main", "src/preload", "packages/core/src", "packages/mcp/src", "packages/modules/src/main.ts", "packages/modules/src/api/main.ts", "packages/modules/src/db/main.ts", "packages/modules/src/mock/main.ts", "packages/modules/src/realtime/main.ts", "packages/modules/src/teleport/main.ts", "packages/modules/src/tools/main.ts"]
+  "include": ["electron.vite.config.ts", "vitest.config.ts", "src/main", "src/preload", "packages/core/src", "packages/mcp/src", "packages/modules/src/main.ts", "packages/modules/src/api/main.ts", "packages/modules/src/db/main.ts", "packages/modules/src/mock/main.ts", "packages/modules/src/mcp/main.ts", "packages/modules/src/realtime/main.ts", "packages/modules/src/teleport/main.ts", "packages/modules/src/tools/main.ts"]
 }
