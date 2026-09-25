@@ -6,7 +6,8 @@
  *   npm run release -- patch|minor|major|<x.y.z>
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 const REPO = 'https://github.com/be5her/quiver';
 const bump = process.argv[2];
@@ -26,7 +27,16 @@ if (git('status', '--porcelain')) fail('the working tree has uncommitted changes
 git('fetch', '-q', 'origin', 'master', '--tags');
 if (git('rev-parse', 'HEAD') !== git('rev-parse', 'origin/master')) fail('master differs from origin/master; pull or push first');
 
-execFileSync('npm', ['version', bump, '-m', 'Release v%s'], { stdio: 'inherit', shell: process.platform === 'win32' });
+// Run npm's own CLI script with this node instead of the `npm` shim. On Windows the shim is
+// npm.cmd, which needs `shell: true`, and cmd then splits the unquoted "Release v%s" message.
+const npmCli = [process.env.npm_execpath, join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js')]
+  .find((path) => path && /npm-cli\.c?js$/.test(path) && existsSync(path));
+const npm = (...args) =>
+  npmCli
+    ? execFileSync(process.execPath, [npmCli, ...args], { stdio: 'inherit' })
+    : execFileSync('npm', args, { stdio: 'inherit' });
+
+npm('version', bump, '-m', 'Release v%s');
 const { version } = JSON.parse(readFileSync('package.json', 'utf8'));
 git('push', 'origin', 'master', `refs/tags/v${version}`);
 
