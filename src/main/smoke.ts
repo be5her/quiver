@@ -366,7 +366,7 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       },
       ws.id,
     );
-    check('mock: server saved with a free port and route defaults', mock.port >= 4100 && !mock.running && mock.routes.length === 4 && mock.routes[2].enabled && mock.routes[1].headers.length === 0, { port: mock.port });
+    check('mock: server saved with a random five-digit port and route defaults', mock.port >= 10000 && mock.port <= 32767 && !mock.running && mock.routes.length === 4 && mock.routes[2].enabled && mock.routes[1].headers.length === 0, { port: mock.port });
     check('mock: definition committed to the project', (await fs.stat(path.join(folder, '.quiver', 'mock-servers', `${mock.id}.json`))).isFile());
     const mockStarted = await run<MockServerSummary>('mock.server.start', { id: mock.id }, ws.id);
     check('mock: server starts', mockStarted.running && mockStarted.url === `http://127.0.0.1:${mock.port}`, mockStarted.url);
@@ -442,6 +442,14 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       ws2.id,
     );
     await run('mock.server.start', { id: hooks.id }, ws2.id);
+    const portRecords = host.config.get().mock.ports;
+    check(
+      'mock: ports of every project are recorded in the global config',
+      hooks.port !== mock.port &&
+        portRecords.some((r) => r.port === mock.port && r.serverId === mock.id && r.workspace === ws.path) &&
+        portRecords.some((r) => r.port === hooks.port && r.serverId === hooks.id && r.workspace === ws2.path && r.name === 'hooks'),
+      portRecords,
+    );
     const rh = await fetch(`http://127.0.0.1:${hooks.port}/webhooks/stripe`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"event":"invoice.paid"}' });
     check('mock: webhook receiver answers the templated fallback', rh.status === 200 && ((await rh.json()) as { got: string }).got === 'invoice.paid');
     await run('workspace.close', { id: ws2.id }, null);
@@ -457,8 +465,9 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     const busy = await run<MockServerSummary>('mock.server.save', { server: { name: 'busy', port: hooks.port } }, ws.id);
     const busyStart = await host.invoke('mock.server.start', { id: busy.id }, { caller: 'ui', workspaceId: ws.id });
     const busySummary = await run<MockServerSummary>('mock.server.get', { id: busy.id }, ws.id);
-    check('mock: starting on a taken port reports it and keeps the error on the summary', !busyStart.ok && /already in use/.test(busyStart.error.message) && /in use/.test(busySummary.error ?? ''), busyStart.ok ? 'ok?' : busyStart.error.message);
+    check('mock: starting on a taken port names the other project\'s server and keeps the error on the summary', !busyStart.ok && /already in use by mock server "hooks" in /.test(busyStart.error.message) && /in use/.test(busySummary.error ?? ''), busyStart.ok ? 'ok?' : busyStart.error.message);
     await run('mock.server.delete', { id: busy.id }, ws.id);
+    check('mock: deleting a server forgets its port record', !host.config.get().mock.ports.some((r) => r.serverId === busy.id) && host.config.get().mock.ports.some((r) => r.serverId === hooks.id));
     const cleared = await run<{ cleared: number }>('mock.request.clear', { serverId: mock.id }, ws.id);
     check('mock: clear drops the log', cleared.cleared === 11 && (await run<MockCapturedRequest[]>('mock.request.list', { serverId: mock.id }, ws.id)).length === 0, cleared);
     const mockStopped = await run<MockServerSummary>('mock.server.stop', { id: mock.id }, ws.id);

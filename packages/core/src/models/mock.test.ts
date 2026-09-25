@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MOCK_PORT_MAX,
+  MOCK_PORT_MIN,
   MockRouteDraftSchema,
   MockRouteSchema,
   MockServerDraftSchema,
   MockServerSchema,
   capturedToCurl,
   compact,
+  findPortRecord,
   findRoute,
   forwardUrl,
   inferContentType,
@@ -15,12 +18,16 @@ import {
   newMockServer,
   normalizePath,
   parseQuery,
+  randomPortCandidates,
   renderResponse,
   replayUrl,
   replayableHeaders,
   requestVariables,
+  withPortRecord,
+  withoutPortRecord,
   type MockCapturedRequest,
 } from './mock';
+import type { MockPortRecord } from '../types';
 
 describe('normalizePath', () => {
   it('strips query, hash, duplicate and trailing slashes', () => {
@@ -220,5 +227,41 @@ describe('schemas', () => {
     expect(server.cors).toBe(true);
     expect(MockServerSchema.safeParse({ ...server, port: 70000 }).success).toBe(false);
     expect(MockServerSchema.safeParse({ ...server, fallback: { type: 'forward', url: 'http://localhost:3000' } }).success).toBe(true);
+  });
+});
+
+describe('port allocation', () => {
+  it('draws distinct five-digit ports outside the ephemeral ranges and skips avoided ones', () => {
+    const ports = randomPortCandidates(new Set(), 200);
+    expect(ports.length).toBe(200);
+    expect(new Set(ports).size).toBe(200);
+    for (const p of ports) {
+      expect(p).toBeGreaterThanOrEqual(MOCK_PORT_MIN);
+      expect(p).toBeLessThanOrEqual(MOCK_PORT_MAX);
+      expect(String(p)).toHaveLength(5);
+    }
+    // A fixed random source draws the same port every time: once avoided, nothing is left.
+    expect(randomPortCandidates(new Set(), 5, () => 0)).toEqual([MOCK_PORT_MIN]);
+    expect(randomPortCandidates(new Set([MOCK_PORT_MIN]), 5, () => 0)).toEqual([]);
+    // With two possible draws, the avoided one is skipped and the other comes first.
+    let flip = 0;
+    const two = randomPortCandidates(new Set([MOCK_PORT_MIN]), 5, () => (flip++ % 2 === 0 ? 0 : 0.5));
+    expect(two).toEqual([MOCK_PORT_MIN + Math.floor((MOCK_PORT_MAX - MOCK_PORT_MIN + 1) / 2)]);
+  });
+
+  it('keeps one record per server and finds the owner of a port', () => {
+    const a: MockPortRecord = { port: 12345, workspace: 'D:/a', serverId: 's1', name: 'api' };
+    const b: MockPortRecord = { port: 23456, workspace: 'D:/b', serverId: 's1', name: 'hooks' };
+    let records = withPortRecord([], a);
+    records = withPortRecord(records, b);
+    expect(records).toEqual([a, b]);
+    expect(withPortRecord(records, { ...a })).toBe(records);
+    const moved = withPortRecord(records, { ...a, port: 12346 });
+    expect(moved.map((r) => r.port)).toEqual([12346, 23456]);
+    expect(findPortRecord(moved, 23456)).toEqual(b);
+    expect(findPortRecord(moved, 23456, { workspace: 'D:/b', serverId: 's1' })).toBeUndefined();
+    expect(findPortRecord(moved, 1)).toBeUndefined();
+    expect(withoutPortRecord(moved, 'D:/a', 's1')).toEqual([b]);
+    expect(withoutPortRecord(moved, 'D:/a', 'nope')).toBe(moved);
   });
 });

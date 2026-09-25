@@ -51,6 +51,19 @@ export interface TeleportConfig {
   loginOnLaunch: boolean;
 }
 
+/** A port Quiver handed to a mock server on this machine. New servers in any project avoid every recorded port. */
+export interface MockPortRecord {
+  port: number;
+  /** Folder of the workspace the server lives in. */
+  workspace: string;
+  serverId: string;
+  name: string;
+}
+
+export interface MockConfig {
+  ports: MockPortRecord[];
+}
+
 export interface GlobalConfig {
   theme: 'system' | 'light' | 'dark';
   recentWorkspaces: RecentWorkspace[];
@@ -59,6 +72,7 @@ export interface GlobalConfig {
   globalVariables: Variable[];
   mcp: McpConfig;
   teleport: TeleportConfig;
+  mock: MockConfig;
 }
 
 /** Storage exposed to commands. Implemented over the `.quiver` folder of a workspace. */

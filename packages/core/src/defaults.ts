@@ -10,5 +10,6 @@ export function defaultGlobalConfig(): GlobalConfig {
     globalVariables: [],
     mcp: { enabled: true, port: DEFAULT_MCP_PORT, allowMutating: false },
     teleport: { proxies: [], pins: [], tshPath: '', loginOnLaunch: false },
+    mock: { ports: [] },
   };
 }

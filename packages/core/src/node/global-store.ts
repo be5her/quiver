@@ -4,13 +4,14 @@ import { defaultGlobalConfig } from '../defaults';
 import { migrateTeleportConfig } from '../models/teleport';
 import type { GlobalConfig } from '../types';
 
-/** Shallow merge with the nested sections merged one level deeper, so a partial `mcp` or `teleport` patch keeps the other keys. */
+/** Shallow merge with the nested sections merged one level deeper, so a partial `mcp`, `teleport` or `mock` patch keeps the other keys. */
 function mergeConfig(base: GlobalConfig, patch: Partial<GlobalConfig>): GlobalConfig {
   return {
     ...base,
     ...patch,
     mcp: { ...base.mcp, ...(patch.mcp ?? {}) },
     teleport: migrateTeleportConfig({ ...base.teleport, ...(patch.teleport ?? {}) }),
+    mock: { ...base.mock, ...(patch.mock ?? {}) },
   };
 }
 

@@ -13,7 +13,10 @@ import {
   nowIso,
   replayUrl,
   replayableHeaders,
+  withPortRecord,
+  withoutPortRecord,
   type CommandContext,
+  type HostApi,
   type MockCapturedRequest,
   type MockReplayResult,
   type MockServer,
@@ -23,11 +26,9 @@ import {
 } from '@quiver/core';
 import { fetch as undiciFetch } from 'undici';
 import { z } from 'zod';
-import { MockRuntime, findPort } from './server';
+import { MockRuntime, pickPort } from './server';
 
 export const MOCK_COLLECTION = 'mock-servers';
-/** New servers get the first free port from here, so URLs stay short and predictable. */
-const DEFAULT_PORT_START = 4100;
 const REPLAY_BODY_LIMIT = 10 * 1024 * 1024;
 const TEXT_TYPES = /^(text\/|application\/(json|xml|javascript|x-www-form-urlencoded|graphql|yaml|x-yaml|ld\+json|problem\+json)|.*\+(json|xml))/i;
 
@@ -52,6 +53,32 @@ async function getServer(w: WorkspaceApi, id: string): Promise<MockServer> {
   return MockServerSchema.parse(item);
 }
 
+/** Remember the ports of these servers in the global config, so new servers in any project on this machine avoid them. */
+async function rememberPorts(host: HostApi, w: WorkspaceApi, servers: MockServer[]): Promise<void> {
+  const current = host.config.get().mock.ports;
+  let next = current;
+  for (const s of servers) next = withPortRecord(next, { port: s.port, workspace: w.path, serverId: s.id, name: s.name });
+  if (next !== current) await host.config.update({ mock: { ports: next } });
+}
+
+async function forgetPort(host: HostApi, w: WorkspaceApi, serverId: string): Promise<void> {
+  const current = host.config.get().mock.ports;
+  const next = withoutPortRecord(current, w.path, serverId);
+  if (next !== current) await host.config.update({ mock: { ports: next } });
+}
+
+/** Ports a new server must steer clear of: every recorded one, the servers of every open workspace and the MCP port. */
+async function portsToAvoid(host: HostApi): Promise<Set<number>> {
+  const config = host.config.get();
+  const avoid = new Set<number>(config.mock.ports.map((r) => r.port));
+  avoid.add(config.mcp.port);
+  for (const info of host.workspaces.list()) {
+    const open = host.workspaces.get(info.id);
+    if (open) for (const s of await listServers(open)) avoid.add(s.port);
+  }
+  return avoid;
+}
+
 async function saveServer(ctx: CommandContext, draft: MockServerDraft): Promise<MockServerSummary> {
   const w = ws(ctx);
   const existing = draft.id ? await w.store.get<MockServer>(MOCK_COLLECTION, draft.id) : undefined;
@@ -64,9 +91,10 @@ async function saveServer(ctx: CommandContext, draft: MockServerDraft): Promise<
   });
   if (!merged.name.trim()) merged.name = 'Mock server';
   const taken = new Set((await listServers(w)).filter((s) => s.id !== merged.id).map((s) => s.port));
-  if (merged.port === 0) merged.port = await findPort(DEFAULT_PORT_START, taken);
+  if (merged.port === 0) merged.port = await pickPort(await portsToAvoid(ctx.host));
   else if (taken.has(merged.port)) throw new QuiverError('INVALID_INPUT', `Port ${merged.port} is already used by another mock server in this workspace`);
   await w.store.put(MOCK_COLLECTION, merged);
+  await rememberPorts(ctx.host, w, [merged]);
   await runtime.apply(w, ctx.host, merged);
   return runtime.summary(w, merged);
 }
@@ -100,7 +128,7 @@ const serverSave = defineCommand({
   id: 'mock.server.save',
   title: 'Save mock server',
   description:
-    'Creates or updates a mock server (omit id to create). Port 0 picks a free one. Routes match in order, first enabled match wins; `:name` captures a path segment and a trailing `*` the rest. Response bodies and headers may use {{params.x}}, {{query.x}}, {{headers.x}}, {{body.field}} and {{$uuid}}. A running server picks up changes immediately; a new port or host restarts it.',
+    'Creates or updates a mock server (omit id to create). Port 0 picks a random free port that no other Quiver mock server on this machine uses. Routes match in order, first enabled match wins; `:name` captures a path segment and a trailing `*` the rest. Response bodies and headers may use {{params.x}}, {{query.x}}, {{headers.x}}, {{body.field}} and {{$uuid}}. A running server picks up changes immediately; a new port or host restarts it.',
   scope: 'workspace',
   input: z.object({ server: MockServerDraftSchema }),
   handler: async ({ server }, ctx) => saveServer(ctx, server),
@@ -116,6 +144,7 @@ const serverDelete = defineCommand({
   handler: async ({ id }, ctx) => {
     const w = ws(ctx);
     await runtime.remove(w, id);
+    await forgetPort(ctx.host, w, id);
     return { deleted: await w.store.remove(MOCK_COLLECTION, id) };
   },
 });
@@ -299,7 +328,9 @@ export const mockModule = defineModule({
   id: 'mock',
   commands: [serverList, serverGet, serverSave, serverDelete, serverStart, serverStop, routeSave, routeDelete, requestList, requestGet, requestClear, requestWait, requestReplay],
   onWorkspaceOpen: async (workspace, host) => {
-    for (const server of await listServers(workspace)) {
+    const servers = await listServers(workspace);
+    await rememberPorts(host, workspace, servers);
+    for (const server of servers) {
       if (!server.autoStart) continue;
       try {
         await runtime.start(workspace, host, server);

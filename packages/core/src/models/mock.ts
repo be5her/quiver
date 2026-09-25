@@ -2,6 +2,7 @@ import { toCurl } from '../curl';
 import { newId, nowIso } from '../ids';
 import { resolveTemplate } from '../variables';
 import { z } from 'zod';
+import type { MockPortRecord } from '../types';
 import { HttpMethodSchema, KeyValueSchema, type HttpMethod, type KeyValue } from './api';
 
 /**
@@ -357,4 +358,48 @@ export function capturedToCurl(captured: MockCapturedRequest, baseUrl: string): 
   const method = (HttpMethodSchema.options as string[]).includes(captured.method.toUpperCase()) ? (captured.method.toUpperCase() as HttpMethod) : 'GET';
   const body = captured.bodyEncoding === 'utf8' && captured.body ? captured.body : null;
   return toCurl({ method, url: `${baseUrl.replace(/\/$/, '')}${captured.url}`, headers: replayableHeaders(captured.headers), body });
+}
+
+// ---------- ports ----------
+
+/** Mock servers get random five-digit ports below the ephemeral ranges of Linux (32768+) and Windows (49152+). */
+export const MOCK_PORT_MIN = 10000;
+export const MOCK_PORT_MAX = 32767;
+
+/** Up to `count` distinct random ports in the mock range that are not in `avoid`, in the order to try them. */
+export function randomPortCandidates(avoid: Set<number>, count = 50, random: () => number = Math.random): number[] {
+  const out: number[] = [];
+  const seen = new Set<number>();
+  const span = MOCK_PORT_MAX - MOCK_PORT_MIN + 1;
+  for (let i = 0; i < Math.max(1000, count * 20) && out.length < count; i++) {
+    const port = MOCK_PORT_MIN + Math.floor(random() * span);
+    if (port < MOCK_PORT_MIN || port > MOCK_PORT_MAX || seen.has(port)) continue;
+    seen.add(port);
+    if (!avoid.has(port)) out.push(port);
+  }
+  return out;
+}
+
+function samePortOwner(a: Pick<MockPortRecord, 'workspace' | 'serverId'>, b: Pick<MockPortRecord, 'workspace' | 'serverId'>): boolean {
+  return a.workspace === b.workspace && a.serverId === b.serverId;
+}
+
+/** Records with `record` added, or replacing the entry of the same server. Returns the same array when nothing changed. */
+export function withPortRecord(records: MockPortRecord[], record: MockPortRecord): MockPortRecord[] {
+  const index = records.findIndex((r) => samePortOwner(r, record));
+  if (index === -1) return [...records, record];
+  const current = records[index];
+  if (current.port === record.port && current.name === record.name) return records;
+  return records.map((r, i) => (i === index ? record : r));
+}
+
+/** Records without the entry of the given server. Returns the same array when there was none. */
+export function withoutPortRecord(records: MockPortRecord[], workspace: string, serverId: string): MockPortRecord[] {
+  const next = records.filter((r) => !samePortOwner(r, { workspace, serverId }));
+  return next.length === records.length ? records : next;
+}
+
+/** The record of a server other than `except` that holds `port`, if any. */
+export function findPortRecord(records: MockPortRecord[], port: number, except?: Pick<MockPortRecord, 'workspace' | 'serverId'>): MockPortRecord | undefined {
+  return records.find((r) => r.port === port && (!except || !samePortOwner(r, except)));
 }

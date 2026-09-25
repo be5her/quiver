@@ -1,7 +1,10 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createServer as createTcpServer, type AddressInfo } from 'node:net';
 import {
+  MOCK_PORT_MAX,
+  MOCK_PORT_MIN,
   QuiverError,
+  findPortRecord,
   findRoute,
   forwardUrl,
   matchPath,
@@ -10,6 +13,7 @@ import {
   normalizePath,
   nowIso,
   parseQuery,
+  randomPortCandidates,
   renderResponse,
   replayableHeaders,
   requestVariables,
@@ -124,13 +128,18 @@ function canListen(port: number, host: string): Promise<boolean> {
   });
 }
 
-/** First port at or above `start` that is free on both loopback and all interfaces and not in `taken`. */
-export async function findPort(start: number, taken: Set<number>): Promise<number> {
-  for (let port = start; port < start + 500 && port <= 65535; port++) {
-    if (taken.has(port)) continue;
+/** A random five-digit port that is free on both loopback and all interfaces and not in `avoid`. */
+export async function pickPort(avoid: Set<number>): Promise<number> {
+  for (const port of randomPortCandidates(avoid, 100)) {
     if ((await canListen(port, '127.0.0.1')) && (await canListen(port, '0.0.0.0'))) return port;
   }
-  throw new QuiverError('REQUEST_FAILED', `No free port found between ${start} and ${start + 500}`);
+  throw new QuiverError('REQUEST_FAILED', `No free port found between ${MOCK_PORT_MIN} and ${MOCK_PORT_MAX}`);
+}
+
+/** Names the other Quiver mock server recorded on this port, when there is one. */
+function portOwner(host: HostApi, ws: WorkspaceApi, definition: MockServer): string {
+  const record = findPortRecord(host.config.get().mock.ports, definition.port, { workspace: ws.path, serverId: definition.id });
+  return record ? ` by mock server "${record.name}" in ${record.workspace}` : '';
 }
 
 /**
@@ -222,7 +231,7 @@ export class MockRuntime {
       const code = (err as NodeJS.ErrnoException).code;
       s.error =
         code === 'EADDRINUSE'
-          ? `Port ${definition.port} is already in use`
+          ? `Port ${definition.port} is already in use${portOwner(host, ws, definition)}`
           : code === 'EACCES'
             ? `Port ${definition.port} is not allowed for this user`
             : errorMessage(err);
