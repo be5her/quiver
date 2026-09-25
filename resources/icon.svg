@@ -1,50 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
-  <!--
-    Quiver: three arrows fanning out of a tilted quiver, drawn as one mark so it stays
-    readable at 16 px. Colours match the app's accent (#4f6bf0) on a dark canvas.
-    resources/icon.png is rendered from this file by `npm run icon`.
-  -->
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#262d45"/>
-      <stop offset="1" stop-color="#10131b"/>
-    </linearGradient>
-    <linearGradient id="tube" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#7a92ff"/>
-      <stop offset="1" stop-color="#4a63e6"/>
-    </linearGradient>
-  </defs>
-
-  <!-- Rounded square badge -->
-  <rect x="0" y="0" width="1024" height="1024" rx="224" fill="url(#bg)"/>
-  <rect x="20" y="20" width="984" height="984" rx="208" fill="none" stroke="#ffffff" stroke-opacity="0.07" stroke-width="6"/>
-
-  <g transform="rotate(28 512 512)" stroke-linecap="round" stroke-linejoin="round">
-    <!-- Hollow of the quiver, behind the arrows -->
-    <ellipse cx="512" cy="500" rx="142" ry="44" fill="#22307a"/>
-
-    <!-- Arrows, fanned around a point inside the quiver -->
-    <g fill="#ffffff" stroke="#ffffff" stroke-width="38">
-      <g transform="rotate(-16 512 760)">
-        <line x1="512" y1="520" x2="512" y2="220"/>
-        <path d="M512 120 L566 250 L512 222 L458 250 Z" stroke="none"/>
-      </g>
-      <g>
-        <line x1="512" y1="520" x2="512" y2="220"/>
-        <path d="M512 120 L566 250 L512 222 L458 250 Z" stroke="none"/>
-      </g>
-      <g transform="rotate(16 512 760)">
-        <line x1="512" y1="520" x2="512" y2="220"/>
-        <path d="M512 120 L566 250 L512 222 L458 250 Z" stroke="none"/>
-      </g>
-    </g>
-
-    <!-- Quiver body, in front of the shafts; its top edge is the front rim of the mouth -->
-    <path d="M370 500 Q512 588 654 500 L630 890 Q512 950 394 890 Z" fill="url(#tube)"/>
-    <path d="M370 500 Q512 588 654 500" fill="none" stroke="#d6ddff" stroke-width="16"/>
-
-    <!-- Strap -->
-    <path d="M384 690 Q512 748 640 690" fill="none" stroke="#1a2352" stroke-opacity="0.6" stroke-width="30"/>
-    <path d="M384 690 Q512 748 640 690" fill="none" stroke="#ffffff" stroke-opacity="0.28" stroke-width="10"/>
-  </g>
+  <!-- Quiver app icon, Amber Leather, dark. C4 Solid mark on a rounded badge. -->
+  <rect width="1024" height="1024" rx="224" fill="#15171C"/>
+  <rect x="10" y="10" width="1004" height="1004" rx="214" fill="none" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="6"/>
+  <g transform="translate(112 112) scale(8)"><path d="M38 52 V18" stroke="#F5F3EE" stroke-width="6.5" stroke-linecap="round"/><path d="M30 27 L38 18 L46 27" stroke="#F5F3EE" stroke-width="6.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M52 52 V6" stroke="#E8A23A" stroke-width="6.5" stroke-linecap="round"/><path d="M44 15 L52 6 L60 15" stroke="#E8A23A" stroke-width="6.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M66 52 V18" stroke="#F5F3EE" stroke-width="6.5" stroke-linecap="round"/><path d="M58 27 L66 18 L74 27" stroke="#F5F3EE" stroke-width="6.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M14 46 V84 a8 8 0 0 0 8 8 H78 a8 8 0 0 0 8 -8 V56 a8 8 0 0 0 -8 -8 H50 l-8 -8 H22 a8 8 0 0 0 -8 8 Z" stroke="#F5F3EE" stroke-width="9" fill="#F5F3EE" stroke-linejoin="round"/></g>
 </svg>

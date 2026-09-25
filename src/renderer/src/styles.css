@@ -3,15 +3,16 @@
 @source '../../../packages/modules/src';
 @custom-variant dark (&:where(.dark, .dark *));
 
+/* Default palette (Amber Leather). applyTheme overrides these with the palette chosen in Settings. */
 :root {
-  --canvas: #ffffff;
-  --surface: #f7f8fa;
-  --elevated: #eceef2;
-  --fg: #1b1e25;
-  --muted: #6b7280;
-  --edge: #e2e5ea;
-  --accent: #4f6bf0;
-  --accent-hover: #3d59dd;
+  --canvas: #f5f3ee;
+  --surface: #edece7;
+  --elevated: #e4e2de;
+  --fg: #1b1d23;
+  --muted: #6b6760;
+  --edge: #d6d5d2;
+  --accent: #926610;
+  --accent-hover: #72500c;
   --accent-fg: #ffffff;
   --danger: #dc2626;
   --success: #15803d;
@@ -21,15 +22,15 @@
 }
 
 .dark {
-  --canvas: #121419;
-  --surface: #181b21;
-  --elevated: #22262e;
-  --fg: #e4e7ee;
-  --muted: #8b93a3;
-  --edge: #2a2f39;
-  --accent: #7089ff;
-  --accent-hover: #8397ff;
-  --accent-fg: #0f1117;
+  --canvas: #15171c;
+  --surface: #1d1f23;
+  --elevated: #27292d;
+  --fg: #f5f3ee;
+  --muted: #909090;
+  --edge: #343639;
+  --accent: #e8a23a;
+  --accent-hover: #ecb15a;
+  --accent-fg: #1b1d23;
   --danger: #f87171;
   --success: #4ade80;
   --warning: #fbbf24;

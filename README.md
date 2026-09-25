@@ -29,7 +29,7 @@ Working today:
 - Env files: every `.env`, `.env.<name>` and `<name>.env` of the project in one place, with secret-looking values masked until revealed. Edit keys in a table or the raw text without disturbing comments, blank lines or quoting; compare a file with its `.env.example` and add what is missing; switch `.env` between profiles (`.env.staging`, `.env.production`); a warning when a file with real values is committed or not gitignored; a history of every change Quiver made. Import a file into a Quiver environment (secrets encrypted) or export one back.
 - Small tools: JSON format, JWT decode, base64, URL encode, hash, UUID, timestamp.
 - MCP server: every command is a tool over Streamable HTTP on `http://127.0.0.1:7411/mcp`.
-- Light and dark theme, command palette (`Ctrl+K`).
+- Light and dark theme in six brand palettes (Amber Leather by default; Moss & Lime, Signal Blue, Ember, Slate & Mint, Graphite & Red under Settings → Appearance), command palette (`Ctrl+K`).
 
 The first planned scope is complete. Ideas for later: gRPC, Docker, S3, a plugin loader for module manifests.
 
@@ -70,6 +70,10 @@ src/renderer       The shell: title bar, activity bar, sidebar, tabs, status bar
 3. Register both in `packages/modules/src/main.ts` and `packages/modules/src/ui.ts`.
 
 Commands are the only way the UI talks to the host, so anything you add is reachable from the palette, from MCP and from a future CLI without extra work.
+
+### Theme
+
+Colours are CSS variables (`canvas`, `surface`, `elevated`, `fg`, `muted`, `edge`, `accent`, `accent-hover`, `accent-fg`, `danger`, `success`, `warning`) that Tailwind exposes as `bg-canvas`, `text-accent` and so on. `styles.css` holds the default palette; the palettes themselves live in `packages/core/src/palettes.ts`, taken from the brand package's `themes/themes.json`, with a light and a dark set each. `applyTheme` toggles the `dark` class and writes the chosen palette into a `<style id="quiver-palette">` whose selectors outrank `styles.css`, so the mode still follows the class. The choice is `palette` in global config beside `theme`; an unknown key falls back to Amber Leather. The app icon (`resources/icon.svg`) is the brand's C4 Solid mark on the Amber Leather dark badge and does not change with the palette; the in-app mark (`shell/Logo.tsx`) is drawn with the `fg` and `accent` tokens, so it does.
 
 ### Storage
 
@@ -125,6 +129,8 @@ Releases are GitHub Releases built by [.github/workflows/release.yml](.github/wo
 1. On a clean, up-to-date `master`: `npm run release -- minor` (or `patch`, `major`, or an explicit `1.2.3`). This bumps `package.json`, commits `Release vX.Y.Z`, tags `vX.Y.Z` and pushes both.
 2. The tag starts the Release workflow. It creates a **draft** release whose notes list the merged pull requests, then each runner builds and uploads its installers and manifests. Allow ten to fifteen minutes.
 3. Open the draft on GitHub, read and adjust the notes, and click **Publish release**. Only a published release is visible to installed copies.
+
+The notes are grouped by the labels of the merged pull requests, following [.github/release.yml](.github/release.yml): `breaking`, `enhancement` (New), `design` (Look and feel), `bug` (Fixes), `documentation`, then everything else; `skip-changelog` leaves a pull request out. Pick the bump from what merged since the last tag: `major` for a `breaking` pull request, `minor` for new features or a visible redesign, `patch` for fixes only.
 
 If a build fails, fix it on `master` through a pull request, then move the tag (`git tag -f vX.Y.Z && git push -f origin vX.Y.Z`) or bump again. electron-builder refuses to upload into a release that is already published, so a published version is final.
 

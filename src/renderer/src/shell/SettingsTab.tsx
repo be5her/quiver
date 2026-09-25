@@ -1,4 +1,4 @@
-import type { GlobalConfig, TeleportStatus, UpdateState, Variable } from '@quiver/core';
+import { PALETTES, resolvePalette, type GlobalConfig, type TeleportStatus, type UpdateState, type Variable } from '@quiver/core';
 import { Button, Checkbox, Input, KeyValueEditor, Label, Select, applyTheme, cn, invoke, notify, useAppStore, useInvoke, type TabProps } from '@quiver/ui';
 import { Copy, Download, ExternalLink, RotateCw, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
@@ -68,6 +68,35 @@ export function SettingsTab(_props: TabProps) {
             <option value="light">Light</option>
             <option value="dark">Dark</option>
           </Select>
+          <Label className="mt-4">Palette</Label>
+          <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Palette">
+            {PALETTES.map((palette) => {
+              const selected = resolvePalette(config.palette).key === palette.key;
+              return (
+                <button
+                  key={palette.key}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  data-testid="palette-option"
+                  data-palette={palette.key}
+                  onClick={() => {
+                    applyTheme(config.theme, palette.key);
+                    void update({ palette: palette.key });
+                  }}
+                  className={cn(
+                    'flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs hover:bg-elevated',
+                    selected ? 'border-accent bg-elevated text-fg' : 'border-edge text-muted',
+                  )}
+                >
+                  <span className="flex size-4 items-center justify-center rounded" style={{ background: palette.brand.ground }}>
+                    <span className="size-2 rounded-full" style={{ background: palette.brand.accent }} />
+                  </span>
+                  {palette.name}
+                </button>
+              );
+            })}
+          </div>
         </Section>
 
         <Section title="MCP server">
