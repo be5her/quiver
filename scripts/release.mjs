@@ -1,5 +1,5 @@
 /**
- * Cuts a release: bumps package.json, commits "Release vX.Y.Z", tags vX.Y.Z and pushes master
+ * Cuts a release: bumps package.json, commits "Release vX.Y.Z", tags vX.Y.Z and pushes main
  * with the tag. GitHub Actions (.github/workflows/release.yml) then builds the installers for
  * Windows, macOS and Linux into a draft release for you to publish.
  *
@@ -22,10 +22,10 @@ const fail = (message) => {
   process.exit(1);
 };
 
-if (git('rev-parse', '--abbrev-ref', 'HEAD') !== 'master') fail('switch to master first; releases are cut from the default branch');
+if (git('rev-parse', '--abbrev-ref', 'HEAD') !== 'main') fail('switch to main first; releases are cut from the default branch');
 if (git('status', '--porcelain')) fail('the working tree has uncommitted changes');
-git('fetch', '-q', 'origin', 'master', '--tags');
-if (git('rev-parse', 'HEAD') !== git('rev-parse', 'origin/master')) fail('master differs from origin/master; pull or push first');
+git('fetch', '-q', 'origin', 'main', '--tags');
+if (git('rev-parse', 'HEAD') !== git('rev-parse', 'origin/main')) fail('main differs from origin/main; pull or push first');
 
 // Run npm's own CLI script with this node instead of the `npm` shim. On Windows the shim is
 // npm.cmd, which needs `shell: true`, and cmd then splits the unquoted "Release v%s" message.
@@ -38,7 +38,7 @@ const npm = (...args) =>
 
 npm('version', bump, '-m', 'Release v%s');
 const { version } = JSON.parse(readFileSync('package.json', 'utf8'));
-git('push', 'origin', 'master', `refs/tags/v${version}`);
+git('push', 'origin', 'main', `refs/tags/v${version}`);
 
 console.log(`
 Pushed v${version}.

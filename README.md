@@ -118,7 +118,7 @@ Append `?workspace=<absolute folder path>` to bind a client to a specific projec
 
 ## Development workflow
 
-Every change is a branch and a pull request against `master`. CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the typecheck, the unit tests and a production build on Linux and the full smoke test on Windows for each pull request. Branch from a fresh `master`, verify with the three scripts, push, open the pull request (the template asks what changed, how it was verified and for screenshots of UI changes) and merge on green.
+Every change is a branch and a pull request against `main`. CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the typecheck, the unit tests and a production build on Linux and the full smoke test on Windows for each pull request. Branch from a fresh `main`, verify with the three scripts, push, open the pull request (the template asks what changed, how it was verified and for screenshots of UI changes) and merge on green.
 
 [CLAUDE.md](CLAUDE.md) spells this out for Claude Code: start a session in this folder, ask for a feature or a fix, and it comes back as a pull request ready for review. Once enough have merged, cut a release.
 
@@ -126,13 +126,13 @@ Every change is a branch and a pull request against `master`. CI ([.github/workf
 
 Releases are GitHub Releases built by [.github/workflows/release.yml](.github/workflows/release.yml) on Windows, macOS and Linux runners. Installed copies find new versions through the `latest*.yml` manifests electron-builder attaches to the release.
 
-1. On a clean, up-to-date `master`: `npm run release -- minor` (or `patch`, `major`, or an explicit `1.2.3`). This bumps `package.json`, commits `Release vX.Y.Z`, tags `vX.Y.Z` and pushes both.
+1. On a clean, up-to-date `main`: `npm run release -- minor` (or `patch`, `major`, or an explicit `1.2.3`). This bumps `package.json`, commits `Release vX.Y.Z`, tags `vX.Y.Z` and pushes both.
 2. The tag starts the Release workflow. It creates a **draft** release whose notes list the merged pull requests, then each runner builds and uploads its installers and manifests. Allow ten to fifteen minutes.
 3. Open the draft on GitHub, read and adjust the notes, and click **Publish release**. Only a published release is visible to installed copies.
 
 The notes are grouped by the labels of the merged pull requests, following [.github/release.yml](.github/release.yml): `breaking`, `enhancement` (New), `design` (Look and feel), `bug` (Fixes), `documentation`, then everything else; `skip-changelog` leaves a pull request out. Pick the bump from what merged since the last tag: `major` for a `breaking` pull request, `minor` for new features or a visible redesign, `patch` for fixes only.
 
-If a build fails, fix it on `master` through a pull request, then move the tag (`git tag -f vX.Y.Z && git push -f origin vX.Y.Z`) or bump again. electron-builder refuses to upload into a release that is already published, so a published version is final.
+If a build fails, fix it on `main` through a pull request, then move the tag (`git tag -f vX.Y.Z && git push -f origin vX.Y.Z`) or bump again. electron-builder refuses to upload into a release that is already published, so a published version is final.
 
 Local check before tagging: `npm run package` builds the installer for this platform into `release/`; to exercise the updater against it, package a higher version too, serve `release/` over HTTP and run the older `release/win-unpacked/Quiver.exe` with `QUIVER_SMOKE=1 QUIVER_UPDATE_FEED=http://127.0.0.1:<port>/`, which checks, downloads and verifies the newer build without installing it.
 

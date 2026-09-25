@@ -1,12 +1,12 @@
 name: CI
 
-# Runs on every pull request and on master: typecheck, unit tests and a production build on Linux,
+# Runs on every pull request and on main: typecheck, unit tests and a production build on Linux,
 # plus the full smoke test (real Electron, real listeners, the UI) on Windows.
 
 on:
   pull_request:
   push:
-    branches: [master]
+    branches: [main]
 
 concurrency:
   group: ci-${{ github.ref }}

@@ -4,9 +4,9 @@ Quiver is a per-project developer toolbelt: Electron + React in an npm workspace
 
 ## One branch and one pull request per change
 
-Every feature, fix or chore is its own branch and its own pull request against `master`. Never commit to `master`, never push tags, never create, edit or publish releases: the owner cuts releases with `npm run release` (README, "Releasing").
+Every feature, fix or chore is its own branch and its own pull request against `main`. Never commit to `main`, never push tags, never create, edit or publish releases: the owner cuts releases with `npm run release` (README, "Releasing").
 
-1. Start from a fresh `master`: `git checkout master && git pull --ff-only origin master`.
+1. Start from a fresh `main`: `git checkout main && git pull --ff-only origin main`.
 2. Branch: `git checkout -b feat/<short-name>` or `fix/<short-name>`.
 3. Implement (conventions below). Add smoke checks in `src/main/smoke.ts` for new behaviour and unit tests in `packages/core` for pure logic.
 4. Verify all three, and fix what fails: `npm run typecheck`, `npm test`, `npm run smoke`. For UI changes run the smoke with `QUIVER_SMOKE_SHOTS=<dir>` and look at the screenshots.
@@ -28,4 +28,4 @@ Every feature, fix or chore is its own branch and its own pull request against `
 
 ## Releasing (owner only)
 
-`npm run release -- patch|minor|major` on a clean, up-to-date `master` bumps the version, tags it and pushes. The Release workflow builds installers for all three platforms into a draft GitHub release; publishing the draft is what installed copies see. Details in README, "Releasing".
+`npm run release -- patch|minor|major` on a clean, up-to-date `main` bumps the version, tags it and pushes. The Release workflow builds installers for all three platforms into a draft GitHub release; publishing the draft is what installed copies see. Details in README, "Releasing".
