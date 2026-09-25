@@ -3,16 +3,16 @@
 @source '../../../packages/modules/src';
 @custom-variant dark (&:where(.dark, .dark *));
 
-/* Default palette (Amber Leather). applyTheme overrides these with the palette chosen in Settings. */
+/* Default palette (Slate & Mint). applyTheme overrides these with the palette chosen in Settings. */
 :root {
-  --canvas: #f5f3ee;
-  --surface: #edece7;
-  --elevated: #e4e2de;
-  --fg: #1b1d23;
-  --muted: #6b6760;
-  --edge: #d6d5d2;
-  --accent: #926610;
-  --accent-hover: #72500c;
+  --canvas: #eef1f3;
+  --surface: #e6eaec;
+  --elevated: #dde0e2;
+  --fg: #171c22;
+  --muted: #5b646c;
+  --edge: #d0d3d6;
+  --accent: #157961;
+  --accent-hover: #105b49;
   --accent-fg: #ffffff;
   --danger: #dc2626;
   --success: #15803d;
@@ -22,15 +22,15 @@
 }
 
 .dark {
-  --canvas: #15171c;
-  --surface: #1d1f23;
-  --elevated: #27292d;
-  --fg: #f5f3ee;
-  --muted: #909090;
-  --edge: #343639;
-  --accent: #e8a23a;
-  --accent-hover: #ecb15a;
-  --accent-fg: #1b1d23;
+  --canvas: #14181d;
+  --surface: #1c2024;
+  --elevated: #25292e;
+  --fg: #edf1f3;
+  --muted: #8b8f93;
+  --edge: #32363b;
+  --accent: #2dd4a8;
+  --accent-hover: #4bdab4;
+  --accent-fg: #171c22;
   --danger: #f87171;
   --success: #4ade80;
   --warning: #fbbf24;

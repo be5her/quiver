@@ -256,7 +256,7 @@ export const PALETTES = [
 
 export type PaletteKey = (typeof PALETTES)[number]['key'];
 
-export const DEFAULT_PALETTE: PaletteKey = 'amber-leather';
+export const DEFAULT_PALETTE: PaletteKey = 'slate-mint';
 
 /** The palette for a key, falling back to the default for unknown keys (a hand-edited config, a palette removed later). */
 export function resolvePalette(key: string | undefined): Palette {
