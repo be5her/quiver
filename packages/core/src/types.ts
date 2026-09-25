@@ -191,6 +191,8 @@ export interface HostEvents {
   'teleport.changed': { reason: 'status' | 'tunnels' | 'login' | 'pins' };
   /** A mock server started or stopped, its definition changed, or it captured requests. */
   'mock.changed': { workspaceId: string; serverId: string; reason: 'status' | 'requests' | 'servers' };
+  /** A WebSocket or SSE connection changed state, its definition changed, or messages arrived. */
+  'realtime.changed': { workspaceId: string; connectionId: string; reason: 'status' | 'messages' | 'connections' };
 }
 
 export type HostEventName = keyof HostEvents;

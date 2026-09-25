@@ -17,6 +17,7 @@ import {
 } from '@quiver/ui';
 import { Copy, Save, Send } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { GraphqlEditor } from './GraphqlEditor';
 import { ResponsePane } from './ResponsePane';
 
 type Section = 'params' | 'headers' | 'body' | 'auth';
@@ -163,7 +164,7 @@ export function RequestTab({ tab, scope }: TabProps) {
       </div>
 
       <div className="flex flex-col flex-1 min-h-0">
-        <div className="flex flex-col basis-[45%] min-h-[140px] border-b border-edge">
+        <div className={cn('flex flex-col min-h-[140px] border-b border-edge', request.body.type === 'graphql' && section === 'body' ? 'basis-[60%]' : 'basis-[45%]')}>
           <Segmented<Section>
             value={section}
             onChange={setSection}
@@ -178,7 +179,7 @@ export function RequestTab({ tab, scope }: TabProps) {
           <div className="flex-1 min-h-0 overflow-auto p-2">
             {section === 'params' && <KeyValueEditor rows={request.params} onChange={(params) => patch({ params })} keyPlaceholder="Parameter" />}
             {section === 'headers' && <KeyValueEditor rows={request.headers} onChange={(headers) => patch({ headers })} keyPlaceholder="Header" />}
-            {section === 'body' && <BodyEditor body={request.body} onChange={(body) => patch({ body })} />}
+            {section === 'body' && <BodyEditor body={request.body} onChange={(body) => patch({ body })} request={request} />}
             {section === 'auth' && <AuthEditor auth={request.auth} onChange={(auth) => patch({ auth })} />}
           </div>
         </div>
@@ -197,12 +198,13 @@ const BODY_TYPES: { value: RequestBody['type']; label: string }[] = [
   { value: 'xml', label: 'XML' },
   { value: 'urlencoded', label: 'Form URL-encoded' },
   { value: 'form', label: 'Multipart form' },
+  { value: 'graphql', label: 'GraphQL' },
 ];
 
-function BodyEditor({ body, onChange }: { body: RequestBody; onChange(body: RequestBody): void }) {
+function BodyEditor({ body, onChange, request }: { body: RequestBody; onChange(body: RequestBody): void; request: ApiRequest }) {
   const setType = (type: RequestBody['type']) => {
     if (type === body.type) return;
-    const content = 'content' in body ? body.content : '';
+    const content = 'content' in body ? body.content : body.type === 'graphql' ? body.query : '';
     const fields: KeyValue[] = 'fields' in body ? body.fields : [];
     switch (type) {
       case 'none':
@@ -210,6 +212,8 @@ function BodyEditor({ body, onChange }: { body: RequestBody; onChange(body: Requ
       case 'urlencoded':
       case 'form':
         return onChange({ type, fields });
+      case 'graphql':
+        return onChange({ type, query: content, variables: '' });
       default:
         return onChange({ type, content });
     }
@@ -231,12 +235,17 @@ function BodyEditor({ body, onChange }: { body: RequestBody; onChange(body: Requ
         </div>
       )}
       {'fields' in body && <KeyValueEditor rows={body.fields} onChange={(fields) => onChange({ ...body, fields })} keyPlaceholder="Field" />}
+      {body.type === 'graphql' && (
+        <div className="flex-1 min-h-0">
+          <GraphqlEditor body={body} onChange={onChange} request={request} />
+        </div>
+      )}
       {body.type === 'none' && <p className="text-xs text-muted px-1">This request has no body.</p>}
     </div>
   );
 }
 
-function AuthEditor({ auth, onChange }: { auth: RequestAuth; onChange(auth: RequestAuth): void }) {
+export function AuthEditor({ auth, onChange }: { auth: RequestAuth; onChange(auth: RequestAuth): void }) {
   const setType = (type: RequestAuth['type']) => {
     switch (type) {
       case 'none':

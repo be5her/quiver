@@ -23,8 +23,20 @@ export const RequestBodySchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('xml'), content: z.string() }),
   z.object({ type: z.literal('urlencoded'), fields: z.array(KeyValueSchema) }),
   z.object({ type: z.literal('form'), fields: z.array(KeyValueSchema) }),
+  /** Sent as `{"query","variables","operationName"}` JSON (or query parameters for GET). `variables` is JSON text. */
+  z.object({ type: z.literal('graphql'), query: z.string(), variables: z.string(), operationName: z.string().optional() }),
 ]);
 export type RequestBody = z.infer<typeof RequestBodySchema>;
+
+/** An introspected GraphQL schema, cached per endpoint under `.quiver/local`. */
+export interface GraphqlSchemaDoc {
+  /** Endpoint the schema was fetched from, after variable resolution. */
+  url: string;
+  fetchedAt: string;
+  /** The schema as SDL, which is what editors, the explorer and agents read. */
+  sdl: string;
+  typeCount: number;
+}
 
 export const RequestAuthSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('none') }),

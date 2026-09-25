@@ -2,6 +2,7 @@ import {
   ApiRequestSchema,
   EnvironmentSchema,
   QuiverError,
+  RequestBodySchema,
   SendOptionsSchema,
   defaultRequestName,
   defineCommand,
@@ -33,6 +34,7 @@ import {
   saveEnvironment,
   setActiveEnvironmentId,
 } from './env';
+import { graphqlEndpoint, introspect, readSchema } from './graphql';
 import { prepareRequest, sendPrepared } from './http';
 
 const HISTORY_LOG = 'history';
@@ -92,6 +94,7 @@ const requestCreate = defineCommand({
     method: ApiRequestSchema.shape.method.optional(),
     url: z.string().optional(),
     collectionId: z.string().nullable().optional(),
+    body: RequestBodySchema.optional().describe('Initial body, e.g. { type: "graphql", query: "", variables: "" }'),
   }),
   handler: async (input, ctx) => {
     const req = newApiRequest({
@@ -99,6 +102,7 @@ const requestCreate = defineCommand({
       method: input.method ?? 'GET',
       url: input.url ?? '',
       collectionId: input.collectionId ?? null,
+      body: input.body ?? { type: 'none' },
     });
     return ws(ctx).store.put(COLLECTIONS.requests, req);
   },
@@ -192,6 +196,51 @@ const requestSend = defineCommand({
     } finally {
       if (input.record !== false) await w.store.appendLog(HISTORY_LOG, entry);
     }
+  },
+});
+
+// ---------- GraphQL ----------
+
+const RequestRefInput = z.object({
+  requestId: z.string().optional(),
+  request: ApiRequestSchema.optional(),
+  environmentId: z.string().nullable().optional(),
+});
+
+async function requestFrom(ctx: CommandContext, input: { requestId?: string; request?: ApiRequest }): Promise<ApiRequest> {
+  const request = input.request ?? (input.requestId ? await requireRequest(ws(ctx), input.requestId) : null);
+  if (!request) throw new QuiverError('INVALID_INPUT', 'Provide requestId or request');
+  return request;
+}
+
+const graphqlIntrospect = defineCommand({
+  id: 'api.graphql.introspect',
+  title: 'Fetch GraphQL schema',
+  description:
+    'Runs the introspection query against the URL of a request (saved id or inline) with its headers and auth, and caches the schema as SDL on this machine for autocompletion, the schema explorer and api.graphql.schema. Returns the SDL.',
+  scope: 'workspace',
+  input: RequestRefInput,
+  handler: async (input, ctx) => {
+    const request = await requestFrom(ctx, input);
+    const { resolved } = await resolveRequest(ctx, request, input.environmentId);
+    return introspect(ws(ctx), resolved);
+  },
+});
+
+const graphqlSchema = defineCommand({
+  id: 'api.graphql.schema',
+  title: 'GraphQL schema',
+  description: 'Returns the cached schema (SDL) of the endpoint of a request, or null when it was never fetched with api.graphql.introspect. Pass `url` to look an endpoint up directly.',
+  scope: 'workspace',
+  input: RequestRefInput.extend({ url: z.string().optional() }),
+  handler: async (input, ctx) => {
+    let url = input.url;
+    if (!url) {
+      const request = await requestFrom(ctx, input);
+      const vars = await resolveVariableMap(ws(ctx), ctx.host, input.environmentId);
+      url = prepareRequest(resolveDeep(request, vars)).url;
+    }
+    return readSchema(ws(ctx), graphqlEndpoint(url));
   },
 });
 
@@ -428,6 +477,8 @@ export const apiModule = defineModule({
     requestMove,
     requestDelete,
     requestSend,
+    graphqlIntrospect,
+    graphqlSchema,
     collectionList,
     collectionCreate,
     collectionRename,

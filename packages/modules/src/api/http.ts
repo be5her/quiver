@@ -1,4 +1,4 @@
-import { QuiverError, type ApiRequest, type ApiResponse, type HttpMethod, type SendOptions } from '@quiver/core';
+import { QuiverError, type ApiRequest, type ApiResponse, type HttpMethod, type RequestBody, type SendOptions } from '@quiver/core';
 import { Agent, fetch as undiciFetch, type Dispatcher } from 'undici';
 
 export interface PreparedRequest {
@@ -21,6 +21,30 @@ function appendQuery(url: string, entries: [string, string][]): string {
   const qs = entries.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
   if (url.includes('?')) return url.endsWith('?') || url.endsWith('&') ? url + qs : `${url}&${qs}`;
   return `${url}?${qs}`;
+}
+
+export interface GraphqlPayload {
+  query: string;
+  variables?: Record<string, unknown>;
+  operationName?: string;
+}
+
+/** The JSON payload of a GraphQL request. Variables are JSON text and must be an object when given. */
+export function graphqlPayload(body: Extract<RequestBody, { type: 'graphql' }>): GraphqlPayload {
+  const payload: GraphqlPayload = { query: body.query };
+  const text = body.variables.trim();
+  if (text) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch (err) {
+      throw new QuiverError('INVALID_INPUT', `GraphQL variables must be valid JSON: ${(err as Error).message}`);
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new QuiverError('INVALID_INPUT', 'GraphQL variables must be a JSON object');
+    payload.variables = parsed as Record<string, unknown>;
+  }
+  if (body.operationName?.trim()) payload.operationName = body.operationName.trim();
+  return payload;
 }
 
 /** Turn an already variable-resolved request into what goes on the wire. */
@@ -48,6 +72,21 @@ export function prepareRequest(req: ApiRequest): PreparedRequest {
 
   let body: string | Buffer | null = null;
   let bodyPreview: string | null = null;
+  if (req.body.type === 'graphql') {
+    // GraphQL over HTTP: JSON by POST, or query parameters for GET.
+    const payload = graphqlPayload(req.body);
+    if (req.method === 'GET' || req.method === 'HEAD') {
+      query.push(['query', payload.query]);
+      if (payload.variables) query.push(['variables', JSON.stringify(payload.variables)]);
+      if (payload.operationName) query.push(['operationName', payload.operationName]);
+    } else {
+      body = JSON.stringify(payload);
+      bodyPreview = body;
+      if (!hasHeader(headers, 'content-type')) headers.push(['Content-Type', 'application/json']);
+    }
+    if (!hasHeader(headers, 'accept')) headers.push(['Accept', 'application/graphql-response+json, application/json']);
+    return { method: req.method, url: appendQuery(req.url.trim(), query), headers, body, bodyPreview };
+  }
   const canHaveBody = !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
   if (canHaveBody) {
     switch (req.body.type) {

@@ -5,11 +5,13 @@ import { MySQL, SQLite, StandardSQL, sql, type SQLNamespace } from '@codemirror/
 import { Prec } from '@codemirror/state';
 import { EditorView, keymap } from '@codemirror/view';
 import CodeMirror, { type Extension, type ReactCodeMirrorRef } from '@uiw/react-codemirror';
+import { graphql as graphqlLanguage } from 'cm6-graphql';
+import type { GraphQLSchema } from 'graphql';
 import { useMemo, useRef, type Ref } from 'react';
 import { cn } from '../cn';
 import { useAppStore } from '../stores/app';
 
-export type CodeLanguage = 'json' | 'javascript' | 'html' | 'xml' | 'sql' | 'text';
+export type CodeLanguage = 'json' | 'javascript' | 'html' | 'xml' | 'sql' | 'graphql' | 'text';
 export type SqlDialect = 'mysql' | 'sqlite' | 'standard';
 export type { SQLNamespace, ReactCodeMirrorRef };
 
@@ -27,6 +29,8 @@ export interface CodeEditorProps {
   sqlDialect?: SqlDialect;
   /** SQL only: table names (and optionally columns) offered by autocompletion. */
   sqlSchema?: SQLNamespace;
+  /** GraphQL only: schema for autocompletion and lint. Without it, highlighting only. */
+  graphqlSchema?: GraphQLSchema | null;
   /** Bound to Mod+Enter inside the editor. */
   onRun?(): void;
   /** Access to the underlying CodeMirror view, e.g. to read the selection. */
@@ -34,8 +38,10 @@ export interface CodeEditorProps {
   autoFocus?: boolean;
 }
 
-function languageExtension(language: CodeLanguage, dialect: SqlDialect, schema?: SQLNamespace): Extension[] {
+function languageExtension(language: CodeLanguage, dialect: SqlDialect, schema?: SQLNamespace, graphqlSchema?: GraphQLSchema | null): Extension[] {
   switch (language) {
+    case 'graphql':
+      return [graphqlLanguage(graphqlSchema ?? undefined)];
     case 'json':
       return [json()];
     case 'javascript':
@@ -72,6 +78,7 @@ export function CodeEditor({
   wrap,
   sqlDialect = 'standard',
   sqlSchema,
+  graphqlSchema,
   onRun,
   editorRef,
   autoFocus,
@@ -81,7 +88,7 @@ export function CodeEditor({
   onRunRef.current = onRun;
 
   const extensions = useMemo(() => {
-    const list = [baseTheme, ...languageExtension(language, sqlDialect, sqlSchema)];
+    const list = [baseTheme, ...languageExtension(language, sqlDialect, sqlSchema, graphqlSchema)];
     if (wrap) list.push(EditorView.lineWrapping);
     list.push(
       Prec.highest(
@@ -98,7 +105,7 @@ export function CodeEditor({
       ),
     );
     return list;
-  }, [language, wrap, sqlDialect, sqlSchema]);
+  }, [language, wrap, sqlDialect, sqlSchema, graphqlSchema]);
 
   return (
     <div className={cn('overflow-hidden rounded-md border border-edge bg-surface', fill && 'h-full min-h-0', className)}>
@@ -119,7 +126,7 @@ export function CodeEditor({
           foldGutter: true,
           highlightActiveLine: !readOnly,
           highlightActiveLineGutter: false,
-          autocompletion: language === 'sql' && !readOnly,
+          autocompletion: (language === 'sql' || language === 'graphql') && !readOnly,
         }}
       />
     </div>

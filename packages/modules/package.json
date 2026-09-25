@@ -9,6 +9,7 @@
     "./ui": "./src/ui.ts"
   },
   "dependencies": {
+    "graphql": "^17.0.2",
     "ioredis": "^6.0.0",
     "mysql2": "^3.24.4",
     "undici": "^7.29.1"

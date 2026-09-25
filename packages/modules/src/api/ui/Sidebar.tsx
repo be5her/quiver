@@ -14,9 +14,9 @@ import {
   selectScope,
   statusColor,
 } from '@quiver/ui';
-import { ChevronDown, ChevronRight, Copy, FolderPlus, Import, Pencil, Plus, Trash2, Check } from 'lucide-react';
+import { Braces, ChevronDown, ChevronRight, Copy, FolderPlus, Import, Pencil, Plus, Trash2, Check } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import { createEnvironment, createRequest, importCurl, openEnvironmentTab, openRequestTab } from './index';
+import { createEnvironment, createGraphqlRequest, createRequest, importCurl, openEnvironmentTab, openRequestTab } from './index';
 
 export function ApiSidebar() {
   const requests = useInvoke<ApiRequest[]>('api.request.list', {}, { refreshOn: ['requests'] });
@@ -35,6 +35,9 @@ export function ApiSidebar() {
           <>
             <IconButton label="New request" size="sm" onClick={() => void createRequest()}>
               <Plus className="size-3.5" />
+            </IconButton>
+            <IconButton label="New GraphQL request" size="sm" onClick={() => void createGraphqlRequest()}>
+              <Braces className="size-3.5" />
             </IconButton>
             <IconButton label="New collection" size="sm" onClick={() => void newCollection(null)}>
               <FolderPlus className="size-3.5" />
@@ -199,7 +202,15 @@ function RequestRow({ request, depth }: { request: ApiRequest; depth: number }) 
       depth={depth}
       active={isActive}
       onClick={() => openRequestTab(request)}
-      prefix={<span className={cn('text-[10px] font-bold w-10 shrink-0 text-right', METHOD_COLORS[request.method])}>{request.method}</span>}
+      prefix={
+        request.body.type === 'graphql' ? (
+          <span className="text-[10px] font-bold w-10 shrink-0 text-right text-pink-600 dark:text-pink-400" title={`GraphQL over ${request.method}`}>
+            GQL
+          </span>
+        ) : (
+          <span className={cn('text-[10px] font-bold w-10 shrink-0 text-right', METHOD_COLORS[request.method])}>{request.method}</span>
+        )
+      }
       label={request.name}
       actions={
         <>
