@@ -195,6 +195,8 @@ export interface HostEvents {
   'realtime.changed': { workspaceId: string; connectionId: string; reason: 'status' | 'messages' | 'connections' };
   /** MCP inspector: a server connected or dropped, its definition changed, its tool/resource/prompt lists changed, or the log grew. */
   'mcp.changed': { workspaceId: string; serverId: string; reason: 'status' | 'servers' | 'lists' | 'log' };
+  /** Env files: a dotenv file or .gitignore changed on disk (from Quiver or outside), or a backup was taken. */
+  'env.changed': { workspaceId: string; reason: 'files'; path?: string };
 }
 
 export type HostEventName = keyof HostEvents;

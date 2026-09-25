@@ -6,5 +6,5 @@
       "@/*": ["./src/renderer/src/*"]
     }
   },
-  "include": ["src/renderer/src", "packages/ui/src", "packages/modules/src/ui.ts", "packages/modules/src/api/ui", "packages/modules/src/db/ui", "packages/modules/src/mock/ui", "packages/modules/src/mcp/ui", "packages/modules/src/realtime/ui", "packages/modules/src/teleport/ui", "packages/modules/src/tools/ui", "packages/modules/src/placeholders"]
+  "include": ["src/renderer/src", "packages/ui/src", "packages/modules/src/ui.ts", "packages/modules/src/api/ui", "packages/modules/src/db/ui", "packages/modules/src/env/ui", "packages/modules/src/mock/ui", "packages/modules/src/mcp/ui", "packages/modules/src/realtime/ui", "packages/modules/src/teleport/ui", "packages/modules/src/tools/ui"]
 }
