@@ -24,9 +24,10 @@ export function CommandPalette() {
     return [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
   }, [actions, open]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // A UI action with the same id as a host command wraps it with proper feedback, so the raw command steps aside.
   const runnable = useMemo(
-    () => commands.filter((c) => !c.hidden && c.noInput && (c.scope === 'global' || hasWorkspace)),
-    [commands, hasWorkspace],
+    () => commands.filter((c) => !c.hidden && c.noInput && (c.scope === 'global' || hasWorkspace) && !actions.some((a) => a.id === c.id)),
+    [commands, hasWorkspace, actions],
   );
 
   if (!open) return null;

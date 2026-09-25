@@ -1,5 +1,8 @@
 import { join } from 'node:path';
-import { BrowserWindow, shell } from 'electron';
+import { BrowserWindow, app, shell } from 'electron';
+
+/** Windows and macOS take the window icon from the executable and the bundle; Linux and dev runs need it here. */
+const iconPath = app.isPackaged ? join(process.resourcesPath, 'icon.png') : join(app.getAppPath(), 'resources', 'icon.png');
 
 export function createMainWindow(options: { show?: boolean } = {}): BrowserWindow {
   const win = new BrowserWindow({
@@ -11,6 +14,7 @@ export function createMainWindow(options: { show?: boolean } = {}): BrowserWindo
     autoHideMenuBar: true,
     backgroundColor: '#14161b',
     title: 'Quiver',
+    icon: process.platform === 'darwin' ? undefined : iconPath,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,

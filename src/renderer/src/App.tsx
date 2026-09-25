@@ -1,4 +1,4 @@
-import type { CommandMeta, GlobalConfig, WorkspaceInfo } from '@quiver/core';
+import type { CommandMeta, GlobalConfig, UpdateState, WorkspaceInfo } from '@quiver/core';
 import { DialogHost, ToastHost, applyTheme, invoke, onHostEvent, useAppStore, watchSystemTheme } from '@quiver/ui';
 import { useEffect } from 'react';
 import { ActivityBar } from './shell/ActivityBar';
@@ -11,6 +11,7 @@ import { TitleBar } from './shell/TitleBar';
 import { handleShortcut, registerShellActions } from './shell/actions';
 import { modules } from './shell/modules';
 import { useTabPersistence } from './shell/persistence';
+import { handleUpdateEvent } from './shell/updates';
 
 export function App() {
   const ready = useAppStore((s) => s.ready);
@@ -49,7 +50,7 @@ function useBootstrap() {
         invoke<GlobalConfig>('config.get', {}, null),
         window.quiver.listCommands() as Promise<CommandMeta[]>,
         invoke<WorkspaceInfo[]>('workspace.list', {}, null),
-        invoke<{ mcp: { running: boolean; port: number } }>('app.info', {}, null),
+        invoke<{ mcp: { running: boolean; port: number }; update: UpdateState }>('app.info', {}, null),
       ]);
       if (disposed) return;
       store.setConfig(config);
@@ -57,6 +58,7 @@ function useBootstrap() {
       store.setCommands(commands);
       store.setWorkspaces(workspaces);
       store.setMcpStatus(info.mcp);
+      store.setUpdate(info.update);
       store.setReady(true);
     })().catch((err) => console.error('[quiver] bootstrap failed', err));
 
@@ -67,6 +69,7 @@ function useBootstrap() {
         applyTheme(config.theme);
       }),
       onHostEvent('mcp.status', (status) => useAppStore.getState().setMcpStatus(status)),
+      onHostEvent('app.update', handleUpdateEvent),
       watchSystemTheme(() => useAppStore.getState().config?.theme ?? 'system'),
       registerShellActions(),
     ];

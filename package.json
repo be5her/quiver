@@ -6,6 +6,16 @@
   "private": true,
   "main": "./out/main/index.js",
   "license": "MIT",
+  "author": {
+    "name": "Besher Karam",
+    "email": "besher.karam.1998@gmail.com"
+  },
+  "homepage": "https://github.com/be5her/quiver",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/be5her/quiver.git"
+  },
+  "bugs": "https://github.com/be5her/quiver/issues",
   "workspaces": [
     "packages/*"
   ],
@@ -16,10 +26,13 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "vitest run",
     "smoke": "electron-vite build && cross-env QUIVER_SMOKE=1 electron .",
-    "package": "electron-vite build && electron-builder"
+    "package": "electron-vite build && electron-builder --publish never",
+    "icon": "electron scripts/render-icon.cjs",
+    "release": "node scripts/release.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.1",
+    "electron-updater": "^6.8.9",
     "graphql": "^17.0.2",
     "ioredis": "^6.0.0",
     "mysql2": "^3.24.4",

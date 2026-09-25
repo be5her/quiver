@@ -52,6 +52,7 @@ import type {
   TeleportPin,
   TeleportStatus,
   TeleportTunnel,
+  UpdateState,
   WorkspaceInfo,
 } from '@quiver/core';
 import type { Host } from './host';
@@ -1276,6 +1277,20 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     }
     check('env files: .env untouched by the blocked calls', (await fs.readFile(path.join(envRoot, '.env'), 'utf8')) === envOriginal);
 
+    // Updater: a dev build reports that it cannot update itself, and the mutating commands are gated for agents.
+    const updateState = await run<UpdateState>('app.update.check', {}, null);
+    check(
+      'update: dev build reports unsupported',
+      updateState.supported === false && updateState.status === 'idle' && updateState.current === host.api.version && Boolean(updateState.reason),
+      updateState,
+    );
+    const infoWithUpdate = await run<{ version: string; update: UpdateState }>('app.info', {}, null);
+    check('update: app.info carries the updater state', infoWithUpdate.update?.supported === false && infoWithUpdate.version === updateState.current);
+    for (const tool of ['app_update_download', 'app_update_install']) {
+      const blockedUpdate = await rpc('tools/call', { name: tool, arguments: {} });
+      check(`mcp blocks ${tool} by default`, blockedUpdate.result?.isError === true && (blockedUpdate.result.content?.[0]?.text ?? '').includes('MUTATION_BLOCKED'));
+    }
+
     // Renderer boots without console errors.
     const win = openWindow();
     const errors: string[] = [];
@@ -1703,6 +1718,20 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await shot('24-env-keys-dark');
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(200);
+
+      // Settings: the About section shows the version and says that a dev build does not update itself.
+      await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: ',', ctrlKey: true, bubbles: true }))`);
+      await wait(600);
+      const aboutVersion = await js(
+        `(() => { const el = document.querySelector('[data-testid=about-version]'); if (el) el.scrollIntoView(); return el ? el.textContent : null; })()`,
+      );
+      check('ui: about shows the running version', typeof aboutVersion === 'string' && aboutVersion.includes(host.api.version), aboutVersion);
+      const updateNote = await js(`(() => { const el = document.querySelector('[data-testid=update-note]'); return el ? el.textContent : null; })()`);
+      check('ui: about says updates are off in dev builds', typeof updateNote === 'string' && updateNote.includes('installed builds'), updateNote);
+      const markInTitle = await js(`Boolean(document.querySelector('header [data-testid=quiver-mark]'))`);
+      check('ui: title bar shows the logo mark', markInTitle === true);
+      await wait(200);
+      await shot('25-settings-about-light');
     }
 
     const outSecond = await run<TeleportStatus>('teleport.logout', { proxy: second }, null);

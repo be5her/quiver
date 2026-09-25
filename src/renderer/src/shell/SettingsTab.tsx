@@ -1,7 +1,13 @@
-import type { GlobalConfig, TeleportStatus, Variable } from '@quiver/core';
+import type { GlobalConfig, TeleportStatus, UpdateState, Variable } from '@quiver/core';
 import { Button, Checkbox, Input, KeyValueEditor, Label, Select, applyTheme, cn, invoke, notify, useAppStore, useInvoke, type TabProps } from '@quiver/ui';
-import { Copy, X } from 'lucide-react';
+import { Copy, Download, ExternalLink, RotateCw, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import { QuiverMark } from './Logo';
+import { checkForUpdates, downloadUpdate, installUpdate, openExternal } from './updates';
+
+const RELEASES_URL = 'https://github.com/be5her/quiver/releases';
+const ISSUES_URL = 'https://github.com/be5her/quiver/issues';
+const PLATFORM_NAMES: Record<string, string> = { win32: 'Windows', darwin: 'macOS', linux: 'Linux' };
 
 export function SettingsTab(_props: TabProps) {
   const config = useAppStore((s) => s.config);
@@ -168,9 +174,114 @@ export function SettingsTab(_props: TabProps) {
             </Button>
           </div>
         </Section>
+
+        <Section title="About">
+          <AboutPanel />
+        </Section>
       </div>
     </div>
   );
+}
+
+function AboutPanel() {
+  const update = useAppStore((s) => s.update);
+  const [checking, setChecking] = useState(false);
+  const version = update?.current ?? window.quiver.version;
+  const platform = PLATFORM_NAMES[window.quiver.platform] ?? window.quiver.platform;
+  const check = async () => {
+    setChecking(true);
+    try {
+      await checkForUpdates();
+    } finally {
+      setChecking(false);
+    }
+  };
+  const hasRelease = update?.status === 'available' || update?.status === 'downloaded';
+  return (
+    <div className="flex items-start gap-4">
+      <QuiverMark className="size-14 shrink-0" />
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-semibold" data-testid="about-version">
+          Quiver {version}
+        </p>
+        <p className="text-xs text-muted mt-0.5">
+          {platform} ·{' '}
+          <button type="button" className="underline hover:text-fg" onClick={() => openExternal(RELEASES_URL)}>
+            Releases
+          </button>{' '}
+          ·{' '}
+          <button type="button" className="underline hover:text-fg" onClick={() => openExternal(ISSUES_URL)}>
+            Report an issue
+          </button>
+        </p>
+        <div className="flex items-center gap-2 mt-3 flex-wrap">
+          <Button
+            size="sm"
+            variant="secondary"
+            icon={<RotateCw className="size-3.5" />}
+            loading={checking || update?.status === 'checking'}
+            disabled={!update?.supported}
+            onClick={() => void check()}
+            data-testid="update-check"
+          >
+            Check for updates
+          </Button>
+          {update?.status === 'available' && update.installable && (
+            <Button size="sm" variant="primary" icon={<Download className="size-3.5" />} onClick={() => void downloadUpdate()}>
+              Download {update.version}
+            </Button>
+          )}
+          {update?.status === 'available' && !update.installable && (
+            <Button size="sm" variant="primary" icon={<ExternalLink className="size-3.5" />} onClick={() => openExternal(update.url)}>
+              Get {update.version} from GitHub
+            </Button>
+          )}
+          {update?.status === 'downloaded' && (
+            <Button size="sm" variant="primary" icon={<RotateCw className="size-3.5" />} onClick={() => void installUpdate()}>
+              Restart to install {update.version}
+            </Button>
+          )}
+          {hasRelease && (
+            <Button size="sm" variant="ghost" onClick={() => openExternal(update?.url)}>
+              Release notes
+            </Button>
+          )}
+        </div>
+        <p className={cn('text-xs mt-2', update?.status === 'error' ? 'text-danger' : 'text-muted')} data-testid="update-note">
+          {describeUpdate(update)}
+        </p>
+        {update?.status === 'downloading' && (
+          <div className="h-1 mt-2 rounded bg-elevated overflow-hidden max-w-xs">
+            <div className="h-full bg-accent transition-[width]" style={{ width: `${update.progress?.percent ?? 0}%` }} />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function describeUpdate(update: UpdateState | null): string {
+  if (!update) return '';
+  if (!update.supported) return update.reason ?? 'Updates are not available in this build.';
+  const when = update.checkedAt ? ` Checked at ${new Date(update.checkedAt).toLocaleTimeString()}.` : '';
+  switch (update.status) {
+    case 'idle':
+      return 'Quiver looks for a new release shortly after launch and every six hours. Nothing is downloaded until you ask.';
+    case 'checking':
+      return 'Checking GitHub Releases…';
+    case 'none':
+      return `You are on the latest version.${when}`;
+    case 'available':
+      return `Quiver ${update.version} is available.${update.installable ? ' Download it here; it installs when you restart.' : ` ${update.reason ?? ''}`}`;
+    case 'downloading': {
+      const rate = update.progress?.bytesPerSecond ? ` at ${(update.progress.bytesPerSecond / 1048576).toFixed(1)} MB/s` : '';
+      return `Downloading Quiver ${update.version}: ${update.progress?.percent ?? 0}%${rate}`;
+    }
+    case 'downloaded':
+      return `Quiver ${update.version} is downloaded and installs on the next restart.`;
+    case 'error':
+      return `${update.error ?? 'The update check failed.'}${when}`;
+  }
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {

@@ -179,6 +179,38 @@ export interface ModuleMain {
   onWorkspaceClose?(ws: WorkspaceApi, host: HostApi): Promise<void> | void;
 }
 
+/** Where the in-app updater stands. Fed by electron-updater from the manifests of the GitHub release. */
+export type UpdateStatus = 'idle' | 'checking' | 'available' | 'none' | 'downloading' | 'downloaded' | 'error';
+
+export interface UpdateState {
+  /** False in development builds; `reason` says why. */
+  supported: boolean;
+  /** True when this build can replace itself in place. Otherwise the UI links to `url` for a manual download. */
+  installable: boolean;
+  reason?: string;
+  /** The running version. */
+  current: string;
+  status: UpdateStatus;
+  /** The newer version, once one is known. */
+  version?: string;
+  releaseDate?: string;
+  /** The release page on GitHub: notes, or the manual download. */
+  url?: string;
+  progress?: { percent: number; transferred: number; total: number; bytesPerSecond: number };
+  error?: string;
+  checkedAt?: string;
+  /** Whether the last check was started by the user or by the launch timer. */
+  trigger?: 'manual' | 'auto';
+}
+
+/** Implemented by the Electron host; absent in smoke runs and in hosts without an updater. */
+export interface UpdatesApi {
+  state(): UpdateState;
+  check(trigger: 'manual' | 'auto'): Promise<UpdateState>;
+  download(): Promise<UpdateState>;
+  install(): Promise<void>;
+}
+
 /** Events broadcast from host to UI. */
 export interface HostEvents {
   'workspace.changed': { workspaces: WorkspaceInfo[] };
@@ -197,6 +229,8 @@ export interface HostEvents {
   'mcp.changed': { workspaceId: string; serverId: string; reason: 'status' | 'servers' | 'lists' | 'log' };
   /** Env files: a dotenv file or .gitignore changed on disk (from Quiver or outside), or a backup was taken. */
   'env.changed': { workspaceId: string; reason: 'files'; path?: string };
+  /** The in-app updater moved: checking, a version found, download progress, downloaded, or an error. */
+  'app.update': UpdateState;
 }
 
 export type HostEventName = keyof HostEvents;

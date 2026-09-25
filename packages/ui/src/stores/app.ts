@@ -1,4 +1,4 @@
-import type { CommandMeta, GlobalConfig, WorkspaceInfo } from '@quiver/core';
+import type { CommandMeta, GlobalConfig, UpdateState, WorkspaceInfo } from '@quiver/core';
 import { create } from 'zustand';
 
 export const GLOBAL_SCOPE = '__global__';
@@ -26,6 +26,8 @@ interface AppState {
   bottomPanelOpen: boolean;
   resolvedTheme: 'light' | 'dark';
   mcpStatus: McpStatus | null;
+  /** In-app updater state, mirrored from the host. */
+  update: UpdateState | null;
   toasts: Toast[];
 
   setReady(ready: boolean): void;
@@ -38,6 +40,7 @@ interface AppState {
   setBottomPanelOpen(open: boolean): void;
   setResolvedTheme(theme: 'light' | 'dark'): void;
   setMcpStatus(status: McpStatus): void;
+  setUpdate(state: UpdateState): void;
   notify(message: string, kind?: Toast['kind']): void;
   dismissToast(id: number): void;
 }
@@ -55,6 +58,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   bottomPanelOpen: false,
   resolvedTheme: 'light',
   mcpStatus: null,
+  update: null,
   toasts: [],
 
   setReady: (ready) => set({ ready }),
@@ -74,6 +78,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setBottomPanelOpen: (bottomPanelOpen) => set({ bottomPanelOpen }),
   setResolvedTheme: (resolvedTheme) => set({ resolvedTheme }),
   setMcpStatus: (mcpStatus) => set({ mcpStatus }),
+  setUpdate: (update) => set({ update }),
   notify: (message, kind = 'info') => {
     const id = ++toastSeq;
     set({ toasts: [...get().toasts, { id, kind, message }] });

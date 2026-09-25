@@ -2,9 +2,21 @@
 
 A per-project developer toolbelt. Open a folder, and that folder gets its own API requests, environments, database connections, mock servers and small tools, stored as JSON under `.quiver/`. Every feature is also exposed to AI agents through a built-in MCP server.
 
+## Install
+
+Download the build for your platform from the [latest release](https://github.com/be5her/quiver/releases/latest). The builds are not code-signed yet, so each OS asks once before the first launch.
+
+| Platform | File                                                                                  | First launch                                                                                                                                                                                                                                              |
+| -------- | ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Windows  | `Quiver-<version>-setup.exe`                                                          | SmartScreen shows "Windows protected your PC": click _More info_, then _Run anyway_. Updates install in place from the app.                                                                                                                                 |
+| macOS    | `Quiver-<version>-mac-arm64.dmg` (Apple silicon), `Quiver-<version>-mac-x64.dmg` (Intel) | Drag Quiver to Applications. The first launch is blocked; open _System Settings → Privacy & Security_ and click _Open Anyway_, or run `xattr -dr com.apple.quarantine /Applications/Quiver.app`. The app announces new versions but, until builds are signed, links to the download instead of replacing itself. |
+| Linux    | `Quiver-<version>-linux-x64.AppImage` or `Quiver-<version>-linux-x64.deb`             | `chmod +x` the AppImage and run it; it updates in place. The `.deb` announces new versions and links to the download.                                                                                                                                       |
+
+Quiver looks for a newer release on GitHub shortly after launch and every six hours. When there is one, the status bar shows "Update to vX" (or "vX available" where the build cannot replace itself); nothing is downloaded until you click. Settings → About has "Check for updates", the release notes and a "Restart to install" button once the download is verified. Agents get `app_update_check`; `app_update_download` and `app_update_install` are gated like every mutating command.
+
 ## Status
 
-Early scaffold. Working today:
+Working today:
 
 - Workspace model: open several folders, switch instantly, per-workspace tabs restored on return.
 - API client: collections, requests, params/headers/body/auth, environments with encrypted secrets, history, curl import and export, `{{variables}}` everywhere.
@@ -35,7 +47,9 @@ Other scripts:
 | `npm test`          | Unit tests for the core engine (vitest).                       |
 | `npm run typecheck` | Type-checks the main process and the renderer separately.      |
 | `npm run smoke`     | Builds, then runs a headless end-to-end check and exits. Covers SQLite, Redis (against an in-process fake), Teleport (against a fake `tsh` script that answers status, login, db/kube listing and opens real local tunnels) mock servers (real listeners: routes, templates, forwarding, replay, a webhook receiver that survives a workspace reopen), GraphQL (a graphql-js endpoint: POST, GET, operation names, introspection), WebSocket (a `ws` server: subprotocols, binary frames, reconnect after a server close), SSE (retry hint, `Last-Event-ID` resume, POST bodies, error answers) and MCP servers (a dependency-free stdio script plus SDK-built Streamable HTTP and legacy SSE endpoints: import from `.mcp.json`, initialize, tools with annotations and structured output, resources and templates, prompts, log notifications, list-changed refresh, a process that exits, a connection to Quiver's own server) and env files (a temporary project with a committed `.env`, an example, a profile, a nested app and a `node_modules` decoy: discovery, parsing, masking for agents, in-place edits, compare and sync, profile switches, backups and restores, import to and export from environments, the UI table and watcher). Set `QUIVER_SMOKE_MYSQL=mysql://user:pass@host:3306/db` to also exercise a live MySQL server, and `QUIVER_SMOKE_SHOTS=<dir>` to capture screenshots. The run uses a private MCP port, so a Quiver you have open is left alone. |
-| `npm run package`   | Builds an installer with electron-builder (not yet exercised). |
+| `npm run package`   | Builds the installer for this platform into `release/` with electron-builder, without publishing. |
+| `npm run icon`      | Renders `resources/icon.svg` to `resources/icon.png`, the source of every platform icon. |
+| `npm run release`   | Owner only. Bumps the version, tags and pushes so CI builds a draft release; see "Releasing". |
 
 ## Layout
 
@@ -97,3 +111,23 @@ claude mcp add --transport http quiver "http://127.0.0.1:7411/mcp"
 ```
 
 Append `?workspace=<absolute folder path>` to bind a client to a specific project. Commands flagged as mutating (deletes, database writes) are refused for agents until "Allow mutating commands" is enabled in Settings. `db_query_run` decides per call: `SELECT`, `SHOW`, `EXPLAIN` and read-only Redis commands always work, anything that writes is gated. For Teleport, `teleport_status`, `teleport_db_list`, `teleport_kube_list`, `teleport_db_connect` (start a tunnel, attach a connection), `teleport_pin` and `teleport_cluster_add` are always allowed; `teleport_login`, `teleport_logout`, `teleport_kube_login` (rewrites your kubeconfig), `teleport_db_disconnect` and `teleport_cluster_remove` are gated because they change state your terminal shares or delete pins. Mock servers: listing, saving servers and routes, starting, reading captured requests, `mock_request_wait` and `mock_request_replay` are allowed; `mock_server_stop`, `mock_server_delete`, `mock_route_delete` and `mock_request_clear` are gated. Realtime: listing, saving, `realtime_connect`, `realtime_send` and `realtime_message_wait` are allowed; `realtime_disconnect`, `realtime_connection_delete` and `realtime_message_clear` are gated. `api_graphql_introspect` and `api_graphql_schema` are allowed. MCP inspector: listing, saving, importing, `mcp_connect`, `mcp_ping`, the tool, resource and prompt listings, `mcp_resource_read`, `mcp_prompt_get` and `mcp_log_list` are allowed; `mcp_tool_call` decides per call and lets tools annotated `readOnlyHint` through while gating every other tool; `mcp_disconnect`, `mcp_server_delete`, `mcp_log_clear` and `mcp_request` are gated. Env files: `env_file_list`, `env_file_read` (secret values masked), `env_file_diff`, `env_profile_list`, `env_backup_list` and `env_file_import` are allowed; `env_file_read` with `reveal: true` and every write (`env_file_set`, `env_file_write`, `env_file_unset`, `env_file_create`, `env_file_delete`, `env_file_sync`, `env_profile_use`, `env_backup_restore`, `env_file_export`) is gated.
+
+## Development workflow
+
+Every change is a branch and a pull request against `master`. CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the typecheck, the unit tests and a production build on Linux and the full smoke test on Windows for each pull request. Branch from a fresh `master`, verify with the three scripts, push, open the pull request (the template asks what changed, how it was verified and for screenshots of UI changes) and merge on green.
+
+[CLAUDE.md](CLAUDE.md) spells this out for Claude Code: start a session in this folder, ask for a feature or a fix, and it comes back as a pull request ready for review. Once enough have merged, cut a release.
+
+## Releasing
+
+Releases are GitHub Releases built by [.github/workflows/release.yml](.github/workflows/release.yml) on Windows, macOS and Linux runners. Installed copies find new versions through the `latest*.yml` manifests electron-builder attaches to the release.
+
+1. On a clean, up-to-date `master`: `npm run release -- minor` (or `patch`, `major`, or an explicit `1.2.3`). This bumps `package.json`, commits `Release vX.Y.Z`, tags `vX.Y.Z` and pushes both.
+2. The tag starts the Release workflow. It creates a **draft** release whose notes list the merged pull requests, then each runner builds and uploads its installers and manifests. Allow ten to fifteen minutes.
+3. Open the draft on GitHub, read and adjust the notes, and click **Publish release**. Only a published release is visible to installed copies.
+
+If a build fails, fix it on `master` through a pull request, then move the tag (`git tag -f vX.Y.Z && git push -f origin vX.Y.Z`) or bump again. electron-builder refuses to upload into a release that is already published, so a published version is final.
+
+Local check before tagging: `npm run package` builds the installer for this platform into `release/`; to exercise the updater against it, package a higher version too, serve `release/` over HTTP and run the older `release/win-unpacked/Quiver.exe` with `QUIVER_SMOKE=1 QUIVER_UPDATE_FEED=http://127.0.0.1:<port>/`, which checks, downloads and verifies the newer build without installing it.
+
+Signing is not set up yet. When it is: for Windows add the `WIN_CSC_LINK` (base64 `.pfx`) and `WIN_CSC_KEY_PASSWORD` repository secrets; for macOS add `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD` and `APPLE_TEAM_ID`, remove `identity: null` from `electron-builder.yml`, set `mac.notarize: true`, and flip `MAC_SIGNED` in `src/main/updater.ts` so macOS copies update in place.
