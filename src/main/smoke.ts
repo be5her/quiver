@@ -1479,8 +1479,21 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     );
     const infoWithUpdate = await run<{ version: string; update: UpdateState }>('app.info', {}, null);
     check('update: app.info carries the updater state', infoWithUpdate.update?.supported === false && infoWithUpdate.version === updateState.current);
-    for (const tool of ['app_update_download', 'app_update_install']) {
-      const blockedUpdate = await rpc('tools/call', { name: tool, arguments: {} });
+    check('update: follows stable by default, beta is not offered in a dev build', updateState.channel === 'stable' && updateState.betaSupported === false && host.api.config.get().updates.channel === 'stable', {
+      channel: updateState.channel,
+      betaSupported: updateState.betaSupported,
+    });
+    const onBeta = await run<UpdateState>('app.update.channel', { channel: 'beta' }, null);
+    check('update: switching to beta is stored in the global config and reported', onBeta.channel === 'beta' && host.api.config.get().updates.channel === 'beta', onBeta);
+    const onStable = await run<UpdateState>('app.update.channel', { channel: 'stable' }, null);
+    check('update: switching back to stable', onStable.channel === 'stable' && host.api.config.get().updates.channel === 'stable', onStable);
+    const badChannel = await run('app.update.channel', { channel: 'nightly' }, null).then(
+      () => false,
+      () => true,
+    );
+    check('update: an unknown channel is rejected', badChannel && host.api.config.get().updates.channel === 'stable');
+    for (const tool of ['app_update_download', 'app_update_install', 'app_update_channel']) {
+      const blockedUpdate = await rpc('tools/call', { name: tool, arguments: tool === 'app_update_channel' ? { channel: 'beta' } : {} });
       check(`mcp blocks ${tool} by default`, blockedUpdate.result?.isError === true && (blockedUpdate.result.content?.[0]?.text ?? '').includes('MUTATION_BLOCKED'));
     }
 
@@ -2074,6 +2087,8 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       check('ui: about shows the running version', typeof aboutVersion === 'string' && aboutVersion.includes(host.api.version), aboutVersion);
       const updateNote = await js(`(() => { const el = document.querySelector('[data-testid=update-note]'); return el ? el.textContent : null; })()`);
       check('ui: about says updates are off in dev builds', typeof updateNote === 'string' && updateNote.includes('installed builds'), updateNote);
+      const betaToggle = await js(`Boolean(document.querySelector('[data-testid=update-beta]'))`);
+      check('ui: the beta builds checkbox is hidden where beta builds are not offered', betaToggle === false);
       const markInTitle = await js(`Boolean(document.querySelector('header [data-testid=quiver-mark]'))`);
       check('ui: title bar shows the logo mark', markInTitle === true);
       await wait(200);

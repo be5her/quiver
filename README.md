@@ -12,7 +12,9 @@ Download the build for your platform from the [latest release](https://github.co
 | macOS    | `Quiver-<version>-mac-arm64.dmg` (Apple silicon), `Quiver-<version>-mac-x64.dmg` (Intel) | Drag Quiver to Applications. The first launch is blocked; open _System Settings → Privacy & Security_ and click _Open Anyway_, or run `xattr -dr com.apple.quarantine /Applications/Quiver.app`. The app announces new versions but, until builds are signed, links to the download instead of replacing itself. |
 | Linux    | `Quiver-<version>-linux-x64.AppImage` or `Quiver-<version>-linux-x64.deb`             | `chmod +x` the AppImage and run it; it updates in place. The `.deb` announces new versions and links to the download.                                                                                                                                       |
 
-Quiver looks for a newer release on GitHub shortly after launch and every six hours. When there is one, the status bar shows "Update to vX" (or "vX available" where the build cannot replace itself); nothing is downloaded until you click. Settings → About has "Check for updates", the release notes and a "Restart to install" button once the download is verified. Agents get `app_update_check`; `app_update_download` and `app_update_install` are gated like every mutating command.
+Quiver looks for a newer release on GitHub shortly after launch and every six hours. When there is one, the status bar shows "Update to vX" (or "vX available" where the build cannot replace itself); nothing is downloaded until you click. Settings → About has "Check for updates", the release notes and a "Restart to install" button once the download is verified. Agents get `app_update_check`; `app_update_download`, `app_update_install` and `app_update_channel` are gated like every mutating command.
+
+On Windows, Settings → About also has **Beta builds**: with it on, Quiver also offers the build made from every pull request merged into `main` (published about ten minutes after the merge) as well as stable releases, whichever was published last, and checks every hour instead of every six. Turning it off never downgrades: the copy keeps its beta until a newer stable release ships. The setting is per machine.
 
 ## Status
 
@@ -29,6 +31,7 @@ Working today:
 - Env files: every `.env`, `.env.<name>` and `<name>.env` of the project in one place, with secret-looking values masked until revealed. Edit keys in a table or the raw text without disturbing comments, blank lines or quoting; compare a file with its `.env.example` and add what is missing; switch `.env` between profiles (`.env.staging`, `.env.production`); a warning when a file with real values is committed or not gitignored; a history of every change Quiver made. Import a file into a Quiver environment (secrets encrypted) or export one back.
 - Small tools: JSON format, JWT decode, base64, URL encode, hash, UUID, timestamp.
 - MCP server: every command is a tool over Streamable HTTP on `http://127.0.0.1:7411/mcp`.
+- Releases: a Windows beta for every merge to `main` that opted-in copies install right away, and stable releases for every platform, versioned from the merged pull requests, when `main` is merged into `stable`.
 - Light and dark theme in six brand palettes (Slate & Mint by default; Amber Leather, Moss & Lime, Signal Blue, Ember, Graphite & Red under Settings → Appearance), command palette (`Ctrl+K`).
 
 The first planned scope is complete. Ideas for later: gRPC, Docker, S3, a plugin loader for module manifests.
@@ -49,7 +52,7 @@ Other scripts:
 | `npm run smoke`     | Builds, then runs a headless end-to-end check and exits. Covers SQLite, Redis (against an in-process fake), Teleport (against a fake `tsh` script that answers status, login, db/kube listing, opens real local tunnels and answers `tsh kubectl` from canned cluster data, logging every argv it receives) mock servers (real listeners: routes, templates, forwarding, replay, a webhook receiver that survives a workspace reopen), GraphQL (a graphql-js endpoint: POST, GET, operation names, introspection), WebSocket (a `ws` server: subprotocols, binary frames, reconnect after a server close), SSE (retry hint, `Last-Event-ID` resume, POST bodies, error answers) and MCP servers (a dependency-free stdio script plus SDK-built Streamable HTTP and legacy SSE endpoints: import from `.mcp.json`, initialize, tools with annotations and structured output, resources and templates, prompts, log notifications, list-changed refresh, a process that exits, a connection to Quiver's own server) and env files (a temporary project with a committed `.env`, an example, a profile, a nested app and a `node_modules` decoy: discovery, parsing, masking for agents, in-place edits, compare and sync, profile switches, backups and restores, import to and export from environments, the UI table and watcher). Set `QUIVER_SMOKE_MYSQL=mysql://user:pass@host:3306/db` to also exercise a live MySQL server, and `QUIVER_SMOKE_SHOTS=<dir>` to capture screenshots. The run uses a private MCP port, so a Quiver you have open is left alone. |
 | `npm run package`   | Builds the installer for this platform into `release/` with electron-builder, without publishing. |
 | `npm run icon`      | Renders `resources/icon.svg` to `resources/icon.png`, the source of every platform icon. |
-| `npm run release`   | Owner only. Bumps the version, tags and pushes so CI builds a draft release; see "Releasing". |
+| `npm run release:plan` | Previews the next stable release from the current checkout: version, why, and notes. Needs the GitHub CLI signed in; see "Releasing". |
 
 ## Layout
 
@@ -122,20 +125,26 @@ Append `?workspace=<absolute folder path>` to bind a client to a specific projec
 
 Every change is a branch and a pull request against `main`. CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the typecheck, the unit tests and a production build on Linux and the full smoke test on Windows for each pull request. Branch from a fresh `main`, verify with the three scripts, push, open the pull request (the template asks what changed, how it was verified and for screenshots of UI changes) and merge on green.
 
-[CLAUDE.md](CLAUDE.md) spells this out for Claude Code: start a session in this folder, ask for a feature or a fix, and it comes back as a pull request ready for review. Once enough have merged, cut a release.
+Label each pull request before merging: `breaking`, `enhancement` (New), `design` (Look and feel), `bug` (Fixes) or `documentation`. The labels group the release notes and decide the next version; `skip-changelog` leaves a pull request out of the notes.
+
+[CLAUDE.md](CLAUDE.md) spells this out for Claude Code: start a session in this folder, ask for a feature or a fix, and it comes back as a pull request ready for review. Every merge ships as a Windows beta; once enough have merged, release them as stable.
 
 ## Releasing
 
-Releases are GitHub Releases built by [.github/workflows/release.yml](.github/workflows/release.yml) on Windows, macOS and Linux runners. Installed copies find new versions through the `latest*.yml` manifests electron-builder attaches to the release.
+Nothing is released by hand: two workflows build and publish GitHub Releases, and installed copies find them through the `latest*.yml` manifests electron-builder attaches. The version in `package.json` is stamped during those builds and never committed; the `vX.Y.Z` tags are the record, and the committed value is only what local builds report.
 
-1. On a clean, up-to-date `main`: `npm run release -- minor` (or `patch`, `major`, or an explicit `1.2.3`). This bumps `package.json`, commits `Release vX.Y.Z`, tags `vX.Y.Z` and pushes both.
-2. The tag starts the Release workflow. It creates a **draft** release whose notes list the merged pull requests, then each runner builds and uploads its installers and manifests. Allow ten to fifteen minutes.
-3. Open the draft on GitHub, read and adjust the notes, and click **Publish release**. Only a published release is visible to installed copies.
+**Beta, on every merge to `main`** ([.github/workflows/beta.yml](.github/workflows/beta.yml)). The Windows installer is built as `X.Y.(Z+1)-beta.N`, where `X.Y.Z` is the last stable release and `N` counts the commits since it (so `0.3.1-beta.4` is the fourth merge after 0.3.0), and published as a prerelease. Copies with Beta builds on see it at their next check (Settings → About → Check for updates to not wait); everyone else ignores prereleases. Only the ten newest betas are kept; older ones are deleted with their tags. A beta that fails to build is simply skipped; the next merge produces the next one.
 
-The notes are grouped by the labels of the merged pull requests, following [.github/release.yml](.github/release.yml): `breaking`, `enhancement` (New), `design` (Look and feel), `bug` (Fixes), `documentation`, then everything else; `skip-changelog` leaves a pull request out. Pick the bump from what merged since the last tag: `major` for a `breaking` pull request, `minor` for new features or a visible redesign, `patch` for fixes only.
+**Stable, on every merge into `stable`** ([.github/workflows/stable.yml](.github/workflows/stable.yml)).
 
-If a build fails, fix it on `main` through a pull request, then move the tag (`git tag -f vX.Y.Z && git push -f origin vX.Y.Z`) or bump again. electron-builder refuses to upload into a release that is already published, so a published version is final.
+1. Open a pull request from `main` into `stable`. The Stable workflow comments the version it will release and the notes: the last stable version bumped by the largest pull request merged since it, where `breaking` bumps major (minor while the version is 0.x), `enhancement`, `design`, a `feat/…` branch or a `feat:` title bumps minor, and anything else patch. Label the pull request into `stable` with `release:major`, `release:minor` or `release:patch` to choose yourself; the comment updates.
+2. Merge it with **Create a merge commit**, never squash or rebase: `stable` must keep `main`'s history, or the next plan would count everything again (the workflow refuses to release a squashed merge).
+3. The workflow drafts `vX.Y.Z` with those notes, builds Windows, macOS and Linux into it and publishes it as the latest release. Allow ten to fifteen minutes. Edit the notes on GitHub afterwards if you like.
 
-Local check before tagging: `npm run package` builds the installer for this platform into `release/`; to exercise the updater against it, package a higher version too, serve `release/` over HTTP and run the older `release/win-unpacked/Quiver.exe` with `QUIVER_SMOKE=1 QUIVER_UPDATE_FEED=http://127.0.0.1:<port>/`, which checks, downloads and verifies the newer build without installing it.
+Fix a failed stable build on `main` through a pull request and open the next pull request into `stable`; the plan starts again from the last published release, so delete the leftover draft if the version changed. Re-running a release that was published does nothing. electron-builder refuses to upload into a published release, so a published version is final. Hotfixes go through `main` like everything else.
+
+Setup, once: create `stable` from the last release (`git push origin v0.3.0^{commit}:refs/heads/stable`), and allow merge commits in the repository settings (squash can stay the default for `main`).
+
+Local check: `npm run package` builds the installer for this platform into `release/`; to exercise the updater against it, package a higher version too, serve `release/` over HTTP and run the older `release/win-unpacked/Quiver.exe` with `QUIVER_SMOKE=1 QUIVER_UPDATE_FEED=http://127.0.0.1:<port>/`, which checks, downloads and verifies the newer build without installing it.
 
 Signing is not set up yet. When it is: for Windows add the `WIN_CSC_LINK` (base64 `.pfx`) and `WIN_CSC_KEY_PASSWORD` repository secrets; for macOS add `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD` and `APPLE_TEAM_ID`, remove `identity: null` from `electron-builder.yml`, set `mac.notarize: true`, and flip `MAC_SIGNED` in `src/main/updater.ts` so macOS copies update in place.

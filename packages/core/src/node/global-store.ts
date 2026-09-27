@@ -2,9 +2,9 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { defaultGlobalConfig } from '../defaults';
 import { migrateTeleportConfig } from '../models/teleport';
-import type { GlobalConfig } from '../types';
+import type { GlobalConfig, UpdatesConfig } from '../types';
 
-/** Shallow merge with the nested sections merged one level deeper, so a partial `mcp`, `teleport` or `mock` patch keeps the other keys. */
+/** Shallow merge with the nested sections merged one level deeper, so a partial `mcp`, `teleport`, `mock` or `updates` patch keeps the other keys. */
 function mergeConfig(base: GlobalConfig, patch: Partial<GlobalConfig>): GlobalConfig {
   return {
     ...base,
@@ -12,7 +12,13 @@ function mergeConfig(base: GlobalConfig, patch: Partial<GlobalConfig>): GlobalCo
     mcp: { ...base.mcp, ...(patch.mcp ?? {}) },
     teleport: migrateTeleportConfig({ ...base.teleport, ...(patch.teleport ?? {}) }),
     mock: { ...base.mock, ...(patch.mock ?? {}) },
+    updates: normalizeUpdates({ ...base.updates, ...(patch.updates ?? {}) }),
   };
+}
+
+/** An unknown channel (a hand-edited file, an older or newer build) falls back to stable. */
+function normalizeUpdates(updates: UpdatesConfig): UpdatesConfig {
+  return { ...updates, channel: updates.channel === 'beta' ? 'beta' : 'stable' };
 }
 
 /** Global, per-user configuration stored as one JSON file in the app data folder. */

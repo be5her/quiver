@@ -1,0 +1,109 @@
+name: Beta
+
+# Every push to main (every merged pull request) becomes a Windows beta: vX.Y.(Z+1)-beta.N after
+# the last stable vX.Y.Z, where N counts the commits since it. It is published as a GitHub
+# prerelease, which only copies that opted in (Settings -> About -> Beta builds) pick up. Stable
+# copies ask for the latest release, which never is a prerelease.
+#
+# The version is stamped into package.json during the build and never committed; the tags are the
+# record. Only the newest KEEP_BETAS beta releases are kept, older ones are deleted with their tags.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: beta
+  cancel-in-progress: false
+
+env:
+  KEEP_BETAS: 10
+
+jobs:
+  plan:
+    name: Plan and draft
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      skip: ${{ steps.draft.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - id: plan
+        run: node scripts/release/plan.mjs beta
+      - name: Create the draft prerelease (kept when it already exists)
+        id: draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.plan.outputs.tag }}
+          VERSION: ${{ steps.plan.outputs.version }}
+        shell: bash
+        run: |
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" = "false" ]; then
+              echo "$TAG is already published; nothing to do."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+          subject=$(git log -1 --format=%s "$GITHUB_SHA")
+          printf 'Windows beta built from %s: %s\n\nInstalled copies get it when Settings -> About -> Beta builds is on.\n' "${GITHUB_SHA:0:7}" "$subject" > notes.md
+          gh release create "$TAG" --draft --prerelease --target "$GITHUB_SHA" --title "Quiver $VERSION" --notes-file notes.md
+
+  build:
+    name: Build (Windows)
+    needs: plan
+    if: needs.plan.outputs.skip != 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - name: Stamp the version
+        run: npm pkg set version=${{ needs.plan.outputs.version }}
+      - name: Build and upload to the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: npm run build && npx electron-builder --win --publish always
+
+  publish:
+    name: Publish
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish the prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: gh release edit "$TAG" --draft=false --prerelease --latest=false
+      - name: Delete all but the newest ${{ env.KEEP_BETAS }} betas
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          gh release list --limit 200 --json tagName,isPrerelease,isDraft,createdAt |
+            jq -r --argjson keep "$KEEP_BETAS" '[.[] | select(.isPrerelease and (.isDraft | not) and (.tagName | test("^v[0-9]+[.][0-9]+[.][0-9]+-beta[.][0-9]+$")))] | sort_by(.createdAt) | reverse | .[$keep:] | .[].tagName' |
+            while read -r tag; do
+              echo "Deleting $tag"
+              gh release delete "$tag" --cleanup-tag --yes
+            done
+      - name: Summary
+        run: echo "Published [Quiver ${{ needs.plan.outputs.version }}](https://github.com/${{ github.repository }}/releases/tag/${{ needs.plan.outputs.tag }}) for Windows beta testers." >> "$GITHUB_STEP_SUMMARY"
