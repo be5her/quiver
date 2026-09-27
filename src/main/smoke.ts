@@ -1679,11 +1679,17 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         await setField('kube-field-resource', 'pods');
         await wait(200);
         const listPreview = await text('kube-preview');
+        const listExact = await js(`document.querySelector('[data-testid=kube-preview]')?.title ?? null`);
         check(
-          'ui: preview shows the full command for the form',
-          typeof listPreview === 'string' && listPreview.includes(' kubectl get pods --namespace payments --kubeconfig=') && listPreview.endsWith(' --context=smoke.teleport.local-prod-eks'),
-          listPreview,
+          'ui: preview is one short line, with the exact command as its tooltip',
+          listPreview === 'kubectl get pods --namespace payments' &&
+            typeof listExact === 'string' &&
+            listExact.includes(' kubectl get pods --namespace payments --kubeconfig=') &&
+            listExact.endsWith(' --context=smoke.teleport.local-prod-eks'),
+          { listPreview, listExact },
         );
+        const infoTip = await js(`document.querySelector('[data-testid=kube-info]')?.title ?? null`);
+        check('ui: the explanation lives in the info tooltip', typeof infoTip === 'string' && infoTip.includes('Read-only') && infoTip.includes('kubectl get <type>'), infoTip);
         await js(`document.querySelector('[data-testid=kube-run]').click()`);
         await wait(1500);
         const outputText = await text('kube-output');
@@ -1712,12 +1718,19 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         await setField('kube-field-tail', '25');
         await wait(200);
         const logsPreview = await text('kube-preview');
-        check('ui: logs preview', typeof logsPreview === 'string' && logsPreview.includes(' kubectl logs api-7d9f-abc12 --namespace payments --container istio-proxy --tail 25 --kubeconfig=') && (await runDisabled()) === false, logsPreview);
+        check('ui: logs preview', logsPreview === 'kubectl logs api-7d9f-abc12 --namespace payments --container istio-proxy --tail 25' && (await runDisabled()) === false, logsPreview);
         await js(`document.querySelector('[data-testid=kube-run]').click()`);
         await wait(1500);
         const logText = await text('kube-output');
+        const ranHidden = (await text('kube-ran')) === null;
+        await js(`document.querySelector('[data-testid=kube-ran-toggle]').click()`);
+        await wait(200);
         const ranLine = await text('kube-ran');
-        check('ui: output shows the exact command that ran', typeof ranLine === 'string' && ranLine.includes(' kubectl logs api-7d9f-abc12 '), ranLine);
+        check(
+          'ui: the exact command that ran is collapsed until asked for',
+          ranHidden && typeof ranLine === 'string' && ranLine.includes(' kubectl logs api-7d9f-abc12 ') && ranLine.includes('--kubeconfig='),
+          ranLine,
+        );
         check('ui: logs rendered', typeof logText === 'string' && logText.includes('[istio-proxy] line 300') && !logText.includes('line 275\n'), String(logText).slice(-80));
         const historyRows = await js(`document.querySelectorAll('[data-testid=kube-history-entry]').length`);
         check('ui: history panel lists the runs', typeof historyRows === 'number' && historyRows >= 3, historyRows);

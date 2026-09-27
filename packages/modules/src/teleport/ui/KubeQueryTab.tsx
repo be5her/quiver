@@ -4,7 +4,9 @@ import {
   KUBE_OUTPUTS,
   KUBE_RESOURCE_TYPES,
   KUBE_TAIL_MAX,
+  buildKubectlArgs,
   closestName,
+  formatCommandLine,
   kubeOperationInfo,
   kubeQueryErrors,
   newId,
@@ -21,7 +23,7 @@ import {
   type KubeStreamRead,
 } from '@quiver/core';
 import { Badge, Button, Checkbox, IconButton, Input, Select, Spinner, cn, confirmDialog, invoke, notify, onHostEvent, useInvoke, type TabProps } from '@quiver/ui';
-import { Boxes, Copy, Play, Search, Square, Star, Terminal, Trash2, X } from 'lucide-react';
+import { Boxes, ChevronDown, ChevronRight, Copy, Info, Play, Search, Square, Star, Terminal, Trash2, X } from 'lucide-react';
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { DbError, formatDuration } from '../../db/ui/shared';
 
@@ -99,6 +101,8 @@ export function KubeQueryTab({ tab }: TabProps) {
   const previewed = useInvoke<KubePreview>('teleport.kube.preview', { proxy, cluster, query }, { workspaceId: null, enabled: valid });
   const preview = valid ? previewed.data : undefined;
   const refreshPreview = previewed.refresh;
+  // What the box shows: the kubectl part. The exact line (tsh path, --kubeconfig, --context) is its tooltip and what Copy copies.
+  const shortCommand = useMemo(() => (valid ? formatCommandLine(['kubectl', ...buildKubectlArgs(query.operation, query.params)]) : null), [valid, query]);
   const info = kubeOperationInfo(operation)!;
 
   const set = (key: string, value: Values[string]) => {
@@ -243,12 +247,27 @@ export function KubeQueryTab({ tab }: TabProps) {
             ))}
           </div>
           <div className="flex items-center gap-2">
-            <div className="flex-1 min-w-0 flex items-start gap-1 rounded-md border border-edge bg-canvas pl-2.5 pr-1 py-1.5">
-              <code className="flex-1 min-w-0 text-xs font-mono text-muted whitespace-pre-wrap break-all select-all" data-testid="kube-preview">
-                {!valid ? 'Fill in the required fields to see the command' : (preview?.command ?? '…')}
+            <div className="flex-1 min-w-0 flex items-center gap-1 rounded-md border border-edge bg-canvas pl-2.5 pr-1 h-8">
+              <code className="flex-1 min-w-0 truncate text-xs font-mono text-muted" title={preview?.command} data-testid="kube-preview">
+                {shortCommand ?? 'Fill in the required fields to see the command'}
               </code>
+              <span
+                tabIndex={0}
+                className="inline-flex items-center justify-center size-6 text-muted hover:text-fg cursor-help focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 rounded-md"
+                title={[
+                  `${info.description}. Read-only: your terminal's kubectl context is not changed.`,
+                  'Hover the command for the exact line that runs; Copy copies it.',
+                  preview?.setup ? `The first run on this cluster prepares its private kubeconfig once with:\n${preview.setup}` : '',
+                ]
+                  .filter(Boolean)
+                  .join('\n\n')}
+                aria-label="About this command"
+                data-testid="kube-info"
+              >
+                <Info className="size-3.5" />
+              </span>
               {preview && (
-                <IconButton label="Copy command" size="sm" onClick={() => void navigator.clipboard.writeText(preview.command).then(() => notify('Command copied', 'success'))}>
+                <IconButton label="Copy the exact command" size="sm" onClick={() => void navigator.clipboard.writeText(preview.command).then(() => notify('Command copied', 'success'))}>
                   <Copy className="size-3" />
                 </IconButton>
               )}
@@ -263,14 +282,6 @@ export function KubeQueryTab({ tab }: TabProps) {
               </Button>
             )}
           </div>
-          {preview?.setup && (
-            <p className="text-[11px] text-muted -mt-1 break-all" data-testid="kube-setup">
-              The first run prepares this cluster's private kubeconfig once with <code className="font-mono">{preview.setup}</code>
-            </p>
-          )}
-          <p className="text-[11px] text-muted -mt-1">
-            {info.description}. Read-only, and your terminal's kubectl context is not changed. This is the exact command that runs, with nothing added; it is built on the host from this form, never from text.
-          </p>
         </div>
 
         <OutputPanel
@@ -533,6 +544,7 @@ function OutputPanel({
   const [search, setSearch] = useState('');
   const [onlyMatches, setOnlyMatches] = useState(false);
   const [follow, setFollow] = useState(true);
+  const [showCommand, setShowCommand] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
   const term = search.trim().toLowerCase();
   const matches = useMemo(() => (term ? lines.reduce((n, l) => n + (l.toLowerCase().includes(term) ? 1 : 0), 0) : 0), [lines, term]);
@@ -562,6 +574,19 @@ function OutputPanel({
           </span>
         ) : (
           <span className="text-muted">Output</span>
+        )}
+        {ran && !running && (
+          <button
+            type="button"
+            className="flex items-center gap-0.5 text-muted hover:text-fg"
+            onClick={() => setShowCommand((v) => !v)}
+            aria-expanded={showCommand}
+            title="The exact command that ran"
+            data-testid="kube-ran-toggle"
+          >
+            {showCommand ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
+            Command
+          </button>
         )}
         <div className="flex-1" />
         {running?.streaming && (
@@ -595,10 +620,15 @@ function OutputPanel({
           <DbError error={error} onRetry={onRetry} />
         </div>
       )}
-      {ran && (
-        <div className="px-3 py-1.5 border-b border-edge shrink-0 text-[11px] font-mono text-muted break-all select-all" data-testid="kube-ran">
-          {ran.setup && <div>{ran.setup}</div>}
-          <div>{ran.command}</div>
+      {ran && showCommand && !running && (
+        <div className="flex items-start gap-1 pl-3 pr-2 py-1.5 border-b border-edge shrink-0">
+          <div className="flex-1 min-w-0 text-[11px] font-mono text-muted break-all select-all" data-testid="kube-ran">
+            {ran.setup && <div>{ran.setup}</div>}
+            <div>{ran.command}</div>
+          </div>
+          <IconButton label="Copy command" size="sm" onClick={() => void navigator.clipboard.writeText(ran.command).then(() => notify('Command copied', 'success'))}>
+            <Copy className="size-3" />
+          </IconButton>
         </div>
       )}
       <div ref={scroller} className="flex-1 min-h-0 overflow-auto bg-canvas" data-testid="kube-output">
