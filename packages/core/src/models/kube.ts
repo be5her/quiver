@@ -450,6 +450,33 @@ export function lastKubeNamespace(entries: KubeHistoryEntry[], proxy: string, cl
 
 // ---------- output parsers for pickers ----------
 
+/**
+ * The candidate closest to a misspelt value (swapped, missing, extra or wrong characters), or
+ * null when nothing is close. kubectl answers a query in a namespace that does not exist with
+ * "No resources found" and exit 0, so the form uses this to catch typos before they run.
+ */
+export function closestName(value: string, candidates: readonly string[]): string | null {
+  if (!value || candidates.includes(value)) return null;
+  // Optimal string alignment distance: Levenshtein plus adjacent transpositions.
+  const distance = (a: string, b: string): number => {
+    const d = Array.from({ length: a.length + 1 }, (_, i) => Array.from({ length: b.length + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)));
+    for (let i = 1; i <= a.length; i++) {
+      for (let j = 1; j <= b.length; j++) {
+        const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+        d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost);
+        if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+      }
+    }
+    return d[a.length][b.length];
+  };
+  let best: { name: string; score: number } | null = null;
+  for (const name of candidates) {
+    const score = distance(value, name);
+    if (score <= Math.max(1, Math.floor(value.length / 4)) && (!best || score < best.score)) best = { name, score };
+  }
+  return best?.name ?? null;
+}
+
 /** First column of a kubectl table (NAME), header skipped. */
 export function parseKubectlNames(stdout: string): string[] {
   const lines = stdout.split(/\r?\n/).filter((l) => l.trim());

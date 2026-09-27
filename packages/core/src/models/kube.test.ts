@@ -9,6 +9,7 @@ import {
   KubeQuerySchema,
   addKubeHistory,
   buildKubectlArgs,
+  closestName,
   formatCommandLine,
   kubeQueryErrors,
   kubeconfigCurrentContext,
@@ -251,6 +252,16 @@ describe('form helpers', () => {
       "& 'C:\\Program Files\\Teleport Connect\\tsh.exe' kubectl get events --sort-by .lastTimestamp --kubeconfig=C:\\Users\\me\\x.kubeconfig",
     );
     expect(formatCommandLine(['tsh.exe', 'kube', 'login', 'dev'], { windows: true, env: { KUBECONFIG: 'C:\\x.cfg' } })).toBe("$env:KUBECONFIG='C:\\x.cfg'; tsh.exe kube login dev");
+  });
+
+  it('suggests the closest namespace for a typo', () => {
+    const namespaces = ['default', 'fina-checkout', 'omni-checkout', 'omni-pos', 'omni-sf'];
+    expect(closestName('omni-chekcout', namespaces)).toBe('omni-checkout');
+    expect(closestName('omni-chckout', namespaces)).toBe('omni-checkout');
+    expect(closestName('defualt', namespaces)).toBe('default');
+    expect(closestName('omni-checkout', namespaces)).toBeNull();
+    expect(closestName('payments', namespaces)).toBeNull();
+    expect(closestName('', namespaces)).toBeNull();
   });
 
   it('parses picker data', () => {

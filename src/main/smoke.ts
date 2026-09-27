@@ -1660,7 +1660,23 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
           })()`);
         const text = (testid: string) => js(`document.querySelector('[data-testid=${testid}]')?.textContent ?? null`);
         const runDisabled = () => js(`document.querySelector('[data-testid=kube-run]')?.disabled ?? null`);
-        await setField('kube-field-namespace', 'payments');
+        // A misspelt namespace: kubectl would answer "No resources found" with exit 0, so the form warns and suggests the real one.
+        await setField('kube-field-namespace', 'paymetns');
+        await wait(300);
+        const nsWarning = await text('kube-field-warning');
+        check('ui: unknown namespace warns and suggests the closest one', typeof nsWarning === 'string' && nsWarning.includes('Not a namespace') && nsWarning.includes('Use payments?') && (await runDisabled()) === false, nsWarning);
+        await js(`document.querySelector('[data-testid=kube-namespace-suggestion]').click()`);
+        await wait(200);
+        const nsFixed = await js(`document.querySelector('[data-testid=kube-field-namespace]')?.value ?? null`);
+        check('ui: the suggestion fixes the namespace', nsFixed === 'payments' && (await text('kube-field-warning')) === null, nsFixed);
+        // Success with a note on stderr ("No resources found") is not shown as an error.
+        await setField('kube-field-resource', 'services');
+        await wait(200);
+        await js(`document.querySelector('[data-testid=kube-run]').click()`);
+        await wait(1500);
+        const emptyNote = await js(`(() => { const el = document.querySelector('[data-testid=kube-stderr]'); return el ? [el.textContent, el.className.includes('text-muted')] : null; })()`);
+        check('ui: "No resources found" on success is a note, not an error', Array.isArray(emptyNote) && String(emptyNote[0]).includes('No resources found') && emptyNote[1] === true, emptyNote);
+        await setField('kube-field-resource', 'pods');
         await wait(200);
         const listPreview = await text('kube-preview');
         check(

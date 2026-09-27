@@ -4,6 +4,7 @@ import {
   KUBE_OUTPUTS,
   KUBE_RESOURCE_TYPES,
   KUBE_TAIL_MAX,
+  closestName,
   kubeOperationInfo,
   kubeQueryErrors,
   newId,
@@ -293,14 +294,23 @@ export function KubeQueryTab({ tab }: TabProps) {
 
 // ---------- form ----------
 
-function FieldBox({ label, error, children, className }: { label: string; error?: string; children: ReactNode; className?: string }) {
+/** A labelled field with one line below it: the validation error, else a warning, else nothing. */
+function FieldBox({ label, error, warning, children, className }: { label: string; error?: string; warning?: ReactNode; children: ReactNode; className?: string }) {
   return (
     <div className={cn('flex flex-col gap-1 min-w-0', className)}>
       <span className="text-[11px] font-medium text-muted">{label}</span>
       {children}
-      <span className={cn('text-[11px] h-3.5 leading-3.5 truncate', error ? 'text-danger' : 'text-transparent')} title={error}>
-        {error ?? '.'}
-      </span>
+      {error ? (
+        <span className="text-[11px] h-3.5 leading-3.5 truncate text-danger" title={error}>
+          {error}
+        </span>
+      ) : warning ? (
+        <span className="text-[11px] h-3.5 leading-3.5 truncate text-warning" data-testid="kube-field-warning">
+          {warning}
+        </span>
+      ) : (
+        <span className="h-3.5" />
+      )}
     </div>
   );
 }
@@ -366,9 +376,26 @@ function FieldEditor({ field, values, error, onChange, lookups, namespace }: { f
           </Select>
         </FieldBox>
       );
-    case 'namespace':
+    case 'namespace': {
+      // kubectl answers "No resources found" with exit 0 for a namespace that does not exist, so say so before running.
+      const typed = typeof value === 'string' ? value.trim() : '';
+      const unknown = !values.allNamespaces && typed !== '' && lookups.namespaces.length > 0 && !lookups.namespaces.includes(typed);
+      const suggestion = unknown ? closestName(typed, lookups.namespaces) : null;
+      const warning = unknown ? (
+        <>
+          Not a namespace on this cluster.
+          {suggestion && (
+            <>
+              {' '}
+              <button type="button" className="underline hover:text-fg" onClick={() => onChange(suggestion)} data-testid="kube-namespace-suggestion">
+                Use {suggestion}?
+              </button>
+            </>
+          )}
+        </>
+      ) : undefined;
       return (
-        <FieldBox label={field.label} error={error}>
+        <FieldBox label={field.label} error={error} warning={warning}>
           <fieldset disabled={Boolean(values.allNamespaces)} className="contents">
             {text({ list: listId('options'), placeholder: 'default' })}
           </fieldset>
@@ -379,6 +406,7 @@ function FieldEditor({ field, values, error, onChange, lookups, namespace }: { f
           </datalist>
         </FieldBox>
       );
+    }
     case 'pod':
     case 'name':
     case 'deployment': {
@@ -574,7 +602,12 @@ function OutputPanel({
         </div>
       )}
       <div ref={scroller} className="flex-1 min-h-0 overflow-auto bg-canvas" data-testid="kube-output">
-        {stderr.trim() && <pre className="px-3 pt-2 text-xs font-mono whitespace-pre-wrap break-all text-danger">{stderr.trimEnd()}</pre>}
+        {stderr.trim() && (
+          // kubectl also writes notes such as "No resources found" to stderr on success; only a failure is shown as an error.
+          <pre className={cn('px-3 pt-2 text-xs font-mono whitespace-pre-wrap break-all', exitCode === 0 ? 'text-muted' : 'text-danger')} data-testid="kube-stderr">
+            {stderr.trimEnd()}
+          </pre>
+        )}
         {shown.length > 0 ? (
           <pre className="px-3 py-2 text-xs font-mono leading-5 whitespace-pre">
             {shown.map((line, i) => (
