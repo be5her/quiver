@@ -60,7 +60,14 @@ async function main(): Promise<void> {
   await app.whenReady();
 
   // The smoke test checks the "no updater" path; with QUIVER_UPDATE_FEED it drives the real one against a local feed instead.
-  const updates = process.env.QUIVER_SMOKE && !process.env.QUIVER_UPDATE_FEED ? undefined : new Updater({ version: app.getVersion(), emit: (state) => broadcast({ event: 'app.update', payload: state }) });
+  const updates =
+    process.env.QUIVER_SMOKE && !process.env.QUIVER_UPDATE_FEED
+      ? undefined
+      : new Updater({
+          version: app.getVersion(),
+          channel: () => host?.api.config.get().updates.channel ?? 'stable',
+          emit: (state) => broadcast({ event: 'app.update', payload: state }),
+        });
   host = new Host({
     userDataDir: app.getPath('userData'),
     version: app.getVersion(),
@@ -86,10 +93,18 @@ async function main(): Promise<void> {
 
   createMainWindow();
 
-  // Look for a newer release shortly after launch and every six hours; nothing is downloaded until asked.
+  // Look for a newer release shortly after launch, then every six hours, or every hour on the beta
+  // channel so a merged change reaches testers soon. Nothing is downloaded until asked.
   if (updates?.state().supported) {
+    const hour = 60 * 60 * 1000;
+    let lastCheck = Date.now();
     setTimeout(() => void updates.check('auto'), 10_000);
-    setInterval(() => void updates.check('auto'), 6 * 60 * 60 * 1000);
+    setInterval(() => {
+      const state = updates.state();
+      if (!(state.betaSupported && state.channel === 'beta') && Date.now() - lastCheck < 6 * hour - 60_000) return;
+      lastCheck = Date.now();
+      void updates.check('auto');
+    }, hour);
   }
 
   app.on('activate', () => {

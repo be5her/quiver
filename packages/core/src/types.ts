@@ -75,6 +75,14 @@ export interface GlobalConfig {
   mcp: McpConfig;
   teleport: TeleportConfig;
   mock: MockConfig;
+  updates: UpdatesConfig;
+}
+
+/** Which releases the in-app updater follows. `beta` adds the Windows prereleases built from every merge to main. */
+export type UpdateChannel = 'stable' | 'beta';
+
+export interface UpdatesConfig {
+  channel: UpdateChannel;
 }
 
 /** Storage exposed to commands. Implemented over the `.quiver` folder of a workspace. */
@@ -205,6 +213,10 @@ export interface UpdateState {
   checkedAt?: string;
   /** Whether the last check was started by the user or by the launch timer. */
   trigger?: 'manual' | 'auto';
+  /** The channel the next check follows, from the global config. */
+  channel: UpdateChannel;
+  /** True where beta builds are published and can install themselves: Windows installs, for now. */
+  betaSupported: boolean;
 }
 
 /** Implemented by the Electron host; absent in smoke runs and in hosts without an updater. */

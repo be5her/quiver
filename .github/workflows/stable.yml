@@ -1,0 +1,136 @@
+name: Stable
+
+# Stable releases come from the `stable` branch. Open a pull request from main into stable:
+#   - while it is open, the plan job comments the version it will release and the notes, worked
+#     out from the pull requests merged since the last stable tag (scripts/release/plan.mjs):
+#     `breaking` -> major (minor while 0.x), `enhancement`/`design` or a feat/ branch -> minor,
+#     anything else -> patch. A release:major|minor|patch label on this pull request overrides it.
+#   - merging it (use "Create a merge commit", not squash, so stable keeps main's history) builds
+#     Windows, macOS and Linux into a draft and publishes it as the latest release.
+#
+# The version is stamped into package.json during the build and never committed; the vX.Y.Z tag,
+# created when the release is published, is the record.
+
+on:
+  pull_request:
+    branches: [stable]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  push:
+    branches: [stable]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: stable-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  plan:
+    name: Plan
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/stable'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      released: ${{ steps.plan.outputs.released }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: node scripts/release/plan.mjs stable ${PR:+--pr "$PR"} --notes release-notes.md --summary release-summary.md
+      - name: Summary
+        if: steps.plan.outputs.released == ''
+        run: cat release-summary.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Comment the plan on the pull request
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          { echo '<!-- quiver-release-plan -->'; echo '### Release plan'; echo; cat release-summary.md; } > comment.md
+          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate --jq '.[] | select(.body | startswith("<!-- quiver-release-plan -->")) | .id' | tail -n 1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@comment.md > /dev/null
+          else
+            gh pr comment "$PR" --body-file comment.md
+          fi
+      - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request' && steps.plan.outputs.released == ''
+        with:
+          name: release-notes
+          path: release-notes.md
+
+  draft:
+    name: Draft release
+    needs: plan
+    if: github.event_name != 'pull_request' && needs.plan.outputs.released == ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+      - name: Create the draft (kept when it already exists)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        shell: bash
+        run: |
+          if gh release view "$TAG" --json isDraft >/dev/null 2>&1; then
+            echo "$TAG already exists; the builds are uploaded into it."
+          else
+            gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "Quiver $VERSION" --notes-file release-notes.md
+          fi
+
+  build:
+    name: Build (${{ matrix.os }})
+    needs: [plan, draft]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - name: Stamp the version
+        run: npm pkg set version=${{ needs.plan.outputs.version }}
+      - name: Build and upload to the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: npm run build && npx electron-builder --publish always
+
+  publish:
+    name: Publish
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish as the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: gh release edit "$TAG" --draft=false --prerelease=false --latest
+      - name: Summary
+        run: echo "Published [Quiver ${{ needs.plan.outputs.version }}](https://github.com/${{ github.repository }}/releases/tag/${{ needs.plan.outputs.tag }})." >> "$GITHUB_STEP_SUMMARY"

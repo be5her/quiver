@@ -1,6 +1,6 @@
 import { app } from 'electron';
 import { autoUpdater } from 'electron-updater';
-import { QuiverError, type UpdateState, type UpdatesApi } from '@quiver/core';
+import { QuiverError, type UpdateChannel, type UpdateState, type UpdatesApi } from '@quiver/core';
 
 export const RELEASES_URL = 'https://github.com/be5her/quiver/releases';
 
@@ -12,26 +12,31 @@ const MAC_SIGNED = false;
 
 export interface UpdaterOptions {
   version: string;
+  /** The channel from the global config, read at every check so a change applies to the next one. */
+  channel(): UpdateChannel;
   emit(state: UpdateState): void;
 }
 
 interface Support {
   supported: boolean;
   installable: boolean;
+  /** Beta builds are only published for Windows, where the NSIS installer replaces itself. */
+  beta: boolean;
   reason?: string;
 }
 
 function support(): Support {
   // QUIVER_UPDATE_FEED points the updater at any server that serves electron-builder's latest*.yml (used by the packaged smoke run).
-  if (process.env.QUIVER_UPDATE_FEED) return { supported: true, installable: process.platform !== 'darwin' || MAC_SIGNED };
-  if (!app.isPackaged) return { supported: false, installable: false, reason: 'Updates are only checked in installed builds.' };
+  const beta = process.platform === 'win32';
+  if (process.env.QUIVER_UPDATE_FEED) return { supported: true, installable: process.platform !== 'darwin' || MAC_SIGNED, beta };
+  if (!app.isPackaged) return { supported: false, installable: false, beta: false, reason: 'Updates are only checked in installed builds.' };
   if (process.platform === 'darwin' && !MAC_SIGNED) {
-    return { supported: true, installable: false, reason: 'This macOS build is not signed, so it cannot replace itself. New versions are announced here; download them from GitHub.' };
+    return { supported: true, installable: false, beta, reason: 'This macOS build is not signed, so it cannot replace itself. New versions are announced here; download them from GitHub.' };
   }
   if (process.platform === 'linux' && !process.env.APPIMAGE) {
-    return { supported: true, installable: false, reason: 'Installed from a package, which Quiver does not replace itself. New versions are announced here; download them from GitHub.' };
+    return { supported: true, installable: false, beta, reason: 'Installed from a package, which Quiver does not replace itself. New versions are announced here; download them from GitHub.' };
   }
-  return { supported: true, installable: true };
+  return { supported: true, installable: true, beta };
 }
 
 function describe(err: unknown): string {
@@ -45,6 +50,12 @@ function describe(err: unknown): string {
  * In-app updates through electron-updater, fed by the GitHub release that electron-builder
  * publishes (the `latest*.yml` manifests next to the installers). Nothing is downloaded until
  * asked: check, then download, then restart. A downloaded update is also applied on the next quit.
+ *
+ * Channels: stable copies ask GitHub for the latest release, which never is a prerelease. Windows
+ * copies on the beta channel also accept prereleases (`vX.Y.Z-beta.N`), so they get whichever of
+ * the newest beta or stable was published last. electron-builder writes `latest.yml` into GitHub
+ * prereleases too; electron-updater looks for `beta.yml` first and falls back to it. Leaving beta
+ * never downgrades: the copy stays on its beta until a stable release newer than it ships.
  */
 export class Updater implements UpdatesApi {
   private current: UpdateState;
@@ -52,21 +63,27 @@ export class Updater implements UpdatesApi {
 
   constructor(private readonly opts: UpdaterOptions) {
     const s = support();
-    this.current = { supported: s.supported, installable: s.installable, reason: s.reason, current: opts.version, status: 'idle', url: RELEASES_URL };
+    this.current = { supported: s.supported, installable: s.installable, reason: s.reason, current: opts.version, status: 'idle', url: RELEASES_URL, channel: 'stable', betaSupported: s.beta };
     if (s.supported) this.attach();
   }
 
   state(): UpdateState {
-    return this.current;
+    return { ...this.current, channel: this.opts.channel() };
+  }
+
+  private followsBeta(): boolean {
+    return this.current.betaSupported && this.opts.channel() === 'beta';
   }
 
   private set(patch: Partial<UpdateState>): void {
     this.current = { ...this.current, ...patch };
-    this.opts.emit(this.current);
+    this.opts.emit(this.state());
   }
 
   private attach(): void {
     autoUpdater.autoDownload = false;
+    // The default, kept explicit: a copy leaving beta must not go back to the older stable release.
+    autoUpdater.allowDowngrade = false;
     // A downloaded update is applied when the app quits, except in smoke runs, which must never install anything.
     autoUpdater.autoInstallOnAppQuit = !process.env.QUIVER_SMOKE;
     autoUpdater.logger = {
@@ -91,11 +108,13 @@ export class Updater implements UpdatesApi {
   }
 
   async check(trigger: 'manual' | 'auto' = 'manual'): Promise<UpdateState> {
-    if (!this.current.supported) return this.current;
+    if (!this.current.supported) return this.state();
     if (this.pending) return this.pending;
-    if (this.current.status === 'downloading' || this.current.status === 'downloaded') return this.current;
+    if (this.current.status === 'downloading' || this.current.status === 'downloaded') return this.state();
     this.pending = (async () => {
       this.set({ status: 'checking', trigger, error: undefined });
+      // electron-updater turns prereleases on by itself when the running version is one; the channel decides instead.
+      autoUpdater.allowPrerelease = this.followsBeta();
       try {
         const result = await autoUpdater.checkForUpdates();
         const checkedAt = new Date().toISOString();
@@ -110,7 +129,7 @@ export class Updater implements UpdatesApi {
       } finally {
         this.pending = null;
       }
-      return this.current;
+      return this.state();
     })();
     return this.pending;
   }
@@ -118,7 +137,7 @@ export class Updater implements UpdatesApi {
   async download(): Promise<UpdateState> {
     if (!this.current.supported) throw new QuiverError('INVALID_INPUT', this.current.reason ?? 'Updates are not available in this build.');
     if (!this.current.installable) throw new QuiverError('INVALID_INPUT', `${this.current.reason ?? 'This build cannot replace itself.'} ${this.current.url ?? RELEASES_URL}`);
-    if (this.current.status === 'downloading' || this.current.status === 'downloaded') return this.pending ?? this.current;
+    if (this.current.status === 'downloading' || this.current.status === 'downloaded') return this.pending ?? this.state();
     if (this.current.status !== 'available') {
       const after = await this.check('manual');
       if (after.status !== 'available') return after;
@@ -133,7 +152,7 @@ export class Updater implements UpdatesApi {
       } finally {
         this.pending = null;
       }
-      return this.current;
+      return this.state();
     })();
     return this.pending;
   }
