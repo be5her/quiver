@@ -64,6 +64,7 @@ export class Host {
 
     this.api = {
       version: opts.version,
+      dataDir: opts.userDataDir,
       config: {
         get: () => this.config.get(),
         update: (patch) => this.config.update(patch),

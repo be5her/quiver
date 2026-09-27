@@ -280,10 +280,10 @@ export class TeleportSession {
   }
 
   /** Run a tsh subcommand against one cluster; maps "not logged in" style failures to TELEPORT_LOGIN_REQUIRED. */
-  async run(args: string[], proxy: string, timeoutMs = 60_000): Promise<string> {
+  async run(args: string[], proxy: string, timeoutMs = 60_000, env?: Record<string, string>): Promise<string> {
     const cluster = await this.requireSession(proxy);
     const tsh = await this.tshCommand();
-    const run = await runTsh(tsh, [...args, `--proxy=${cluster.proxy}`], { timeoutMs });
+    const run = await runTsh(tsh, [...args, `--proxy=${cluster.proxy}`], { timeoutMs, env });
     if (run.code !== 0) {
       const message = tshErrorMessage(run);
       if (/not logged in|expired|relogin|re-login/i.test(message)) {

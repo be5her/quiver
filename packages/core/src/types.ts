@@ -107,6 +107,8 @@ export interface SecretsApi {
 /** What the host (Electron main process, or a CLI) gives to commands. */
 export interface HostApi {
   readonly version: string;
+  /** Per-machine app data folder (the Electron user data folder). Absent in hosts without one; modules then keep that state in memory. */
+  readonly dataDir?: string;
   /** Native dialogs, present when the host has a window. */
   dialogs?: {
     pickFile(options?: { title?: string; filters?: { name: string; extensions: string[] }[]; defaultPath?: string }): Promise<string | undefined>;
@@ -223,6 +225,8 @@ export interface HostEvents {
   'mcp.call': { tool: string; workspaceId?: string; ok: boolean; durationMs: number; at: string };
   /** Teleport session status, login progress, pins or tunnel list changed. Fetch teleport.status for details. */
   'teleport.changed': { reason: 'status' | 'tunnels' | 'login' | 'pins' };
+  /** Kubernetes queries: the local history changed, or a followed log stream has new lines or ended. */
+  'teleport.kube.changed': { reason: 'history' | 'stream'; runId?: string };
   /** A mock server started or stopped, its definition changed, or it captured requests. */
   'mock.changed': { workspaceId: string; serverId: string; reason: 'status' | 'requests' | 'servers' };
   /** A WebSocket or SSE connection changed state, its definition changed, or messages arrived. */

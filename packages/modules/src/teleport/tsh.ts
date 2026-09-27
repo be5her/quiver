@@ -21,6 +21,8 @@ export interface RunOptions {
   timeoutMs?: number;
   /** Called per line as output arrives; used to show login progress. */
   onLine?(line: string, stream: 'stdout' | 'stderr'): void;
+  /** Extra environment for this run, e.g. a private KUBECONFIG. */
+  env?: Record<string, string>;
 }
 
 function isFile(file: string): boolean {
@@ -83,10 +85,51 @@ export function tshNotFound(): QuiverError {
   return new QuiverError('NOT_FOUND', 'tsh was not found. Install Teleport Connect, add tsh to PATH, or set its path in Settings > Teleport.');
 }
 
+export interface SpawnOptions {
+  /** Extra environment for this run, e.g. a private KUBECONFIG. */
+  env?: Record<string, string>;
+  /** Make the run stoppable as a whole with killTree: on macOS and Linux it leads its own process group. */
+  tree?: boolean;
+}
+
 /** Spawn tsh with tokenized arguments and no shell. stdin is closed so nothing can block on a prompt. */
-export function spawnTsh(tsh: TshCommand, args: string[]): ChildProcess {
+export function spawnTsh(tsh: TshCommand, args: string[], options: SpawnOptions = {}): ChildProcess {
   const [program, ...fixed] = tsh.argv;
-  return spawn(program, [...fixed, ...args], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: process.env });
+  return spawn(program, [...fixed, ...args], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+    detached: Boolean(options.tree) && process.platform !== 'win32',
+    env: options.env ? { ...process.env, ...options.env } : process.env,
+  });
+}
+
+/**
+ * Stop a process spawned with `tree: true` and everything it started. `tsh kubectl` runs kubectl
+ * in a second tsh process that shares the first one's stdout, so killing only the first leaves
+ * the second running and the pipe open. Windows: taskkill walks the tree by parent process id.
+ * Elsewhere: signal the process group.
+ */
+export function killTree(child: ChildProcess, signal: NodeJS.Signals = 'SIGTERM'): void {
+  const pid = child.pid;
+  if (pid === undefined) return;
+  if (process.platform === 'win32') {
+    const taskkill = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe');
+    try {
+      const killer = spawn(taskkill, ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+      killer.on('error', () => child.kill());
+      killer.on('exit', (code) => {
+        if (code !== 0) child.kill();
+      });
+    } catch {
+      child.kill();
+    }
+    return;
+  }
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    child.kill(signal);
+  }
 }
 
 /** Pipe a stream's chunks into whole lines. */
@@ -106,7 +149,7 @@ export function runTsh(tsh: TshCommand, args: string[], options: RunOptions = {}
   return new Promise((resolve, reject) => {
     let child: ChildProcess;
     try {
-      child = spawnTsh(tsh, args);
+      child = spawnTsh(tsh, args, { env: options.env });
     } catch (err) {
       reject(new QuiverError('REQUEST_FAILED', `Could not start tsh: ${(err as Error).message}`));
       return;

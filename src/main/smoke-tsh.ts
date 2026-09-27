@@ -23,18 +23,29 @@ export interface FakeTsh {
   setState(state: FakeTshState | null): Promise<void>;
   /** Move a cluster's certificate into the past. */
   expire(proxy: string): Promise<void>;
+  /** Stands in for the user's `~/.kube/config`; the smoke points KUBECONFIG at it. */
+  homeKubeconfig: string;
+  /** Every `tsh kubectl` call the fake received: argv after `kubectl`, the KUBECONFIG it ran with, and the pid of the second process that ran it. */
+  kubectlCalls(): Promise<{ argv: string[]; kubeconfig: string | null; pid: number }[]>;
 }
 
 /**
  * A stand-in for the real tsh CLI, written as a Node script so the smoke test can exercise
  * login, status, db/kube listing and `proxy db --tunnel` across two clusters without a
  * Teleport cluster. `--proxy` selects the profile like the real tsh; the tunnel is a plain
- * TCP forwarder to the in-process fake Redis.
+ * TCP forwarder to the in-process fake Redis. `kube login` writes the kubeconfig KUBECONFIG
+ * names, and `kubectl` answers the read-only operations from canned data, logs every argv it
+ * gets and refuses to run without a context from that kubeconfig.
  */
 export async function writeFakeTsh(dir: string, redisPort: number): Promise<FakeTsh> {
   const stateFile = path.join(dir, 'fake-tsh-state.json');
   const script = path.join(dir, 'fake-tsh.cjs');
-  const source = FAKE_TSH_SOURCE.replace('__STATE_FILE__', JSON.stringify(stateFile)).replace('__REDIS_PORT__', String(redisPort));
+  const homeKubeconfig = path.join(dir, 'home-kubeconfig.yaml');
+  const callsFile = path.join(dir, 'fake-kubectl-calls.jsonl');
+  const source = FAKE_TSH_SOURCE.replace('__STATE_FILE__', JSON.stringify(stateFile))
+    .replace('__REDIS_PORT__', String(redisPort))
+    .replace('__HOME_KUBECONFIG__', JSON.stringify(homeKubeconfig))
+    .replace('__CALLS_FILE__', JSON.stringify(callsFile));
   await fs.writeFile(script, source, 'utf8');
   const node = findNode();
   const quote = (p: string) => `"${p.replace(/\\/g, '/')}"`;
@@ -61,6 +72,14 @@ export async function writeFakeTsh(dir: string, redisPort: number): Promise<Fake
       state.profiles[proxy].validUntil = new Date(Date.now() - 60_000).toISOString();
       await setState(state);
     },
+    homeKubeconfig,
+    kubectlCalls: async () => {
+      const text = await fs.readFile(callsFile, 'utf8').catch(() => '');
+      return text
+        .split('\n')
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as { argv: string[]; kubeconfig: string | null; pid: number });
+    },
   };
 }
 
@@ -81,8 +100,11 @@ export function findNode(): string {
 const FAKE_TSH_SOURCE = String.raw`
 const fs = require('fs');
 const net = require('net');
+const path = require('path');
 const STATE_FILE = __STATE_FILE__;
 const REDIS_PORT = __REDIS_PORT__;
+const HOME_KUBECONFIG = __HOME_KUBECONFIG__;
+const CALLS_FILE = __CALLS_FILE__;
 const args = process.argv.slice(2);
 const flag = (name) => { const a = args.find((x) => x.startsWith('--' + name + '=')); return a ? a.slice(name.length + 3) : undefined; };
 const out = (s) => process.stdout.write(s + '\n');
@@ -130,6 +152,173 @@ const DBS = {
 const KUBES = { 'smoke.teleport.local:443': ['dev-eks', 'prod-eks'], 'second.teleport.local:443': ['eu-eks'] };
 const dbsFor = (proxy) => DBS[Object.keys(DBS).find((k) => norm(k) === norm(proxy))] || [];
 const kubesFor = (proxy) => KUBES[Object.keys(KUBES).find((k) => norm(k) === norm(proxy))] || [];
+
+const samePath = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+/** Kubeconfig as the fake writes it: one "- name: <ctx> # proxy=<proxy>" line per context. */
+function readKubeconfig(file) {
+  let text = '';
+  try { text = fs.readFileSync(file, 'utf8'); } catch {}
+  const contexts = {};
+  for (const m of text.matchAll(/^- name: (\S+) # proxy=(\S+)$/gm)) contexts[m[1]] = m[2];
+  const cur = /^current-context: (\S+)$/m.exec(text);
+  return { contexts, current: cur ? cur[1] : null };
+}
+function writeKubeconfig(file, cfg) {
+  const lines = ['apiVersion: v1', 'kind: Config', 'contexts:'];
+  for (const [name, proxy] of Object.entries(cfg.contexts)) lines.push('- name: ' + name + ' # proxy=' + proxy);
+  lines.push('current-context: ' + cfg.current, '');
+  fs.writeFileSync(file, lines.join('\n'));
+}
+const K_NAMESPACES = ['default', 'kube-system', 'payments'];
+const K_PODS = {
+  payments: [
+    { name: 'api-7d9f-abc12', containers: ['api', 'istio-proxy'], ready: '2/2', labels: { app: 'api' } },
+    { name: 'worker-5c8b-xyz34', containers: ['worker'], ready: '1/1', labels: { app: 'worker' } },
+  ],
+  default: [{ name: 'hello-6b7c-q1w2e', containers: ['hello'], ready: '1/1', labels: { app: 'hello' } }],
+  'kube-system': [{ name: 'coredns-5d78-aaaaa', containers: ['coredns'], ready: '1/1', labels: { k8s: 'dns' } }],
+};
+const K_DEPLOYMENTS = { payments: ['api', 'worker'], default: ['hello'], 'kube-system': ['coredns'] };
+const K_WRITES = ['apply', 'create', 'delete', 'edit', 'patch', 'replace', 'scale', 'set', 'label', 'annotate', 'exec', 'cp', 'port-forward', 'proxy', 'run', 'drain', 'cordon', 'taint', 'debug', 'attach'];
+const K_VALUE_FLAGS = ['--namespace', '--selector', '--output', '--container', '--tail', '--since', '--sort-by'];
+const pad = (cells, widths) => cells.map((c, i) => String(c).padEnd(widths[i])).join(' ').trimEnd();
+function table(header, rows) {
+  const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => String(r[i]).length)) + 2);
+  return [pad(header, widths), ...rows.map((r) => pad(r, widths))].join('\n');
+}
+function podsIn(opt) {
+  const spaces = opt['all-namespaces'] ? K_NAMESPACES : [opt.namespace || 'default'];
+  let pods = [];
+  for (const ns of spaces) for (const pod of K_PODS[ns] || []) pods.push({ ns, ...pod });
+  if (opt.selector) {
+    const m = /^([\w.\/-]+)=([\w.-]*)$/.exec(opt.selector);
+    if (m) pods = pods.filter((pod) => pod.labels[m[1]] === m[2]);
+  }
+  return pods;
+}
+function podJson(pod, ns) {
+  return { apiVersion: 'v1', kind: 'Pod', metadata: { name: pod.name, namespace: ns, labels: pod.labels }, spec: { containers: pod.containers.map((c) => ({ name: c, image: c + ':1.0' })) }, status: { phase: 'Running' } };
+}
+function kubectl(argv) {
+  // Like the real tsh: its own flag parser runs up to the first positional, so kubectl flags there are rejected.
+  if (argv.length && argv[0].startsWith('-')) {
+    err("tsh: error: unknown long flag '" + argv[0].split('=')[0] + "'");
+    err('usage: tsh kubectl [<>...]');
+    process.exit(1);
+  }
+  let kubeconfig = null;
+  let context = null;
+  const rest = [];
+  for (const a of argv) {
+    if (a.startsWith('--kubeconfig=')) kubeconfig = a.slice('--kubeconfig='.length);
+    else if (a.startsWith('--context=')) context = a.slice('--context='.length);
+    else rest.push(a);
+  }
+  fs.appendFileSync(CALLS_FILE, JSON.stringify({ argv, kubeconfig: process.env.KUBECONFIG || null, pid: process.pid }) + '\n');
+  const cfg = readKubeconfig(kubeconfig || process.env.KUBECONFIG || HOME_KUBECONFIG);
+  const ctx = context || cfg.current;
+  if (!ctx || !cfg.contexts[ctx]) { err('error: context "' + ctx + '" does not exist'); process.exit(1); }
+  const state = read();
+  const key = findProxy(state, cfg.contexts[ctx]);
+  if (!key) { err('error: getting credentials: exec: ERROR: Not logged in.'); process.exit(1); }
+  if (expired(state.profiles[key])) { err('error: getting credentials: exec: ERROR: Your Teleport certificate has expired, please re-login with tsh login.'); process.exit(1); }
+  if (K_WRITES.includes(rest[0])) { err('FAKE KUBECTL: refusing write verb ' + rest[0]); process.exit(99); }
+  const opt = {};
+  const pos = [];
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a.startsWith('--')) {
+      const eq = a.indexOf('=');
+      if (eq > 0) opt[a.slice(2, eq)] = a.slice(eq + 1);
+      else if (K_VALUE_FLAGS.includes(a)) opt[a.slice(2)] = rest[++i];
+      else opt[a.slice(2)] = true;
+    } else pos.push(a);
+  }
+  const ns = opt.namespace || 'default';
+  const findPod = (name) => (K_PODS[ns] || []).find((pod) => pod.name === name);
+  const notFound = (kind, name) => { err('Error from server (NotFound): ' + kind + ' "' + name + '" not found'); process.exit(1); };
+  switch (pos[0]) {
+    case 'get': {
+      const type = pos[1];
+      const name = pos[2];
+      if (type === 'pods') {
+        if (name) {
+          const pod = findPod(name);
+          if (!pod) notFound('pods', name);
+          if (opt.output === 'json') out(JSON.stringify(podJson(pod, ns), null, 2));
+          else if (opt.output === 'yaml') out('apiVersion: v1\nkind: Pod\nmetadata:\n  name: ' + pod.name + '\n  namespace: ' + ns);
+          else out(table(['NAME', 'READY', 'STATUS', 'RESTARTS', 'AGE'], [[pod.name, pod.ready, 'Running', 0, '3d']]));
+          return;
+        }
+        const pods = podsIn(opt);
+        if (!pods.length) { err('No resources found in ' + ns + ' namespace.'); return; }
+        if (opt.output === 'json') return out(JSON.stringify({ apiVersion: 'v1', kind: 'List', items: pods.map((pod) => podJson(pod, pod.ns)) }, null, 2));
+        const all = Boolean(opt['all-namespaces']);
+        const wide = opt.output === 'wide';
+        const header = [...(all ? ['NAMESPACE'] : []), 'NAME', 'READY', 'STATUS', 'RESTARTS', 'AGE', ...(wide ? ['IP', 'NODE'] : [])];
+        out(table(header, pods.map((pod, i) => [...(all ? [pod.ns] : []), pod.name, pod.ready, 'Running', i, '3d', ...(wide ? ['10.0.1.' + (10 + i), 'ip-10-0-0-1'] : [])])));
+        return;
+      }
+      if (type === 'namespaces') return out(table(['NAME', 'STATUS', 'AGE'], K_NAMESPACES.map((n) => [n, 'Active', '90d'])));
+      if (type === 'deployments') {
+        const deps = K_DEPLOYMENTS[ns] || [];
+        if (name && !deps.includes(name)) notFound('deployments.apps', name);
+        return out(table(['NAME', 'READY', 'UP-TO-DATE', 'AVAILABLE', 'AGE'], (name ? [name] : deps).map((d) => [d, '2/2', 2, 2, '12d'])));
+      }
+      if (type === 'nodes') return out(table(['NAME', 'STATUS', 'ROLES', 'AGE', 'VERSION'], [['ip-10-0-0-1', 'Ready', '<none>', '40d', 'v1.29.3-eks']]));
+      if (type === 'events') {
+        return out(table(['LAST SEEN', 'TYPE', 'REASON', 'OBJECT', 'MESSAGE'], [
+          ['5m', 'Normal', 'Scheduled', 'pod/api-7d9f-abc12', 'Successfully assigned ' + ns + '/api-7d9f-abc12'],
+          ['2m', 'Warning', 'BackOff', 'pod/worker-5c8b-xyz34', 'Back-off restarting failed container'],
+        ]));
+      }
+      if (name) notFound(type, name);
+      err('No resources found in ' + ns + ' namespace.');
+      return;
+    }
+    case 'describe': {
+      const pod = pos[1] === 'pods' ? findPod(pos[2]) : null;
+      if (!pod) notFound(pos[1], pos[2]);
+      out(['Name:         ' + pod.name, 'Namespace:    ' + ns, 'Status:       Running', 'Containers:', ...pod.containers.map((c) => '  ' + c + ':\n    Image:  ' + c + ':1.0\n    State:  Running'), 'Events:       <none>'].join('\n'));
+      return;
+    }
+    case 'logs': {
+      const pod = findPod(pos[1]);
+      if (!pod) notFound('pods', pos[1]);
+      const container = opt.container || pod.containers[0];
+      if (!pod.containers.includes(container)) { err('error: container ' + container + ' is not valid for pod ' + pod.name); process.exit(1); }
+      const line = (i) => (opt.timestamps ? new Date(Date.UTC(2026, 8, 27, 10, 0, i)).toISOString() + ' ' : '') + '[' + container + (opt.previous ? ' previous' : '') + '] line ' + i;
+      const total = 300;
+      const tail = opt.tail ? Math.min(Number(opt.tail), total) : total;
+      for (let i = total - tail + 1; i <= total; i++) out(line(i));
+      if (opt.follow) {
+        let i = total;
+        setInterval(() => out(line(++i)), 150);
+      }
+      return;
+    }
+    case 'top':
+      if (pos[1] === 'nodes') return out(table(['NAME', 'CPU(cores)', 'CPU%', 'MEMORY(bytes)', 'MEMORY%'], [['ip-10-0-0-1', '412m', '10%', '3120Mi', '41%']]));
+      return out(table(['NAME', 'CPU(cores)', 'MEMORY(bytes)'], podsIn(opt).map((pod) => [pod.name, '12m', '96Mi'])));
+    case 'rollout': {
+      const name = pos[3];
+      if (!(K_DEPLOYMENTS[ns] || []).includes(name)) notFound('deployments.apps', name);
+      if (pos[1] === 'status') return out('deployment "' + name + '" successfully rolled out');
+      return out('deployment.apps/' + name + '\nREVISION  CHANGE-CAUSE\n1         <none>\n2         <none>');
+    }
+    case 'api-resources':
+      return out(table(['NAME', 'SHORTNAMES', 'APIVERSION', 'NAMESPACED', 'KIND'], [['pods', 'po', 'v1', 'true', 'Pod'], ['deployments', 'deploy', 'apps/v1', 'true', 'Deployment'], ['nodes', 'no', 'v1', 'false', 'Node']]));
+    case 'version':
+      return out('Client Version: v1.30.0-fake\nKustomize Version: v5.0.4\nServer Version: v1.29.3-eks');
+    case 'auth':
+      if (pos[1] !== 'can-i') break;
+      if (['get', 'list', 'watch'].includes(pos[2])) return out('yes');
+      out('no');
+      process.exit(1);
+  }
+  err('error: unknown command "' + rest.join(' ') + '" for "kubectl"');
+  process.exit(1);
+}
 
 function forward(port, target, onListen) {
   const server = net.createServer((sock) => {
@@ -206,8 +395,14 @@ switch (args[0]) {
     } else if (args[1] === 'login') {
       const name = args[2];
       if (!kubesFor(proxy).includes(name)) { err('ERROR: kubernetes cluster "' + name + '" not found'); process.exit(1); }
-      state.profiles[proxy].kube = name;
-      write(state);
+      const target = process.env.KUBECONFIG || HOME_KUBECONFIG;
+      const cfg = readKubeconfig(target);
+      const ctx = p.cluster + '-' + name;
+      cfg.contexts[ctx] = proxy;
+      cfg.current = ctx;
+      writeKubeconfig(target, cfg);
+      // tsh status reports the kube cluster of the kubeconfig the terminal uses.
+      if (samePath(target, HOME_KUBECONFIG)) { state.profiles[proxy].kube = name; write(state); }
       out('Logged into Kubernetes cluster "' + name + '". Try \'kubectl version\' to test the connection.');
     } else { err('ERROR: unknown kube subcommand'); process.exit(1); }
     break;
@@ -226,6 +421,17 @@ switch (args[0]) {
     forward(port, REDIS_PORT, () => out('Started authenticated tunnel for the ' + entry.spec.protocol + ' database "' + db + '" in cluster "' + sel.p.cluster + '" on 127.0.0.1:' + port + '.'));
     break;
   }
+  case 'kubectl':
+    // Like the real tsh: kubectl runs in a second tsh process sharing this one's stdout and
+    // stderr, so stopping only this process leaves it running and the pipe open. Detached on
+    // Windows because Node would otherwise kill it with its parent (a kill-on-close job), which
+    // Go's tsh does not; elsewhere it stays in the parent's process group, as Go's does.
+    if (process.env.FAKE_TSH_KUBECTL_CHILD) kubectl(args.slice(1));
+    else {
+      const child = require('child_process').spawn(process.execPath, [process.argv[1]].concat(args), { stdio: 'inherit', windowsHide: true, detached: process.platform === 'win32', env: Object.assign({}, process.env, { FAKE_TSH_KUBECTL_CHILD: '1' }) });
+      child.on('exit', (code) => process.exit(code === null ? 1 : code));
+    }
+    break;
   case '__forward':
     forward(Number(args[1]), Number(args[2]), () => out('forwarding ' + args[1] + ' -> ' + args[2]));
     break;
