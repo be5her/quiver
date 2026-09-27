@@ -7,7 +7,7 @@ import {
   QuiverError,
   addKubeHistory,
   buildKubectlArgs,
-  formatKubectlCommand,
+  formatCommandLine,
   isLoginRequiredMessage,
   kubeOperationInfo,
   kubeconfigCurrentContext,
@@ -17,12 +17,13 @@ import {
   sanitizeKubeHistory,
   type Caller,
   type KubeHistoryEntry,
+  type KubePreview,
   type KubeQuery,
   type KubeRunResult,
   type KubeStreamRead,
 } from '@quiver/core';
 import type { TeleportSession } from './session';
-import { lineSplitter, spawnTsh } from './tsh';
+import { lineSplitter, spawnTsh, type TshCommand } from './tsh';
 
 const STDOUT_CAP = 2 * 1024 * 1024;
 const STDERR_CAP = 64 * 1024;
@@ -69,15 +70,27 @@ interface LiveRun {
   endedAt: number | null;
 }
 
+interface Prepared {
+  kubeconfig: string;
+  context: string;
+}
+
+const WINDOWS = process.platform === 'win32';
+
 /**
  * Runs catalogue queries with `tsh kubectl`, which embeds kubectl, so no kubectl install is needed.
  *
  * Each (cluster, Kubernetes cluster) pair gets a private kubeconfig under the app data folder,
- * written once by `tsh kube login` with KUBECONFIG pointing at it. Every query then passes that
- * file and its context explicitly, so the kubeconfig your terminal uses is never read or changed.
+ * written once by `tsh kube login` with KUBECONFIG pointing at it. Every query then runs
+ * `tsh kubectl <template args> --kubeconfig=<that file> --context=<its context>` with no extra
+ * environment, so what the preview shows is exactly what is spawned, and the kubeconfig your
+ * terminal uses is never read or changed. The flags go after the subcommand because tsh parses
+ * its own flags up to the first positional argument and rejects kubectl's.
  */
 export class KubeRunner {
-  private readonly contexts = new Map<string, Promise<{ kubeconfig: string; context: string }>>();
+  private readonly contexts = new Map<string, Promise<Prepared>>();
+  /** Contexts that finished preparing, for previews that must not spawn anything. */
+  private readonly ready = new Map<string, Prepared>();
   private readonly runs = new Map<string, LiveRun>();
   private history: KubeHistoryEntry[] | null = null;
   private historyMtime = 0;
@@ -93,35 +106,72 @@ export class KubeRunner {
 
   // ---------- private kubeconfig ----------
 
+  private key(proxy: string, cluster: string): string {
+    return `${normalizeProxy(proxy)}\n${cluster}`;
+  }
+
   private kubeconfigPath(proxy: string, cluster: string): string {
     const dir = this.dir ?? path.join(os.tmpdir(), 'quiver-teleport-kube');
-    const hash = createHash('sha256').update(`${normalizeProxy(proxy)}\n${cluster}`).digest('hex').slice(0, 20);
+    const hash = createHash('sha256').update(this.key(proxy, cluster)).digest('hex').slice(0, 20);
     return path.join(dir, `${hash}.kubeconfig`);
   }
 
-  /** `tsh kube login` into the private kubeconfig once per app run; the kube credentials plugin renews certificates after that. */
-  private ensureContext(proxy: string, cluster: string, fresh = false): Promise<{ kubeconfig: string; context: string }> {
-    const key = `${normalizeProxy(proxy)}\n${cluster}`;
+  /** tsh's default context name, `<teleport cluster>-<kube cluster>`, until the kubeconfig says otherwise. */
+  private defaultContext(proxy: string, cluster: string): string {
+    return `${this.opts.session.cluster(proxy)?.cluster ?? normalizeProxy(proxy).replace(/:\d+$/, '')}-${cluster}`;
+  }
+
+  /** The one-time preparation, as the exact argv and environment it runs with. */
+  private setupCommand(tsh: TshCommand, proxy: string, cluster: string): { argv: string[]; env: Record<string, string> } {
+    return { argv: [...tsh.argv, 'kube', 'login', cluster, `--proxy=${proxy}`], env: { KUBECONFIG: this.kubeconfigPath(proxy, cluster) } };
+  }
+
+  /**
+   * `tsh kube login` into the private kubeconfig once per app run; the kube credentials plugin
+   * renews certificates after that. `created` tells the caller that this call did the login.
+   */
+  private async ensureContext(proxy: string, cluster: string, fresh = false): Promise<{ prepared: Prepared; created: boolean }> {
+    const key = this.key(proxy, cluster);
     const cached = this.contexts.get(key);
-    if (cached && !fresh) return cached;
+    if (cached && !fresh) return { prepared: await cached, created: false };
+    this.ready.delete(key);
     const pending = (async () => {
       const kubeconfig = this.kubeconfigPath(proxy, cluster);
       await fs.mkdir(path.dirname(kubeconfig), { recursive: true });
+      // session.run appends --proxy, matching setupCommand().
       await this.opts.session.run(['kube', 'login', cluster], proxy, LOGIN_TIMEOUT_MS, { KUBECONFIG: kubeconfig });
       const text = await fs.readFile(kubeconfig, 'utf8').catch(() => '');
-      const status = this.opts.session.cluster(proxy);
-      const context = kubeconfigCurrentContext(text) ?? `${status?.cluster ?? normalizeProxy(proxy).replace(/:\d+$/, '')}-${cluster}`;
-      return { kubeconfig, context };
+      const prepared = { kubeconfig, context: kubeconfigCurrentContext(text) ?? this.defaultContext(proxy, cluster) };
+      this.ready.set(key, prepared);
+      return prepared;
     })();
     pending.catch(() => this.contexts.delete(key));
     this.contexts.set(key, pending);
-    return pending;
+    return { prepared: await pending, created: true };
   }
 
   /** Forget contexts, e.g. after a logout; the next query logs in again. */
   forget(proxy?: string): void {
-    if (!proxy) return this.contexts.clear();
-    for (const key of [...this.contexts.keys()]) if (key.startsWith(`${normalizeProxy(proxy)}\n`)) this.contexts.delete(key);
+    for (const map of [this.contexts, this.ready]) {
+      if (!proxy) map.clear();
+      else for (const key of [...map.keys()]) if (key.startsWith(`${normalizeProxy(proxy)}\n`)) map.delete(key);
+    }
+  }
+
+  /** The full argv for one query: tsh, `kubectl`, the template, then the explicit kubeconfig and context. */
+  private queryArgv(tsh: TshCommand, args: string[], prepared: Prepared): string[] {
+    return [...tsh.argv, 'kubectl', ...args, `--kubeconfig=${prepared.kubeconfig}`, `--context=${prepared.context}`];
+  }
+
+  /** What a query would spawn, without spawning anything. */
+  async preview(proxy: string, cluster: string, query: KubeQuery): Promise<KubePreview> {
+    const args = buildKubectlArgs(query.operation, query.params);
+    const tsh = await this.opts.session.tshCommand();
+    const resolved = this.opts.session.cluster(proxy)?.proxy ?? proxy;
+    const prepared = this.ready.get(this.key(resolved, cluster));
+    const argv = this.queryArgv(tsh, args, prepared ?? { kubeconfig: this.kubeconfigPath(resolved, cluster), context: this.defaultContext(resolved, cluster) });
+    const setup = prepared ? null : this.setupCommand(tsh, resolved, cluster);
+    return { command: formatCommandLine(argv, { windows: WINDOWS }), argv, contextConfirmed: Boolean(prepared), setup: setup ? formatCommandLine(setup.argv, { windows: WINDOWS, env: setup.env }) : null };
   }
 
   // ---------- running ----------
@@ -133,19 +183,25 @@ export class KubeRunner {
     const runId = req.runId ?? newId();
     if (this.runs.get(runId)?.running) throw new QuiverError('INVALID_INPUT', `Run ${runId} is already running`);
     const cluster = await this.opts.session.requireSession(req.proxy);
-    const command = formatKubectlCommand(args);
+    const tsh = await this.opts.session.tshCommand();
+    let setup: string | null = null;
 
     const attempt = async (fresh: boolean) => {
-      const { kubeconfig, context } = await this.ensureContext(cluster.proxy, req.cluster, fresh);
-      return this.spawnRun(runId, [`--kubeconfig=${kubeconfig}`, `--context=${context}`, ...args], { KUBECONFIG: kubeconfig, TELEPORT_PROXY: cluster.proxy }, Boolean(info?.streaming), req.timeoutMs);
+      const { prepared, created } = await this.ensureContext(cluster.proxy, req.cluster, fresh);
+      if (created) {
+        const cmd = this.setupCommand(tsh, cluster.proxy, req.cluster);
+        setup = formatCommandLine(cmd.argv, { windows: WINDOWS, env: cmd.env });
+      }
+      const argv = this.queryArgv(tsh, args, prepared);
+      return { argv, live: await this.spawnRun(runId, tsh, argv, Boolean(info?.streaming), req.timeoutMs) };
     };
 
     const startedAt = nowIso();
-    let live = await attempt(false);
+    let { argv, live } = await attempt(false);
     // The private kubeconfig vanished or lost its context (data folder cleaned, tsh upgraded): log in again once.
     if (!live.running && live.exitCode !== 0 && /context .*(does not exist|not found)|no configuration has been provided|kubeconfig/i.test(live.stderr)) {
       this.runs.delete(runId);
-      live = await attempt(true);
+      ({ argv, live } = await attempt(true));
     }
     if (!live.running && live.exitCode !== 0 && isLoginRequiredMessage(live.stderr)) {
       this.forget(cluster.proxy);
@@ -166,14 +222,15 @@ export class KubeRunner {
     };
     if (req.record) await this.record(entry);
 
-    const stdout = live.lines.join('\n');
     const result: KubeRunResult = {
       runId,
       proxy: cluster.proxy,
       cluster: req.cluster,
       query: req.query,
-      command,
-      stdout,
+      command: formatCommandLine(argv, { windows: WINDOWS }),
+      argv,
+      setup,
+      stdout: live.lines.join('\n'),
       stderr: live.stderr,
       exitCode: live.exitCode,
       durationMs: entry.durationMs,
@@ -190,87 +247,84 @@ export class KubeRunner {
   }
 
   /**
-   * Spawn `tsh kubectl` with an argv array and no shell. A one-shot query resolves when the
+   * Spawn the argv with no shell and no extra environment. A one-shot query resolves when the
    * process exits (or is cancelled or times out); a stream resolves after its first output,
    * a quick exit, or a second, and keeps running.
    */
-  private spawnRun(runId: string, kubectlArgs: string[], env: Record<string, string>, streaming: boolean, timeoutMs: number): Promise<LiveRun> {
+  private spawnRun(runId: string, tsh: TshCommand, argv: string[], streaming: boolean, timeoutMs: number): Promise<LiveRun> {
     return new Promise((resolve, reject) => {
-      const tshPromise = this.opts.session.tshCommand();
-      void tshPromise.then((tsh) => {
-        let child: ChildProcess;
-        try {
-          child = spawnTsh(tsh, ['kubectl', ...kubectlArgs], env);
-        } catch (err) {
-          reject(new QuiverError('REQUEST_FAILED', `Could not start tsh kubectl: ${(err as Error).message}`));
-          return;
+      let child: ChildProcess;
+      try {
+        child = spawnTsh(tsh, argv.slice(tsh.argv.length));
+      } catch (err) {
+        reject(new QuiverError('REQUEST_FAILED', `Could not start tsh kubectl: ${(err as Error).message}`));
+        return;
+      }
+      if (streaming) this.pruneStreams();
+      const live: LiveRun = { runId, child, streaming, startedAt: Date.now(), lines: [], first: 0, dropped: 0, stderr: '', exitCode: null, running: true, cancelled: false, historyId: newId(), endedAt: null };
+      this.runs.set(runId, live);
+      let bytes = 0;
+      let settled = false;
+      const settle = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(startTimer);
+        resolve(live);
+      };
+      const push = (line: string) => {
+        if (!streaming) {
+          if (bytes > STDOUT_CAP) {
+            live.dropped++;
+            return;
+          }
+          bytes += line.length + 1;
         }
-        if (streaming) this.pruneStreams();
-        const live: LiveRun = { runId, child, streaming, startedAt: Date.now(), lines: [], first: 0, dropped: 0, stderr: '', exitCode: null, running: true, cancelled: false, historyId: newId(), endedAt: null };
-        this.runs.set(runId, live);
-        let bytes = 0;
-        let settled = false;
-        const settle = () => {
-          if (settled) return;
+        live.lines.push(line);
+        if (live.lines.length > STREAM_LINES && streaming) {
+          const extra = live.lines.length - STREAM_LINES;
+          live.lines.splice(0, extra);
+          live.first += extra;
+          live.dropped += extra;
+        }
+        if (streaming) {
+          this.emitStream(runId);
+          settle();
+        }
+      };
+      const outLines = lineSplitter(push);
+      child.stdout?.on('data', outLines);
+      child.stderr?.on('data', (chunk: Buffer) => {
+        if (live.stderr.length < STDERR_CAP) live.stderr += chunk.toString().slice(0, STDERR_CAP - live.stderr.length);
+      });
+      const limit = streaming ? STREAM_MAX_MS : timeoutMs;
+      const killTimer = setTimeout(() => {
+        if (!live.running) return;
+        this.timedOut.add(runId);
+        child.kill();
+      }, limit);
+      killTimer.unref?.();
+      const startTimer = setTimeout(settle, streaming ? 1000 : 2 ** 31 - 1);
+      child.on('error', (err) => {
+        live.running = false;
+        live.endedAt = Date.now();
+        clearTimeout(killTimer);
+        if (!settled) {
           settled = true;
           clearTimeout(startTimer);
-          resolve(live);
-        };
-        const push = (line: string) => {
-          if (!streaming) {
-            if (bytes > STDOUT_CAP) {
-              live.dropped++;
-              return;
-            }
-            bytes += line.length + 1;
-          }
-          live.lines.push(line);
-          if (live.lines.length > STREAM_LINES && streaming) {
-            const extra = live.lines.length - STREAM_LINES;
-            live.lines.splice(0, extra);
-            live.first += extra;
-            live.dropped += extra;
-          }
-          if (streaming) {
-            this.emitStream(runId);
-            settle();
-          }
-        };
-        const outLines = lineSplitter(push);
-        child.stdout?.on('data', outLines);
-        child.stderr?.on('data', (chunk: Buffer) => {
-          if (live.stderr.length < STDERR_CAP) live.stderr += chunk.toString().slice(0, STDERR_CAP - live.stderr.length);
-        });
-        const limit = streaming ? STREAM_MAX_MS : timeoutMs;
-        const killTimer = setTimeout(() => {
-          if (!live.running) return;
-          this.timedOut.add(runId);
-          child.kill();
-        }, limit);
-        killTimer.unref?.();
-        const startTimer = setTimeout(settle, streaming ? 1000 : 2 ** 31 - 1);
-        child.on('error', (err) => {
-          live.running = false;
-          live.endedAt = Date.now();
-          clearTimeout(killTimer);
-          if (!settled) {
-            settled = true;
-            clearTimeout(startTimer);
-            this.runs.delete(runId);
-            reject(new QuiverError('REQUEST_FAILED', `Could not start tsh kubectl (${tsh.argv[0]}): ${err.message}`));
-          }
-        });
-        child.on('close', (code) => {
-          outLines('\n');
-          if (live.lines.length && live.lines[live.lines.length - 1] === '') live.lines.pop();
-          live.running = false;
-          live.exitCode = live.cancelled || this.timedOut.has(runId) ? null : code;
-          live.endedAt = Date.now();
-          clearTimeout(killTimer);
-          if (streaming && settled) void this.finishStream(live);
-          settle();
-        });
-      }, reject);
+          this.runs.delete(runId);
+          reject(new QuiverError('REQUEST_FAILED', `Could not start tsh kubectl (${tsh.argv[0]}): ${err.message}`));
+        }
+      });
+      child.on('close', (code) => {
+        outLines('\n');
+        if (live.lines.length && live.lines[live.lines.length - 1] === '') live.lines.pop();
+        live.running = false;
+        live.exitCode = live.cancelled || this.timedOut.has(runId) ? null : code;
+        live.endedAt = Date.now();
+        clearTimeout(killTimer);
+        if (streaming && settled) void this.finishStream(live);
+        settle();
+      });
     });
   }
 

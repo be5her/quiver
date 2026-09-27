@@ -200,6 +200,12 @@ function podJson(pod, ns) {
   return { apiVersion: 'v1', kind: 'Pod', metadata: { name: pod.name, namespace: ns, labels: pod.labels }, spec: { containers: pod.containers.map((c) => ({ name: c, image: c + ':1.0' })) }, status: { phase: 'Running' } };
 }
 function kubectl(argv) {
+  // Like the real tsh: its own flag parser runs up to the first positional, so kubectl flags there are rejected.
+  if (argv.length && argv[0].startsWith('-')) {
+    err("tsh: error: unknown long flag '" + argv[0].split('=')[0] + "'");
+    err('usage: tsh kubectl [<>...]');
+    process.exit(1);
+  }
   let kubeconfig = null;
   let context = null;
   const rest = [];

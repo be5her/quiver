@@ -9,7 +9,7 @@ import {
   KubeQuerySchema,
   addKubeHistory,
   buildKubectlArgs,
-  formatKubectlCommand,
+  formatCommandLine,
   kubeQueryErrors,
   kubeconfigCurrentContext,
   lastKubeNamespace,
@@ -243,8 +243,14 @@ describe('form helpers', () => {
   });
 
   it('display command quotes what needs quoting', () => {
-    expect(formatKubectlCommand(['get', 'pods', '--selector', 'app in (a,b)'])).toBe("kubectl get pods --selector 'app in (a,b)'");
-    expect(formatKubectlCommand(['get', 'events', '--sort-by', '.lastTimestamp'])).toBe('kubectl get events --sort-by .lastTimestamp');
+    expect(formatCommandLine(['/usr/bin/tsh', 'kubectl', 'get', 'pods', '--selector', 'app in (a,b)', '--kubeconfig=/home/me/k.cfg'])).toBe(
+      "/usr/bin/tsh kubectl get pods --selector 'app in (a,b)' --kubeconfig=/home/me/k.cfg",
+    );
+    expect(formatCommandLine(['tsh', 'kube', 'login', 'dev'], { env: { KUBECONFIG: '/tmp/a b' } })).toBe("KUBECONFIG='/tmp/a b' tsh kube login dev");
+    expect(formatCommandLine(['C:\\Program Files\\Teleport Connect\\tsh.exe', 'kubectl', 'get', 'events', '--sort-by', '.lastTimestamp', '--kubeconfig=C:\\Users\\me\\x.kubeconfig'], { windows: true })).toBe(
+      "& 'C:\\Program Files\\Teleport Connect\\tsh.exe' kubectl get events --sort-by .lastTimestamp --kubeconfig=C:\\Users\\me\\x.kubeconfig",
+    );
+    expect(formatCommandLine(['tsh.exe', 'kube', 'login', 'dev'], { windows: true, env: { KUBECONFIG: 'C:\\x.cfg' } })).toBe("$env:KUBECONFIG='C:\\x.cfg'; tsh.exe kube login dev");
   });
 
   it('parses picker data', () => {

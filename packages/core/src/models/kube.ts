@@ -323,10 +323,27 @@ export const KUBE_WRITE_VERBS = [
   'wait',
 ] as const;
 
-/** A human-readable, copyable rendering of an argv. Display only: nothing ever parses it back. */
-export function formatKubectlCommand(args: readonly string[], program = 'kubectl'): string {
-  const quote = (a: string) => (/^[A-Za-z0-9_./:=,@%+-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`);
-  return [program, ...args].map(quote).join(' ');
+export interface CommandLineOptions {
+  /** PowerShell quoting (`& 'C:\\Program Files\\...' ...`, `$env:NAME='...'; `) instead of POSIX sh. */
+  windows?: boolean;
+  /** Environment variables the process gets on top of the app's own. */
+  env?: Record<string, string>;
+}
+
+/**
+ * The exact argv as a copyable command line for the platform's usual shell. Display only:
+ * Quiver spawns the argv array without a shell and never parses this text back.
+ */
+export function formatCommandLine(argv: readonly string[], options: CommandLineOptions = {}): string {
+  const safe = options.windows ? /^[A-Za-z0-9_./:=,@%+\\-]+$/ : /^[A-Za-z0-9_./:=,@%+-]+$/;
+  const quote = (a: string) => (a !== '' && safe.test(a) ? a : options.windows ? `'${a.replace(/'/g, "''")}'` : `'${a.replace(/'/g, `'\\''`)}'`);
+  const env = Object.entries(options.env ?? {});
+  if (options.windows) {
+    const [program, ...rest] = argv.map(quote);
+    const call = [program?.startsWith("'") ? `& ${program}` : program, ...rest].join(' ');
+    return [...env.map(([k, v]) => `$env:${k}='${v.replace(/'/g, "''")}';`), call].join(' ');
+  }
+  return [...env.map(([k, v]) => `${k}=${quote(v)}`), ...argv.map(quote)].join(' ');
 }
 
 // ---------- results, history ----------
@@ -336,8 +353,12 @@ export interface KubeRunResult {
   proxy: string;
   cluster: string;
   query: KubeQuery;
-  /** What ran, as display text (context flags left out). */
+  /** The exact command line that ran, program and every flag included (display only). */
   command: string;
+  /** The exact argv that was spawned, without a shell. */
+  argv: string[];
+  /** When this run first had to prepare the private kubeconfig: that `tsh kube login` command line, else null. */
+  setup: string | null;
   stdout: string;
   stderr: string;
   /** Null while a stream is running, or when the process was killed. */
@@ -351,6 +372,16 @@ export interface KubeRunResult {
   streaming: boolean;
   historyId: string;
   startedAt: string;
+}
+
+/** What `teleport.kube.query` would spawn for a query, before running it. */
+export interface KubePreview {
+  command: string;
+  argv: string[];
+  /** False until the private kubeconfig exists: the context is then tsh's default name, confirmed by the first run. */
+  contextConfirmed: boolean;
+  /** The one-time `tsh kube login` that the first run does first, or null when it already ran. */
+  setup: string | null;
 }
 
 export interface KubeStreamRead {

@@ -4,8 +4,6 @@ import {
   KUBE_OUTPUTS,
   KUBE_RESOURCE_TYPES,
   KUBE_TAIL_MAX,
-  buildKubectlArgs,
-  formatKubectlCommand,
   kubeOperationInfo,
   kubeQueryErrors,
   newId,
@@ -16,6 +14,7 @@ import {
   type KubeField,
   type KubeHistoryEntry,
   type KubeOperation,
+  type KubePreview,
   type KubeQuery,
   type KubeRunResult,
   type KubeStreamRead,
@@ -95,7 +94,10 @@ export function KubeQueryTab({ tab }: TabProps) {
   const query = useMemo(() => toQuery(operation, values), [operation, values]);
   const errors = useMemo(() => kubeQueryErrors(query), [query]);
   const valid = Object.keys(errors).length === 0;
-  const preview = useMemo(() => (valid ? formatKubectlCommand(buildKubectlArgs(query.operation, query.params)) : null), [valid, query]);
+  // The host builds the preview from the same argv it would spawn: tsh path, template, kubeconfig and context.
+  const previewed = useInvoke<KubePreview>('teleport.kube.preview', { proxy, cluster, query }, { workspaceId: null, enabled: valid });
+  const preview = valid ? previewed.data : undefined;
+  const refreshPreview = previewed.refresh;
   const info = kubeOperationInfo(operation)!;
 
   const set = (key: string, value: Values[string]) => {
@@ -160,6 +162,7 @@ export function KubeQueryTab({ tab }: TabProps) {
       setError(toErrorPayload(err));
       setRunning(null);
     }
+    void refreshPreview();
   };
 
   const stop = () => {
@@ -239,9 +242,16 @@ export function KubeQueryTab({ tab }: TabProps) {
             ))}
           </div>
           <div className="flex items-center gap-2">
-            <code className="flex-1 min-w-0 truncate rounded-md border border-edge bg-canvas px-2.5 h-8 leading-8 text-xs font-mono text-muted select-all" title={preview ?? undefined} data-testid="kube-preview">
-              {preview ?? 'Fill in the required fields to see the command'}
-            </code>
+            <div className="flex-1 min-w-0 flex items-start gap-1 rounded-md border border-edge bg-canvas pl-2.5 pr-1 py-1.5">
+              <code className="flex-1 min-w-0 text-xs font-mono text-muted whitespace-pre-wrap break-all select-all" data-testid="kube-preview">
+                {!valid ? 'Fill in the required fields to see the command' : (preview?.command ?? '…')}
+              </code>
+              {preview && (
+                <IconButton label="Copy command" size="sm" onClick={() => void navigator.clipboard.writeText(preview.command).then(() => notify('Command copied', 'success'))}>
+                  <Copy className="size-3" />
+                </IconButton>
+              )}
+            </div>
             {running ? (
               <Button size="md" variant="danger" icon={<Square className="size-3.5" />} onClick={stop} data-testid="kube-stop">
                 {running.streaming ? 'Stop' : 'Cancel'}
@@ -252,8 +262,13 @@ export function KubeQueryTab({ tab }: TabProps) {
               </Button>
             )}
           </div>
+          {preview?.setup && (
+            <p className="text-[11px] text-muted -mt-1 break-all" data-testid="kube-setup">
+              The first run prepares this cluster's private kubeconfig once with <code className="font-mono">{preview.setup}</code>
+            </p>
+          )}
           <p className="text-[11px] text-muted -mt-1">
-            {info.description}. Read-only, and your terminal's kubectl context is not changed. The preview is for reference: the host builds the command from this form, never from text.
+            {info.description}. Read-only, and your terminal's kubectl context is not changed. This is the exact command that runs, with nothing added; it is built on the host from this form, never from text.
           </p>
         </div>
 
@@ -265,6 +280,7 @@ export function KubeQueryTab({ tab }: TabProps) {
           running={running}
           truncated={Boolean(result?.truncated) || (stream?.dropped ?? 0) > 0}
           error={error}
+          ran={result ? { command: result.command, setup: result.setup } : null}
           onRetry={() => void run()}
           hasResult={Boolean(result) || Boolean(error)}
         />
@@ -471,6 +487,7 @@ function OutputPanel({
   running,
   truncated,
   error,
+  ran,
   onRetry,
   hasResult,
 }: {
@@ -481,6 +498,7 @@ function OutputPanel({
   running: { streaming: boolean } | null;
   truncated: boolean;
   error: ErrorPayload | null;
+  ran: { command: string; setup: string | null } | null;
   onRetry(): void;
   hasResult: boolean;
 }) {
@@ -547,6 +565,12 @@ function OutputPanel({
       {error && (
         <div className="p-2 shrink-0">
           <DbError error={error} onRetry={onRetry} />
+        </div>
+      )}
+      {ran && (
+        <div className="px-3 py-1.5 border-b border-edge shrink-0 text-[11px] font-mono text-muted break-all select-all" data-testid="kube-ran">
+          {ran.setup && <div>{ran.setup}</div>}
+          <div>{ran.command}</div>
         </div>
       )}
       <div ref={scroller} className="flex-1 min-h-0 overflow-auto bg-canvas" data-testid="kube-output">

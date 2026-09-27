@@ -28,6 +28,7 @@ import type {
   Environment,
   HistoryEntry,
   KubeHistoryEntry,
+  KubePreview,
   KubeRunResult,
   KubeStreamRead,
   McpConfigFile,
@@ -422,22 +423,36 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     {
       const homeBefore = await fs.readFile(fakeTsh.homeKubeconfig, 'utf8');
       const kq = (query: unknown, extra: Record<string, unknown> = {}) => run<KubeRunResult>('teleport.kube.query', { proxy: first, cluster: 'prod-eks', query, ...extra }, null);
-      const pods = await kq({ operation: 'list', params: { resource: 'pods', namespace: 'payments' } });
+      const podsQuery = { operation: 'list', params: { resource: 'pods', namespace: 'payments' } };
+      const previewFirst = await run<KubePreview>('teleport.kube.preview', { proxy: first, cluster: 'prod-eks', query: podsQuery }, null);
+      check(
+        'kube: preview before the first run shows the one-time setup',
+        !previewFirst.contextConfirmed && /kube login prod-eks --proxy=smoke\.teleport\.local:443$/.test(previewFirst.setup ?? '') && (previewFirst.setup ?? '').includes('KUBECONFIG') && previewFirst.command.includes(' kubectl get pods --namespace payments --kubeconfig='),
+        previewFirst,
+      );
+      const pods = await kq(podsQuery);
       check(
         'kube: list pods in a namespace',
-        pods.exitCode === 0 && pods.stdout.includes('api-7d9f-abc12') && pods.stdout.includes('worker-5c8b-xyz34') && !pods.stdout.includes('hello-') && pods.command === 'kubectl get pods --namespace payments' && !pods.streaming,
+        pods.exitCode === 0 && pods.stdout.includes('api-7d9f-abc12') && pods.stdout.includes('worker-5c8b-xyz34') && !pods.stdout.includes('hello-') && pods.command.includes(' kubectl get pods --namespace payments --kubeconfig=') && !pods.streaming,
         { command: pods.command, exit: pods.exitCode, stderr: pods.stderr, stdout: pods.stdout.slice(0, 200) },
       );
       const podsCall = (await fakeTsh.kubectlCalls()).at(-1);
-      const privateConfig = podsCall?.argv[0]?.replace(/^--kubeconfig=/, '') ?? '';
+      const privateConfig = podsCall?.argv.at(-2)?.replace(/^--kubeconfig=/, '') ?? '';
       check(
-        'kube: argv is the template plus an explicit private kubeconfig and context',
-        JSON.stringify(podsCall?.argv.slice(1)) === JSON.stringify(['--context=smoke.teleport.local-prod-eks', 'get', 'pods', '--namespace', 'payments']) &&
-          podsCall?.argv[0]?.startsWith('--kubeconfig=') === true &&
-          podsCall?.kubeconfig === privateConfig &&
+        'kube: argv is the template, then an explicit private kubeconfig and context (after the subcommand, where tsh accepts them)',
+        JSON.stringify(podsCall?.argv.slice(0, -2)) === JSON.stringify(['get', 'pods', '--namespace', 'payments']) &&
+          podsCall?.argv.at(-2)?.startsWith('--kubeconfig=') === true &&
+          podsCall?.argv.at(-1) === '--context=smoke.teleport.local-prod-eks' &&
           path.resolve(privateConfig).startsWith(path.resolve(host.api.dataDir ?? '/nowhere')),
         podsCall,
       );
+      check(
+        'kube: the result shows exactly what was spawned, and the setup that ran',
+        JSON.stringify(pods.argv.slice(-7)) === JSON.stringify(['kubectl', ...(podsCall?.argv ?? [])]) && pods.setup === previewFirst.setup,
+        { argv: pods.argv, setup: pods.setup },
+      );
+      const previewAfter = await run<KubePreview>('teleport.kube.preview', { proxy: first, cluster: 'prod-eks', query: podsQuery }, null);
+      check('kube: preview is the exact command that runs', previewAfter.contextConfirmed && previewAfter.setup === null && previewAfter.command === pods.command, previewAfter);
       const statusAfterQuery = await run<TeleportStatus>('teleport.status', { refresh: true }, null);
       const homeAfter = await fs.readFile(fakeTsh.homeKubeconfig, 'utf8');
       check(
@@ -449,13 +464,13 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       const logLines = logs.stdout.split('\n');
       check(
         'kube: logs with tail, container and timestamps',
-        logs.exitCode === 0 && logLines.length === 5 && logLines.every((l) => l.includes('[istio-proxy]') && /^\d{4}-\d\d-\d\dT/.test(l)) && logLines[4].endsWith('line 300') && logs.command === 'kubectl logs api-7d9f-abc12 --namespace payments --container istio-proxy --tail 5 --timestamps',
+        logs.exitCode === 0 && logLines.length === 5 && logLines.every((l) => l.includes('[istio-proxy]') && /^\d{4}-\d\d-\d\dT/.test(l)) && logLines[4].endsWith('line 300') && logs.command.includes(' kubectl logs api-7d9f-abc12 --namespace payments --container istio-proxy --tail 5 --timestamps --kubeconfig=') && logs.setup === null,
         { command: logs.command, lines: logLines },
       );
       const described = await kq({ operation: 'describe', params: { resource: 'pods', name: 'api-7d9f-abc12', namespace: 'payments' } });
       check('kube: describe', described.exitCode === 0 && described.stdout.includes('Name:         api-7d9f-abc12') && described.stdout.includes('istio-proxy'), described.stdout.slice(0, 200));
       const events = await kq({ operation: 'events', params: { namespace: 'payments' } });
-      check('kube: events sorted by time', events.exitCode === 0 && events.stdout.includes('BackOff') && events.command.endsWith('--sort-by .lastTimestamp'), events.command);
+      check('kube: events sorted by time', events.exitCode === 0 && events.stdout.includes('BackOff') && events.command.includes('--sort-by .lastTimestamp --kubeconfig='), events.command);
       const canDelete = await kq({ operation: 'can-i', params: { verb: 'delete', resource: 'pods', namespace: 'payments' } });
       const canGet = await kq({ operation: 'can-i', params: { verb: 'get', resource: 'pods', namespace: 'payments' } });
       check('kube: auth can-i answers without being an error', canDelete.exitCode === 1 && canDelete.stdout.trim() === 'no' && canGet.exitCode === 0 && canGet.stdout.trim() === 'yes');
@@ -1186,7 +1201,7 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       const mcpRaw = await kubeCall({ proxy: first, cluster: 'prod-eks', query: { operation: 'version', params: {} }, args: ['delete', 'ns', 'payments'], command: 'kubectl delete ns payments' });
       const mcpRawOut = JSON.parse(mcpRaw.result?.content?.[0]?.text ?? '{}') as Partial<KubeRunResult>;
       const rawCall = (await fakeTsh.kubectlCalls()).at(-1);
-      check('mcp: extra raw arguments are ignored, never passed on', mcpRawOut.command === 'kubectl version' && JSON.stringify(rawCall?.argv.slice(2)) === '["version"]', rawCall);
+      check('mcp: extra raw arguments are ignored, never passed on', JSON.stringify(rawCall?.argv.slice(0, -2)) === '["version"]' && JSON.stringify(mcpRawOut.argv?.slice(-3, -2)) === '["version"]', rawCall);
       const mcpParamFlag = await kubeCall({ proxy: first, cluster: 'prod-eks', query: { operation: 'logs', params: { pod: 'api-7d9f-abc12', flags: '--all-containers' } } });
       check('mcp: unknown kube params are rejected', mcpParamFlag.result?.isError === true && (await fakeTsh.kubectlCalls()).length === callsBeforeMcp + 1);
       const mcpHist = await rpc('tools/call', { name: 'teleport_kube_history_list', arguments: { cluster: 'prod-eks' } });
@@ -1648,7 +1663,11 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         await setField('kube-field-namespace', 'payments');
         await wait(200);
         const listPreview = await text('kube-preview');
-        check('ui: preview shows the command for the form', listPreview === 'kubectl get pods --namespace payments', listPreview);
+        check(
+          'ui: preview shows the full command for the form',
+          typeof listPreview === 'string' && listPreview.includes(' kubectl get pods --namespace payments --kubeconfig=') && listPreview.endsWith(' --context=smoke.teleport.local-prod-eks'),
+          listPreview,
+        );
         await js(`document.querySelector('[data-testid=kube-run]').click()`);
         await wait(1500);
         const outputText = await text('kube-output');
@@ -1677,10 +1696,12 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         await setField('kube-field-tail', '25');
         await wait(200);
         const logsPreview = await text('kube-preview');
-        check('ui: logs preview', logsPreview === 'kubectl logs api-7d9f-abc12 --namespace payments --container istio-proxy --tail 25' && (await runDisabled()) === false, logsPreview);
+        check('ui: logs preview', typeof logsPreview === 'string' && logsPreview.includes(' kubectl logs api-7d9f-abc12 --namespace payments --container istio-proxy --tail 25 --kubeconfig=') && (await runDisabled()) === false, logsPreview);
         await js(`document.querySelector('[data-testid=kube-run]').click()`);
         await wait(1500);
         const logText = await text('kube-output');
+        const ranLine = await text('kube-ran');
+        check('ui: output shows the exact command that ran', typeof ranLine === 'string' && ranLine.includes(' kubectl logs api-7d9f-abc12 '), ranLine);
         check('ui: logs rendered', typeof logText === 'string' && logText.includes('[istio-proxy] line 300') && !logText.includes('line 275\n'), String(logText).slice(-80));
         const historyRows = await js(`document.querySelectorAll('[data-testid=kube-history-entry]').length`);
         check('ui: history panel lists the runs', typeof historyRows === 'number' && historyRows >= 3, historyRows);

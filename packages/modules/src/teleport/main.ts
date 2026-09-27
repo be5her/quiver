@@ -22,6 +22,7 @@ import {
   type DbConnectionSummary,
   type HostApi,
   type KubeHistoryEntry,
+  type KubePreview,
   type KubeRunResult,
   type KubeStreamRead,
   type ParsedDatabase,
@@ -406,6 +407,19 @@ const kubeQuery = defineCommand({
   },
 });
 
+const kubePreview = defineCommand({
+  id: 'teleport.kube.preview',
+  title: 'Preview a Kubernetes query',
+  description:
+    'The exact command line teleport.kube.query would spawn for a query (tsh path, the template arguments, --kubeconfig and --context), without running anything, plus the one-time tsh kube login that prepares the private kubeconfig if it has not run yet.',
+  scope: 'global',
+  input: z.object({ proxy: ProxyInput, cluster: KubeClusterInput, query: KubeQuerySchema }),
+  handler: async ({ proxy: proxyArg, cluster, query }, ctx): Promise<KubePreview> => {
+    const proxy = await resolveKubeProxy(ctx.host, proxyArg, cluster);
+    return getTeleport(ctx.host).kube.preview(proxy, cluster, query);
+  },
+});
+
 const kubeStreamRead = defineCommand({
   id: 'teleport.kube.stream.read',
   title: 'Read a followed Kubernetes log',
@@ -524,6 +538,7 @@ export const teleportModule = defineModule({
     kubeList,
     kubeLogin,
     kubeQuery,
+    kubePreview,
     kubeStreamRead,
     kubeCancel,
     kubeHistoryList,
