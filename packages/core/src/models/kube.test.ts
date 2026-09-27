@@ -254,6 +254,14 @@ describe('form helpers', () => {
     expect(formatCommandLine(['tsh.exe', 'kube', 'login', 'dev'], { windows: true, env: { KUBECONFIG: 'C:\\x.cfg' } })).toBe("$env:KUBECONFIG='C:\\x.cfg'; tsh.exe kube login dev");
   });
 
+  it('keeps a ~ inside a word bare (Windows short names) but quotes one a shell would expand', () => {
+    // GitHub's Windows runners put temp files under C:\Users\RUNNER~1.
+    expect(formatCommandLine(['C:/Users/RUNNER~1/tsh.exe', 'kubectl', 'get', 'pods', '--kubeconfig=C:\\Users\\RUNNER~1\\k.kubeconfig'], { windows: true })).toBe(
+      'C:/Users/RUNNER~1/tsh.exe kubectl get pods --kubeconfig=C:\\Users\\RUNNER~1\\k.kubeconfig',
+    );
+    expect(formatCommandLine(['tsh', 'kubectl', 'get', 'pods', '--kubeconfig=~/k.cfg', '~/tsh', 'a:~b'])).toBe("tsh kubectl get pods '--kubeconfig=~/k.cfg' '~/tsh' 'a:~b'");
+  });
+
   it('suggests the closest namespace for a typo', () => {
     const namespaces = ['default', 'fina-checkout', 'omni-checkout', 'omni-pos', 'omni-sf'];
     expect(closestName('omni-chekcout', namespaces)).toBe('omni-checkout');

@@ -335,8 +335,11 @@ export interface CommandLineOptions {
  * Quiver spawns the argv array without a shell and never parses this text back.
  */
 export function formatCommandLine(argv: readonly string[], options: CommandLineOptions = {}): string {
-  const safe = options.windows ? /^[A-Za-z0-9_./:=,@%+\\-]+$/ : /^[A-Za-z0-9_./:=,@%+-]+$/;
-  const quote = (a: string) => (a !== '' && safe.test(a) ? a : options.windows ? `'${a.replace(/'/g, "''")}'` : `'${a.replace(/'/g, `'\\''`)}'`);
+  const safe = options.windows ? /^[A-Za-z0-9_./:=,@%+~\\-]+$/ : /^[A-Za-z0-9_./:=,@%+~-]+$/;
+  // A `~` inside a word is literal in both shells (Windows short names like `RUNNER~1`), but
+  // sh expands one that starts a word or follows `=` or `:`, so those still get quoted.
+  const expandsTilde = /^~|[=:]~/;
+  const quote = (a: string) => (a !== '' && safe.test(a) && !expandsTilde.test(a) ? a : options.windows ? `'${a.replace(/'/g, "''")}'` : `'${a.replace(/'/g, `'\\''`)}'`);
   const env = Object.entries(options.env ?? {});
   if (options.windows) {
     const [program, ...rest] = argv.map(quote);
