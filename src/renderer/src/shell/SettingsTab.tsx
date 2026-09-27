@@ -3,7 +3,7 @@ import { Button, Checkbox, Input, KeyValueEditor, Label, Select, applyTheme, cn,
 import { Copy, Download, ExternalLink, RotateCw, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { QuiverMark } from './Logo';
-import { checkForUpdates, downloadUpdate, installUpdate, openExternal } from './updates';
+import { checkForUpdates, downloadUpdate, installUpdate, openExternal, setUpdateChannel } from './updates';
 
 const RELEASES_URL = 'https://github.com/be5her/quiver/releases';
 const ISSUES_URL = 'https://github.com/be5her/quiver/issues';
@@ -215,6 +215,7 @@ export function SettingsTab(_props: TabProps) {
 function AboutPanel() {
   const update = useAppStore((s) => s.update);
   const [checking, setChecking] = useState(false);
+  const [switching, setSwitching] = useState(false);
   const version = update?.current ?? window.quiver.version;
   const platform = PLATFORM_NAMES[window.quiver.platform] ?? window.quiver.platform;
   const check = async () => {
@@ -225,6 +226,14 @@ function AboutPanel() {
       setChecking(false);
     }
   };
+  const switchChannel = async (beta: boolean) => {
+    setSwitching(true);
+    try {
+      await setUpdateChannel(beta ? 'beta' : 'stable');
+    } finally {
+      setSwitching(false);
+    }
+  };
   const hasRelease = update?.status === 'available' || update?.status === 'downloaded';
   return (
     <div className="flex items-start gap-4">
@@ -232,6 +241,7 @@ function AboutPanel() {
       <div className="flex-1 min-w-0">
         <p className="text-sm font-semibold" data-testid="about-version">
           Quiver {version}
+          {/-beta\./.test(version) && <span className="ml-2 text-[10px] font-medium uppercase tracking-wide text-accent border border-accent/40 rounded px-1 py-px align-middle">Beta</span>}
         </p>
         <p className="text-xs text-muted mt-0.5">
           {platform} ·{' '}
@@ -284,6 +294,19 @@ function AboutPanel() {
             <div className="h-full bg-accent transition-[width]" style={{ width: `${update.progress?.percent ?? 0}%` }} />
           </div>
         )}
+        {update?.betaSupported && (
+          <div className="mt-4">
+            <label className="flex items-center gap-2 text-sm">
+              <Checkbox data-testid="update-beta" checked={update.channel === 'beta'} disabled={switching} onChange={(e) => void switchChannel(e.target.checked)} />
+              Beta builds
+            </label>
+            <p className="text-xs text-muted mt-1">
+              {update.channel === 'beta'
+                ? 'Quiver also offers the build made from every change merged on GitHub, before it reaches a stable release. Turning this off keeps the version you have until a newer stable release ships.'
+                : 'Get a new build for every change merged on GitHub, before it reaches a stable release. Beta builds are published for Windows only.'}
+            </p>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -295,7 +318,9 @@ function describeUpdate(update: UpdateState | null): string {
   const when = update.checkedAt ? ` Checked at ${new Date(update.checkedAt).toLocaleTimeString()}.` : '';
   switch (update.status) {
     case 'idle':
-      return 'Quiver looks for a new release shortly after launch and every six hours. Nothing is downloaded until you ask.';
+      return update.channel === 'beta' && update.betaSupported
+        ? 'Quiver looks for a new stable or beta build shortly after launch and every hour. Nothing is downloaded until you ask.'
+        : 'Quiver looks for a new release shortly after launch and every six hours. Nothing is downloaded until you ask.';
     case 'checking':
       return 'Checking GitHub Releases…';
     case 'none':

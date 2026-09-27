@@ -1,4 +1,4 @@
-import { toErrorPayload, type UpdateState } from '@quiver/core';
+import { toErrorPayload, type UpdateChannel, type UpdateState } from '@quiver/core';
 import { confirmDialog, invoke, notify, useAppStore, useTabsStore } from '@quiver/ui';
 
 /** Keeps the store in step with the host and tells the user about outcomes they asked for. */
@@ -22,6 +22,16 @@ export async function checkForUpdates(): Promise<void> {
     const state = await invoke<UpdateState>('app.update.check', {}, null);
     useAppStore.getState().setUpdate(state);
     if (!state.supported) notify(state.reason ?? 'Updates are not available in this build.', 'info');
+  } catch (err) {
+    notify(toErrorPayload(err).message, 'error');
+  }
+}
+
+/** Joins or leaves the beta channel, then checks right away so the user sees what the channel offers. */
+export async function setUpdateChannel(channel: UpdateChannel): Promise<void> {
+  try {
+    const state = await invoke<UpdateState>('app.update.channel', { channel }, null);
+    useAppStore.getState().setUpdate(state);
   } catch (err) {
     notify(toErrorPayload(err).message, 'error');
   }

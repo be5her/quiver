@@ -28,7 +28,7 @@
     "smoke": "electron-vite build && cross-env QUIVER_SMOKE=1 electron .",
     "package": "electron-vite build && electron-builder --publish never",
     "icon": "electron scripts/render-icon.cjs",
-    "release": "node scripts/release.mjs"
+    "release:plan": "node scripts/release/plan.mjs stable"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.1",

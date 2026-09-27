@@ -1,6 +1,9 @@
 import {
   DbConnectionSchema,
+  KUBE_CLUSTER_NAME,
+  KubeQuerySchema,
   QuiverError,
+  lastKubeNamespace,
   clusterLabel,
   dbKindForProtocol,
   defineCommand,
@@ -18,6 +21,10 @@ import {
   type DbConnection,
   type DbConnectionSummary,
   type HostApi,
+  type KubeHistoryEntry,
+  type KubePreview,
+  type KubeRunResult,
+  type KubeStreamRead,
   type ParsedDatabase,
   type ParsedKubeCluster,
   type TeleportClusterStatus,
@@ -165,6 +172,7 @@ const logout = defineCommand({
     if (proxy) await tunnels.stopCluster(proxy);
     else await tunnels.stopAll();
     invalidateCaches(proxy);
+    getTeleport(ctx.host).kube.forget(proxy);
     return session.logout(proxy);
   },
 });
@@ -340,21 +348,28 @@ const kubeList = defineCommand({
   handler: async ({ proxy, refresh }, ctx): Promise<TeleportKubeCluster[]> => listKubeClusters(ctx.host, proxy, Boolean(refresh)),
 });
 
+/** The Teleport cluster a Kubernetes cluster belongs to: the given proxy, else the only cluster that lists it. */
+async function resolveKubeProxy(host: HostApi, proxyArg: string | undefined, cluster: string): Promise<string> {
+  const { session } = getTeleport(host);
+  if (proxyArg) return session.resolveProxy(proxyArg);
+  const matches = (await listKubeClusters(host, undefined, false)).filter((k) => k.name === cluster);
+  if (matches.length > 1) throw new QuiverError('INVALID_INPUT', `"${cluster}" exists on several clusters; pass proxy: ${matches.map((k) => k.proxy).join(', ')}`);
+  return matches[0]?.proxy ?? session.resolveProxy(undefined);
+}
+
+const KubeClusterInput = z.string().max(253).regex(KUBE_CLUSTER_NAME, 'Not a Kubernetes cluster name').describe('Kubernetes cluster name from teleport.kube.list');
+
 const kubeLogin = defineCommand({
   id: 'teleport.kube.login',
-  title: 'Select Kubernetes cluster',
-  description: 'Runs tsh kube login <cluster> on the given Teleport cluster, which writes the kubeconfig context used by kubectl in your terminal.',
+  title: 'Set kubectl context for your terminal',
+  description:
+    'Runs tsh kube login <cluster> on the given Teleport cluster, which rewrites the kubeconfig your terminal uses so kubectl there points at this cluster. Not needed for teleport.kube.query, which never touches that kubeconfig.',
   scope: 'global',
   mutating: true,
-  input: z.object({ proxy: ProxyInput, cluster: z.string() }),
+  input: z.object({ proxy: ProxyInput, cluster: KubeClusterInput }),
   handler: async ({ proxy: proxyArg, cluster }, ctx) => {
     const { session } = getTeleport(ctx.host);
-    let proxy = proxyArg;
-    if (!proxy) {
-      const matches = (await listKubeClusters(ctx.host, undefined, false)).filter((k) => k.name === cluster);
-      if (matches.length > 1) throw new QuiverError('INVALID_INPUT', `"${cluster}" exists on several clusters; pass proxy: ${matches.map((k) => k.proxy).join(', ')}`);
-      proxy = matches[0]?.proxy ?? session.resolveProxy(undefined);
-    }
+    const proxy = await resolveKubeProxy(ctx.host, proxyArg, cluster);
     const output = await session.run(['kube', 'login', cluster], proxy);
     invalidateCaches();
     void session.refresh().catch(() => {});
@@ -362,9 +377,176 @@ const kubeLogin = defineCommand({
   },
 });
 
+// ---------- kubernetes queries ----------
+
+const RunIdInput = z
+  .string()
+  .regex(/^[A-Za-z0-9_-]{1,64}$/)
+  .describe('Id of the run, chosen by the caller so it can cancel before the result arrives');
+
+const kubeQuery = defineCommand({
+  id: 'teleport.kube.query',
+  title: 'Query a Kubernetes cluster (read-only)',
+  description:
+    'Runs one predefined, read-only kubectl operation against a Kubernetes cluster reached through Teleport: list, get, describe, logs, logs-follow, events, top-pods, top-nodes, rollout-status, rollout-history, namespaces, api-resources, version or can-i. ' +
+    'There is no way to pass a kubectl command, arguments or flags: pick an operation and fill in its typed parameters. Secrets cannot be read. ' +
+    'The query targets the cluster explicitly through a private kubeconfig, so the kubectl context in your terminal is untouched. ' +
+    'Returns stdout, stderr, the exit code and the duration. logs-follow returns at once with streaming: true; read more with teleport.kube.stream.read and stop it with teleport.kube.cancel.',
+  scope: 'global',
+  input: z.object({
+    proxy: ProxyInput,
+    cluster: KubeClusterInput,
+    query: KubeQuerySchema,
+    runId: RunIdInput.optional(),
+    timeoutSeconds: z.number().int().min(1).max(600).optional().describe('Stop a one-shot query after this long (default 60)'),
+    record: z.boolean().optional().describe('Add the run to the local history (default true)'),
+  }),
+  handler: async ({ proxy: proxyArg, cluster, query, runId, timeoutSeconds, record }, ctx): Promise<KubeRunResult> => {
+    const proxy = await resolveKubeProxy(ctx.host, proxyArg, cluster);
+    return getTeleport(ctx.host).kube.run({ proxy, cluster, query, runId, caller: ctx.caller, timeoutMs: (timeoutSeconds ?? 60) * 1000, record: record ?? true });
+  },
+});
+
+const kubePreview = defineCommand({
+  id: 'teleport.kube.preview',
+  title: 'Preview a Kubernetes query',
+  description:
+    'The exact command line teleport.kube.query would spawn for a query (tsh path, the template arguments, --kubeconfig and --context), without running anything, plus the one-time tsh kube login that prepares the private kubeconfig if it has not run yet.',
+  scope: 'global',
+  input: z.object({ proxy: ProxyInput, cluster: KubeClusterInput, query: KubeQuerySchema }),
+  handler: async ({ proxy: proxyArg, cluster, query }, ctx): Promise<KubePreview> => {
+    const proxy = await resolveKubeProxy(ctx.host, proxyArg, cluster);
+    return getTeleport(ctx.host).kube.preview(proxy, cluster, query);
+  },
+});
+
+const kubeStreamRead = defineCommand({
+  id: 'teleport.kube.stream.read',
+  title: 'Read a followed Kubernetes log',
+  description: 'Lines of a logs-follow run after `since` (the `next` value of the previous read), whether it is still running, and how many lines fell out of its 5000-line buffer.',
+  scope: 'global',
+  input: z.object({ runId: RunIdInput, since: z.number().int().min(0).optional() }),
+  handler: async ({ runId, since }, ctx): Promise<KubeStreamRead> => getTeleport(ctx.host).kube.read(runId, since ?? 0),
+});
+
+const kubeCancel = defineCommand({
+  id: 'teleport.kube.cancel',
+  title: 'Stop a Kubernetes query',
+  description: 'Stops a running query or a followed log by its runId. Only affects the local tsh kubectl process.',
+  scope: 'global',
+  input: z.object({ runId: RunIdInput }),
+  handler: async ({ runId }, ctx) => ({ cancelled: getTeleport(ctx.host).kube.cancel(runId) }),
+});
+
+const HistoryFilter = { proxy: z.string().optional().describe('Only this Teleport cluster'), cluster: KubeClusterInput.optional() };
+
+function historyMatches(e: KubeHistoryEntry, proxy: string | undefined, cluster: string | undefined): boolean {
+  return (!proxy || sameProxy(e.proxy, proxy)) && (!cluster || e.cluster === cluster);
+}
+
+const kubeHistoryList = defineCommand({
+  id: 'teleport.kube.history.list',
+  title: 'Kubernetes query history',
+  description:
+    'Past Kubernetes queries on this machine, newest first, pinned ones included: cluster, operation and parameters (never a command line), time, exit code and duration, plus the namespace last used when a cluster is given. Entries are validated like live queries; tampered ones are left out.',
+  scope: 'global',
+  input: z.object({ ...HistoryFilter, limit: z.number().int().min(1).max(500).optional() }),
+  handler: async ({ proxy, cluster, limit }, ctx): Promise<{ entries: KubeHistoryEntry[]; lastNamespace: string | null }> => {
+    const kube = getTeleport(ctx.host).kube;
+    const entries = (await kube.loadHistory()).filter((e) => historyMatches(e, proxy, cluster));
+    const first = entries[0];
+    return { entries: entries.slice(0, limit ?? 500), lastNamespace: cluster && first ? lastKubeNamespace(entries, first.proxy, cluster) : null };
+  },
+});
+
+const kubeHistoryRerun = defineCommand({
+  id: 'teleport.kube.history.rerun',
+  title: 'Run a Kubernetes query again',
+  description: 'Runs a history entry again on the same cluster. It goes through the same validation as teleport.kube.query.',
+  scope: 'global',
+  input: z.object({ id: z.string(), runId: RunIdInput.optional() }),
+  handler: async ({ id, runId }, ctx): Promise<KubeRunResult> => {
+    const kube = getTeleport(ctx.host).kube;
+    const entry = (await kube.loadHistory()).find((e) => e.id === id);
+    if (!entry) throw new QuiverError('NOT_FOUND', `No Kubernetes history entry ${id}`);
+    return kube.run({ proxy: entry.proxy, cluster: entry.cluster, query: entry.query, runId, caller: ctx.caller, timeoutMs: 60_000, record: true });
+  },
+});
+
+const kubeHistoryPin = defineCommand({
+  id: 'teleport.kube.history.pin',
+  title: 'Pin a Kubernetes query',
+  description: 'Pins or unpins a history entry as a favourite of its cluster. Pinned entries are kept when the history is trimmed or cleared. Omit pinned to toggle.',
+  scope: 'global',
+  input: z.object({ id: z.string(), pinned: z.boolean().optional() }),
+  handler: async ({ id, pinned }, ctx): Promise<KubeHistoryEntry> => {
+    const kube = getTeleport(ctx.host).kube;
+    const entries = await kube.loadHistory();
+    const entry = entries.find((e) => e.id === id);
+    if (!entry) throw new QuiverError('NOT_FOUND', `No Kubernetes history entry ${id}`);
+    const next = { ...entry, pinned: pinned ?? !entry.pinned };
+    await kube.saveHistory(entries.map((e) => (e.id === id ? next : e)));
+    return next;
+  },
+});
+
+const kubeHistoryDelete = defineCommand({
+  id: 'teleport.kube.history.delete',
+  title: 'Delete a Kubernetes history entry',
+  description: 'Removes one entry from the local Kubernetes query history.',
+  scope: 'global',
+  mutating: true,
+  input: z.object({ id: z.string() }),
+  handler: async ({ id }, ctx) => {
+    const kube = getTeleport(ctx.host).kube;
+    const entries = await kube.loadHistory();
+    const next = entries.filter((e) => e.id !== id);
+    if (next.length !== entries.length) await kube.saveHistory(next);
+    return { deleted: entries.length - next.length };
+  },
+});
+
+const kubeHistoryClear = defineCommand({
+  id: 'teleport.kube.history.clear',
+  title: 'Clear Kubernetes query history',
+  description: 'Removes the local Kubernetes query history, of one cluster or all of them. Pinned entries stay unless keepPinned is false.',
+  scope: 'global',
+  mutating: true,
+  input: z.object({ ...HistoryFilter, keepPinned: z.boolean().optional() }),
+  handler: async ({ proxy, cluster, keepPinned }, ctx) => {
+    const kube = getTeleport(ctx.host).kube;
+    const entries = await kube.loadHistory();
+    const next = entries.filter((e) => !historyMatches(e, proxy, cluster) || (e.pinned && keepPinned !== false));
+    await kube.saveHistory(next);
+    return { deleted: entries.length - next.length };
+  },
+});
+
 export const teleportModule = defineModule({
   id: 'teleport',
-  commands: [status, login, loginCancel, logout, clusterAdd, clusterRemove, pin, dbList, dbConnect, dbDisconnect, kubeList, kubeLogin],
+  commands: [
+    status,
+    login,
+    loginCancel,
+    logout,
+    clusterAdd,
+    clusterRemove,
+    pin,
+    dbList,
+    dbConnect,
+    dbDisconnect,
+    kubeList,
+    kubeLogin,
+    kubeQuery,
+    kubePreview,
+    kubeStreamRead,
+    kubeCancel,
+    kubeHistoryList,
+    kubeHistoryRerun,
+    kubeHistoryPin,
+    kubeHistoryDelete,
+    kubeHistoryClear,
+  ],
   onStart: (host) => {
     const { session } = getTeleport(host);
     // Never block startup on tsh; the UI polls status as soon as it mounts.
@@ -381,8 +563,9 @@ export const teleportModule = defineModule({
       .catch((err) => console.warn(`[quiver] teleport status failed: ${(err as Error).message}`));
   },
   onStop: async (host) => {
-    const { session, tunnels } = getTeleport(host);
+    const { session, tunnels, kube } = getTeleport(host);
     session.stop();
+    kube.stopAll();
     await tunnels.stopAll();
   },
 });

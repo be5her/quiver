@@ -1,9 +1,10 @@
 node_modules/
 out/
 dist/
-release/
+/release/
 *.log
 .DS_Store
 Thumbs.db
 .vite/
 coverage/
+quiver-brand/*

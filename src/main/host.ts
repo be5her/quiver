@@ -64,6 +64,7 @@ export class Host {
 
     this.api = {
       version: opts.version,
+      dataDir: opts.userDataDir,
       config: {
         get: () => this.config.get(),
         update: (patch) => this.config.update(patch),
@@ -205,7 +206,17 @@ export class Host {
   }
 
   private updateState(): UpdateState {
-    return this.opts.updates?.state() ?? { supported: false, installable: false, reason: 'Updates are only checked in installed builds.', current: this.opts.version, status: 'idle' };
+    return (
+      this.opts.updates?.state() ?? {
+        supported: false,
+        installable: false,
+        reason: 'Updates are only checked in installed builds.',
+        current: this.opts.version,
+        status: 'idle',
+        channel: this.config.get().updates.channel,
+        betaSupported: false,
+      }
+    );
   }
 
   // ---------- host commands ----------
@@ -358,6 +369,20 @@ export class Host {
         scope: 'global',
         input: z.object({}),
         handler: async () => (this.opts.updates ? this.opts.updates.check('manual') : this.updateState()),
+      }),
+      defineCommand({
+        id: 'app.update.channel',
+        title: 'Switch update channel',
+        description:
+          'Follows stable releases only, or also the beta builds published for Windows from every change merged to main, then checks for updates. Leaving beta never downgrades: this copy stays on its version until a newer stable release ships.',
+        scope: 'global',
+        mutating: true,
+        input: z.object({ channel: z.enum(['stable', 'beta']) }),
+        handler: async ({ channel }) => {
+          await this.config.update({ updates: { ...this.config.get().updates, channel } });
+          const state = this.updateState();
+          return this.opts.updates && state.supported ? this.opts.updates.check('manual') : state;
+        },
       }),
       defineCommand({
         id: 'app.update.download',

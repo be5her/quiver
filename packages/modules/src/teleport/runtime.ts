@@ -1,17 +1,20 @@
 import type { HostApi } from '@quiver/core';
+import { KubeRunner } from './kube';
 import { TeleportSession } from './session';
 import { TunnelManager } from './tunnels';
 
 export interface TeleportRuntime {
   session: TeleportSession;
   tunnels: TunnelManager;
+  kube: KubeRunner;
 }
 
 let runtime: TeleportRuntime | null = null;
 
 /**
- * One session and one tunnel manager per app. Both the Teleport module and the database
- * driver pool go through here, so a tunnel started from either side is visible to the other.
+ * One session, one tunnel manager and one Kubernetes query runner per app. Both the Teleport
+ * module and the database driver pool go through here, so a tunnel started from either side is
+ * visible to the other.
  */
 export function getTeleport(host: HostApi): TeleportRuntime {
   if (runtime) return runtime;
@@ -26,6 +29,12 @@ export function getTeleport(host: HostApi): TeleportRuntime {
     onChange: (reason) => host.emit('teleport.changed', { reason }),
     tunnels: () => tunnels.list(),
   });
-  runtime = { session, tunnels };
+  const kube = new KubeRunner({
+    session,
+    dataDir: host.dataDir ?? null,
+    onHistory: () => host.emit('teleport.kube.changed', { reason: 'history' }),
+    onStream: (runId) => host.emit('teleport.kube.changed', { reason: 'stream', runId }),
+  });
+  runtime = { session, tunnels, kube };
   return runtime;
 }

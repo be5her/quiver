@@ -2,6 +2,7 @@ import { clusterLabel, toErrorPayload, type TeleportStatus } from '@quiver/core'
 import { confirmDialog, defineModuleUI, invoke, notify, promptDialog, useAppStore } from '@quiver/ui';
 import { ShieldCheck } from 'lucide-react';
 import { teleportLoginAgain } from '../../db/ui/shared';
+import { KubeQueryTab } from './KubeQueryTab';
 import { TeleportSidebar } from './Sidebar';
 
 /** Palette action: log in, asking which cluster when several are known. */
@@ -38,8 +39,9 @@ async function logoutFromPalette(): Promise<void> {
 
 /**
  * App-wide Teleport access: one section per cluster (a tsh profile), pinned resources on top,
- * databases behind `tsh proxy db` tunnels and Kubernetes clusters. Nothing here is stored in
- * `.quiver/`; clusters and pins live in global config.
+ * databases behind `tsh proxy db` tunnels and Kubernetes clusters with a read-only query view.
+ * Nothing here is stored in `.quiver/`; clusters and pins live in global config, the Kubernetes
+ * query history in the app data folder.
  */
 export const teleportModuleUI = defineModuleUI({
   id: 'teleport',
@@ -48,7 +50,7 @@ export const teleportModuleUI = defineModuleUI({
   order: 25,
   availability: 'always',
   Sidebar: TeleportSidebar,
-  tabs: {},
+  tabs: { 'teleport.kube': KubeQueryTab },
   actions: [
     { id: 'teleport.login.ui', title: 'Teleport: log in', group: 'Teleport', keywords: ['tsh', 'sso'], run: loginFromPalette },
     { id: 'teleport.logout.ui', title: 'Teleport: log out of all clusters', group: 'Teleport', keywords: ['tsh'], run: logoutFromPalette },
