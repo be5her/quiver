@@ -21,6 +21,8 @@ export interface RunOptions {
   timeoutMs?: number;
   /** Called per line as output arrives; used to show login progress. */
   onLine?(line: string, stream: 'stdout' | 'stderr'): void;
+  /** Extra environment for this run, e.g. a private KUBECONFIG. */
+  env?: Record<string, string>;
 }
 
 function isFile(file: string): boolean {
@@ -84,9 +86,9 @@ export function tshNotFound(): QuiverError {
 }
 
 /** Spawn tsh with tokenized arguments and no shell. stdin is closed so nothing can block on a prompt. */
-export function spawnTsh(tsh: TshCommand, args: string[]): ChildProcess {
+export function spawnTsh(tsh: TshCommand, args: string[], env?: Record<string, string>): ChildProcess {
   const [program, ...fixed] = tsh.argv;
-  return spawn(program, [...fixed, ...args], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: process.env });
+  return spawn(program, [...fixed, ...args], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: env ? { ...process.env, ...env } : process.env });
 }
 
 /** Pipe a stream's chunks into whole lines. */
@@ -106,7 +108,7 @@ export function runTsh(tsh: TshCommand, args: string[], options: RunOptions = {}
   return new Promise((resolve, reject) => {
     let child: ChildProcess;
     try {
-      child = spawnTsh(tsh, args);
+      child = spawnTsh(tsh, args, options.env);
     } catch (err) {
       reject(new QuiverError('REQUEST_FAILED', `Could not start tsh: ${(err as Error).message}`));
       return;

@@ -11,7 +11,7 @@ import {
   type TeleportStatus,
   type TeleportTunnel,
 } from '@quiver/core';
-import { Badge, Button, IconButton, SectionHeader, Spinner, cn, confirmDialog, invoke, notify, promptDialog, runAction, useAppStore, useInvoke } from '@quiver/ui';
+import { Badge, Button, IconButton, SectionHeader, Spinner, cn, confirmDialog, invoke, notify, promptDialog, runAction, selectScope, useAppStore, useInvoke, useTabsStore } from '@quiver/ui';
 import { Boxes, Check, ChevronDown, ChevronRight, Copy, Database, LogIn, LogOut, Pin, PinOff, Plug, Plus, RefreshCw, Square, Terminal, Trash2, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { create } from 'zustand';
@@ -107,9 +107,15 @@ async function stopDatabase(proxy: string, name: string): Promise<void> {
   await invoke('teleport.db.disconnect', { proxy, database: name }, null);
 }
 
-async function useKubeCluster(proxy: string, name: string): Promise<void> {
+/** Open the read-only query view of a Kubernetes cluster. */
+export function openKubeQuery(proxy: string, name: string): void {
+  useTabsStore.getState().openTab(selectScope(useAppStore.getState()), { type: 'teleport.kube', title: name, data: { id: `${proxy}|${name}`, proxy, cluster: name } }, { singletonKey: `teleport.kube:${proxy}|${name}` });
+}
+
+/** `tsh kube login`: rewrites the kubeconfig the user's terminals use. Only on an explicit, labelled request. */
+async function setTerminalKubeContext(proxy: string, name: string): Promise<void> {
   await invoke('teleport.kube.login', { proxy, cluster: name }, null);
-  notify(`kubectl now points at ${name}`, 'success');
+  notify(`kubectl in your terminals now points at ${name}`, 'success');
 }
 
 async function setPin(pin: TeleportPin, pinned: boolean): Promise<void> {
@@ -217,8 +223,8 @@ function PinnedSection({ status, connections }: { status: TeleportStatus; connec
             if (pin.kind === 'db') {
               if (conn && tunnel) revealDbConnection(conn);
               else await connectDatabase(pin.proxy, pin.name, db?.allowedUsers, connections);
-            } else {
-              await useKubeCluster(pin.proxy, pin.name);
+            } else if (usable) {
+              openKubeQuery(pin.proxy, pin.name);
             }
           } catch (err) {
             report(err);
@@ -573,10 +579,11 @@ function KubeList({ cluster }: { cluster: TeleportClusterStatus }) {
   }, [kubes.data, cluster.proxy, setKubes]);
   const refresh = () => invoke('teleport.kube.list', { proxy: cluster.proxy, refresh: true }, null).then(() => kubes.refresh(), report);
 
-  const use = async (k: TeleportKubeCluster) => {
+  const useInTerminal = async (k: TeleportKubeCluster) => {
+    if (!(await confirmDialog({ title: `Point your terminal's kubectl at ${k.name}?`, message: 'This runs tsh kube login, which changes the current context in the kubeconfig your terminals use. Querying the cluster in Quiver does not need it.', confirmLabel: 'Set terminal context' }))) return;
     setBusy(k.name);
     try {
-      await useKubeCluster(k.proxy, k.name);
+      await setTerminalKubeContext(k.proxy, k.name);
       await kubes.refresh();
     } catch (err) {
       report(err);
@@ -592,19 +599,47 @@ function KubeList({ cluster }: { cluster: TeleportClusterStatus }) {
       {kubes.data?.map((k) => {
         const active = k.selected || cluster.kubeCluster === k.name;
         return (
-          <div key={k.name} className="group flex items-center gap-2 pl-4 pr-2 h-7 hover:bg-elevated min-w-0" title={Object.entries(k.labels).map(([a, b]) => `${a}=${b}`).join('\n')} data-testid="teleport-kube">
-            {active ? <Check className="size-3.5 text-success shrink-0" /> : <span className="size-3.5 shrink-0" />}
-            <span className={cn('truncate text-[13px] flex-1', active && 'font-medium')}>{k.name}</span>
+          <div
+            key={k.name}
+            role="button"
+            tabIndex={0}
+            onClick={() => openKubeQuery(k.proxy, k.name)}
+            onKeyDown={(e) => e.key === 'Enter' && openKubeQuery(k.proxy, k.name)}
+            className="group flex items-center gap-2 pl-4 pr-2 h-7 hover:bg-elevated cursor-pointer min-w-0"
+            title={[`Query ${k.name} (read-only)`, ...Object.entries(k.labels).map(([a, b]) => `${a}=${b}`)].join('\n')}
+            data-testid="teleport-kube"
+          >
+            <Boxes className="size-3.5 text-muted shrink-0" />
+            <span className="truncate text-[13px] flex-1">{k.name}</span>
             {k.pinned && <Pin className="size-3 text-muted shrink-0 group-hover:hidden" aria-label="pinned" />}
-            {active && <span className="text-[10px] text-muted group-hover:hidden">active</span>}
+            {active && (
+              <span className="flex items-center gap-0.5 text-[10px] text-muted group-hover:hidden" title="Current kubectl context in your terminal">
+                <Terminal className="size-3" /> terminal
+              </span>
+            )}
             <span className="hidden group-hover:flex items-center gap-0.5 shrink-0">
-              <IconButton label={k.pinned ? 'Unpin' : 'Pin'} size="sm" onClick={() => void setPin({ proxy: k.proxy, kind: 'kube', name: k.name }, !k.pinned).catch(report)}>
+              <IconButton
+                label={k.pinned ? 'Unpin' : 'Pin'}
+                size="sm"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void setPin({ proxy: k.proxy, kind: 'kube', name: k.name }, !k.pinned).catch(report);
+                }}
+              >
                 {k.pinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />}
               </IconButton>
               {!active && (
-                <Button size="sm" variant="ghost" loading={busy === k.name} onClick={() => void use(k)}>
-                  Use
-                </Button>
+                <IconButton
+                  label="Set as kubectl context for my terminal (changes kubectl in your terminals)"
+                  size="sm"
+                  disabled={busy === k.name}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void useInTerminal(k);
+                  }}
+                >
+                  {busy === k.name ? <Spinner className="size-3" /> : <Terminal className="size-3.5" />}
+                </IconButton>
               )}
             </span>
           </div>

@@ -27,6 +27,9 @@ import type {
   EnvProfileGroup,
   Environment,
   HistoryEntry,
+  KubeHistoryEntry,
+  KubeRunResult,
+  KubeStreamRead,
   McpConfigFile,
   McpLogEntry,
   McpPrompt,
@@ -223,6 +226,9 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
   const fakeRedis = await startFakeRedis();
   const tshDir = await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-smoke-tsh-'));
   const fakeTsh = await writeFakeTsh(tshDir, fakeRedis.port);
+  // The fake's stand-in for ~/.kube/config: what kubectl in the user's terminal would use.
+  const previousKubeconfig = process.env.KUBECONFIG;
+  process.env.KUBECONFIG = fakeTsh.homeKubeconfig;
   // MCP servers for the inspector: a stdio script, plus Streamable HTTP and legacy SSE endpoints in process.
   const mcpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-smoke-mcp-'));
   const fakeStdio = await writeFakeMcpStdio(mcpDir);
@@ -411,6 +417,116 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       kubeLogin.proxy === first && kubeLogin.output.includes('dev-eks') && kubesAfter.find((k) => k.name === 'dev-eks')?.selected === true && clusterOf(statusKube, first)?.kubeCluster === 'dev-eks' && !clusterOf(statusKube, second)?.kubeCluster,
       kubesAfter,
     );
+
+    // ---------- teleport: read-only Kubernetes queries through tsh kubectl, a private kubeconfig and the query history ----------
+    {
+      const homeBefore = await fs.readFile(fakeTsh.homeKubeconfig, 'utf8');
+      const kq = (query: unknown, extra: Record<string, unknown> = {}) => run<KubeRunResult>('teleport.kube.query', { proxy: first, cluster: 'prod-eks', query, ...extra }, null);
+      const pods = await kq({ operation: 'list', params: { resource: 'pods', namespace: 'payments' } });
+      check(
+        'kube: list pods in a namespace',
+        pods.exitCode === 0 && pods.stdout.includes('api-7d9f-abc12') && pods.stdout.includes('worker-5c8b-xyz34') && !pods.stdout.includes('hello-') && pods.command === 'kubectl get pods --namespace payments' && !pods.streaming,
+        { command: pods.command, exit: pods.exitCode, stderr: pods.stderr, stdout: pods.stdout.slice(0, 200) },
+      );
+      const podsCall = (await fakeTsh.kubectlCalls()).at(-1);
+      const privateConfig = podsCall?.argv[0]?.replace(/^--kubeconfig=/, '') ?? '';
+      check(
+        'kube: argv is the template plus an explicit private kubeconfig and context',
+        JSON.stringify(podsCall?.argv.slice(1)) === JSON.stringify(['--context=smoke.teleport.local-prod-eks', 'get', 'pods', '--namespace', 'payments']) &&
+          podsCall?.argv[0]?.startsWith('--kubeconfig=') === true &&
+          podsCall?.kubeconfig === privateConfig &&
+          path.resolve(privateConfig).startsWith(path.resolve(host.api.dataDir ?? '/nowhere')),
+        podsCall,
+      );
+      const statusAfterQuery = await run<TeleportStatus>('teleport.status', { refresh: true }, null);
+      const homeAfter = await fs.readFile(fakeTsh.homeKubeconfig, 'utf8');
+      check(
+        'kube: the terminal kubeconfig current context is unchanged after a query',
+        homeAfter === homeBefore && /current-context: smoke\.teleport\.local-dev-eks/.test(homeAfter) && clusterOf(statusAfterQuery, first)?.kubeCluster === 'dev-eks',
+        { homeAfter, kube: clusterOf(statusAfterQuery, first)?.kubeCluster },
+      );
+      const logs = await kq({ operation: 'logs', params: { pod: 'api-7d9f-abc12', namespace: 'payments', container: 'istio-proxy', tail: 5, timestamps: true } });
+      const logLines = logs.stdout.split('\n');
+      check(
+        'kube: logs with tail, container and timestamps',
+        logs.exitCode === 0 && logLines.length === 5 && logLines.every((l) => l.includes('[istio-proxy]') && /^\d{4}-\d\d-\d\dT/.test(l)) && logLines[4].endsWith('line 300') && logs.command === 'kubectl logs api-7d9f-abc12 --namespace payments --container istio-proxy --tail 5 --timestamps',
+        { command: logs.command, lines: logLines },
+      );
+      const described = await kq({ operation: 'describe', params: { resource: 'pods', name: 'api-7d9f-abc12', namespace: 'payments' } });
+      check('kube: describe', described.exitCode === 0 && described.stdout.includes('Name:         api-7d9f-abc12') && described.stdout.includes('istio-proxy'), described.stdout.slice(0, 200));
+      const events = await kq({ operation: 'events', params: { namespace: 'payments' } });
+      check('kube: events sorted by time', events.exitCode === 0 && events.stdout.includes('BackOff') && events.command.endsWith('--sort-by .lastTimestamp'), events.command);
+      const canDelete = await kq({ operation: 'can-i', params: { verb: 'delete', resource: 'pods', namespace: 'payments' } });
+      const canGet = await kq({ operation: 'can-i', params: { verb: 'get', resource: 'pods', namespace: 'payments' } });
+      check('kube: auth can-i answers without being an error', canDelete.exitCode === 1 && canDelete.stdout.trim() === 'no' && canGet.exitCode === 0 && canGet.stdout.trim() === 'yes');
+      const missing = await kq({ operation: 'get', params: { resource: 'pods', name: 'nope', namespace: 'payments' } });
+      check('kube: kubectl errors come back as stderr and exit code', missing.exitCode === 1 && missing.stderr.includes('NotFound'), missing.stderr);
+      const callsBefore = (await fakeTsh.kubectlCalls()).length;
+      const dashName = await host.invoke('teleport.kube.query', { proxy: first, cluster: 'prod-eks', query: { operation: 'get', params: { resource: 'pods', name: '-oyaml', namespace: 'payments' } } }, { caller: 'ui', workspaceId: null });
+      check('kube: a name starting with "-" is rejected', !dashName.ok && dashName.error.code === 'INVALID_INPUT' && /name/.test(dashName.error.message), dashName.ok ? 'ok?' : dashName.error.message);
+      const secrets = await host.invoke('teleport.kube.query', { proxy: first, cluster: 'prod-eks', query: { operation: 'list', params: { resource: 'secrets' } } }, { caller: 'ui', workspaceId: null });
+      check('kube: secrets are not a resource type', !secrets.ok && secrets.error.code === 'INVALID_INPUT', secrets.ok ? 'ok?' : secrets.error.message);
+      const badCluster = await host.invoke('teleport.kube.query', { proxy: first, cluster: '--insecure-skip-tls-verify', query: { operation: 'version', params: {} } }, { caller: 'ui', workspaceId: null });
+      check('kube: cluster names are validated too', !badCluster.ok && badCluster.error.code === 'INVALID_INPUT');
+      check('kube: rejected queries never reach kubectl', (await fakeTsh.kubectlCalls()).length === callsBefore);
+
+      // Follow logs: streams until stopped, read incrementally.
+      const follow = await kq({ operation: 'logs-follow', params: { pod: 'worker-5c8b-xyz34', namespace: 'payments', tail: 3 } }, { runId: 'smoke-follow' });
+      await new Promise((r) => setTimeout(r, 700));
+      const read1 = await run<KubeStreamRead>('teleport.kube.stream.read', { runId: 'smoke-follow' }, null);
+      await new Promise((r) => setTimeout(r, 500));
+      const read2 = await run<KubeStreamRead>('teleport.kube.stream.read', { runId: 'smoke-follow', since: read1.next }, null);
+      check(
+        'kube: follow logs streams new lines',
+        follow.streaming && follow.runId === 'smoke-follow' && read1.running && read1.lines.length >= 4 && read1.lines[0].endsWith('line 298') && read2.lines.length >= 1 && read2.lines[0].endsWith(`line ${298 + read1.lines.length}`),
+        { streaming: follow.streaming, read1: read1.lines.length, first: read1.lines[0], read2: read2.lines.slice(0, 2) },
+      );
+      const stopped = await run<{ cancelled: boolean }>('teleport.kube.cancel', { runId: 'smoke-follow' }, null);
+      await new Promise((r) => setTimeout(r, 400));
+      const read3 = await run<KubeStreamRead>('teleport.kube.stream.read', { runId: 'smoke-follow' }, null);
+      check('kube: stop ends the stream', stopped.cancelled && !read3.running, { cancelled: stopped.cancelled, running: read3.running });
+
+      // History: recorded as operation and parameters, replayed through the same validation.
+      await kq({ operation: 'namespaces', params: {} }, { record: false });
+      const hist = await run<{ entries: KubeHistoryEntry[]; lastNamespace: string | null }>('teleport.kube.history.list', { proxy: first, cluster: 'prod-eks' }, null);
+      const ops = hist.entries.map((e) => e.query.operation);
+      check(
+        'kube: history records each run with its params, not a command line',
+        ops.length === 8 && ops[0] === 'logs-follow' && ops.at(-1) === 'list' && !ops.includes('namespaces') && hist.lastNamespace === 'payments' && !JSON.stringify(hist.entries).includes('kubectl') && hist.entries.every((e) => typeof e.durationMs === 'number' && e.at),
+        ops,
+      );
+      const listEntry = hist.entries.at(-1)!;
+      const rerun = await run<KubeRunResult>('teleport.kube.history.rerun', { id: listEntry.id }, null);
+      check('kube: history entry replays', rerun.exitCode === 0 && rerun.stdout === pods.stdout && rerun.command === pods.command, rerun.command);
+      const historyFile = path.join(host.api.dataDir ?? '', 'teleport-kube', 'history.json');
+      const onDiskHistory = JSON.parse(await fs.readFile(historyFile, 'utf8')) as { entries: KubeHistoryEntry[] };
+      onDiskHistory.entries.unshift(
+        { ...listEntry, id: 'tampered-flag', query: { operation: 'list', params: { resource: 'pods', namespace: '--kubeconfig=/etc/passwd' } } } as unknown as KubeHistoryEntry,
+        { ...listEntry, id: 'tampered-op', query: { operation: 'exec', params: { pod: 'x' } } } as unknown as KubeHistoryEntry,
+        { ...listEntry, id: 'tampered-args', query: { operation: 'version', params: { args: ['delete', 'ns', 'payments'] } } } as unknown as KubeHistoryEntry,
+      );
+      await new Promise((r) => setTimeout(r, 30));
+      await fs.writeFile(historyFile, JSON.stringify(onDiskHistory), 'utf8');
+      const histTampered = await run<{ entries: KubeHistoryEntry[] }>('teleport.kube.history.list', { proxy: first, cluster: 'prod-eks' }, null);
+      const tamperedRerun = await host.invoke('teleport.kube.history.rerun', { id: 'tampered-flag' }, { caller: 'ui', workspaceId: null });
+      check(
+        'kube: an edited history file cannot inject arguments',
+        histTampered.entries.length === 9 && !histTampered.entries.some((e) => e.id.startsWith('tampered')) && !tamperedRerun.ok && tamperedRerun.error.code === 'NOT_FOUND',
+        histTampered.entries.map((e) => e.id).slice(0, 4),
+      );
+      const pinnedEntry = await run<KubeHistoryEntry>('teleport.kube.history.pin', { id: listEntry.id }, null);
+      await run('teleport.kube.history.delete', { id: histTampered.entries[0].id }, null);
+      const cleared = await run<{ deleted: number }>('teleport.kube.history.clear', { proxy: first, cluster: 'prod-eks' }, null);
+      const histAfterClear = await run<{ entries: KubeHistoryEntry[] }>('teleport.kube.history.list', { proxy: first, cluster: 'prod-eks' }, null);
+      check(
+        'kube: pin, delete and clear keep the favourite',
+        pinnedEntry.pinned && cleared.deleted === 7 && histAfterClear.entries.length === 1 && histAfterClear.entries[0].id === listEntry.id && histAfterClear.entries[0].pinned,
+        { deleted: cleared.deleted, left: histAfterClear.entries.map((e) => [e.query.operation, e.pinned]) },
+      );
+      await kq({ operation: 'list', params: { resource: 'pods', namespace: 'payments' } });
+      await kq({ operation: 'logs', params: { pod: 'api-7d9f-abc12', namespace: 'payments', tail: 20 } });
+      check('kube: the terminal kubeconfig is still untouched', (await fs.readFile(fakeTsh.homeKubeconfig, 'utf8')) === homeBefore);
+    }
     const pins1 = await run<TeleportPin[]>('teleport.pin', { proxy: first, kind: 'db', name: 'smoke-redis' }, null);
     const pins2 = await run<TeleportPin[]>('teleport.pin', { proxy: second, kind: 'kube', name: 'eu-eks', pinned: true }, null);
     check('teleport: pins from both clusters', pins1.length === 1 && pins2.length === 2 && pins2.some((p) => p.proxy === second && p.kind === 'kube' && p.name === 'eu-eks'), pins2);
@@ -1044,6 +1160,45 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       });
       check(`mcp blocks ${tool} by default`, blockedTool.result?.isError === true && (blockedTool.result.content?.[0]?.text ?? '').includes('MUTATION_BLOCKED'));
     }
+    // Kubernetes over MCP: the catalogue is the tool schema, queries and history listing are allowed, history edits are gated.
+    {
+      const listed = (await rpc('tools/list', {})) as unknown as { result?: { tools?: { name: string; inputSchema?: unknown }[] } };
+      const kubeTool = listed.result?.tools?.find((t) => t.name === 'teleport_kube_query');
+      const schemaText = JSON.stringify(kubeTool?.inputSchema ?? {});
+      check(
+        'mcp: kube query schema lists the operations and no secrets',
+        ['logs-follow', 'rollout-status', 'can-i', 'persistentvolumeclaims'].every((s) => schemaText.includes(`"${s}"`)) && !schemaText.includes('"secrets"') && names.includes('teleport_kube_history_list'),
+        schemaText.slice(0, 300),
+      );
+      const kubeCall = (args: unknown) => rpc('tools/call', { name: 'teleport_kube_query', arguments: args });
+      const mcpNs = await kubeCall({ proxy: first, cluster: 'prod-eks', query: { operation: 'namespaces', params: {} } });
+      const mcpNsOut = JSON.parse(mcpNs.result?.content?.[0]?.text ?? '{}') as Partial<KubeRunResult>;
+      check('mcp: read-only kube query is allowed without mutations', mcpNs.result?.isError !== true && mcpNsOut.exitCode === 0 && (mcpNsOut.stdout ?? '').includes('payments'), mcpNs.result?.content?.[0]?.text?.slice(0, 200));
+      const callsBeforeMcp = (await fakeTsh.kubectlCalls()).length;
+      const mcpUnknown = await kubeCall({ proxy: first, cluster: 'prod-eks', query: { operation: 'exec', params: { pod: 'api-7d9f-abc12', command: ['sh'] } } });
+      // Refused by the SDK's schema check or by the registry, depending on where it fails first; either way kubectl never runs.
+      const unknownText = mcpUnknown.result?.content?.[0]?.text ?? '';
+      check(
+        'mcp: unknown kube operation is rejected',
+        mcpUnknown.result?.isError === true && /INVALID_INPUT|Input validation error/.test(unknownText) && (await fakeTsh.kubectlCalls()).length === callsBeforeMcp,
+        unknownText.slice(0, 200),
+      );
+      const mcpRaw = await kubeCall({ proxy: first, cluster: 'prod-eks', query: { operation: 'version', params: {} }, args: ['delete', 'ns', 'payments'], command: 'kubectl delete ns payments' });
+      const mcpRawOut = JSON.parse(mcpRaw.result?.content?.[0]?.text ?? '{}') as Partial<KubeRunResult>;
+      const rawCall = (await fakeTsh.kubectlCalls()).at(-1);
+      check('mcp: extra raw arguments are ignored, never passed on', mcpRawOut.command === 'kubectl version' && JSON.stringify(rawCall?.argv.slice(2)) === '["version"]', rawCall);
+      const mcpParamFlag = await kubeCall({ proxy: first, cluster: 'prod-eks', query: { operation: 'logs', params: { pod: 'api-7d9f-abc12', flags: '--all-containers' } } });
+      check('mcp: unknown kube params are rejected', mcpParamFlag.result?.isError === true && (await fakeTsh.kubectlCalls()).length === callsBeforeMcp + 1);
+      const mcpHist = await rpc('tools/call', { name: 'teleport_kube_history_list', arguments: { cluster: 'prod-eks' } });
+      check('mcp: kube history list is allowed', mcpHist.result?.isError !== true && (mcpHist.result?.content?.[0]?.text ?? '').includes('"entries"'));
+      for (const [tool, args] of [
+        ['teleport_kube_history_delete', { id: 'x' }],
+        ['teleport_kube_history_clear', {}],
+      ] as const) {
+        const blockedKube = await rpc('tools/call', { name: tool, arguments: args });
+        check(`mcp blocks ${tool} by default`, blockedKube.result?.isError === true && (blockedKube.result.content?.[0]?.text ?? '').includes('MUTATION_BLOCKED'));
+      }
+    }
     const mcpConnect = await rpc('tools/call', { name: 'teleport_db_connect', arguments: { database: 'smoke-redis' } });
     check('mcp can open a teleport tunnel for reads', mcpConnect.result?.isError !== true && (JSON.parse(mcpConnect.result?.content?.[0]?.text ?? '{}') as ConnectOut).tunnel?.port > 0, mcpConnect.result?.content?.[0]?.text?.slice(0, 200));
     const mcpPin = await rpc('tools/call', { name: 'teleport_pin', arguments: { proxy: second, kind: 'db', name: 'second-mysql', pinned: true } });
@@ -1337,6 +1492,9 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
       const js = (code: string) => win.webContents.executeJavaScript(code) as Promise<unknown>;
       const shot = async (name: string) => {
+        // Let the renderer paint the latest state first; otherwise the capture can be a frame behind.
+        win.webContents.invalidate();
+        await Promise.race([js(`new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))`), wait(500)]);
         const image = await win.webContents.capturePage();
         await fs.writeFile(path.join(shotsDir, `${name}.png`), image.toPNG());
       };
@@ -1433,7 +1591,7 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       const tunnelShown = await js(`[...document.querySelectorAll('[data-testid=teleport-db]')].find((r) => r.textContent.includes('smoke-redis'))?.textContent ?? ''`);
       check('ui: running tunnel shown on its database row', typeof tunnelShown === 'string' && /:\d+/.test(tunnelShown) && tunnelShown.includes('as default'), tunnelShown);
       const kubeRows = await js(`[...document.querySelectorAll('[data-testid=teleport-kube]')].map((r) => r.textContent)`);
-      check('ui: kube clusters of both clusters with the active one', Array.isArray(kubeRows) && kubeRows.length === 3 && kubeRows.some((t: string) => t.includes('dev-eks') && t.includes('active')) && kubeRows.some((t: string) => t.includes('eu-eks')), kubeRows);
+      check('ui: kube clusters of both clusters with the active one', Array.isArray(kubeRows) && kubeRows.length === 3 && kubeRows.some((t: string) => t.includes('dev-eks') && t.includes('terminal')) && kubeRows.some((t: string) => t.includes('eu-eks')), kubeRows);
       await shot('09-teleport-dark');
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(300);
@@ -1462,6 +1620,76 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       const keysTabOpen = await js(`Boolean(document.querySelector('[data-tab-type="db.redis"]'))`);
       check('ui: connect opens the key browser', keysTabOpen === true);
       await shot('11-teleport-revealed-light');
+
+      // Kubernetes query view: clicking a kube cluster opens it (no tsh kube login), the form builds the preview, Run shows the output.
+      {
+        const homeBeforeUi = await fs.readFile(fakeTsh.homeKubeconfig, 'utf8');
+        await js(`(() => { const btn = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.title || '') === 'Teleport'); if (btn) btn.click(); })()`);
+        await wait(1200);
+        const openedKube = await js(
+          `(() => { const row = [...document.querySelectorAll('[data-testid=teleport-kube]')].find((r) => r.textContent.includes('prod-eks')); if (row) row.click(); return Boolean(row); })()`,
+        );
+        check('ui: clicking a kube cluster opens the query view', openedKube === true);
+        await wait(1500);
+        const viewCluster = await js(`document.querySelector('[data-testid=kube-query]')?.getAttribute('data-cluster') ?? null`);
+        check('ui: query view is for the clicked cluster', viewCluster === 'prod-eks', viewCluster);
+        // React-controlled inputs need the native setter plus an input/change event.
+        const setField = (testid: string, value: string) =>
+          js(`(() => {
+            const el = document.querySelector('[data-testid=${testid}]');
+            if (!el) return false;
+            const proto = el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+            Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, ${JSON.stringify(value)});
+            el.dispatchEvent(new Event(el instanceof HTMLSelectElement ? 'change' : 'input', { bubbles: true }));
+            return true;
+          })()`);
+        const text = (testid: string) => js(`document.querySelector('[data-testid=${testid}]')?.textContent ?? null`);
+        const runDisabled = () => js(`document.querySelector('[data-testid=kube-run]')?.disabled ?? null`);
+        await setField('kube-field-namespace', 'payments');
+        await wait(200);
+        const listPreview = await text('kube-preview');
+        check('ui: preview shows the command for the form', listPreview === 'kubectl get pods --namespace payments', listPreview);
+        await js(`document.querySelector('[data-testid=kube-run]').click()`);
+        await wait(1500);
+        const outputText = await text('kube-output');
+        const statusExit = await js(`document.querySelector('[data-testid=kube-status]')?.getAttribute('data-exit') ?? null`);
+        check('ui: run shows the output with exit code', typeof outputText === 'string' && outputText.includes('api-7d9f-abc12') && statusExit === '0', { statusExit, outputText: String(outputText).slice(0, 120) });
+        await setField('kube-search', 'worker');
+        await wait(200);
+        const matchText = await text('kube-matches');
+        check('ui: output search counts matches', matchText === '1 match', matchText);
+        await setField('kube-search', '');
+        await js(`document.documentElement.classList.remove('dark')`);
+        await wait(300);
+        await shot('11b-kube-query-light');
+
+        await setField('kube-operation', 'logs');
+        await wait(200);
+        await setField('kube-field-pod', '-bad');
+        await wait(200);
+        const podError = await js(`(() => { const input = document.querySelector('[data-testid=kube-field-pod]'); return input?.parentElement?.querySelector('.text-danger')?.textContent ?? null; })()`);
+        check('ui: invalid value shows inline and disables Run', typeof podError === 'string' && podError.includes('-') && (await runDisabled()) === true, podError);
+        await setField('kube-field-pod', 'api-7d9f-abc12');
+        await wait(1500);
+        const containerOptions = await js(`[...document.querySelectorAll('[data-testid=kube-field-container] option')].map((o) => o.value)`);
+        check('ui: container picker filled from the pod', Array.isArray(containerOptions) && containerOptions.includes('api') && containerOptions.includes('istio-proxy'), containerOptions);
+        await setField('kube-field-container', 'istio-proxy');
+        await setField('kube-field-tail', '25');
+        await wait(200);
+        const logsPreview = await text('kube-preview');
+        check('ui: logs preview', logsPreview === 'kubectl logs api-7d9f-abc12 --namespace payments --container istio-proxy --tail 25' && (await runDisabled()) === false, logsPreview);
+        await js(`document.querySelector('[data-testid=kube-run]').click()`);
+        await wait(1500);
+        const logText = await text('kube-output');
+        check('ui: logs rendered', typeof logText === 'string' && logText.includes('[istio-proxy] line 300') && !logText.includes('line 275\n'), String(logText).slice(-80));
+        const historyRows = await js(`document.querySelectorAll('[data-testid=kube-history-entry]').length`);
+        check('ui: history panel lists the runs', typeof historyRows === 'number' && historyRows >= 3, historyRows);
+        await js(`document.documentElement.classList.add('dark')`);
+        await wait(300);
+        await shot('11c-kube-logs-dark');
+        await js(`document.documentElement.classList.remove('dark')`);
+        check('ui: the query view left the terminal kubeconfig alone', (await fs.readFile(fakeTsh.homeKubeconfig, 'utf8')) === homeBeforeUi);
+      }
 
       // Mock servers module: server rows, route editor, live request list with detail.
       const clickedMock = await js(
@@ -1805,6 +2033,8 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     await fakeMcp.close();
     await fs.rm(folder, { recursive: true, force: true }).catch(() => {});
     await fs.rm(hooksFolder, { recursive: true, force: true }).catch(() => {});
+    if (previousKubeconfig === undefined) delete process.env.KUBECONFIG;
+    else process.env.KUBECONFIG = previousKubeconfig;
     await fs.rm(tshDir, { recursive: true, force: true }).catch(() => {});
     await fs.rm(mcpDir, { recursive: true, force: true }).catch(() => {});
   }
