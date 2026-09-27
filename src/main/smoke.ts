@@ -75,6 +75,22 @@ function freePort(): Promise<number> {
   });
 }
 
+function processAlive(pid: number | undefined): boolean {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/** Poll until the predicate holds or the time is up; resolves to whether it held. */
+async function until(predicate: () => boolean | Promise<boolean>, ms: number): Promise<boolean> {
+  for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 50))) if (await predicate()) return true;
+  return Boolean(await predicate());
+}
+
 /**
  * Headless end-to-end check used by `npm run smoke`. Exercises the command registry,
  * the file store, environments with secrets, HTTP sending, the MCP endpoint and a
@@ -496,10 +512,17 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         follow.streaming && follow.runId === 'smoke-follow' && read1.running && read1.lines.length >= 4 && read1.lines[0].endsWith('line 298') && read2.lines.length >= 1 && read2.lines[0].endsWith(`line ${298 + read1.lines.length}`),
         { streaming: follow.streaming, read1: read1.lines.length, first: read1.lines[0], read2: read2.lines.slice(0, 2) },
       );
+      // tsh kubectl runs kubectl in a second process that shares the output pipe; stopping has to end both.
+      const followPid = (await fakeTsh.kubectlCalls()).findLast((c) => c.argv.includes('--follow'))?.pid;
+      check('kube: follow logs runs in a second process, like tsh kubectl', processAlive(followPid), followPid);
       const stopped = await run<{ cancelled: boolean }>('teleport.kube.cancel', { runId: 'smoke-follow' }, null);
-      await new Promise((r) => setTimeout(r, 400));
+      // Well inside the 3 s fallback, so it is the tree kill that ends the run.
+      const ended = await until(async () => !(await run<KubeStreamRead>('teleport.kube.stream.read', { runId: 'smoke-follow' }, null)).running, 2000);
       const read3 = await run<KubeStreamRead>('teleport.kube.stream.read', { runId: 'smoke-follow' }, null);
-      check('kube: stop ends the stream', stopped.cancelled && !read3.running, { cancelled: stopped.cancelled, running: read3.running });
+      await new Promise((r) => setTimeout(r, 500));
+      const read4 = await run<KubeStreamRead>('teleport.kube.stream.read', { runId: 'smoke-follow', since: read3.next }, null);
+      check('kube: stop ends the stream', stopped.cancelled && ended && !read3.running && read4.lines.length === 0, { cancelled: stopped.cancelled, ended, extra: read4.lines });
+      check('kube: stop kills the process doing the work, not just tsh', await until(() => !processAlive(followPid), 1000), followPid);
 
       // History: recorded as operation and parameters, replayed through the same validation.
       await kq({ operation: 'namespaces', params: {} }, { record: false });
@@ -1739,6 +1762,26 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         await shot('11c-kube-logs-dark');
         await js(`document.documentElement.classList.remove('dark')`);
         check('ui: the query view left the terminal kubeconfig alone', (await fs.readFile(fakeTsh.homeKubeconfig, 'utf8')) === homeBeforeUi);
+
+        // Follow logs, then Stop: the form comes back and the process doing the work is gone.
+        const followState = () => js(`document.querySelector('[data-testid=kube-status]')?.getAttribute('data-state') ?? null`);
+        const lastFollowPid = async () => (await fakeTsh.kubectlCalls()).findLast((c) => c.argv.includes('--follow'))?.pid;
+        await setField('kube-operation', 'logs-follow');
+        await wait(300);
+        await js(`document.querySelector('[data-testid=kube-run]').click()`);
+        const following = await until(async () => (await followState()) === 'running' && String(await text('kube-output')).includes('[istio-proxy] line 302'), 4000);
+        const uiFollowPid = await lastFollowPid();
+        await js(`document.querySelector('[data-testid=kube-stop]').click()`);
+        const formBack = await until(async () => (await js(`Boolean(document.querySelector('[data-testid=kube-run]'))`)) === true && (await followState()) !== 'running', 2500);
+        check('ui: Stop ends a followed log and frees the form', following && formBack && (await until(() => !processAlive(uiFollowPid), 1000)), { following, formBack, alive: processAlive(uiFollowPid) });
+
+        // Closing the tab while following stops it too; nothing is left running.
+        await js(`document.querySelector('[data-testid=kube-run]').click()`);
+        const followingAgain = await until(async () => (await followState()) === 'running' && (await lastFollowPid()) !== uiFollowPid, 4000);
+        const tabFollowPid = await lastFollowPid();
+        await js(`document.querySelector('[role=tab][aria-selected=true] [aria-label="Close tab"]').click()`);
+        const tabGone = await until(async () => (await js(`Boolean(document.querySelector('[data-testid=kube-query]'))`)) === false, 1000);
+        check('ui: closing the tab stops its followed log', followingAgain && tabGone && (await until(() => !processAlive(tabFollowPid), 2500)), { followingAgain, tabGone, alive: processAlive(tabFollowPid) });
       }
 
       // Mock servers module: server rows, route editor, live request list with detail.

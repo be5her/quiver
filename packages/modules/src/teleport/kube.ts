@@ -23,7 +23,7 @@ import {
   type KubeStreamRead,
 } from '@quiver/core';
 import type { TeleportSession } from './session';
-import { lineSplitter, spawnTsh, type TshCommand } from './tsh';
+import { killTree, lineSplitter, spawnTsh, type TshCommand } from './tsh';
 
 const STDOUT_CAP = 2 * 1024 * 1024;
 const STDERR_CAP = 64 * 1024;
@@ -33,6 +33,8 @@ const FINISHED_STREAMS_KEPT = 8;
 /** A followed log stops on its own after this long, so a forgotten stream does not run forever. */
 const STREAM_MAX_MS = 60 * 60_000;
 const LOGIN_TIMEOUT_MS = 60_000;
+/** How long a stopped run may take to close its output before Quiver closes it and ends the run anyway. */
+const STOP_GRACE_MS = 3000;
 
 export interface KubeRunnerOptions {
   session: TeleportSession;
@@ -68,6 +70,8 @@ interface LiveRun {
   cancelled: boolean;
   historyId: string;
   endedAt: number | null;
+  /** Mark the run finished (idempotent); the process's exit code, or null when it never reported one. */
+  end(code: number | null): void;
 }
 
 interface Prepared {
@@ -255,14 +259,12 @@ export class KubeRunner {
     return new Promise((resolve, reject) => {
       let child: ChildProcess;
       try {
-        child = spawnTsh(tsh, argv.slice(tsh.argv.length));
+        child = spawnTsh(tsh, argv.slice(tsh.argv.length), { tree: true });
       } catch (err) {
         reject(new QuiverError('REQUEST_FAILED', `Could not start tsh kubectl: ${(err as Error).message}`));
         return;
       }
       if (streaming) this.pruneStreams();
-      const live: LiveRun = { runId, child, streaming, startedAt: Date.now(), lines: [], first: 0, dropped: 0, stderr: '', exitCode: null, running: true, cancelled: false, historyId: newId(), endedAt: null };
-      this.runs.set(runId, live);
       let bytes = 0;
       let settled = false;
       const settle = () => {
@@ -271,7 +273,35 @@ export class KubeRunner {
         clearTimeout(startTimer);
         resolve(live);
       };
+      const live: LiveRun = {
+        runId,
+        child,
+        streaming,
+        startedAt: Date.now(),
+        lines: [],
+        first: 0,
+        dropped: 0,
+        stderr: '',
+        exitCode: null,
+        running: true,
+        cancelled: false,
+        historyId: newId(),
+        endedAt: null,
+        end: (code) => {
+          if (!live.running) return;
+          outLines('\n');
+          if (live.lines.length && live.lines[live.lines.length - 1] === '') live.lines.pop();
+          live.running = false;
+          live.exitCode = live.cancelled || this.timedOut.has(runId) ? null : code;
+          live.endedAt = Date.now();
+          clearTimeout(killTimer);
+          if (streaming && settled) void this.finishStream(live);
+          settle();
+        },
+      };
+      this.runs.set(runId, live);
       const push = (line: string) => {
+        if (!live.running) return;
         if (!streaming) {
           if (bytes > STDOUT_CAP) {
             live.dropped++;
@@ -294,13 +324,13 @@ export class KubeRunner {
       const outLines = lineSplitter(push);
       child.stdout?.on('data', outLines);
       child.stderr?.on('data', (chunk: Buffer) => {
-        if (live.stderr.length < STDERR_CAP) live.stderr += chunk.toString().slice(0, STDERR_CAP - live.stderr.length);
+        if (live.running && live.stderr.length < STDERR_CAP) live.stderr += chunk.toString().slice(0, STDERR_CAP - live.stderr.length);
       });
       const limit = streaming ? STREAM_MAX_MS : timeoutMs;
       const killTimer = setTimeout(() => {
         if (!live.running) return;
         this.timedOut.add(runId);
-        child.kill();
+        this.stop(live);
       }, limit);
       killTimer.unref?.();
       const startTimer = setTimeout(settle, streaming ? 1000 : 2 ** 31 - 1);
@@ -315,17 +345,35 @@ export class KubeRunner {
           reject(new QuiverError('REQUEST_FAILED', `Could not start tsh kubectl (${tsh.argv[0]}): ${err.message}`));
         }
       });
-      child.on('close', (code) => {
-        outLines('\n');
-        if (live.lines.length && live.lines[live.lines.length - 1] === '') live.lines.pop();
-        live.running = false;
-        live.exitCode = live.cancelled || this.timedOut.has(runId) ? null : code;
-        live.endedAt = Date.now();
-        clearTimeout(killTimer);
-        if (streaming && settled) void this.finishStream(live);
-        settle();
+      child.on('exit', () => {
+        // 'close' follows once the pipes close. A process tsh started that outlived it would keep
+        // them open (and keep streaming), so close them after a grace period.
+        const grace = setTimeout(() => {
+          if (!live.running) return;
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+        }, STOP_GRACE_MS);
+        grace.unref?.();
       });
+      child.on('close', (code) => live.end(code));
     });
+  }
+
+  /**
+   * Stop a run and every process tsh started for it. If it has not ended a few seconds later,
+   * it is killed harder and ended here, so a stopped run always ends.
+   */
+  private stop(live: LiveRun): void {
+    if (!live.running) return;
+    killTree(live.child);
+    const force = setTimeout(() => {
+      if (!live.running) return;
+      killTree(live.child, 'SIGKILL');
+      live.child.stdout?.destroy();
+      live.child.stderr?.destroy();
+      live.end(null);
+    }, STOP_GRACE_MS);
+    force.unref?.();
   }
 
   private emitStream(runId: string): void {
@@ -375,12 +423,16 @@ export class KubeRunner {
     const live = this.runs.get(runId);
     if (!live?.running) return false;
     live.cancelled = true;
-    live.child.kill();
+    this.stop(live);
     return true;
   }
 
   stopAll(): void {
-    for (const live of this.runs.values()) if (live.running) live.child.kill();
+    for (const live of this.runs.values()) {
+      if (!live.running) continue;
+      live.cancelled = true;
+      this.stop(live);
+    }
     for (const timer of this.lastStreamEmit.values()) clearTimeout(timer);
     this.lastStreamEmit.clear();
   }

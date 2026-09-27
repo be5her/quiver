@@ -25,8 +25,8 @@ export interface FakeTsh {
   expire(proxy: string): Promise<void>;
   /** Stands in for the user's `~/.kube/config`; the smoke points KUBECONFIG at it. */
   homeKubeconfig: string;
-  /** Every `tsh kubectl` call the fake received: argv after `kubectl`, and the KUBECONFIG it ran with. */
-  kubectlCalls(): Promise<{ argv: string[]; kubeconfig: string | null }[]>;
+  /** Every `tsh kubectl` call the fake received: argv after `kubectl`, the KUBECONFIG it ran with, and the pid of the second process that ran it. */
+  kubectlCalls(): Promise<{ argv: string[]; kubeconfig: string | null; pid: number }[]>;
 }
 
 /**
@@ -78,7 +78,7 @@ export async function writeFakeTsh(dir: string, redisPort: number): Promise<Fake
       return text
         .split('\n')
         .filter(Boolean)
-        .map((l) => JSON.parse(l) as { argv: string[]; kubeconfig: string | null });
+        .map((l) => JSON.parse(l) as { argv: string[]; kubeconfig: string | null; pid: number });
     },
   };
 }
@@ -214,7 +214,7 @@ function kubectl(argv) {
     else if (a.startsWith('--context=')) context = a.slice('--context='.length);
     else rest.push(a);
   }
-  fs.appendFileSync(CALLS_FILE, JSON.stringify({ argv, kubeconfig: process.env.KUBECONFIG || null }) + '\n');
+  fs.appendFileSync(CALLS_FILE, JSON.stringify({ argv, kubeconfig: process.env.KUBECONFIG || null, pid: process.pid }) + '\n');
   const cfg = readKubeconfig(kubeconfig || process.env.KUBECONFIG || HOME_KUBECONFIG);
   const ctx = context || cfg.current;
   if (!ctx || !cfg.contexts[ctx]) { err('error: context "' + ctx + '" does not exist'); process.exit(1); }
@@ -422,7 +422,15 @@ switch (args[0]) {
     break;
   }
   case 'kubectl':
-    kubectl(args.slice(1));
+    // Like the real tsh: kubectl runs in a second tsh process sharing this one's stdout and
+    // stderr, so stopping only this process leaves it running and the pipe open. Detached on
+    // Windows because Node would otherwise kill it with its parent (a kill-on-close job), which
+    // Go's tsh does not; elsewhere it stays in the parent's process group, as Go's does.
+    if (process.env.FAKE_TSH_KUBECTL_CHILD) kubectl(args.slice(1));
+    else {
+      const child = require('child_process').spawn(process.execPath, [process.argv[1]].concat(args), { stdio: 'inherit', windowsHide: true, detached: process.platform === 'win32', env: Object.assign({}, process.env, { FAKE_TSH_KUBECTL_CHILD: '1' }) });
+      child.on('exit', (code) => process.exit(code === null ? 1 : code));
+    }
     break;
   case '__forward':
     forward(Number(args[1]), Number(args[2]), () => out('forwarding ' + args[1] + ' -> ' + args[2]));

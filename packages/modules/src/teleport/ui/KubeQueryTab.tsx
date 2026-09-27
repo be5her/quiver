@@ -75,6 +75,7 @@ export function KubeQueryTab({ tab }: TabProps) {
   const [operation, setOperation] = useState<KubeOperation>('list');
   const [values, setValues] = useState<Values>({ resource: 'pods' });
   const [running, setRunning] = useState<{ runId: string; streaming: boolean } | null>(null);
+  const [stopping, setStopping] = useState(false);
   const [result, setResult] = useState<KubeRunResult | null>(null);
   const [lines, setLines] = useState<string[]>([]);
   const [stream, setStream] = useState<KubeStreamRead | null>(null);
@@ -149,6 +150,7 @@ export function KubeQueryTab({ tab }: TabProps) {
     const runId = newId();
     const streaming = Boolean(kubeOperationInfo(q.operation)?.streaming);
     setRunning({ runId, streaming });
+    setStopping(false);
     setError(null);
     setStream(null);
     setResult(null);
@@ -170,8 +172,20 @@ export function KubeQueryTab({ tab }: TabProps) {
     void refreshPreview();
   };
 
+  // The host ends the run (and says so through the stream) once the process tree is gone.
   const stop = () => {
-    if (running) void invoke('teleport.kube.cancel', { runId: running.runId }, null).catch(report);
+    if (!running || stopping) return;
+    const { runId } = running;
+    setStopping(true);
+    void invoke<{ cancelled: boolean }>('teleport.kube.cancel', { runId }, null)
+      .then((out) => {
+        // Nothing to stop on the host (it already ended, or Quiver restarted): free the form.
+        if (!out.cancelled) setRunning((r) => (r?.runId === runId ? null : r));
+      })
+      .catch((err: unknown) => {
+        setStopping(false);
+        report(err);
+      });
   };
 
   // Stop a followed log when its tab closes.
@@ -273,8 +287,8 @@ export function KubeQueryTab({ tab }: TabProps) {
               )}
             </div>
             {running ? (
-              <Button size="md" variant="danger" icon={<Square className="size-3.5" />} onClick={stop} data-testid="kube-stop">
-                {running.streaming ? 'Stop' : 'Cancel'}
+              <Button size="md" variant="danger" icon={stopping ? <Spinner className="size-3.5" /> : <Square className="size-3.5" />} disabled={stopping} onClick={stop} data-testid="kube-stop">
+                {stopping ? 'Stopping…' : running.streaming ? 'Stop' : 'Cancel'}
               </Button>
             ) : (
               <Button size="md" variant="primary" icon={<Play className="size-3.5" />} disabled={!valid} onClick={() => void run()} data-testid="kube-run">
