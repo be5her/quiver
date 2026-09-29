@@ -10,13 +10,14 @@ import { TabContent } from './shell/TabContent';
 import { TitleBar } from './shell/TitleBar';
 import { handleShortcut, registerShellActions } from './shell/actions';
 import { modules } from './shell/modules';
-import { useTabPersistence } from './shell/persistence';
+import { useTabPersistence, useTreePersistence } from './shell/persistence';
 import { handleUpdateEvent } from './shell/updates';
 
 export function App() {
   const ready = useAppStore((s) => s.ready);
   useBootstrap();
   useTabPersistence();
+  useTreePersistence();
   useDefaultModule();
 
   if (!ready) return <div className="h-full bg-canvas" />;

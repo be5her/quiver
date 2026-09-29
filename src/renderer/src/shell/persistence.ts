@@ -1,4 +1,4 @@
-import { invoke, useAppStore, useTabsStore, type Tab } from '@quiver/ui';
+import { invoke, useAppStore, useTabsStore, useTreeStore, type Tab } from '@quiver/ui';
 import { useEffect } from 'react';
 
 interface PersistedTabs {
@@ -63,4 +63,46 @@ function stripDraft(data: Record<string, unknown>): Record<string, unknown> {
   if (!('draft' in data)) return data;
   const { draft: _draft, ...rest } = data;
   return rest;
+}
+
+const TREE_KEY = 'ui.tree';
+
+/** Restores which sidebar nodes and sections a workspace had open, and saves them (debounced) when they change. */
+export function useTreePersistence(): void {
+  const activeWorkspaceId = useAppStore((s) => s.activeWorkspaceId);
+  const workspaces = useAppStore((s) => s.workspaces);
+
+  useEffect(() => {
+    if (!activeWorkspaceId) return;
+    if (useTreeStore.getState().scopes[activeWorkspaceId]?.hydrated) return;
+    let cancelled = false;
+    invoke<{ value: Record<string, boolean> | null }>('workspace.state.get', { key: TREE_KEY }, activeWorkspaceId)
+      .then(({ value }) => {
+        if (!cancelled) useTreeStore.getState().hydrate(activeWorkspaceId, value && typeof value === 'object' ? value : {});
+      })
+      .catch(() => useTreeStore.getState().hydrate(activeWorkspaceId, {}));
+    return () => {
+      cancelled = true;
+    };
+  }, [activeWorkspaceId]);
+
+  useEffect(() => {
+    const timers = new Map<string, ReturnType<typeof setTimeout>>();
+    const unsubscribe = useTreeStore.subscribe((state, prev) => {
+      for (const [scope, data] of Object.entries(state.scopes)) {
+        // Saving before the stored state is loaded would overwrite it with a partial one.
+        if (!data.hydrated || data === prev.scopes[scope]) continue;
+        if (!workspaces.some((w) => w.id === scope)) continue;
+        clearTimeout(timers.get(scope));
+        timers.set(
+          scope,
+          setTimeout(() => void invoke('workspace.state.set', { key: TREE_KEY, value: data.expanded }, scope).catch(() => {}), 400),
+        );
+      }
+    });
+    return () => {
+      unsubscribe();
+      timers.forEach((t) => clearTimeout(t));
+    };
+  }, [workspaces]);
 }

@@ -1912,6 +1912,30 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       );
       check('ui: api module button', clickedApi === true);
       await wait(500);
+
+      // API sidebar: a collapsed collection stays collapsed after leaving the module, and the choice is saved per machine.
+      const foldCollection = await run<{ id: string }>('api.collection.create', { name: 'smoke folder' }, ws.id);
+      await run('api.request.create', { name: 'inside folder', collectionId: foldCollection.id }, ws.id);
+      await wait(600);
+      const folderOpen = () => js(`document.querySelector('[data-testid=api-collection][data-name="smoke folder"]')?.getAttribute('data-open') ?? null`);
+      const openedByDefault = await folderOpen();
+      await js(`document.querySelector('[data-testid=api-collection][data-name="smoke folder"] [role=button]').click()`);
+      await wait(200);
+      const collapsed = await folderOpen();
+      const hiddenChild = await js(`[...document.querySelectorAll('[role=button]')].some((r) => r.textContent.includes('inside folder'))`);
+      await js(`[...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.title || '') === 'Databases').click()`);
+      await wait(400);
+      await js(`[...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.title || '') === 'API client').click()`);
+      await wait(600);
+      const afterReturn = await folderOpen();
+      const savedTree = await run<{ value: Record<string, boolean> | null }>('workspace.state.get', { key: 'ui.tree' }, ws.id);
+      check(
+        'ui: a collapsed API collection stays collapsed after switching modules and is saved',
+        openedByDefault === 'true' && collapsed === 'false' && hiddenChild === false && afterReturn === 'false' && savedTree.value?.[`api/collection/${foldCollection.id}`] === false,
+        { openedByDefault, collapsed, hiddenChild, afterReturn, saved: savedTree.value },
+      );
+      await run('api.collection.delete', { id: foldCollection.id }, ws.id).catch(() => {});
+      await wait(300);
       const gqlRowLabel = await js(
         `(() => { const row = [...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('smoke graphql')); if (!row) return null; const label = row.textContent.slice(0, 3); row.click(); return label; })()`,
       );

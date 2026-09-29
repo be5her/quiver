@@ -7,6 +7,7 @@ export * from './stores/app';
 export * from './stores/tabs';
 export * from './stores/actions';
 export * from './stores/dialogs';
+export * from './stores/tree';
 export * from './hooks/useInvoke';
 export * from './components/primitives';
 export * from './components/KeyValueEditor';

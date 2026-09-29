@@ -1,5 +1,5 @@
 import { newId, type DbConnectionSummary, type DbKind } from '@quiver/core';
-import { defineModuleUI, invoke, selectScope, useAppStore, useTabsStore } from '@quiver/ui';
+import { defineModuleUI, expandNode, invoke, selectScope, useAppStore, useTabsStore } from '@quiver/ui';
 import { Database } from 'lucide-react';
 import { ConnectionTab } from './ConnectionTab';
 import { QueryTab } from './QueryTab';
@@ -7,7 +7,6 @@ import { RedisTab } from './RedisTab';
 import { DbSidebar } from './Sidebar';
 import { TableTab } from './TableTab';
 import { firstLine } from './shared';
-import { expandNode } from './tree-store';
 
 const scopeNow = () => selectScope(useAppStore.getState());
 const hasWorkspace = () => useAppStore.getState().activeWorkspaceId !== null;

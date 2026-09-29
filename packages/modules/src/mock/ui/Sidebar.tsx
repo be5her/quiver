@@ -1,8 +1,7 @@
 import { describeRoute, type MockRoute, type MockServerSummary } from '@quiver/core';
-import { Button, IconButton, METHOD_COLORS, SectionHeader, Spinner, cn, notify, useInvoke } from '@quiver/ui';
+import { Button, IconButton, METHOD_COLORS, SectionHeader, Spinner, cn, notify, useExpanded, useInvoke } from '@quiver/ui';
 import { ChevronDown, ChevronRight, Inbox, Pencil, Play, Plus, Square, Trash2, Webhook } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import { useExpanded } from '../../db/ui/tree-store';
 import { createServer, deleteServer, openServerTab, toggleServer } from './index';
 
 export function MockSidebar() {

@@ -20,7 +20,7 @@ On Windows, Settings → About also has **Beta builds**: with it on, Quiver also
 
 Working today:
 
-- Workspace model: open several folders, switch instantly, per-workspace tabs restored on return.
+- Workspace model: open several folders, switch instantly, per-workspace tabs and the open or collapsed state of sidebar folders and sections restored on return and after a restart.
 - API client: collections, requests, params/headers/body/auth, environments with encrypted secrets, history, curl import and export, `{{variables}}` everywhere.
 - Databases: MySQL, SQLite (via Node's built-in `node:sqlite`, nothing to compile) and Redis. Schema tree, table browser with filter and paging, SQL editor with autocompletion and multi-statement scripts, Redis key browser and console, saved queries and history. Passwords are encrypted per machine and never committed.
 - Teleport: several clusters at once, each a tsh profile with its own status, expiry countdown, browser SSO login and logout. Databases from `tsh db ls` with one-click `tsh proxy db --tunnel` tunnels that become Quiver connections, Kubernetes clusters with a read-only query view (list, get, describe, logs and followed logs, events, top, rollout status and history, namespaces, API resources, version, `auth can-i`) that never changes your terminal's kubectl context, a per-machine query history with favourites, and pinned resources from any cluster at the top. Database connections can also go through any tunnel command with a `{port}` placeholder (ssh and friends).
