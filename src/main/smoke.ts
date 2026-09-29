@@ -346,6 +346,15 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         host.config.get().globalVariables.find((v) => v.key === 'shared')?.value === 'yes',
       { agentDefineGlobal: agentDefineGlobal.ok || agentDefineGlobal.error.code, secretGlobal: secretGlobal.ok || secretGlobal.error.code, builtinName: builtinName.ok || builtinName.error.code },
     );
+    // Defining a name that is already a secret, without asking for a secret, keeps it encrypted.
+    await run('api.variables.define', { name: 'partner', value: 'acme3', target: { kind: 'environment', id: env.id }, secret: false }, ws.id);
+    const partnerKept = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'environments', `${env.id}.json`), 'utf8')) as Environment;
+    const partnerRow = partnerKept.variables.find((v) => v.key === 'partner');
+    check(
+      'api.variables.define: an existing secret stays secret and out of the committed file',
+      partnerRow?.secret === true && partnerRow.value === '' && (await run<Environment>('api.environment.get', { id: env.id }, ws.id)).variables.find((v) => v.key === 'partner')?.value === 'acme3',
+      partnerRow,
+    );
     const envWithPartner = await run<Environment>('api.environment.get', { id: env.id }, ws.id);
     await run('api.environment.save', { environment: { ...envWithPartner, variables: envWithPartner.variables.filter((v) => v.key !== 'partner') } }, ws.id);
     await run('config.update', { patch: { globalVariables: globalsBefore } }, null);
@@ -1833,6 +1842,24 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await typeUrl('{{baseUrl}}/things?x=1');
       await wait(200);
       check('ui: restoring the URL leaves the request unmodified', (await js(`document.querySelector('[data-testid=tab][aria-selected=true]')?.textContent.includes('echo') && !document.querySelector('[data-testid=tab][aria-selected=true] .bg-warning')`)) === true);
+
+      // A clean request tab follows the file when it changes on disk (an agent, a git pull).
+      const saveLabel = () =>
+        js(`(() => { const pane = [...document.querySelectorAll('[data-tab-type="api.request"]')].find((el) => !el.classList.contains('hidden')); return [...(pane?.querySelectorAll('button') ?? [])].find((b) => b.textContent.startsWith('Save'))?.textContent ?? null; })()`);
+      const labelBefore = await saveLabel();
+      const echoes = (await run<ApiRequest[]>('api.request.list', {}, ws.id)).filter((r) => r.name === 'echo');
+      const echoReq = echoes[0];
+      const echoFile = path.join(folder, '.quiver', 'requests', `${echoReq.id}.json`);
+      const echoOriginal = await fs.readFile(echoFile, 'utf8');
+      await fs.writeFile(echoFile, JSON.stringify({ ...echoReq, url: '{{baseUrl}}/changed-on-disk' }, null, 2) + '\n');
+      await wait(1200);
+      const tabUrl = await js(
+        `(() => { const pane = [...document.querySelectorAll('[data-tab-type="api.request"]')].find((el) => !el.classList.contains('hidden')); return [...(pane?.querySelectorAll('input') ?? [])].find((i) => i.value.startsWith('{{baseUrl}}'))?.value ?? null; })()`,
+      );
+      const labelAfter = await saveLabel();
+      check('ui: an open request tab without edits picks up a change made on disk', tabUrl === '{{baseUrl}}/changed-on-disk' && labelAfter === 'Save', { tabUrl, labelBefore, labelAfter, echoes: echoes.map((r) => r.url) });
+      await fs.writeFile(echoFile, echoOriginal);
+      await wait(1200);
 
       const bodyVars = await run<ApiRequest>('api.request.create', { name: 'vars in body', method: 'POST', url: '{{baseUrl}}/b', body: { type: 'json', content: '{\n  "auth": "{{token}}",\n  "other": "{{nope}}"\n}' } }, ws.id);
       await wait(500);

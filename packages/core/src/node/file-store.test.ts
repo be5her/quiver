@@ -67,6 +67,25 @@ describe('FileStore external changes', () => {
     await until(() => changes.length === 3);
     expect((await store.list('requests')).map((r) => r.id)).toEqual(['b']);
 
+    // A file this store saved (replaced by a rename) is still watched for edits made in place.
+    await store.put('requests', { id: 'b', name: 'saved here' });
+    await new Promise((r) => setTimeout(r, 300));
+    const seen = changes.length;
+    await fs.writeFile(path.join(root, 'requests', 'b.json'), JSON.stringify({ id: 'b', name: 'edited in place' }));
+    await until(() => changes.length > seen);
+    expect((await store.get<{ id: string; name: string }>('requests', 'b'))?.name).toBe('edited in place');
+
+    // A collection folder deleted and created again is watched again.
+    await fs.rm(path.join(root, 'requests'), { recursive: true });
+    await until(() => changes.length > seen + 1);
+    await new Promise((r) => setTimeout(r, 200));
+    await fs.mkdir(path.join(root, 'requests'));
+    await new Promise((r) => setTimeout(r, 200));
+    await fs.writeFile(path.join(root, 'requests', 'c.json'), JSON.stringify({ id: 'c', name: 'back' }));
+    const end = Date.now() + 3000;
+    while (Date.now() < end && !(await store.list('requests')).some((r) => r.id === 'c')) await new Promise((r) => setTimeout(r, 25));
+    expect((await store.list('requests')).map((r) => r.id)).toEqual(['c']);
+
     await fs.mkdir(path.join(root, 'collections'));
     await fs.writeFile(path.join(root, 'collections', 'c.json'), JSON.stringify({ id: 'c', name: 'new folder' }));
     await until(() => changes.includes('collections'));

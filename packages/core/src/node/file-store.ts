@@ -32,7 +32,8 @@ async function readJson<T>(file: string): Promise<T | undefined> {
  */
 export class FileStore implements StoreApi {
   private readonly cache = new Map<string, Map<string, Entity>>();
-  private watcher: FSWatcher | null = null;
+  private readonly watchers = new Map<string, FSWatcher>();
+  private watching = false;
   private readonly pending = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(
@@ -84,22 +85,52 @@ export class FileStore implements StoreApi {
    * do not report twice.
    */
   watch(debounceMs = 150): void {
-    if (this.watcher) return;
-    try {
-      this.watcher = watch(this.root, { recursive: true, persistent: false }, (_event, filename) => {
-        const collection = filename ? collectionOf(String(filename)) : null;
-        if (collection) this.scheduleReload(collection, debounceMs);
-      });
-      this.watcher.on('error', () => this.unwatch());
-    } catch {
-      // A folder that cannot be watched keeps working; it just misses external edits.
-      this.watcher = null;
+    if (this.watching) return;
+    this.watching = true;
+    // Linux has no native recursive watch; Node's emulation watches each file's inode and loses a
+    // file once it is replaced by a rename (how every save here lands), so watch the folders instead.
+    if (process.platform === 'linux') {
+      this.watchDir('', debounceMs);
+      void fs
+        .readdir(this.root, { withFileTypes: true })
+        .then((entries) => entries.forEach((e) => e.isDirectory() && collectionOf(e.name) && this.watchDir(e.name, debounceMs)))
+        .catch(() => {});
+    } else {
+      this.watchDir('', debounceMs, true);
     }
   }
 
+  /** Watch one folder: the root (`''`) or a collection. The root also picks up new collection folders. */
+  private watchDir(name: string, debounceMs: number, recursive = false): void {
+    if (!this.watching || this.watchers.has(name)) return;
+    try {
+      const watcher = watch(path.join(this.root, name), { recursive, persistent: false }, (_event, filename) => {
+        const collection = filename ? collectionOf(name ? `${name}/${String(filename)}` : String(filename)) : null;
+        if (!collection) return;
+        // The collection folder itself was created, deleted or replaced: watch the one there now.
+        if (!recursive && !name) {
+          this.unwatchDir(collection);
+          this.watchDir(collection, debounceMs);
+        }
+        this.scheduleReload(collection, debounceMs);
+      });
+      // A deleted collection folder ends its watcher; the root sees it come back.
+      watcher.on('error', () => (name ? this.unwatchDir(name) : this.unwatch()));
+      this.watchers.set(name, watcher);
+    } catch {
+      // A folder that cannot be watched keeps working; it just misses external edits.
+    }
+  }
+
+  private unwatchDir(name: string): void {
+    this.watchers.get(name)?.close();
+    this.watchers.delete(name);
+  }
+
   unwatch(): void {
-    this.watcher?.close();
-    this.watcher = null;
+    this.watching = false;
+    for (const watcher of this.watchers.values()) watcher.close();
+    this.watchers.clear();
     for (const timer of this.pending.values()) clearTimeout(timer);
     this.pending.clear();
   }

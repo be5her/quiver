@@ -13,11 +13,12 @@ import {
   cn,
   invoke,
   notify,
+  onHostEvent,
   useTabsStore,
   type TabProps,
 } from '@quiver/ui';
 import { Copy, Save, Send } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { GraphqlEditor } from './GraphqlEditor';
 import { ApiVariablesProvider } from './variables';
 import { ResponsePane } from './ResponsePane';
@@ -64,6 +65,26 @@ function RequestTabBody({ tab, scope }: TabProps) {
     if (draft && !saved) return true;
     return JSON.stringify(request) !== JSON.stringify(saved);
   }, [request, saved, draft]);
+
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+
+  // Follow changes made elsewhere (an agent, a git pull or branch switch, another tab) while there
+  // are no unsaved edits here; with edits, keep them, since reloading would throw them away.
+  useEffect(
+    () =>
+      onHostEvent('store.changed', (p) => {
+        if (draft || p.workspaceId !== scope || p.collection !== 'requests' || dirtyRef.current) return;
+        invoke<ApiRequest>('api.request.get', { id: requestId }, scope)
+          .then((r) => {
+            if (dirtyRef.current) return;
+            setRequest(r);
+            setSaved(r);
+          })
+          .catch(() => undefined);
+      }),
+    [draft, requestId, scope],
+  );
 
   useEffect(() => {
     if (tab.dirty !== dirty) updateTab(scope, tab.id, { dirty });
