@@ -52,13 +52,13 @@ export const DEFINABLE_VARIABLE_NAME = /^[A-Za-z_][\w.-]*$/;
 
 /**
  * Give `name` a value in one layer: the row resolution picks is updated when there is one,
- * otherwise a new enabled row is appended. `secret`, when given, is set on that row.
+ * otherwise a new enabled row is appended. `secret: true` makes that row secret; an existing
+ * secret row stays secret, so a new value never lands in a committed file in plain text.
  */
 export function defineVariableIn(layer: Variable[], name: string, value: string, id: string, secret?: boolean): Variable[] {
-  const flag = secret === undefined ? {} : { secret };
   for (let i = layer.length - 1; i >= 0; i--) {
     const v = layer[i];
-    if (v.enabled && v.key.trim() === name) return layer.map((row, j) => (j === i ? { ...row, value, ...flag } : row));
+    if (v.enabled && v.key.trim() === name) return layer.map((row, j) => (j === i ? { ...row, value, ...(secret || row.secret ? { secret: true } : {}) } : row));
   }
   return [...layer, { id, key: name, value, enabled: true, ...(secret ? { secret: true } : {}) }];
 }

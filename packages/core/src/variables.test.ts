@@ -91,6 +91,12 @@ describe('defineVariableIn', () => {
     expect(defineVariableIn(next, 'host', 'x', 'unused', true)[1].secret).toBe(true);
   });
 
+  it('never turns an existing secret into a plain value', () => {
+    const layer = [{ ...row('a', 'token', ''), secret: true }];
+    expect(defineVariableIn(layer, 'token', 'new', 'unused', false)[0]).toEqual({ id: 'a', key: 'token', value: 'new', enabled: true, secret: true });
+    expect(defineVariableIn(layer, 'token', 'new', 'unused')[0].secret).toBe(true);
+  });
+
   it('accepts ordinary names and refuses built-in and malformed ones', () => {
     expect(DEFINABLE_VARIABLE_NAME.test('partnerName')).toBe(true);
     expect(DEFINABLE_VARIABLE_NAME.test('api.v2-key')).toBe(true);
