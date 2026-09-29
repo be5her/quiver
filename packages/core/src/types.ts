@@ -250,6 +250,8 @@ export interface HostEvents {
   'mcp.changed': { workspaceId: string; serverId: string; reason: 'status' | 'servers' | 'lists' | 'log' };
   /** Env files: a dotenv file or .gitignore changed on disk (from Quiver or outside), or a backup was taken. */
   'env.changed': { workspaceId: string; reason: 'files'; path?: string };
+  /** The workspace's todo list changed. */
+  'todo.changed': { workspaceId: string };
   /** The in-app updater moved: checking, a version found, download progress, downloaded, or an error. */
   'app.update': UpdateState;
 }

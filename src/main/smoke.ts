@@ -58,6 +58,7 @@ import type {
   TeleportTunnel,
   UpdateState,
   WorkspaceInfo,
+  TodoItem,
 } from '@quiver/core';
 import type { Host } from './host';
 import { startFakeMcpHttp, writeFakeMcpStdio } from './smoke-mcp';
@@ -1390,6 +1391,30 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     const hasGit = (await git('init', '-q')) && (await git('add', '.env', '.gitignore')) && (await git('commit', '-q', '-m', 'init'));
     console.log(`env files: git ${hasGit ? 'available, .env committed' : 'not available, git checks skipped'}`);
 
+    // Todo list: a per-machine list under .quiver/local; deleting is gated for agents, adding and ticking are not.
+    const todoA = await run<TodoItem>('todo.add', { title: '  write the release notes ' }, ws.id);
+    const todoB = await run<TodoItem>('todo.add', { title: 'review PR 42', notes: 'ask about the migration' }, ws.id);
+    const todoDone = await run<TodoItem>('todo.update', { id: todoA.id, done: true }, ws.id);
+    const todoNoted = await run<TodoItem>('todo.update', { id: todoB.id, notes: 'ask about the migration and the index' }, ws.id);
+    const todoList = await run<TodoItem[]>('todo.list', {}, ws.id);
+    const todoOnDisk = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'local', 'todos.json'), 'utf8')) as TodoItem[];
+    check(
+      'todo: add trims the title, update ticks and annotates, the list lives under .quiver/local',
+      todoA.title === 'write the release notes' && todoDone.done && typeof todoDone.completedAt === 'string' && todoNoted.notes.endsWith('the index') && !todoNoted.done && todoList.length === 2 && todoOnDisk.length === 2,
+      { todoDone, todoNoted, todoList: todoList.map((t) => `${t.title}:${t.done}`) },
+    );
+    const agentTodoAdd = await host.invoke('todo.add', { title: 'from an agent' }, { caller: 'mcp', workspaceId: ws.id });
+    const agentTodoRemove = await host.invoke('todo.remove', { id: todoB.id }, { caller: 'mcp', workspaceId: ws.id });
+    const agentTodoClear = await host.invoke('todo.clear', {}, { caller: 'mcp', workspaceId: ws.id });
+    const todoCleared = await run<{ removed: number }>('todo.clear', {}, ws.id);
+    const todoAfterClear = await run<TodoItem[]>('todo.list', {}, ws.id);
+    check(
+      'todo: agents may add and tick but not remove or clear; clear drops only the completed items',
+      agentTodoAdd.ok && !agentTodoRemove.ok && agentTodoRemove.error.code === 'MUTATION_BLOCKED' && !agentTodoClear.ok && agentTodoClear.error.code === 'MUTATION_BLOCKED' && todoCleared.removed === 1 && todoAfterClear.length === 2 && todoAfterClear.every((t) => !t.done),
+      { agentTodoAdd: agentTodoAdd.ok, agentTodoRemove: agentTodoRemove.ok || agentTodoRemove.error.code, agentTodoClear: agentTodoClear.ok || agentTodoClear.error.code, todoCleared, left: todoAfterClear.map((t) => t.title) },
+    );
+    for (const t of todoAfterClear) await run('todo.remove', { id: t.id }, ws.id);
+
     const envFiles = await run<EnvFileSummary[]>('env.file.list', {}, ws.id);
     check('env files: finds dotenv files up to four folders deep, ordered by kind, skipping node_modules', envFiles.map((f) => f.path).join() === '.env,.env.local,.env.staging,.env.example,docker.env,apps/web/.env', envFiles.map((f) => f.path));
     const envMain = envFiles.find((f) => f.path === '.env')!;
@@ -2636,6 +2661,47 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         JSON.stringify(afterReset) === JSON.stringify(activityDefault) && host.config.get().activityBar.order.length === 0 && host.config.get().activityBar.hidden.length === 0,
         { afterReset, saved: host.config.get().activityBar },
       );
+
+      // Todo panel: type and Enter adds, ticking strikes through, a line opens for notes, Clear completed empties the done ones.
+      await js(`document.querySelector('[data-testid=activity-item][data-drag-id=todo]').click()`);
+      await wait(400);
+      const typeTodo = async (title: string) => {
+        await js(
+          `(() => { const i = document.querySelector('[data-testid=todo-input]'); const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; setter.call(i, ${JSON.stringify(title)}); i.dispatchEvent(new Event('input', { bubbles: true })); i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); })()`,
+        );
+        await wait(300);
+      };
+      await typeTodo('Fix the flaky login test');
+      await typeTodo('Reply to the design review');
+      await typeTodo('Deploy staging');
+      const todoTitles = () => js(`[...document.querySelectorAll('[data-testid=todo-item]')].map((r) => r.getAttribute('data-title') + (r.hasAttribute('data-done') ? ':done' : ''))`) as Promise<string[]>;
+      const todosTyped = await todoTitles();
+      const todoInputCleared = await js(`document.querySelector('[data-testid=todo-input]').value`);
+      check('ui: todo: Enter adds the typed line and clears the box', JSON.stringify(todosTyped) === JSON.stringify(['Fix the flaky login test', 'Reply to the design review', 'Deploy staging']) && todoInputCleared === '', { todosTyped, todoInputCleared });
+      await js(`document.querySelectorAll('[data-testid=todo-toggle]')[0].click()`);
+      await wait(400);
+      const todosTicked = await todoTitles();
+      check('ui: todo: ticking a line marks it done and moves it below the open ones', JSON.stringify(todosTicked) === JSON.stringify(['Reply to the design review', 'Deploy staging', 'Fix the flaky login test:done']), todosTicked);
+      await js(`document.querySelectorAll('[data-testid=todo-title]')[0].click()`);
+      await wait(200);
+      await js(
+        `(() => { const t = document.querySelector('[data-testid=todo-notes]'); const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; setter.call(t, 'Waiting on Sam for the mockups'); t.dispatchEvent(new Event('input', { bubbles: true })); t.dispatchEvent(new FocusEvent('focusout', { bubbles: true })); })()`,
+      );
+      await wait(500);
+      const notedTodo = (await run<TodoItem[]>('todo.list', {}, ws.id)).find((t) => t.title === 'Reply to the design review');
+      check('ui: todo: notes typed under a line are saved', notedTodo?.notes === 'Waiting on Sam for the mockups', notedTodo);
+      await shot('26a-todo-light');
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(200);
+      await shot('26b-todo-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
+      await js(`document.querySelector('[data-testid=todo-clear]').click()`);
+      await wait(400);
+      const todosCleared = await todoTitles();
+      const todoHeader = await js(`document.querySelector('[data-testid=activity-item][data-drag-id=todo]') && [...document.querySelectorAll('span')].find((s) => /^List · /.test(s.textContent))?.textContent`);
+      check('ui: todo: Clear completed removes the done lines and the header counts what is left', JSON.stringify(todosCleared) === JSON.stringify(['Reply to the design review', 'Deploy staging']) && todoHeader === 'List · 0/2 done', { todosCleared, todoHeader });
+      await js(`document.querySelector('[data-testid=activity-item][data-drag-id=api]').click()`);
+      await wait(200);
 
       const revealedFolder = await run<{ path: string; revealed: boolean }>('workspace.reveal', { id: ws.id }, null);
       const revealByAgent = await host.invoke('workspace.reveal', { id: ws.id }, { caller: 'mcp', workspaceId: null });
