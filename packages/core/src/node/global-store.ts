@@ -2,9 +2,10 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { defaultGlobalConfig } from '../defaults';
 import { migrateTeleportConfig } from '../models/teleport';
+import type { ActivityBarLayout } from '../activity-bar';
 import type { GlobalConfig, UpdatesConfig } from '../types';
 
-/** Shallow merge with the nested sections merged one level deeper, so a partial `mcp`, `teleport`, `mock` or `updates` patch keeps the other keys. */
+/** Shallow merge with the nested sections merged one level deeper, so a partial `mcp`, `teleport`, `mock`, `updates` or `activityBar` patch keeps the other keys. */
 function mergeConfig(base: GlobalConfig, patch: Partial<GlobalConfig>): GlobalConfig {
   return {
     ...base,
@@ -13,7 +14,14 @@ function mergeConfig(base: GlobalConfig, patch: Partial<GlobalConfig>): GlobalCo
     teleport: migrateTeleportConfig({ ...base.teleport, ...(patch.teleport ?? {}) }),
     mock: { ...base.mock, ...(patch.mock ?? {}) },
     updates: normalizeUpdates({ ...base.updates, ...(patch.updates ?? {}) }),
+    activityBar: normalizeActivityBar({ ...base.activityBar, ...(patch.activityBar ?? {}) }),
   };
+}
+
+/** A hand-edited or older file may lack the lists or hold something else. */
+function normalizeActivityBar(layout: Partial<ActivityBarLayout>): ActivityBarLayout {
+  const ids = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+  return { order: ids(layout.order), hidden: ids(layout.hidden) };
 }
 
 /** An unknown channel (a hand-edited file, an older or newer build) falls back to stable. */

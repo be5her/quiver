@@ -3,6 +3,7 @@ export * from './types';
 export * from './errors';
 export * from './ids';
 export * from './arrays';
+export * from './activity-bar';
 export * from './registry';
 export * from './variables';
 export * from './curl';

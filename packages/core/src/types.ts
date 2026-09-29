@@ -1,3 +1,4 @@
+import type { ActivityBarLayout } from './activity-bar';
 import type { z } from 'zod';
 
 export type Caller = 'ui' | 'mcp' | 'cli' | 'system';
@@ -76,6 +77,8 @@ export interface GlobalConfig {
   teleport: TeleportConfig;
   mock: MockConfig;
   updates: UpdatesConfig;
+  /** The user's order of the activity bar and the modules hidden from it. */
+  activityBar: ActivityBarLayout;
 }
 
 /** Which releases the in-app updater follows. `beta` adds the Windows prereleases built from every merge to main. */

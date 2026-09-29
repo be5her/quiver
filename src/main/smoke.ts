@@ -2557,6 +2557,86 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await wait(300);
       check('workspace.reorder: listed ids go first and the rest keep their order', (await workspaceOrder())[0] === ws.id && host.config.get().openWorkspaces[0] === folder, await workspaceOrder());
 
+      // The activity bar: right-click to hide modules (VS Code's ticked list), drag to reorder, reset.
+      const activityOrder = () => js(`[...document.querySelectorAll('[data-testid=activity-item]')].map((b) => b.getAttribute('data-drag-id'))`) as Promise<string[]>;
+      const activeActivity = () => js(`document.querySelector('[data-testid=activity-item][data-active]')?.getAttribute('data-drag-id') ?? null`);
+      const activityDefault = await activityOrder();
+      await rightClick('[data-testid=activity-item]');
+      await wait(200);
+      const activityMenu = (await js(
+        `[...document.querySelectorAll('[data-testid=context-menu] [role^=menuitem]')].map((b) => ({ label: b.textContent, checked: b.getAttribute('aria-checked'), disabled: b.disabled }))`,
+      )) as { label: string; checked: string | null; disabled: boolean }[];
+      check(
+        'ui: right-clicking the activity bar offers Hide, every module ticked, and a reset',
+        activityMenu[0]?.label.startsWith('Hide ') &&
+          activityMenu.filter((i) => i.checked === 'true').length === activityDefault.length &&
+          activityMenu[activityMenu.length - 1]?.label === 'Reset Order and Visibility' && activityMenu[activityMenu.length - 1].disabled,
+        activityMenu,
+      );
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(200);
+      await shot('25a-activity-menu-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
+      const toHide = activityDefault[1];
+      await js(`document.querySelector('[data-testid=activity-menu-${toHide}]').click()`);
+      await wait(300);
+      const afterHide = await activityOrder();
+      check(
+        'ui: unticking a module hides it from the activity bar and keeps that in the config',
+        !afterHide.includes(toHide) && afterHide.length === activityDefault.length - 1 && host.config.get().activityBar.hidden.includes(toHide),
+        { afterHide, saved: host.config.get().activityBar },
+      );
+      const itemRects = (await js(
+        `[...document.querySelectorAll('[data-testid=activity-item]')].map((b) => { const r = b.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), bottom: Math.round(r.bottom) }; })`,
+      )) as { x: number; y: number; bottom: number }[];
+      let activityMarker = false;
+      if (itemRects.length >= 3) {
+        const from = itemRects[0];
+        const to = itemRects[2].bottom - 3;
+        win.webContents.sendInputEvent({ type: 'mouseMove', x: from.x, y: from.y });
+        win.webContents.sendInputEvent({ type: 'mouseDown', x: from.x, y: from.y, button: 'left', clickCount: 1 });
+        for (let step = 1; step <= 8; step++) {
+          win.webContents.sendInputEvent({ type: 'mouseMove', x: from.x, y: Math.round(from.y + ((to - from.y) * step) / 8), button: 'left', modifiers: ['leftbuttondown'] });
+          await wait(30);
+        }
+        await wait(150);
+        activityMarker = (await js(`Boolean(document.querySelector('[data-testid=activity-drop-marker]'))`)) === true;
+        await shot('25b-activity-drag-light');
+        win.webContents.sendInputEvent({ type: 'mouseUp', x: from.x, y: to, button: 'left', clickCount: 1 });
+      }
+      await wait(400);
+      const afterDrag = await activityOrder();
+      check(
+        'ui: dragging an activity bar icon reorders the modules and keeps the order in the config',
+        activityMarker && JSON.stringify(afterDrag) === JSON.stringify([afterHide[1], afterHide[2], afterHide[0], ...afterHide.slice(3)]) && host.config.get().activityBar.order.filter((id) => id !== toHide).slice(0, 3).join() === afterDrag.slice(0, 3).join(),
+        { afterHide, afterDrag, activityMarker, saved: host.config.get().activityBar },
+      );
+      const toActivate = afterDrag[1];
+      await js(`document.querySelector('[data-testid=activity-item][data-drag-id=${toActivate}]').click()`);
+      await wait(200);
+      await rightClick(`[data-testid=activity-item][data-drag-id=${toActivate}]`);
+      await wait(200);
+      await js(`document.querySelector('[data-testid=activity-menu-hide]').click()`);
+      await wait(300);
+      const afterHideActive = await activityOrder();
+      const nowActive = await activeActivity();
+      check(
+        'ui: hiding the module on screen switches to the first module still shown',
+        !afterHideActive.includes(toActivate) && nowActive === afterHideActive[0],
+        { toActivate, afterHideActive, nowActive },
+      );
+      await shot('25c-activity-arranged-light');
+      await rightClick('[data-testid=activity-bar]');
+      await wait(200);
+      await js(`document.querySelector('[data-testid=activity-menu-reset]').click()`);
+      await wait(300);
+      const afterReset = await activityOrder();
+      check(
+        'ui: Reset Order and Visibility brings back every module in the default order',
+        JSON.stringify(afterReset) === JSON.stringify(activityDefault) && host.config.get().activityBar.order.length === 0 && host.config.get().activityBar.hidden.length === 0,
+        { afterReset, saved: host.config.get().activityBar },
+      );
+
       const revealedFolder = await run<{ path: string; revealed: boolean }>('workspace.reveal', { id: ws.id }, null);
       const revealByAgent = await host.invoke('workspace.reveal', { id: ws.id }, { caller: 'mcp', workspaceId: null });
       check('workspace.reveal: answers the folder for the UI and refuses agents', revealedFolder.path === folder && !revealByAgent.ok, { revealedFolder, agent: revealByAgent.ok });

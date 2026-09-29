@@ -1,3 +1,4 @@
+import { defaultActivityBarLayout } from './activity-bar';
 import { DEFAULT_PALETTE } from './palettes';
 import type { GlobalConfig } from './types';
 
@@ -14,5 +15,6 @@ export function defaultGlobalConfig(): GlobalConfig {
     teleport: { proxies: [], pins: [], tshPath: '', loginOnLaunch: false },
     mock: { ports: [] },
     updates: { channel: 'stable' },
+    activityBar: defaultActivityBarLayout(),
   };
 }

@@ -1,9 +1,19 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type MouseEvent as ReactMouseEvent } from 'react';
+import { Check } from 'lucide-react';
 import { create } from 'zustand';
 import { cn } from '../cn';
 
 export type ContextMenuItem =
-  | { label: string; onSelect(): void; shortcut?: string; disabled?: boolean; danger?: boolean; testId?: string }
+  | {
+      label: string;
+      onSelect(): void;
+      shortcut?: string;
+      disabled?: boolean;
+      danger?: boolean;
+      /** Set (true or false) to make the item a checkbox, shown with a tick when true. */
+      checked?: boolean;
+      testId?: string;
+    }
   | 'separator';
 
 interface ContextMenuState {
@@ -60,9 +70,11 @@ export function ContextMenuHost() {
   }, [menu, close]);
 
   if (!menu) return null;
+  // Menus with checkbox items keep a gutter for the tick on every row, so labels line up.
+  const gutter = menu.items.some((item) => item !== 'separator' && item.checked !== undefined);
 
   const onKeyDown = (e: KeyboardEvent) => {
-    const items = [...(ref.current?.querySelectorAll<HTMLButtonElement>('[role=menuitem]:not(:disabled)') ?? [])];
+    const items = [...(ref.current?.querySelectorAll<HTMLButtonElement>('[role^=menuitem]:not(:disabled)') ?? [])];
     const index = items.indexOf(document.activeElement as HTMLButtonElement);
     if (e.key === 'Escape') close();
     else if (e.key === 'ArrowDown') items[(index + 1) % items.length]?.focus();
@@ -91,19 +103,24 @@ export function ContextMenuHost() {
           <button
             key={item.label}
             type="button"
-            role="menuitem"
+            role={item.checked === undefined ? 'menuitem' : 'menuitemcheckbox'}
+            aria-checked={item.checked}
             disabled={item.disabled}
             onClick={() => {
               close();
               item.onSelect();
             }}
             className={cn(
-              'w-full flex items-center gap-6 px-3 py-1.5 text-left outline-none hover:bg-surface focus-visible:bg-surface disabled:opacity-40 disabled:pointer-events-none',
+              'w-full flex items-center gap-6 py-1.5 text-left outline-none hover:bg-surface focus-visible:bg-surface disabled:opacity-40 disabled:pointer-events-none',
               item.danger ? 'text-danger' : 'text-fg',
+              gutter ? 'pl-1.5 pr-3' : 'px-3',
             )}
             data-testid={item.testId}
           >
-            <span className="flex-1 truncate">{item.label}</span>
+            <span className="flex-1 flex items-center gap-1.5 min-w-0">
+              {gutter && <span className="size-4 shrink-0 flex items-center justify-center">{item.checked && <Check className="size-3.5" />}</span>}
+              <span className="truncate">{item.label}</span>
+            </span>
             {item.shortcut && <span className="text-[11px] text-muted">{item.shortcut}</span>}
           </button>
         ),
