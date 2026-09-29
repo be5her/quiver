@@ -2427,6 +2427,63 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         );
       const menuLabels = () => js(`[...document.querySelectorAll('[data-testid=context-menu] [role=menuitem]')].map((b) => b.textContent)`);
       const tabTitles = () => js(`[...document.querySelectorAll('[data-testid=tab]')].map((t) => t.getAttribute('data-title'))`) as Promise<string[]>;
+      // Dragging a tab with the mouse reorders the strip and the new order is saved with the workspace.
+      const orderBefore = await tabTitles();
+      const stripScrolled = await js(`(() => { const strip = document.querySelector('[data-testid=tab]')?.parentElement; if (!strip) return null; const scrolled = strip.scrollLeft > 0 && strip.scrollWidth > strip.clientWidth; strip.scrollLeft = 0; return scrolled; })()`);
+      check('ui: with many tabs open the strip scrolls to the active tab instead of squeezing the tabs', stripScrolled === true, stripScrolled);
+      const wheeled = await js(`(() => { const strip = document.querySelector('[data-testid=tab]').parentElement; strip.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, bubbles: true, cancelable: true })); const moved = strip.scrollLeft; strip.scrollLeft = 0; return moved; })()`);
+      check('ui: the mouse wheel scrolls the tab strip sideways', typeof wheeled === 'number' && wheeled > 0, wheeled);
+      await wait(100);
+      const tabRects = (await js(
+        `[...document.querySelectorAll('[data-testid=tab]')].map((t) => { const r = t.getBoundingClientRect(); return { x: Math.round(r.left + 16), right: Math.round(r.right), y: Math.round(r.top + r.height / 2) }; })`,
+      )) as { x: number; right: number; y: number }[];
+      let markerShown = false;
+      if (tabRects.length >= 3) {
+        const from = tabRects[0];
+        const to = tabRects[2].right - 4;
+        win.webContents.sendInputEvent({ type: 'mouseMove', x: from.x, y: from.y });
+        win.webContents.sendInputEvent({ type: 'mouseDown', x: from.x, y: from.y, button: 'left', clickCount: 1 });
+        for (let step = 1; step <= 8; step++) {
+          win.webContents.sendInputEvent({ type: 'mouseMove', x: Math.round(from.x + ((to - from.x) * step) / 8), y: from.y, button: 'left', modifiers: ['leftbuttondown'] });
+          await wait(30);
+        }
+        await wait(150);
+        markerShown = (await js(`Boolean(document.querySelector('[data-testid=tab-drop-marker]'))`)) === true;
+        await shot('24g-tab-drag-light');
+        win.webContents.sendInputEvent({ type: 'mouseUp', x: to, y: from.y, button: 'left', clickCount: 1 });
+      }
+      await wait(700);
+      const orderAfter = await tabTitles();
+      const expectedOrder = [orderBefore[1], orderBefore[2], orderBefore[0], ...orderBefore.slice(3)];
+      const draggedActive = await js(`document.querySelector('[data-testid=tab][aria-selected=true]')?.getAttribute('data-title') ?? null`);
+      const savedTabs = await run<{ value: { tabs: { title: string }[] } | null }>('workspace.state.get', { key: 'ui.tabs' }, ws.id);
+      check(
+        'ui: dragging a tab past its neighbours reorders the tabs, activates it and saves the order',
+        orderBefore.length >= 3 && markerShown && JSON.stringify(orderAfter) === JSON.stringify(expectedOrder) && draggedActive === orderBefore[0] && JSON.stringify(savedTabs.value?.tabs.map((t) => t.title)) === JSON.stringify(expectedOrder),
+        { orderBefore, orderAfter, markerShown, draggedActive, saved: savedTabs.value?.tabs.map((t) => t.title) },
+      );
+      // Escape during a drag puts everything back.
+      const escRects = (await js(
+        `[...document.querySelectorAll('[data-testid=tab]')].map((t) => { const r = t.getBoundingClientRect(); return { x: Math.round(r.left + 16), y: Math.round(r.top + r.height / 2) }; })`,
+      )) as { x: number; y: number }[];
+      let markerBeforeEsc = false;
+      if (escRects.length >= 2) {
+        win.webContents.sendInputEvent({ type: 'mouseDown', x: escRects[0].x, y: escRects[0].y, button: 'left', clickCount: 1 });
+        for (let step = 1; step <= 5; step++) {
+          win.webContents.sendInputEvent({ type: 'mouseMove', x: escRects[0].x + ((escRects[1].x + 40 - escRects[0].x) * step) / 5, y: escRects[0].y, button: 'left', modifiers: ['leftbuttondown'] });
+          await wait(30);
+        }
+        await wait(100);
+        markerBeforeEsc = (await js(`Boolean(document.querySelector('[data-testid=tab-drop-marker]'))`)) === true;
+        win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+        win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+        await wait(100);
+        win.webContents.sendInputEvent({ type: 'mouseUp', x: escRects[1].x + 40, y: escRects[0].y, button: 'left', clickCount: 1 });
+      }
+      await wait(300);
+      const orderAfterEsc = await tabTitles();
+      check('ui: Escape cancels a tab drag and keeps the order', markerBeforeEsc && JSON.stringify(orderAfterEsc) === JSON.stringify(expectedOrder) && (await js(`Boolean(document.querySelector('[data-testid=tab-drop-marker]'))`)) === false, orderAfterEsc);
+
       const tabsBefore = await tabTitles();
       const secondTab = `[data-testid=tab][data-title=${JSON.stringify(tabsBefore[1] ?? '')}]`;
       const openedTabMenu = await rightClick(secondTab);
