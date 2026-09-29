@@ -28,6 +28,8 @@ export interface HostOptions {
   broadcast(message: { event: HostEventName; payload: unknown }): void;
   pickFolder?(): Promise<string | undefined>;
   pickFile?(options?: { title?: string; filters?: { name: string; extensions: string[] }[]; defaultPath?: string }): Promise<string | undefined>;
+  /** Show a folder in the OS file manager; absent in smoke runs. */
+  revealFolder?(folder: string): Promise<void>;
   /** In-app updates; absent in development and smoke runs. */
   updates?: UpdatesApi;
 }
@@ -246,6 +248,21 @@ export class Host {
           }
           const session = await this.openWorkspace(target);
           return session.info();
+        },
+      }),
+      defineCommand({
+        id: 'workspace.reveal',
+        title: 'Reveal workspace folder',
+        description: 'Opens the workspace folder in the file manager.',
+        scope: 'global',
+        hidden: true,
+        input: z.object({ id: z.string() }),
+        handler: async ({ id }, ctx) => {
+          const session = this.workspaces.get(id);
+          if (!session) throw new QuiverError('NOT_FOUND', `No open workspace ${id}`);
+          if (ctx.caller !== 'ui') throw new QuiverError('INVALID_INPUT', 'Revealing a folder is only available from the UI');
+          await this.opts.revealFolder?.(session.path);
+          return { path: session.path, revealed: Boolean(this.opts.revealFolder) };
         },
       }),
       defineCommand({

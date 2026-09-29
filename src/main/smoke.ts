@@ -2153,6 +2153,55 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await run('api.environment.setActive', { id: env.id }, ws.id);
       await wait(300);
 
+      // Right-click menus: tabs get VS Code's close actions, workspaces get close, copy path and reveal.
+      const rightClick = (selector: string) =>
+        js(
+          `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return false; const r = el.getBoundingClientRect(); el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 10, clientY: r.top + 10 })); return true; })()`,
+        );
+      const menuLabels = () => js(`[...document.querySelectorAll('[data-testid=context-menu] [role=menuitem]')].map((b) => b.textContent)`);
+      const tabTitles = () => js(`[...document.querySelectorAll('[data-testid=tab]')].map((t) => t.getAttribute('data-title'))`) as Promise<string[]>;
+      const tabsBefore = await tabTitles();
+      const secondTab = `[data-testid=tab][data-title=${JSON.stringify(tabsBefore[1] ?? '')}]`;
+      const openedTabMenu = await rightClick(secondTab);
+      await wait(200);
+      const tabMenu = await menuLabels();
+      check(
+        'ui: right-clicking a tab shows Close, Close Others, Close to the Right, Close Saved and Close All',
+        openedTabMenu === true && tabsBefore.length >= 3 && JSON.stringify(tabMenu) === JSON.stringify(['CloseCtrl+W', 'Close Others', 'Close to the Right', 'Close Saved', 'Close All']),
+        { tabs: tabsBefore.length, tabMenu },
+      );
+      await shot('24d-tab-menu-light');
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(200);
+      await shot('24e-tab-menu-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
+      await js(`document.querySelector('[data-testid=tab-menu-close-right]').click()`);
+      await wait(300);
+      const tabsAfterRight = await tabTitles();
+      check('ui: Close to the Right keeps the tabs up to the clicked one', JSON.stringify(tabsAfterRight) === JSON.stringify(tabsBefore.slice(0, 2)), tabsAfterRight);
+      await rightClick(secondTab);
+      await wait(200);
+      await js(`document.querySelector('[data-testid=tab-menu-close-others]').click()`);
+      await wait(300);
+      const tabsAfterOthers = await tabTitles();
+      const activeTitle = await js(`document.querySelector('[data-testid=tab][aria-selected=true]')?.getAttribute('data-title') ?? null`);
+      check('ui: Close Others leaves only the clicked tab, active', JSON.stringify(tabsAfterOthers) === JSON.stringify([tabsBefore[1]]) && activeTitle === tabsBefore[1], { tabsAfterOthers, activeTitle });
+      await rightClick('[data-testid=workspace-tab]');
+      await wait(200);
+      const workspaceMenu = await menuLabels();
+      check(
+        'ui: right-clicking a workspace shows close actions, Copy Path and reveal',
+        Array.isArray(workspaceMenu) && ['Close', 'Close Others', 'Close to the Right', 'Close All', 'Copy Path'].every((l) => workspaceMenu.includes(l)) && workspaceMenu.length === 6,
+        workspaceMenu,
+      );
+      await shot('24f-workspace-menu-light');
+      await js(`document.querySelector('[data-testid=context-menu]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+      await wait(200);
+      check('ui: Escape closes a context menu', (await js(`Boolean(document.querySelector('[data-testid=context-menu]'))`)) === false);
+      const revealedFolder = await run<{ path: string; revealed: boolean }>('workspace.reveal', { id: ws.id }, null);
+      const revealByAgent = await host.invoke('workspace.reveal', { id: ws.id }, { caller: 'mcp', workspaceId: null });
+      check('workspace.reveal: answers the folder for the UI and refuses agents', revealedFolder.path === folder && !revealByAgent.ok, { revealedFolder, agent: revealByAgent.ok });
+
       // Settings: the About section shows the version and says that a dev build does not update itself.
       await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: ',', ctrlKey: true, bubbles: true }))`);
       await wait(600);

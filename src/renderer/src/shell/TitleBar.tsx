@@ -1,8 +1,27 @@
-import { IconButton, Kbd, cn, useAppStore, useTabsStore } from '@quiver/ui';
+import { IconButton, Kbd, cn, openContextMenu, useAppStore, useTabsStore } from '@quiver/ui';
+import type { WorkspaceInfo } from '@quiver/core';
 import { FolderOpen, Search, Settings, X } from 'lucide-react';
-import { useMemo } from 'react';
-import { closeWorkspace, openSettings, openWorkspace } from './actions';
+import { useMemo, type MouseEvent } from 'react';
 import { QuiverMark } from './Logo';
+import { closeWorkspace, closeWorkspaces, copyText, openSettings, openWorkspace, revealWorkspace } from './actions';
+
+const revealLabel = /Mac/i.test(navigator.userAgent) ? 'Reveal in Finder' : /Windows/i.test(navigator.userAgent) ? 'Reveal in File Explorer' : 'Open Containing Folder';
+
+/** The right-click menu of a workspace in the title bar. */
+function showWorkspaceMenu(e: MouseEvent, workspaces: WorkspaceInfo[], ws: WorkspaceInfo): void {
+  const index = workspaces.findIndex((w) => w.id === ws.id);
+  const others = workspaces.filter((w) => w.id !== ws.id).map((w) => w.id);
+  const right = workspaces.slice(index + 1).map((w) => w.id);
+  openContextMenu(e, [
+    { label: 'Close', onSelect: () => void closeWorkspace(ws.id), testId: 'workspace-menu-close' },
+    { label: 'Close Others', onSelect: () => void closeWorkspaces(others), disabled: others.length === 0, testId: 'workspace-menu-close-others' },
+    { label: 'Close to the Right', onSelect: () => void closeWorkspaces(right), disabled: right.length === 0, testId: 'workspace-menu-close-right' },
+    { label: 'Close All', onSelect: () => void closeWorkspaces(workspaces.map((w) => w.id)), testId: 'workspace-menu-close-all' },
+    'separator',
+    { label: 'Copy Path', onSelect: () => copyText(ws.path, 'Path copied'), testId: 'workspace-menu-copy-path' },
+    { label: revealLabel, onSelect: () => void revealWorkspace(ws.id), testId: 'workspace-menu-reveal' },
+  ]);
+}
 
 export function TitleBar() {
   const workspaces = useAppStore((s) => s.workspaces);
@@ -31,6 +50,9 @@ export function TitleBar() {
             tabIndex={0}
             onClick={() => setActive(ws.id)}
             onKeyDown={(e) => e.key === 'Enter' && setActive(ws.id)}
+            onContextMenu={(e) => showWorkspaceMenu(e, workspaces, ws)}
+            data-testid="workspace-tab"
+            data-name={ws.name}
             title={`${ws.path}\nCtrl+${index + 1}`}
             className={cn(
               'group flex items-center gap-1.5 h-7 pl-2.5 pr-1 rounded-md text-xs cursor-pointer border',
