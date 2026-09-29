@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { BrowserWindow, app, dialog, safeStorage } from 'electron';
+import { BrowserWindow, app, dialog, safeStorage, shell } from 'electron';
 import type { SecretsApi } from '@quiver/core';
 import { Host } from './host';
 import { registerIpc } from './ipc';
@@ -50,6 +50,11 @@ async function pickFile(options: { title?: string; filters?: { name: string; ext
   return result.canceled ? undefined : result.filePaths[0];
 }
 
+async function revealFolder(folder: string): Promise<void> {
+  const error = await shell.openPath(folder);
+  if (error) throw new Error(error);
+}
+
 let host: Host | null = null;
 
 async function main(): Promise<void> {
@@ -75,6 +80,7 @@ async function main(): Promise<void> {
     broadcast,
     pickFolder,
     pickFile,
+    revealFolder: process.env.QUIVER_SMOKE ? undefined : revealFolder,
     updates,
   });
   registerIpc(host);

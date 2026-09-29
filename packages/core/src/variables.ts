@@ -2,6 +2,15 @@ import type { Variable } from './types';
 
 const PLACEHOLDER = /\{\{\s*([A-Za-z_$][\w.-]*)\s*\}\}/g;
 
+/** What each built-in dynamic variable produces, for hover help. */
+export const DYNAMIC_VARIABLE_HELP: Record<string, string> = {
+  $uuid: 'A new random UUID',
+  $timestamp: 'Unix time in seconds',
+  $timestampMs: 'Unix time in milliseconds',
+  $isoTimestamp: 'The current time as ISO 8601',
+  $randomInt: 'A random integer from 0 to 999',
+};
+
 /** Built-in dynamic values, addressed as `{{$name}}`. */
 const dynamics: Record<string, () => string> = {
   $uuid: () => globalThis.crypto.randomUUID(),
@@ -24,6 +33,34 @@ export function buildVariableMap(layers: Variable[][]): Record<string, string> {
     }
   }
   return map;
+}
+
+/**
+ * Set the value of the row that `{{name}}` resolves to in one layer: the last enabled row with
+ * that key, as in buildVariableMap. Returns the new rows, or null when the layer has no such row.
+ */
+export function setVariableValue(layer: Variable[], name: string, value: string): Variable[] | null {
+  for (let i = layer.length - 1; i >= 0; i--) {
+    const v = layer[i];
+    if (v.enabled && v.key.trim() === name) return layer.map((row, j) => (j === i ? { ...row, value } : row));
+  }
+  return null;
+}
+
+/** A name `{{name}}` can refer to and a user may define: not a built-in `$` name. */
+export const DEFINABLE_VARIABLE_NAME = /^[A-Za-z_][\w.-]*$/;
+
+/**
+ * Give `name` a value in one layer: the row resolution picks is updated when there is one,
+ * otherwise a new enabled row is appended. `secret: true` makes that row secret; an existing
+ * secret row stays secret, so a new value never lands in a committed file in plain text.
+ */
+export function defineVariableIn(layer: Variable[], name: string, value: string, id: string, secret?: boolean): Variable[] {
+  for (let i = layer.length - 1; i >= 0; i--) {
+    const v = layer[i];
+    if (v.enabled && v.key.trim() === name) return layer.map((row, j) => (j === i ? { ...row, value, ...(secret || row.secret ? { secret: true } : {}) } : row));
+  }
+  return [...layer, { id, key: name, value, enabled: true, ...(secret ? { secret: true } : {}) }];
 }
 
 export function resolveTemplate(input: string, vars: Record<string, string>): string {
@@ -58,4 +95,22 @@ export function resolveDeep<T>(value: T, vars: Record<string, string>): T {
 
 export function listDynamicVariables(): string[] {
   return Object.keys(dynamics);
+}
+
+export interface VariableSpan {
+  /** Offset of the opening `{{`. */
+  from: number;
+  /** Offset just past the closing `}}`. */
+  to: number;
+  name: string;
+}
+
+/** Where `{{name}}` placeholders sit in a string, with the same rules the resolver uses. */
+export function findVariableSpans(input: string): VariableSpan[] {
+  if (!input || !input.includes('{{')) return [];
+  return [...input.matchAll(PLACEHOLDER)].map((m) => ({ from: m.index, to: m.index + m[0].length, name: m[1] }));
+}
+
+export function isDynamicVariable(name: string): boolean {
+  return name in dynamics;
 }

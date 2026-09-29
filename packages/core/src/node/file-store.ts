@@ -1,4 +1,4 @@
-import { promises as fs } from 'node:fs';
+import { promises as fs, watch, type FSWatcher } from 'node:fs';
 import path from 'node:path';
 import type { Entity, StoreApi } from '../types';
 
@@ -32,6 +32,9 @@ async function readJson<T>(file: string): Promise<T | undefined> {
  */
 export class FileStore implements StoreApi {
   private readonly cache = new Map<string, Map<string, Entity>>();
+  private readonly watchers = new Map<string, FSWatcher>();
+  private watching = false;
+  private readonly pending = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(
     readonly root: string,
@@ -73,6 +76,84 @@ export class FileStore implements StoreApi {
     }
     this.cache.set(collection, map);
     return map;
+  }
+
+  /**
+   * Watch the folder for changes made outside Quiver (an agent editing the JSON files,
+   * a git pull or checkout) and reload the collections they touch. A change is reported
+   * through onChange only when the content differs from the cache, so Quiver's own writes
+   * do not report twice.
+   */
+  watch(debounceMs = 150): void {
+    if (this.watching) return;
+    this.watching = true;
+    // Linux has no native recursive watch; Node's emulation watches each file's inode and loses a
+    // file once it is replaced by a rename (how every save here lands), so watch the folders instead.
+    if (process.platform === 'linux') {
+      this.watchDir('', debounceMs);
+      void fs
+        .readdir(this.root, { withFileTypes: true })
+        .then((entries) => entries.forEach((e) => e.isDirectory() && collectionOf(e.name) && this.watchDir(e.name, debounceMs)))
+        .catch(() => {});
+    } else {
+      this.watchDir('', debounceMs, true);
+    }
+  }
+
+  /** Watch one folder: the root (`''`) or a collection. The root also picks up new collection folders. */
+  private watchDir(name: string, debounceMs: number, recursive = false): void {
+    if (!this.watching || this.watchers.has(name)) return;
+    try {
+      const watcher = watch(path.join(this.root, name), { recursive, persistent: false }, (_event, filename) => {
+        const collection = filename ? collectionOf(name ? `${name}/${String(filename)}` : String(filename)) : null;
+        if (!collection) return;
+        // The collection folder itself was created, deleted or replaced: watch the one there now.
+        if (!recursive && !name) {
+          this.unwatchDir(collection);
+          this.watchDir(collection, debounceMs);
+        }
+        this.scheduleReload(collection, debounceMs);
+      });
+      // A deleted collection folder ends its watcher; the root sees it come back.
+      watcher.on('error', () => (name ? this.unwatchDir(name) : this.unwatch()));
+      this.watchers.set(name, watcher);
+    } catch {
+      // A folder that cannot be watched keeps working; it just misses external edits.
+    }
+  }
+
+  private unwatchDir(name: string): void {
+    this.watchers.get(name)?.close();
+    this.watchers.delete(name);
+  }
+
+  unwatch(): void {
+    this.watching = false;
+    for (const watcher of this.watchers.values()) watcher.close();
+    this.watchers.clear();
+    for (const timer of this.pending.values()) clearTimeout(timer);
+    this.pending.clear();
+  }
+
+  private scheduleReload(collection: string, debounceMs: number): void {
+    clearTimeout(this.pending.get(collection));
+    this.pending.set(
+      collection,
+      setTimeout(() => {
+        this.pending.delete(collection);
+        void this.reload(collection).catch(() => {});
+      }, debounceMs),
+    );
+  }
+
+  /** Re-read a collection from disk; reports a change when it differs from what was cached. */
+  async reload(collection: string): Promise<boolean> {
+    const before = this.cache.get(collection);
+    this.cache.delete(collection);
+    const after = await this.load(collection);
+    if (before && sameEntities(before, after)) return false;
+    this.onChange(collection);
+    return true;
   }
 
   /** Drop caches so the next read hits disk. Used after external edits. */
@@ -159,4 +240,22 @@ async function readJsonSafe(file: string): Promise<string | undefined> {
   } catch {
     return undefined;
   }
+}
+
+/** The collection a watched path belongs to: `requests/abc.json` -> `requests`. Local state and temp files are ignored. */
+export function collectionOf(filename: string): string | null {
+  const parts = filename.split(/[\\/]/).filter(Boolean);
+  const [collection, file] = parts;
+  if (!collection || parts.length > 2 || collection === 'local' || !SAFE_NAME.test(collection)) return null;
+  if (file === undefined) return collection.includes('.') ? null : collection;
+  return file.endsWith('.json') ? collection : null;
+}
+
+function sameEntities(a: Map<string, Entity>, b: Map<string, Entity>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [id, item] of a) {
+    const other = b.get(id);
+    if (!other || JSON.stringify(item) !== JSON.stringify(other)) return false;
+  }
+  return true;
 }

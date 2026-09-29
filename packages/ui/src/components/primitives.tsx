@@ -1,5 +1,5 @@
 import { Loader2 } from 'lucide-react';
-import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, SelectHTMLAttributes, TextareaHTMLAttributes } from 'react';
+import type { ButtonHTMLAttributes, ComponentProps, InputHTMLAttributes, ReactNode, SelectHTMLAttributes, TextareaHTMLAttributes } from 'react';
 import { cn } from '../cn';
 
 type Variant = 'primary' | 'secondary' | 'ghost' | 'danger';
@@ -68,7 +68,7 @@ export function IconButton({ label, size = 'md', className, children, ...rest }:
   );
 }
 
-export function Input({ className, ...rest }: InputHTMLAttributes<HTMLInputElement>) {
+export function Input({ className, ...rest }: ComponentProps<'input'>) {
   return (
     <input
       className={cn(

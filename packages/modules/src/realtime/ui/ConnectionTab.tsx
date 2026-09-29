@@ -7,10 +7,11 @@ import {
   type RealtimeConnectionSummary,
   type RealtimeSavedMessage,
 } from '@quiver/core';
-import { Button, Checkbox, CodeEditor, IconButton, Input, KeyValueEditor, Label, Segmented, Select, Spinner, cn, invoke, notify, onHostEvent, useTabsStore, type TabProps } from '@quiver/ui';
+import { Button, Checkbox, CodeEditor, IconButton, Input, KeyValueEditor, Label, Segmented, Select, Spinner, cn, invoke, notify, onHostEvent, useTabsStore, VariableInput, type TabProps } from '@quiver/ui';
 import { Plug, Plus, Save, Send, Trash2, Unplug } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AuthEditor } from '../../api/ui/RequestTab';
+import { ApiVariablesProvider } from '../../api/ui/variables';
 import { MessagesView } from './MessagesView';
 import { statusDot } from './Sidebar';
 import { deleteConnection, type ConnectionView } from './index';
@@ -26,7 +27,15 @@ function definitionOf(summary: RealtimeConnectionSummary): RealtimeConnection {
   return RealtimeConnectionSchema.parse(summary);
 }
 
-export function ConnectionTab({ tab, scope }: TabProps) {
+export function ConnectionTab(props: TabProps) {
+  return (
+    <ApiVariablesProvider>
+      <ConnectionTabBody {...props} />
+    </ApiVariablesProvider>
+  );
+}
+
+function ConnectionTabBody({ tab, scope }: TabProps) {
   const connectionId = String(tab.data?.id ?? '');
   const [summary, setSummary] = useState<RealtimeConnectionSummary | null>(null);
   const [draft, setDraft] = useState<RealtimeConnection | null>(null);
@@ -172,7 +181,7 @@ export function ConnectionTab({ tab, scope }: TabProps) {
         </Button>
       </div>
       <div className="flex items-center gap-2 px-3 py-2 shrink-0">
-        <Input
+        <VariableInput
           value={draft.url}
           onChange={(e) => patch({ url: e.target.value })}
           placeholder={isWs ? 'wss://{{host}}/socket' : 'https://{{host}}/events'}

@@ -28,6 +28,8 @@ export interface HostOptions {
   broadcast(message: { event: HostEventName; payload: unknown }): void;
   pickFolder?(): Promise<string | undefined>;
   pickFile?(options?: { title?: string; filters?: { name: string; extensions: string[] }[]; defaultPath?: string }): Promise<string | undefined>;
+  /** Show a folder in the OS file manager; absent in smoke runs. */
+  revealFolder?(folder: string): Promise<void>;
   /** In-app updates; absent in development and smoke runs. */
   updates?: UpdatesApi;
 }
@@ -249,6 +251,21 @@ export class Host {
         },
       }),
       defineCommand({
+        id: 'workspace.reveal',
+        title: 'Reveal workspace folder',
+        description: 'Opens the workspace folder in the file manager.',
+        scope: 'global',
+        hidden: true,
+        input: z.object({ id: z.string() }),
+        handler: async ({ id }, ctx) => {
+          const session = this.workspaces.get(id);
+          if (!session) throw new QuiverError('NOT_FOUND', `No open workspace ${id}`);
+          if (ctx.caller !== 'ui') throw new QuiverError('INVALID_INPUT', 'Revealing a folder is only available from the UI');
+          await this.opts.revealFolder?.(session.path);
+          return { path: session.path, revealed: Boolean(this.opts.revealFolder) };
+        },
+      }),
+      defineCommand({
         id: 'workspace.close',
         title: 'Close workspace',
         description: 'Closes an open workspace.',
@@ -257,6 +274,21 @@ export class Host {
         handler: async ({ id }) => {
           await this.closeWorkspace(id);
           return { closed: true };
+        },
+      }),
+      defineCommand({
+        id: 'workspace.reorder',
+        title: 'Reorder workspaces',
+        description: 'Puts the open workspaces in the given order, which is also the order they reopen in.',
+        scope: 'global',
+        hidden: true,
+        input: z.object({ ids: z.array(z.string()) }),
+        handler: async ({ ids }) => {
+          const list = this.workspaces.reorder(ids);
+          const open = this.config.get().openWorkspaces;
+          const ordered = list.map((w) => w.path).filter((p) => open.includes(p));
+          await this.config.update({ openWorkspaces: [...ordered, ...open.filter((p) => !ordered.includes(p))] });
+          return list;
         },
       }),
       defineCommand({

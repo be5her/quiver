@@ -1,17 +1,16 @@
 import { DB_KIND_LABELS, type DbConnectionSummary, type DbHistoryEntry, type DbKind, type DbTable, type ErrorPayload, type SavedQuery } from '@quiver/core';
-import { IconButton, SectionHeader, Spinner, cn, confirmDialog, invoke, notify, promptDialog, selectScope, useAppStore, useInvoke, useTabsStore } from '@quiver/ui';
+import { IconButton, SectionHeader, Spinner, cn, confirmDialog, invoke, notify, promptDialog, selectScope, useAppStore, useExpanded, useInvoke, useTabsStore } from '@quiver/ui';
 import { ChevronDown, ChevronRight, Eye, KeyRound, Pencil, Plus, RefreshCw, Table2, Terminal, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { openConnectionTab, openNewConnectionTab, openQueryTab, openRedisTab, openTableTab } from './index';
 import { AccessBadge, DbError, KindIcon, firstLine } from './shared';
-import { useExpanded } from './tree-store';
 
 export function DbSidebar() {
   const connections = useInvoke<DbConnectionSummary[]>('db.connection.list', {}, { refreshOn: ['db-connections'] });
   const queries = useInvoke<SavedQuery[]>('db.query.list', {}, { refreshOn: ['db-queries'] });
   const history = useInvoke<DbHistoryEntry[]>('db.history.list', { limit: 30 }, { refreshOn: ['db-history'] });
-  const [queriesOpen, setQueriesOpen] = useState(true);
-  const [historyOpen, setHistoryOpen] = useState(false);
+  const [queriesOpen, toggleQueries] = useExpanded('db/section/queries', true);
+  const [historyOpen, toggleHistory] = useExpanded('db/section/history');
 
   return (
     <div className="flex flex-col h-full min-h-0 overflow-y-auto text-sm">
@@ -29,7 +28,7 @@ export function DbSidebar() {
       <div className="mt-3">
         <SectionHeader
           title={
-            <button type="button" className="flex items-center gap-1" onClick={() => setQueriesOpen((o) => !o)}>
+            <button type="button" className="flex items-center gap-1" onClick={toggleQueries}>
               {queriesOpen ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />} Saved queries
             </button>
           }
@@ -64,7 +63,7 @@ export function DbSidebar() {
       <div className="mt-3">
         <SectionHeader
           title={
-            <button type="button" className="flex items-center gap-1" onClick={() => setHistoryOpen((o) => !o)}>
+            <button type="button" className="flex items-center gap-1" onClick={toggleHistory}>
               {historyOpen ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />} History
             </button>
           }

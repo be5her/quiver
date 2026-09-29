@@ -1,3 +1,4 @@
+import type { ActivityBarLayout } from './activity-bar';
 import type { z } from 'zod';
 
 export type Caller = 'ui' | 'mcp' | 'cli' | 'system';
@@ -76,6 +77,8 @@ export interface GlobalConfig {
   teleport: TeleportConfig;
   mock: MockConfig;
   updates: UpdatesConfig;
+  /** The user's order of the activity bar and the modules hidden from it. */
+  activityBar: ActivityBarLayout;
 }
 
 /** Which releases the in-app updater follows. `beta` adds the Windows prereleases built from every merge to main. */
@@ -247,6 +250,8 @@ export interface HostEvents {
   'mcp.changed': { workspaceId: string; serverId: string; reason: 'status' | 'servers' | 'lists' | 'log' };
   /** Env files: a dotenv file or .gitignore changed on disk (from Quiver or outside), or a backup was taken. */
   'env.changed': { workspaceId: string; reason: 'files'; path?: string };
+  /** The workspace's todo list changed. */
+  'todo.changed': { workspaceId: string };
   /** The in-app updater moved: checking, a version found, download progress, downloaded, or an error. */
   'app.update': UpdateState;
 }
