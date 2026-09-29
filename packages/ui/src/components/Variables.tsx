@@ -1,10 +1,10 @@
-import { findVariableSpans } from '@quiver/core';
-import { Check, Copy, Eye, EyeOff, Pencil, X } from 'lucide-react';
+import { DEFINABLE_VARIABLE_NAME, findVariableSpans } from '@quiver/core';
+import { Check, Copy, Eye, EyeOff, Pencil, Plus, X } from 'lucide-react';
 import { createContext, useContext, useLayoutEffect, useMemo, useRef, useState, type InputHTMLAttributes, type ReactNode } from 'react';
 import { create } from 'zustand';
 import { cn } from '../cn';
 import { notify } from '../stores/app';
-import { Button, Input } from './primitives';
+import { Button, Checkbox, Input, Select } from './primitives';
 
 /** One variable a `{{name}}` can reach, as the host's `api.variables.list` returns it. */
 export interface VariableInfo {
@@ -19,15 +19,23 @@ export interface VariableInfo {
 
 export interface VariableScope {
   environment: { id: string; name: string } | null;
+  /** Every environment of the workspace, where an undefined variable can be defined. */
+  environments?: { id: string; name: string }[];
   variables: VariableInfo[];
 }
 
+/** Where a new variable goes: an environment of the workspace or the global variables. */
+export type VariableTarget = { kind: 'environment'; id: string } | { kind: 'global' };
+
 /** Changes the value `{{name}}` resolves to, where it is defined. */
 export type SaveVariable = (name: string, value: string) => Promise<void>;
+/** Defines `{{name}}` in the chosen place and returns the variables in effect afterwards. */
+export type DefineVariable = (name: string, value: string, target: VariableTarget, secret: boolean) => Promise<VariableScope>;
 
-/** The variables in reach, plus how to change one when the provider allows it. */
+/** The variables in reach, plus how to change or add one when the provider allows it. */
 export interface VariableContext extends VariableScope {
   save?: SaveVariable;
+  define?: DefineVariable;
 }
 
 const VariablesContext = createContext<VariableContext | null>(null);
@@ -35,10 +43,20 @@ const VariablesContext = createContext<VariableContext | null>(null);
 /**
  * Makes `{{variables}}` inside VariableInput, KeyValueEditor and CodeEditor highlighted, with
  * their value on hover. Outside a provider those components behave as plain inputs. With
- * `onSave`, the hover card can also edit the value.
+ * `onSave`, the hover card can also edit the value, and with `onDefine` define a missing one.
  */
-export function VariablesProvider({ value, onSave, children }: { value: VariableScope | null | undefined; onSave?: SaveVariable; children: ReactNode }) {
-  const context = useMemo(() => (value ? { ...value, save: onSave } : null), [value, onSave]);
+export function VariablesProvider({
+  value,
+  onSave,
+  onDefine,
+  children,
+}: {
+  value: VariableScope | null | undefined;
+  onSave?: SaveVariable;
+  onDefine?: DefineVariable;
+  children: ReactNode;
+}) {
+  const context = useMemo(() => (value ? { ...value, save: onSave, define: onDefine } : null), [value, onSave, onDefine]);
   return <VariablesContext.Provider value={context}>{children}</VariablesContext.Provider>;
 }
 
@@ -56,8 +74,10 @@ interface Card {
   name: string;
   info: VariableInfo | undefined;
   environment: VariableScope['environment'];
+  environments: NonNullable<VariableScope['environments']>;
   anchor: { left: number; top: number; bottom: number };
   save?: SaveVariable;
+  define?: DefineVariable;
 }
 
 interface HoverState {
@@ -74,6 +94,8 @@ interface HoverState {
   setEditing(editing: boolean): void;
   /** Reflect a saved value in the open card until the next refresh of the variables. */
   setValue(value: string): void;
+  /** Re-read the open card's variable from fresh variables, after defining it. */
+  refresh(scope: VariableScope): void;
 }
 
 export const useVariableHoverStore = create<HoverState>((set, get) => ({
@@ -114,22 +136,37 @@ export const useVariableHoverStore = create<HoverState>((set, get) => ({
     const { card } = get();
     if (card?.info) set({ card: { ...card, info: { ...card.info, value } } });
   },
+  refresh: (scope) => {
+    const { card } = get();
+    if (card) set({ card: { ...card, info: lookupVariable(scope, card.name), environment: scope.environment, environments: scope.environments ?? card.environments } });
+  },
 }));
 
 /** Show the card for the variable under the pointer. `rect` is the placeholder's box on screen. */
 export function showVariableCard(scope: VariableContext, name: string, rect: DOMRect): void {
-  useVariableHoverStore.getState().show({ name, info: lookupVariable(scope, name), environment: scope.environment, anchor: { left: rect.left, top: rect.top, bottom: rect.bottom }, save: scope.save });
+  useVariableHoverStore.getState().show({
+    name,
+    info: lookupVariable(scope, name),
+    environment: scope.environment,
+    environments: scope.environments ?? [],
+    anchor: { left: rect.left, top: rect.top, bottom: rect.bottom },
+    save: scope.save,
+    define: scope.define,
+  });
 }
 
 const MASK = '••••••••';
 
 /** Renders the variable hover card. Mount once in the shell. */
 export function VariableHoverHost() {
-  const { card, revealed, editing, cancelHide, scheduleHide, hide, toggleReveal, setEditing, setValue } = useVariableHoverStore();
+  const { card, revealed, editing, cancelHide, scheduleHide, hide, toggleReveal, setEditing, setValue, refresh } = useVariableHoverStore();
   const ref = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState<{ left: number; top: number } | null>(null);
   const [draft, setDraft] = useState('');
   const [saving, setSaving] = useState(false);
+  // Where a missing variable gets defined: 'global' or an environment id.
+  const [target, setTarget] = useState('global');
+  const [secret, setSecret] = useState(false);
 
   useLayoutEffect(() => {
     if (!card || !ref.current) return setPosition(null);
@@ -138,7 +175,7 @@ export function VariableHoverHost() {
     const top = below + height > window.innerHeight - 4 ? Math.max(4, card.anchor.top - height - 6) : below;
     const left = Math.max(4, Math.min(card.anchor.left, window.innerWidth - width - 4));
     setPosition({ left, top });
-  }, [card, revealed, editing, draft]);
+  }, [card, revealed, editing, draft, secret]);
 
   useLayoutEffect(() => {
     if (!card) return;
@@ -169,12 +206,23 @@ export function VariableHoverHost() {
   }, [card, hide, setEditing]);
 
   if (!card) return null;
-  const { info, name, environment, save } = card;
+  const { info, name, environment, environments, save, define } = card;
   const envName = environment?.name;
   const source = !info ? 'Not defined' : info.source === 'environment' ? `Environment · ${envName ?? ''}` : info.source === 'global' ? 'Global' : 'Built-in';
   const hidden = info?.secret && !revealed;
   const editable = Boolean(save && info && info.source !== 'dynamic');
-  const note = editing
+  const definable = Boolean(define && !info && DEFINABLE_VARIABLE_NAME.test(name));
+  const defining = editing && !info;
+  const targetEnv = environments.find((e) => e.id === target);
+  // Active environment first, then the others by name.
+  const targets = environment ? [environment, ...environments.filter((e) => e.id !== environment.id)] : environments;
+  const note = defining
+    ? targetEnv
+      ? targetEnv.id === environment?.id
+        ? `Adds ${name} to the active environment${secret ? ', encrypted on this machine' : ''}.`
+        : `${targetEnv.name} is not active, so ${name} stays undefined here until you switch to it.`
+      : 'Global variables are used by every workspace and stored in plain config, so they cannot be secret.'
+    : editing
     ? info?.source === 'environment'
       ? `Saves to the ${envName ?? 'active'} environment${info.secret ? ', encrypted on this machine' : ''}. Enter saves, Shift+Enter adds a line.`
       : 'Saves to the global variables, which every workspace uses. Enter saves, Shift+Enter adds a line.'
@@ -201,7 +249,29 @@ export function VariableHoverHost() {
     setDraft(info?.value ?? '');
     setEditing(true);
   };
+  const startDefining = () => {
+    if (!definable) return;
+    setDraft('');
+    setTarget(environment?.id ?? 'global');
+    setSecret(false);
+    setEditing(true);
+  };
+  const commitDefine = async () => {
+    if (!define || saving) return;
+    setSaving(true);
+    try {
+      const where: VariableTarget = target === 'global' ? { kind: 'global' } : { kind: 'environment', id: target };
+      const next = await define(name, draft, where, where.kind === 'environment' && secret);
+      setEditing(false);
+      refresh(next);
+    } catch (err) {
+      notify(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
   const commit = async () => {
+    if (defining) return commitDefine();
     if (!save || saving) return;
     if (draft === info?.value) return setEditing(false);
     setSaving(true);
@@ -289,7 +359,69 @@ export function VariableHoverHost() {
         </div>
       )}
 
+      {defining && (
+        <div className="mt-2 flex flex-col gap-1.5">
+          <label className="flex items-center gap-2">
+            <span className="text-muted shrink-0 w-12">Save in</span>
+            <Select
+              value={target}
+              onChange={(e) => {
+                setTarget(e.target.value);
+                if (e.target.value === 'global') setSecret(false);
+              }}
+              className="h-7 flex-1 min-w-0 text-xs"
+              data-testid="variable-card-target"
+            >
+              {targets.map((e) => (
+                <option key={e.id} value={e.id}>
+                  {e.id === environment?.id ? `${e.name} (active)` : e.name}
+                </option>
+              ))}
+              <option value="global">Global variables</option>
+            </Select>
+          </label>
+          <div className="flex items-start gap-1">
+            <textarea
+              autoFocus
+              value={draft}
+              placeholder="Value"
+              spellCheck={false}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  void commit();
+                }
+              }}
+              className={cn(
+                'flex-1 min-w-0 field-sizing-content min-h-8 max-h-32 resize-none rounded border border-accent bg-surface px-2 py-1.5 font-mono text-fg break-all outline-none focus:ring-2 focus:ring-accent/30 placeholder:text-muted',
+                secret && !revealed && '[-webkit-text-security:disc]',
+              )}
+              aria-label={`Value of ${name}`}
+              data-testid="variable-card-input"
+            />
+            {secret && (
+              <button type="button" onClick={toggleReveal} className={iconButton} title={revealed ? 'Hide value' : 'Show value'} aria-label={revealed ? 'Hide value' : 'Show value'}>
+                {revealed ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+              </button>
+            )}
+          </div>
+          <label className={cn('flex items-center gap-1.5', target === 'global' ? 'text-muted/60' : 'text-muted')} title={target === 'global' ? 'Keep secrets in an environment' : 'Stored encrypted on this machine, never committed'}>
+            <Checkbox checked={secret} disabled={target === 'global'} onChange={(e) => setSecret(e.target.checked)} data-testid="variable-card-secret" />
+            Secret
+          </label>
+        </div>
+      )}
+
       {note && <p className="mt-1.5 text-[11px] text-muted">{note}</p>}
+
+      {definable && !editing && (
+        <div className="mt-2 flex justify-end">
+          <Button size="sm" variant="secondary" icon={<Plus className="size-3.5" />} onClick={startDefining} data-testid="variable-card-define">
+            Define {name}
+          </Button>
+        </div>
+      )}
 
       {editing && (
         <div className="mt-2 flex justify-end gap-1.5">

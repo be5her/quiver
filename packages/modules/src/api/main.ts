@@ -1,4 +1,5 @@
 import {
+  DEFINABLE_VARIABLE_NAME,
   ApiRequestSchema,
   EnvironmentSchema,
   QuiverError,
@@ -36,6 +37,7 @@ import {
   listResolvedVariables,
   setResolvedVariable,
   variableSource,
+  defineVariable,
 } from './env';
 import { graphqlEndpoint, introspect, readSchema } from './graphql';
 import { prepareRequest, sendPrepared } from './http';
@@ -394,6 +396,21 @@ const variablesSet = defineCommand({
   handler: async ({ name, value }, ctx) => setResolvedVariable(ws(ctx), ctx.host, name, value),
 });
 
+const variablesDefine = defineCommand({
+  id: 'api.variables.define',
+  title: 'Define a variable',
+  description: 'Gives {{name}} a value in a chosen environment (optionally secret, stored encrypted on this machine) or in the global variables. Updates the definition already there instead of adding a duplicate. Writing a global variable needs mutations enabled, since every workspace sees it.',
+  scope: 'workspace',
+  mutating: ({ target }) => target.kind === 'global',
+  input: z.object({
+    name: z.string().regex(DEFINABLE_VARIABLE_NAME, 'Use letters, digits, _, . and -, starting with a letter or _'),
+    value: z.string(),
+    target: z.discriminatedUnion('kind', [z.object({ kind: z.literal('environment'), id: z.string() }), z.object({ kind: z.literal('global') })]),
+    secret: z.boolean().optional(),
+  }),
+  handler: async ({ name, value, target, secret }, ctx) => defineVariable(ws(ctx), ctx.host, name, value, target, secret),
+});
+
 const environmentSetActive = defineCommand({
   id: 'api.environment.setActive',
   title: 'Switch environment',
@@ -514,6 +531,7 @@ export const apiModule = defineModule({
     environmentSetActive,
     variablesList,
     variablesSet,
+    variablesDefine,
     historyList,
     historyClear,
     importCurl,

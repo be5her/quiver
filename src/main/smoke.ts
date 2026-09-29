@@ -319,6 +319,36 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     );
     await run('config.update', { patch: { globalVariables: globalsBefore } }, null);
 
+    // api.variables.define adds a missing variable to a chosen environment (secret or not) or the globals.
+    const defined = await run<{ environmentName?: string }>('api.variables.define', { name: 'partner', value: 'acme', target: { kind: 'environment', id: env.id }, secret: true }, ws.id);
+    await run('api.variables.define', { name: 'partner', value: 'acme2', target: { kind: 'environment', id: env.id }, secret: true }, ws.id);
+    const listAfterDefine = await run<VarList & { environments: { id: string; name: string }[] }>('api.variables.list', {}, ws.id);
+    const diskAfterDefine = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'environments', `${env.id}.json`), 'utf8')) as Environment;
+    const partnerRows = diskAfterDefine.variables.filter((v) => v.key === 'partner');
+    check(
+      'api.variables.define: adds to the chosen environment once, a secret stays out of the committed file',
+      defined.environmentName === 'local' &&
+        listAfterDefine.variables.find((v) => v.name === 'partner')?.value === 'acme2' &&
+        partnerRows.length === 1 && partnerRows[0].value === '' && partnerRows[0].secret === true &&
+        listAfterDefine.environments.some((e) => e.id === env.id && e.name === 'local'),
+      { defined, partnerRows, environments: listAfterDefine.environments },
+    );
+    const agentDefineGlobal = await host.invoke('api.variables.define', { name: 'partner', value: 'x', target: { kind: 'global' } }, { caller: 'mcp', workspaceId: ws.id });
+    const secretGlobal = await host.invoke('api.variables.define', { name: 'partner', value: 'x', target: { kind: 'global' }, secret: true }, { caller: 'ui', workspaceId: ws.id });
+    const builtinName = await host.invoke('api.variables.define', { name: '$uuid', value: 'x', target: { kind: 'environment', id: env.id } }, { caller: 'ui', workspaceId: ws.id });
+    await run('api.variables.define', { name: 'shared', value: 'yes', target: { kind: 'global' } }, ws.id);
+    check(
+      'api.variables.define: a global needs mutations for agents, cannot be secret, and built-in names are refused',
+      !agentDefineGlobal.ok && agentDefineGlobal.error.code === 'MUTATION_BLOCKED' &&
+        !secretGlobal.ok && secretGlobal.error.code === 'INVALID_INPUT' &&
+        !builtinName.ok && builtinName.error.code === 'INVALID_INPUT' &&
+        host.config.get().globalVariables.find((v) => v.key === 'shared')?.value === 'yes',
+      { agentDefineGlobal: agentDefineGlobal.ok || agentDefineGlobal.error.code, secretGlobal: secretGlobal.ok || secretGlobal.error.code, builtinName: builtinName.ok || builtinName.error.code },
+    );
+    const envWithPartner = await run<Environment>('api.environment.get', { id: env.id }, ws.id);
+    await run('api.environment.save', { environment: { ...envWithPartner, variables: envWithPartner.variables.filter((v) => v.key !== 'partner') } }, ws.id);
+    await run('config.update', { patch: { globalVariables: globalsBefore } }, null);
+
     const created = await run<ApiRequest>('api.request.create', { name: 'echo', method: 'POST', url: '{{baseUrl}}/things?x=1' }, ws.id);
     const saved = await run<ApiRequest>(
       'api.request.save',
@@ -1729,6 +1759,52 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       );
       await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
       await run('config.update', { patch: { globalVariables: globalsBeforeUi } }, null);
+      await wait(400);
+
+      // With {{long}} gone from the globals, its card offers to define it, here as a secret of the active environment.
+      await hoverVariable('input', 'long');
+      await wait(250);
+      await js(`document.querySelector('[data-testid=variable-card-define]')?.click()`);
+      await wait(150);
+      const defineForm = await js(
+        `(() => { const s = document.querySelector('[data-testid=variable-card-target]'); return s ? { target: s.value, options: [...s.options].map((o) => o.textContent), focused: document.activeElement?.getAttribute('data-testid') } : null; })()`,
+      ) as { target: string; options: string[]; focused: string } | null;
+      await js(
+        `(() => { const s = document.querySelector('[data-testid=variable-card-target]'); const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set; set.call(s, 'global'); s.dispatchEvent(new Event('change', { bubbles: true })); })()`,
+      );
+      await wait(100);
+      const secretDisabledForGlobal = await js(`document.querySelector('[data-testid=variable-card-secret]')?.disabled`);
+      await js(
+        `(() => { const s = document.querySelector('[data-testid=variable-card-target]'); const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set; set.call(s, ${JSON.stringify(env.id)}); s.dispatchEvent(new Event('change', { bubbles: true })); })()`,
+      );
+      await wait(100);
+      await js(`document.querySelector('[data-testid=variable-card-secret]')?.click()`);
+      await js(
+        `(() => { const t = document.querySelector('[data-testid=variable-card-input]'); const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; setter.call(t, 'l0ng-secret'); t.dispatchEvent(new Event('input', { bubbles: true })); t.focus(); })()`,
+      );
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(200);
+      await shot('03g-variable-define-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
+      win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
+      win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+      await wait(600);
+      const definedCard = await card();
+      const definedChip = await js(`document.querySelector('[data-var-name=long]')?.className ?? ''`);
+      const definedRow = (await run<Environment>('api.environment.get', { id: env.id }, ws.id)).variables.find((v) => v.key === 'long');
+      check(
+        'ui: an undefined variable can be defined from its card, in the chosen environment and as a secret',
+        defineForm?.target === env.id && defineForm.options[0] === 'local (active)' && defineForm.options.includes('Global variables') && defineForm.focused === 'variable-card-input' &&
+          secretDisabledForGlobal === true &&
+          definedCard?.source === 'Environment · local' && definedCard.value === '••••••••' &&
+          typeof definedChip === 'string' && !definedChip.includes('bg-danger') &&
+          definedRow?.value === 'l0ng-secret' && definedRow.secret === true,
+        { defineForm, secretDisabledForGlobal, definedCard, definedChip, definedRow },
+      );
+      await shot('03h-variable-defined-light');
+      await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+      const envWithLong = await run<Environment>('api.environment.get', { id: env.id }, ws.id);
+      await run('api.environment.save', { environment: { ...envWithLong, variables: envWithLong.variables.filter((v) => v.key !== 'long') } }, ws.id);
       await typeUrl('{{baseUrl}}/things?x=1');
       await wait(200);
       check('ui: restoring the URL leaves the request unmodified', (await js(`document.querySelector('[data-testid=tab][aria-selected=true]')?.textContent.includes('echo') && !document.querySelector('[data-testid=tab][aria-selected=true] .bg-warning')`)) === true);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildVariableMap, findUnresolved, findVariableSpans, isDynamicVariable, resolveDeep, resolveTemplate, setVariableValue } from './variables';
+import { buildVariableMap, findUnresolved, findVariableSpans, isDynamicVariable, resolveDeep, resolveTemplate, setVariableValue, defineVariableIn, DEFINABLE_VARIABLE_NAME } from './variables';
 
 const vars = buildVariableMap([
   [
@@ -71,5 +71,30 @@ describe('setVariableValue', () => {
   it('returns null when no enabled row has the key', () => {
     expect(setVariableValue([row('a', 'host', 'one', false)], 'host', 'new')).toBeNull();
     expect(setVariableValue([], 'host', 'new')).toBeNull();
+  });
+});
+
+describe('defineVariableIn', () => {
+  const row = (id: string, key: string, value: string, enabled = true) => ({ id, key, value, enabled });
+
+  it('appends an enabled row when the name is not defined, keeping disabled rows', () => {
+    const layer = [row('a', 'host', 'one', false)];
+    const next = defineVariableIn(layer, 'host', 'two', 'new-id', true);
+    expect(next).toEqual([row('a', 'host', 'one', false), { id: 'new-id', key: 'host', value: 'two', enabled: true, secret: true }]);
+    expect(buildVariableMap([next]).host).toBe('two');
+  });
+
+  it('updates the row resolution picks when the name is defined', () => {
+    const next = defineVariableIn([row('a', 'host', 'one'), row('b', 'host', 'two')], 'host', 'new', 'unused');
+    expect(next.map((v) => v.value)).toEqual(['one', 'new']);
+    expect(next).toHaveLength(2);
+    expect(defineVariableIn(next, 'host', 'x', 'unused', true)[1].secret).toBe(true);
+  });
+
+  it('accepts ordinary names and refuses built-in and malformed ones', () => {
+    expect(DEFINABLE_VARIABLE_NAME.test('partnerName')).toBe(true);
+    expect(DEFINABLE_VARIABLE_NAME.test('api.v2-key')).toBe(true);
+    expect(DEFINABLE_VARIABLE_NAME.test('$uuid')).toBe(false);
+    expect(DEFINABLE_VARIABLE_NAME.test('9lives')).toBe(false);
   });
 });

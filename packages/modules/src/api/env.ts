@@ -1,4 +1,4 @@
-import { DYNAMIC_VARIABLE_HELP, QuiverError, buildVariableMap, setVariableValue, type Environment, type HostApi, type Variable, type WorkspaceApi } from '@quiver/core';
+import { DYNAMIC_VARIABLE_HELP, QuiverError, buildVariableMap, defineVariableIn, newId, setVariableValue, type Environment, type HostApi, type Variable, type WorkspaceApi } from '@quiver/core';
 
 export const COLLECTIONS = {
   requests: 'requests',
@@ -122,7 +122,7 @@ export async function listResolvedVariables(
   ws: WorkspaceApi,
   host: HostApi,
   mask: boolean,
-): Promise<{ environment: { id: string; name: string } | null; variables: ResolvedVariable[] }> {
+): Promise<{ environment: { id: string; name: string } | null; environments: { id: string; name: string }[]; variables: ResolvedVariable[] }> {
   const byName = new Map<string, ResolvedVariable>();
   for (const v of host.config.get().globalVariables) {
     if (!v.enabled || !v.key.trim()) continue;
@@ -139,7 +139,8 @@ export async function listResolvedVariables(
   for (const [name, help] of Object.entries(DYNAMIC_VARIABLE_HELP)) {
     if (!byName.has(name)) byName.set(name, { name, value: null, secret: false, source: 'dynamic', help });
   }
-  return { environment: env ? { id: env.id, name: env.name } : null, variables: [...byName.values()] };
+  const environments = (await ws.store.list<Environment>(COLLECTIONS.environments)).map((e) => ({ id: e.id, name: e.name })).sort((a, b) => a.name.localeCompare(b.name));
+  return { environment: env ? { id: env.id, name: env.name } : null, environments, variables: [...byName.values()] };
 }
 
 /** Where `{{name}}` resolves from right now: the active environment wins over the globals. */
@@ -169,4 +170,30 @@ export async function setResolvedVariable(ws: WorkspaceApi, host: HostApi, name:
     return { name, source: 'global' };
   }
   throw new QuiverError('NOT_FOUND', `No variable named ${name} in the active environment or the global variables`);
+}
+
+export type VariableTarget = { kind: 'environment'; id: string } | { kind: 'global' };
+
+/**
+ * Give `{{name}}` a value in a chosen place: any environment (a secret there is encrypted on
+ * this machine) or the global variables, which are plain config and so take no secrets.
+ * An existing definition in that place is updated rather than duplicated.
+ */
+export async function defineVariable(
+  ws: WorkspaceApi,
+  host: HostApi,
+  name: string,
+  value: string,
+  target: VariableTarget,
+  secret?: boolean,
+): Promise<{ name: string; target: VariableTarget; environmentName?: string }> {
+  if (target.kind === 'global') {
+    if (secret) throw new QuiverError('INVALID_INPUT', 'Global variables are stored in plain config; keep secrets in an environment');
+    await host.config.update({ globalVariables: defineVariableIn(host.config.get().globalVariables, name, value, newId()) });
+    return { name, target };
+  }
+  const env = await getEnvironment(ws, host, target.id);
+  if (!env) throw new QuiverError('NOT_FOUND', `Environment ${target.id} not found`);
+  await saveEnvironment(ws, host, { ...env, variables: defineVariableIn(env.variables, name, value, newId(), secret) });
+  return { name, target, environmentName: env.name };
 }
