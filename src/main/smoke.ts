@@ -1936,6 +1936,28 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       );
       await run('api.collection.delete', { id: foldCollection.id }, ws.id).catch(() => {});
       await wait(300);
+
+      // API sidebar: requests added by an agent show up without a restart, through MCP or written straight to disk.
+      const viaMcp = await host.invoke('api.request.create', { name: 'added over mcp' }, { caller: 'mcp', workspaceId: ws.id });
+      const onDiskId = 'smokeexternal01';
+      await fs.writeFile(
+        path.join(folder, '.quiver', 'requests', `${onDiskId}.json`),
+        JSON.stringify({ ...(viaMcp.ok ? (viaMcp.result as object) : {}), id: onDiskId, name: 'written to disk', collectionId: null }, null, 2),
+      );
+      await wait(1200);
+      const sidebarRows = await js(`[...document.querySelectorAll('[role=button]')].map((r) => r.textContent)`);
+      const sawDiskRow = Array.isArray(sidebarRows) && sidebarRows.some((t: string) => t.includes('written to disk'));
+      check(
+        'ui: requests created over MCP or written to .quiver by hand appear in the sidebar without a restart',
+        viaMcp.ok && Array.isArray(sidebarRows) && sidebarRows.some((t: string) => t.includes('added over mcp')) && sidebarRows.some((t: string) => t.includes('written to disk')),
+        viaMcp.ok ? 'ok' : viaMcp.error.message,
+      );
+      await fs.rm(path.join(folder, '.quiver', 'requests', `${onDiskId}.json`));
+      await wait(600);
+      const goneRow = await js(`[...document.querySelectorAll('[role=button]')].some((r) => r.textContent.includes('written to disk'))`);
+      check('ui: a request file deleted on disk disappears from the sidebar', sawDiskRow && goneRow === false);
+      if (viaMcp.ok) await run('api.request.delete', { id: (viaMcp.result as { id: string }).id }, ws.id).catch(() => {});
+      await wait(300);
       const gqlRowLabel = await js(
         `(() => { const row = [...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('smoke graphql')); if (!row) return null; const label = row.textContent.slice(0, 3); row.click(); return label; })()`,
       );

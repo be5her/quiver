@@ -80,7 +80,7 @@ Colours are CSS variables (`canvas`, `surface`, `elevated`, `fg`, `muted`, `edge
 
 ### Storage
 
-- `.quiver/<collection>/<id>.json`: committed, one file per item, diffable in pull requests.
+- `.quiver/<collection>/<id>.json`: committed, one file per item, diffable in pull requests. Quiver watches the folder, so files an agent writes by hand, a `git pull` or a branch switch show up without a restart.
 - `.quiver/local/`: gitignored. UI state, request and query history, requests captured by mock servers, realtime message logs, MCP traffic logs, env file backups, fetched GraphQL schemas, and secrets (environment values, database passwords) encrypted with the OS keychain.
 - SQLite files referenced by a relative path resolve against the project folder, so a committed connection works for every teammate.
 - Global config lives in the Electron user data folder as `config.json`. Teleport settings (cluster proxy addresses, pins, optional tsh path, log in on launch) live there too, never in `.quiver/`; the Teleport sessions themselves are the standard tsh profiles in `~/.tsh`, shared with the tsh and kubectl in your terminal. The Kubernetes query history and the private kubeconfigs Quiver queries through live in `teleport-kube/` in the same folder, per machine.

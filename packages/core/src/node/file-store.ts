@@ -1,4 +1,4 @@
-import { promises as fs } from 'node:fs';
+import { promises as fs, watch, type FSWatcher } from 'node:fs';
 import path from 'node:path';
 import type { Entity, StoreApi } from '../types';
 
@@ -32,6 +32,8 @@ async function readJson<T>(file: string): Promise<T | undefined> {
  */
 export class FileStore implements StoreApi {
   private readonly cache = new Map<string, Map<string, Entity>>();
+  private watcher: FSWatcher | null = null;
+  private readonly pending = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(
     readonly root: string,
@@ -73,6 +75,54 @@ export class FileStore implements StoreApi {
     }
     this.cache.set(collection, map);
     return map;
+  }
+
+  /**
+   * Watch the folder for changes made outside Quiver (an agent editing the JSON files,
+   * a git pull or checkout) and reload the collections they touch. A change is reported
+   * through onChange only when the content differs from the cache, so Quiver's own writes
+   * do not report twice.
+   */
+  watch(debounceMs = 150): void {
+    if (this.watcher) return;
+    try {
+      this.watcher = watch(this.root, { recursive: true, persistent: false }, (_event, filename) => {
+        const collection = filename ? collectionOf(String(filename)) : null;
+        if (collection) this.scheduleReload(collection, debounceMs);
+      });
+      this.watcher.on('error', () => this.unwatch());
+    } catch {
+      // A folder that cannot be watched keeps working; it just misses external edits.
+      this.watcher = null;
+    }
+  }
+
+  unwatch(): void {
+    this.watcher?.close();
+    this.watcher = null;
+    for (const timer of this.pending.values()) clearTimeout(timer);
+    this.pending.clear();
+  }
+
+  private scheduleReload(collection: string, debounceMs: number): void {
+    clearTimeout(this.pending.get(collection));
+    this.pending.set(
+      collection,
+      setTimeout(() => {
+        this.pending.delete(collection);
+        void this.reload(collection).catch(() => {});
+      }, debounceMs),
+    );
+  }
+
+  /** Re-read a collection from disk; reports a change when it differs from what was cached. */
+  async reload(collection: string): Promise<boolean> {
+    const before = this.cache.get(collection);
+    this.cache.delete(collection);
+    const after = await this.load(collection);
+    if (before && sameEntities(before, after)) return false;
+    this.onChange(collection);
+    return true;
   }
 
   /** Drop caches so the next read hits disk. Used after external edits. */
@@ -159,4 +209,22 @@ async function readJsonSafe(file: string): Promise<string | undefined> {
   } catch {
     return undefined;
   }
+}
+
+/** The collection a watched path belongs to: `requests/abc.json` -> `requests`. Local state and temp files are ignored. */
+export function collectionOf(filename: string): string | null {
+  const parts = filename.split(/[\\/]/).filter(Boolean);
+  const [collection, file] = parts;
+  if (!collection || parts.length > 2 || collection === 'local' || !SAFE_NAME.test(collection)) return null;
+  if (file === undefined) return collection.includes('.') ? null : collection;
+  return file.endsWith('.json') ? collection : null;
+}
+
+function sameEntities(a: Map<string, Entity>, b: Map<string, Entity>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [id, item] of a) {
+    const other = b.get(id);
+    if (!other || JSON.stringify(item) !== JSON.stringify(other)) return false;
+  }
+  return true;
 }

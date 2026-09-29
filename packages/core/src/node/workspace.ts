@@ -36,6 +36,7 @@ export class WorkspaceSession implements WorkspaceApi {
 
   async init(): Promise<void> {
     await this.store.init();
+    this.store.watch();
   }
 
   info(): WorkspaceInfo {
@@ -62,6 +63,7 @@ export class WorkspaceSession implements WorkspaceApi {
   }
 
   async dispose(): Promise<void> {
+    this.store.unwatch();
     await this.stateWrite;
   }
 }
