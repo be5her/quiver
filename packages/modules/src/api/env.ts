@@ -1,4 +1,4 @@
-import { buildVariableMap, type Environment, type HostApi, type Variable, type WorkspaceApi } from '@quiver/core';
+import { DYNAMIC_VARIABLE_HELP, buildVariableMap, type Environment, type HostApi, type Variable, type WorkspaceApi } from '@quiver/core';
 
 export const COLLECTIONS = {
   requests: 'requests',
@@ -105,3 +105,39 @@ export async function resolveVariableMap(ws: WorkspaceApi, host: HostApi, enviro
 }
 
 export const ACTIVE_ENVIRONMENT_STATE_KEY = ACTIVE_ENV_KEY;
+
+export interface ResolvedVariable {
+  name: string;
+  /** Null for built-in dynamic variables, which get a new value on every send. */
+  value: string | null;
+  secret: boolean;
+  source: 'global' | 'environment' | 'dynamic';
+  /** Set when an environment value hides a global one of the same name. */
+  overridesGlobal?: boolean;
+  help?: string;
+}
+
+/** Every variable a `{{name}}` can reach right now, in resolution order, with where it comes from. */
+export async function listResolvedVariables(
+  ws: WorkspaceApi,
+  host: HostApi,
+  mask: boolean,
+): Promise<{ environment: { id: string; name: string } | null; variables: ResolvedVariable[] }> {
+  const byName = new Map<string, ResolvedVariable>();
+  for (const v of host.config.get().globalVariables) {
+    if (!v.enabled || !v.key.trim()) continue;
+    const secret = Boolean(v.secret);
+    byName.set(v.key.trim(), { name: v.key.trim(), value: secret && mask ? MASK : v.value, secret, source: 'global' });
+  }
+  const envId = await getActiveEnvironmentId(ws);
+  const env = envId ? await getEnvironment(ws, host, envId, mask) : undefined;
+  for (const v of env?.variables ?? []) {
+    if (!v.enabled || !v.key.trim()) continue;
+    const name = v.key.trim();
+    byName.set(name, { name, value: v.value, secret: Boolean(v.secret), source: 'environment', overridesGlobal: byName.get(name)?.source === 'global' || undefined });
+  }
+  for (const [name, help] of Object.entries(DYNAMIC_VARIABLE_HELP)) {
+    if (!byName.has(name)) byName.set(name, { name, value: null, secret: false, source: 'dynamic', help });
+  }
+  return { environment: env ? { id: env.id, name: env.name } : null, variables: [...byName.values()] };
+}

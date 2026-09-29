@@ -2,14 +2,16 @@ import { html } from '@codemirror/lang-html';
 import { javascript } from '@codemirror/lang-javascript';
 import { json } from '@codemirror/lang-json';
 import { MySQL, SQLite, StandardSQL, sql, type SQLNamespace } from '@codemirror/lang-sql';
-import { Prec } from '@codemirror/state';
-import { EditorView, keymap } from '@codemirror/view';
+import { Prec, RangeSetBuilder } from '@codemirror/state';
+import { Decoration, EditorView, ViewPlugin, keymap, type DecorationSet, type ViewUpdate } from '@codemirror/view';
+import { findVariableSpans } from '@quiver/core';
 import CodeMirror, { type Extension, type ReactCodeMirrorRef } from '@uiw/react-codemirror';
 import { graphql as graphqlLanguage } from 'cm6-graphql';
 import type { GraphQLSchema } from 'graphql';
 import { useMemo, useRef, type Ref } from 'react';
 import { cn } from '../cn';
 import { useAppStore } from '../stores/app';
+import { lookupVariable, showVariableCard, useVariableHoverStore, useVariables, type VariableScope } from './Variables';
 
 export type CodeLanguage = 'json' | 'javascript' | 'html' | 'xml' | 'sql' | 'graphql' | 'text';
 export type SqlDialect = 'mysql' | 'sqlite' | 'standard';
@@ -67,6 +69,49 @@ const baseTheme = EditorView.theme({
   '.cm-tooltip-autocomplete ul li[aria-selected]': { backgroundColor: 'var(--accent)', color: 'var(--accent-fg)' },
 });
 
+const variableTheme = EditorView.baseTheme({
+  '.cm-variable': { backgroundColor: 'color-mix(in srgb, var(--accent) 20%, transparent)', borderRadius: '2px' },
+  '.cm-variable-missing': { backgroundColor: 'color-mix(in srgb, var(--danger) 20%, transparent)', borderRadius: '2px', boxShadow: 'inset 0 -1.5px 0 var(--danger)' },
+});
+
+/** Marks `{{variables}}` in the visible lines and shows their value card on hover. */
+function variableHighlighting(scope: VariableScope): Extension {
+  const build = (view: EditorView): DecorationSet => {
+    const builder = new RangeSetBuilder<Decoration>();
+    for (const { from, to } of view.visibleRanges) {
+      const text = view.state.doc.sliceString(from, to);
+      for (const span of findVariableSpans(text)) {
+        const known = Boolean(lookupVariable(scope, span.name));
+        builder.add(from + span.from, from + span.to, Decoration.mark({ class: known ? 'cm-variable' : 'cm-variable-missing', attributes: { 'data-var-name': span.name } }));
+      }
+    }
+    return builder.finish();
+  };
+  const plugin = ViewPlugin.fromClass(
+    class {
+      decorations: DecorationSet;
+      constructor(view: EditorView) {
+        this.decorations = build(view);
+      }
+      update(update: ViewUpdate) {
+        if (update.docChanged || update.viewportChanged) this.decorations = build(update.view);
+      }
+    },
+    { decorations: (v) => v.decorations },
+  );
+  const hover = EditorView.domEventHandlers({
+    mousemove(event) {
+      const el = (event.target as HTMLElement | null)?.closest<HTMLElement>('[data-var-name]');
+      if (el) showVariableCard(scope, el.dataset.varName!, el.getBoundingClientRect());
+      else useVariableHoverStore.getState().scheduleHide();
+    },
+    mouseleave() {
+      useVariableHoverStore.getState().scheduleHide();
+    },
+  });
+  return [variableTheme, plugin, hover];
+}
+
 export function CodeEditor({
   value,
   onChange,
@@ -84,12 +129,15 @@ export function CodeEditor({
   autoFocus,
 }: CodeEditorProps) {
   const theme = useAppStore((s) => s.resolvedTheme);
+  // Inside a VariablesProvider, editable editors mark {{variables}}; responses and other read-only views do not.
+  const variables = useVariables();
   const onRunRef = useRef(onRun);
   onRunRef.current = onRun;
 
   const extensions = useMemo(() => {
     const list = [baseTheme, ...languageExtension(language, sqlDialect, sqlSchema, graphqlSchema)];
     if (wrap) list.push(EditorView.lineWrapping);
+    if (variables && !readOnly) list.push(variableHighlighting(variables));
     list.push(
       Prec.highest(
         keymap.of([
@@ -105,7 +153,7 @@ export function CodeEditor({
       ),
     );
     return list;
-  }, [language, wrap, sqlDialect, sqlSchema, graphqlSchema]);
+  }, [language, wrap, sqlDialect, sqlSchema, graphqlSchema, variables, readOnly]);
 
   return (
     <div className={cn('overflow-hidden rounded-md border border-edge bg-surface', fill && 'h-full min-h-0', className)}>

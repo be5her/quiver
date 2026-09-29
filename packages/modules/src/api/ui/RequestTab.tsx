@@ -4,6 +4,7 @@ import {
   CodeEditor,
   Input,
   KeyValueEditor,
+  VariableInput,
   Label,
   METHOD_COLORS,
   Segmented,
@@ -18,11 +19,20 @@ import {
 import { Copy, Save, Send } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { GraphqlEditor } from './GraphqlEditor';
+import { ApiVariablesProvider } from './variables';
 import { ResponsePane } from './ResponsePane';
 
 type Section = 'params' | 'headers' | 'body' | 'auth';
 
-export function RequestTab({ tab, scope }: TabProps) {
+export function RequestTab(props: TabProps) {
+  return (
+    <ApiVariablesProvider>
+      <RequestTabBody {...props} />
+    </ApiVariablesProvider>
+  );
+}
+
+function RequestTabBody({ tab, scope }: TabProps) {
   const requestId = String(tab.data?.id ?? '');
   const draft = tab.data?.draft as ApiRequest | undefined;
   const [request, setRequest] = useState<ApiRequest | null>(draft ?? null);
@@ -151,7 +161,7 @@ export function RequestTab({ tab, scope }: TabProps) {
             </option>
           ))}
         </Select>
-        <Input
+        <VariableInput
           value={request.url}
           onChange={(e) => patch({ url: e.target.value })}
           placeholder="https://{{baseUrl}}/path"
@@ -272,14 +282,14 @@ export function AuthEditor({ auth, onChange }: { auth: RequestAuth; onChange(aut
       {auth.type === 'bearer' && (
         <div>
           <Label>Token</Label>
-          <Input className="font-mono" value={auth.token} onChange={(e) => onChange({ ...auth, token: e.target.value })} placeholder="{{token}}" />
+          <VariableInput className="font-mono" value={auth.token} onChange={(e) => onChange({ ...auth, token: e.target.value })} placeholder="{{token}}" />
         </div>
       )}
       {auth.type === 'basic' && (
         <div className="grid grid-cols-2 gap-2">
           <div>
             <Label>Username</Label>
-            <Input value={auth.username} onChange={(e) => onChange({ ...auth, username: e.target.value })} />
+            <VariableInput value={auth.username} onChange={(e) => onChange({ ...auth, username: e.target.value })} />
           </div>
           <div>
             <Label>Password</Label>
@@ -291,11 +301,11 @@ export function AuthEditor({ auth, onChange }: { auth: RequestAuth; onChange(aut
         <div className="grid grid-cols-[1fr_1fr_auto] gap-2">
           <div>
             <Label>Key</Label>
-            <Input className="font-mono" value={auth.key} onChange={(e) => onChange({ ...auth, key: e.target.value })} />
+            <VariableInput className="font-mono" value={auth.key} onChange={(e) => onChange({ ...auth, key: e.target.value })} />
           </div>
           <div>
             <Label>Value</Label>
-            <Input className="font-mono" value={auth.value} onChange={(e) => onChange({ ...auth, value: e.target.value })} />
+            <VariableInput className="font-mono" value={auth.value} onChange={(e) => onChange({ ...auth, value: e.target.value })} />
           </div>
           <div>
             <Label>Add to</Label>

@@ -33,6 +33,7 @@ import {
   resolveVariableMap,
   saveEnvironment,
   setActiveEnvironmentId,
+  listResolvedVariables,
 } from './env';
 import { graphqlEndpoint, introspect, readSchema } from './graphql';
 import { prepareRequest, sendPrepared } from './http';
@@ -372,6 +373,15 @@ const environmentActive = defineCommand({
   handler: async (_i, ctx) => ({ id: await getActiveEnvironmentId(ws(ctx)) }),
 });
 
+const variablesList = defineCommand({
+  id: 'api.variables.list',
+  title: 'List variables in effect',
+  description: 'Lists every {{variable}} a request can use right now: global variables, then the active environment (which wins), then the built-in dynamic ones, each with its source. Secret values are masked for agents.',
+  scope: 'workspace',
+  input: z.object({}),
+  handler: async (_i, ctx) => listResolvedVariables(ws(ctx), ctx.host, ctx.caller === 'mcp'),
+});
+
 const environmentSetActive = defineCommand({
   id: 'api.environment.setActive',
   title: 'Switch environment',
@@ -490,6 +500,7 @@ export const apiModule = defineModule({
     environmentDelete,
     environmentActive,
     environmentSetActive,
+    variablesList,
     historyList,
     historyClear,
     importCurl,

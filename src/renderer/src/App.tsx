@@ -1,5 +1,5 @@
 import type { CommandMeta, GlobalConfig, UpdateState, WorkspaceInfo } from '@quiver/core';
-import { ContextMenuHost, DialogHost, ToastHost, applyTheme, invoke, onHostEvent, useAppStore, watchSystemTheme } from '@quiver/ui';
+import { ContextMenuHost, DialogHost, ToastHost, VariableHoverHost, applyTheme, invoke, onHostEvent, useAppStore, watchSystemTheme } from '@quiver/ui';
 import { useEffect } from 'react';
 import { ActivityBar } from './shell/ActivityBar';
 import { CommandPalette } from './shell/CommandPalette';
@@ -36,6 +36,7 @@ export function App() {
       <StatusBar />
       <CommandPalette />
       <ContextMenuHost />
+      <VariableHoverHost />
       <DialogHost />
       <ToastHost />
     </div>

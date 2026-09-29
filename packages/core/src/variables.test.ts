@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildVariableMap, findUnresolved, resolveDeep, resolveTemplate } from './variables';
+import { buildVariableMap, findUnresolved, findVariableSpans, isDynamicVariable, resolveDeep, resolveTemplate } from './variables';
 
 const vars = buildVariableMap([
   [
@@ -34,5 +34,25 @@ describe('variables', () => {
   it('resolves nested structures', () => {
     const out = resolveDeep({ a: '{{host}}', b: [{ c: '{{token}}' }], d: 3 }, vars);
     expect(out).toEqual({ a: 'env.example', b: [{ c: 'global-token' }], d: 3 });
+  });
+});
+
+describe('findVariableSpans', () => {
+  it('finds every placeholder with its offsets and trimmed name', () => {
+    const text = 'https://{{host}}/v1/{{ id }}?t={{$uuid}}';
+    const spans = findVariableSpans(text);
+    expect(spans.map((s) => s.name)).toEqual(['host', 'id', '$uuid']);
+    expect(spans.map((s) => text.slice(s.from, s.to))).toEqual(['{{host}}', '{{ id }}', '{{$uuid}}']);
+  });
+
+  it('ignores text that is not a placeholder', () => {
+    expect(findVariableSpans('')).toEqual([]);
+    expect(findVariableSpans('no vars')).toEqual([]);
+    expect(findVariableSpans('{{}} {{1abc}} {{ spaced name }} {single}')).toEqual([]);
+  });
+
+  it('knows the built-in dynamic variables', () => {
+    expect(isDynamicVariable('$uuid')).toBe(true);
+    expect(isDynamicVariable('uuid')).toBe(false);
   });
 });

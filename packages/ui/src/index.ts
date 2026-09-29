@@ -14,4 +14,5 @@ export * from './components/KeyValueEditor';
 export * from './components/CodeEditor';
 export * from './components/DialogHost';
 export * from './components/ContextMenu';
+export * from './components/Variables';
 export * from './components/ToastHost';

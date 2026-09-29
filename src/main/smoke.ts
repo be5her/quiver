@@ -279,6 +279,19 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     const onDisk = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'environments', `${env.id}.json`), 'utf8')) as Environment;
     check('secret not written to committed file', onDisk.variables[1].value === '');
     await run('api.environment.setActive', { id: env.id }, ws.id);
+    type VarList = { environment: { name: string } | null; variables: { name: string; value: string | null; secret: boolean; source: string }[] };
+    const varsForUi = await run<VarList>('api.variables.list', {}, ws.id);
+    const varsForAgent = await host.invoke('api.variables.list', {}, { caller: 'mcp', workspaceId: ws.id });
+    const agentToken = varsForAgent.ok ? (varsForAgent.result as VarList).variables.find((v) => v.name === 'token') : undefined;
+    check(
+      'api.variables.list: the active environment and built-ins, secrets shown to the UI and masked for agents',
+      varsForUi.environment?.name === 'local' &&
+        varsForUi.variables.find((v) => v.name === 'baseUrl')?.source === 'environment' &&
+        varsForUi.variables.find((v) => v.name === 'token')?.value === 's3cret' &&
+        varsForUi.variables.find((v) => v.name === '$uuid')?.source === 'dynamic' &&
+        agentToken?.value === '••••••••' && agentToken.secret,
+      { ui: varsForUi.variables.map((v) => `${v.name}:${v.source}`), agentToken },
+    );
 
     const created = await run<ApiRequest>('api.request.create', { name: 'echo', method: 'POST', url: '{{baseUrl}}/things?x=1' }, ws.id);
     const saved = await run<ApiRequest>(
@@ -1568,6 +1581,92 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(300);
       await shot('03-request-light');
+
+      // Variables: {{name}} is marked in inputs and editors, and hovering shows the value, with secrets masked until revealed.
+      const hoverVariable = (inputSelector: string, name: string) =>
+        js(
+          `(() => { const pane = [...document.querySelectorAll('[data-tab-type="api.request"]')].find((el) => !el.classList.contains('hidden')) ?? document; const input = [...pane.querySelectorAll(${JSON.stringify(inputSelector)})].find((i) => (i.getAttribute('data-variables') || '').split(',').includes(${JSON.stringify(name)})); if (!input) return 'no input'; const chip = input.parentElement.querySelector('[data-var-name="${name}"]'); if (!chip) return 'no chip'; const r = chip.getBoundingClientRect(); input.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 })); return 'ok'; })()`,
+        );
+      const card = () =>
+        js(
+          `(() => { const c = document.querySelector('[data-testid=variable-card]'); return c ? { name: c.getAttribute('data-name'), source: c.querySelector('[data-testid=variable-card-source]')?.textContent, value: c.querySelector('[data-testid=variable-card-value]')?.textContent ?? null } : null; })()`,
+        ) as Promise<{ name: string; source: string; value: string | null } | null>;
+      const hoveredUrl = await hoverVariable('input', 'baseUrl');
+      await wait(250);
+      const urlCard = await card();
+      check(
+        'ui: hovering {{baseUrl}} in the URL shows its value and environment',
+        hoveredUrl === 'ok' && urlCard?.name === 'baseUrl' && urlCard.value === `http://127.0.0.1:${echoPort}` && urlCard.source === 'Environment · local',
+        { hoveredUrl, urlCard },
+      );
+      await shot('03b-variable-hover-light');
+      await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+      await js(
+        `(() => { const pane = [...document.querySelectorAll('[data-tab-type="api.request"]')].find((el) => !el.classList.contains('hidden')); const tab = pane && [...pane.querySelectorAll('[role=tab]')].find((b) => b.textContent.startsWith('Auth')); if (tab) tab.click(); })()`,
+      );
+      await wait(300);
+      const hoveredToken = await hoverVariable('input', 'token');
+      await wait(250);
+      const tokenMasked = await card();
+      await js(`document.querySelector('[data-testid=variable-card-reveal]')?.click()`);
+      await wait(150);
+      const tokenRevealed = await card();
+      check(
+        'ui: a secret variable is masked in the card until revealed',
+        hoveredToken === 'ok' && tokenMasked?.value === '••••••••' && tokenRevealed?.value === 's3cret',
+        { hoveredToken, tokenMasked, tokenRevealed },
+      );
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(200);
+      await shot('03c-variable-secret-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
+      await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+      const typeUrl = (value: string) =>
+        js(
+          `(() => { const pane = [...document.querySelectorAll('[data-tab-type="api.request"]')].find((el) => !el.classList.contains('hidden')); const input = [...pane.querySelectorAll('input')].find((i) => i.value.startsWith('{{baseUrl}}')); if (!input) return false; const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; setter.call(input, ${JSON.stringify(value)}); input.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`,
+        );
+      await typeUrl('{{baseUrl}}/things?x=1&k={{nope}}');
+      await wait(200);
+      const hoveredMissing = await hoverVariable('input', 'nope');
+      await wait(250);
+      const missingCard = await card();
+      const missingChip = await js(`document.querySelector('[data-var-name=nope]')?.className ?? ''`);
+      check(
+        'ui: an undefined variable is marked and its card says so',
+        hoveredMissing === 'ok' && missingCard?.source === 'Not defined' && typeof missingChip === 'string' && missingChip.includes('bg-danger'),
+        { hoveredMissing, missingCard, missingChip },
+      );
+      await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+      await typeUrl('{{baseUrl}}/things?x=1');
+      await wait(200);
+      check('ui: restoring the URL leaves the request unmodified', (await js(`document.querySelector('[data-testid=tab][aria-selected=true]')?.textContent.includes('echo') && !document.querySelector('[data-testid=tab][aria-selected=true] .bg-warning')`)) === true);
+
+      const bodyVars = await run<ApiRequest>('api.request.create', { name: 'vars in body', method: 'POST', url: '{{baseUrl}}/b', body: { type: 'json', content: '{\n  "auth": "{{token}}",\n  "other": "{{nope}}"\n}' } }, ws.id);
+      await wait(500);
+      await js(`(() => { const row = [...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('vars in body')); if (row) row.click(); })()`);
+      await wait(800);
+      await js(
+        `(() => { const pane = [...document.querySelectorAll('[data-tab-type="api.request"]')].find((el) => !el.classList.contains('hidden')); const tab = pane && [...pane.querySelectorAll('[role=tab]')].find((b) => b.textContent.startsWith('Body')); if (tab) tab.click(); })()`,
+      );
+      await wait(500);
+      const editorMarks = await js(
+        `(() => { const pane = [...document.querySelectorAll('[data-tab-type="api.request"]')].find((el) => !el.classList.contains('hidden')); return [...pane.querySelectorAll('.cm-content [data-var-name]')].map((el) => el.getAttribute('data-var-name') + ':' + el.className); })()`,
+      );
+      await js(
+        `(() => { const pane = [...document.querySelectorAll('[data-tab-type="api.request"]')].find((el) => !el.classList.contains('hidden')); const el = pane.querySelector('.cm-content [data-var-name=token]'); if (!el) return; const r = el.getBoundingClientRect(); el.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: r.left + 2, clientY: r.top + 2 })); })()`,
+      );
+      await wait(250);
+      const editorCard = await card();
+      check(
+        'ui: the body editor marks known and unknown variables and shows the card on hover',
+        Array.isArray(editorMarks) && editorMarks.some((m: string) => m.startsWith('token:') && m.includes('cm-variable') && !m.includes('missing')) && editorMarks.some((m: string) => m.startsWith('nope:') && m.includes('cm-variable-missing')) && editorCard?.name === 'token' && editorCard.value === '••••••••',
+        { editorMarks, editorCard },
+      );
+      await shot('03d-variable-body-light');
+      await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+      await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+      await run('api.request.delete', { id: bodyVars.id }, ws.id);
+      await wait(300);
       await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }))`);
       await wait(400);
       await shot('04-palette-light');
