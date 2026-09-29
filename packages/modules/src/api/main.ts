@@ -34,6 +34,8 @@ import {
   saveEnvironment,
   setActiveEnvironmentId,
   listResolvedVariables,
+  setResolvedVariable,
+  variableSource,
 } from './env';
 import { graphqlEndpoint, introspect, readSchema } from './graphql';
 import { prepareRequest, sendPrepared } from './http';
@@ -382,6 +384,16 @@ const variablesList = defineCommand({
   handler: async (_i, ctx) => listResolvedVariables(ws(ctx), ctx.host, ctx.caller === 'mcp'),
 });
 
+const variablesSet = defineCommand({
+  id: 'api.variables.set',
+  title: 'Set a variable value',
+  description: 'Changes the value {{name}} resolves to, where it is defined: the active environment (secrets stay encrypted on this machine) or else the global variables. Does not create variables. Changing a global variable needs mutations enabled, since every workspace sees it.',
+  scope: 'workspace',
+  mutating: async ({ name }, ctx) => (await variableSource(ws(ctx), ctx.host, name)) !== 'environment',
+  input: z.object({ name: z.string().min(1), value: z.string() }),
+  handler: async ({ name, value }, ctx) => setResolvedVariable(ws(ctx), ctx.host, name, value),
+});
+
 const environmentSetActive = defineCommand({
   id: 'api.environment.setActive',
   title: 'Switch environment',
@@ -501,6 +513,7 @@ export const apiModule = defineModule({
     environmentActive,
     environmentSetActive,
     variablesList,
+    variablesSet,
     historyList,
     historyClear,
     importCurl,

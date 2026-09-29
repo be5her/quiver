@@ -293,6 +293,32 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       { ui: varsForUi.variables.map((v) => `${v.name}:${v.source}`), agentToken },
     );
 
+    // api.variables.set changes a value where it is defined, keeping secrets encrypted; globals are gated for agents.
+    const globalsBefore = host.config.get().globalVariables;
+    await run('config.update', { patch: { globalVariables: [...globalsBefore, { id: 'g1', key: 'region', value: 'eu', enabled: true }] } }, null);
+    const setSecret = await run<{ source: string }>('api.variables.set', { name: 'token', value: 'n3w' }, ws.id);
+    const tokenAfterSet = (await run<VarList>('api.variables.list', {}, ws.id)).variables.find((v) => v.name === 'token');
+    const diskAfterSet = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'environments', `${env.id}.json`), 'utf8')) as Environment;
+    check(
+      'api.variables.set: updates the active environment and keeps a secret out of the committed file',
+      setSecret.source === 'environment' && tokenAfterSet?.value === 'n3w' && tokenAfterSet.secret && diskAfterSet.variables[1].value === '' && diskAfterSet.variables[1].secret === true,
+      { setSecret, tokenAfterSet, disk: diskAfterSet.variables[1] },
+    );
+    await run('api.variables.set', { name: 'token', value: 's3cret' }, ws.id);
+    const agentSetEnv = await host.invoke('api.variables.set', { name: 'baseUrl', value: `http://127.0.0.1:${echoPort}` }, { caller: 'mcp', workspaceId: ws.id });
+    const agentSetGlobal = await host.invoke('api.variables.set', { name: 'region', value: 'us' }, { caller: 'mcp', workspaceId: ws.id });
+    const uiSetGlobal = await run<{ source: string }>('api.variables.set', { name: 'region', value: 'us' }, ws.id);
+    const unknownSet = await host.invoke('api.variables.set', { name: 'nope', value: 'x' }, { caller: 'ui', workspaceId: ws.id });
+    check(
+      'api.variables.set: agents may change an environment value, a global one needs mutations, unknown names are refused',
+      agentSetEnv.ok &&
+        !agentSetGlobal.ok && agentSetGlobal.error.code === 'MUTATION_BLOCKED' &&
+        uiSetGlobal.source === 'global' && host.config.get().globalVariables.find((v) => v.key === 'region')?.value === 'us' &&
+        !unknownSet.ok && unknownSet.error.code === 'NOT_FOUND',
+      { agentSetEnv: agentSetEnv.ok, agentSetGlobal: agentSetGlobal.ok ? 'ok?' : agentSetGlobal.error.code, uiSetGlobal, unknownSet: unknownSet.ok ? 'ok?' : unknownSet.error.code },
+    );
+    await run('config.update', { patch: { globalVariables: globalsBefore } }, null);
+
     const created = await run<ApiRequest>('api.request.create', { name: 'echo', method: 'POST', url: '{{baseUrl}}/things?x=1' }, ws.id);
     const saved = await run<ApiRequest>(
       'api.request.save',
@@ -1637,6 +1663,72 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         { hoveredMissing, missingCard, missingChip },
       );
       await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+
+      // A long value scrolls inside the card without closing it, and the card edits the value where it is defined.
+      const globalsBeforeUi = host.config.get().globalVariables;
+      const longValue = Array.from({ length: 60 }, (_, i) => `segment-${i}`).join('/');
+      await run('config.update', { patch: { globalVariables: [...globalsBeforeUi, { id: 'glong', key: 'long', value: longValue, enabled: true }] } }, null);
+      await typeUrl('{{baseUrl}}/things?x=1&l={{long}}');
+      await wait(400);
+      const hoveredLong = await hoverVariable('input', 'long');
+      await wait(250);
+      const valueBox = (await js(
+        `(() => { const el = document.querySelector('[data-testid=variable-card-value]'); if (!el) return null; const r = el.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), overflow: el.scrollHeight > el.clientHeight }; })()`,
+      )) as { x: number; y: number; overflow: boolean } | null;
+      if (valueBox) {
+        win.webContents.sendInputEvent({ type: 'mouseMove', x: valueBox.x, y: valueBox.y });
+        await wait(100);
+        for (let i = 0; i < 3; i++) {
+          win.webContents.sendInputEvent({ type: 'mouseWheel', x: valueBox.x, y: valueBox.y, deltaX: 0, deltaY: -120 });
+          await wait(80);
+        }
+      }
+      await wait(300);
+      const afterWheel = await js(`(() => { const el = document.querySelector('[data-testid=variable-card-value]'); return el ? el.scrollTop : null; })()`);
+      const longCard = await card();
+      check(
+        'ui: the wheel scrolls a long value inside the card and the card stays open',
+        hoveredLong === 'ok' && valueBox?.overflow === true && typeof afterWheel === 'number' && afterWheel > 0 && longCard?.name === 'long',
+        { hoveredLong, valueBox, afterWheel, longCard: longCard?.name },
+      );
+      await shot('03e-variable-long-scrolled-light');
+
+      await js(`document.querySelector('[data-testid=variable-card-edit]')?.click()`);
+      await wait(150);
+      const editor = await js(
+        `(() => { const t = document.querySelector('[data-testid=variable-card-input]'); return t ? { focused: document.activeElement === t, value: t.value } : null; })()`,
+      ) as { focused: boolean; value: string } | null;
+      await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+      await wait(150);
+      const afterCancel = await js(
+        `(() => { const c = document.querySelector('[data-testid=variable-card]'); return c ? { editing: c.hasAttribute('data-editing'), input: Boolean(c.querySelector('[data-testid=variable-card-input]')) } : null; })()`,
+      ) as { editing: boolean; input: boolean } | null;
+      check(
+        'ui: the card edits a value in place, and Escape backs out of the edit without closing it',
+        editor?.focused === true && editor.value === longValue && afterCancel?.editing === false && afterCancel.input === false,
+        { editor: editor && { focused: editor.focused, same: editor.value === longValue }, afterCancel },
+      );
+      await js(`document.querySelector('[data-testid=variable-card-edit]')?.click()`);
+      await wait(150);
+      await js(
+        `(() => { const t = document.querySelector('[data-testid=variable-card-input]'); const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; setter.call(t, 'short/value'); t.dispatchEvent(new Event('input', { bubbles: true })); })()`,
+      );
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(200);
+      await shot('03f-variable-editing-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
+      win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
+      win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+      await wait(500);
+      const edited = await card();
+      const editedFlag = await js(`document.querySelector('[data-testid=variable-card]')?.hasAttribute('data-editing') ?? null`);
+      check(
+        'ui: Enter saves the edited value to where it is defined and the card shows it',
+        edited?.value === 'short/value' && editedFlag === false && host.config.get().globalVariables.find((v) => v.key === 'long')?.value === 'short/value',
+        { edited, editedFlag, stored: host.config.get().globalVariables.find((v) => v.key === 'long')?.value },
+      );
+      await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+      await run('config.update', { patch: { globalVariables: globalsBeforeUi } }, null);
       await typeUrl('{{baseUrl}}/things?x=1');
       await wait(200);
       check('ui: restoring the URL leaves the request unmodified', (await js(`document.querySelector('[data-testid=tab][aria-selected=true]')?.textContent.includes('echo') && !document.querySelector('[data-testid=tab][aria-selected=true] .bg-warning')`)) === true);

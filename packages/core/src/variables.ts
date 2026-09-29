@@ -35,6 +35,18 @@ export function buildVariableMap(layers: Variable[][]): Record<string, string> {
   return map;
 }
 
+/**
+ * Set the value of the row that `{{name}}` resolves to in one layer: the last enabled row with
+ * that key, as in buildVariableMap. Returns the new rows, or null when the layer has no such row.
+ */
+export function setVariableValue(layer: Variable[], name: string, value: string): Variable[] | null {
+  for (let i = layer.length - 1; i >= 0; i--) {
+    const v = layer[i];
+    if (v.enabled && v.key.trim() === name) return layer.map((row, j) => (j === i ? { ...row, value } : row));
+  }
+  return null;
+}
+
 export function resolveTemplate(input: string, vars: Record<string, string>): string {
   if (!input || !input.includes('{{')) return input;
   return input.replace(PLACEHOLDER, (whole, name: string) => {

@@ -11,7 +11,7 @@ import type { GraphQLSchema } from 'graphql';
 import { useMemo, useRef, type Ref } from 'react';
 import { cn } from '../cn';
 import { useAppStore } from '../stores/app';
-import { lookupVariable, showVariableCard, useVariableHoverStore, useVariables, type VariableScope } from './Variables';
+import { lookupVariable, showVariableCard, useVariableHoverStore, useVariables, type VariableContext } from './Variables';
 
 export type CodeLanguage = 'json' | 'javascript' | 'html' | 'xml' | 'sql' | 'graphql' | 'text';
 export type SqlDialect = 'mysql' | 'sqlite' | 'standard';
@@ -75,7 +75,7 @@ const variableTheme = EditorView.baseTheme({
 });
 
 /** Marks `{{variables}}` in the visible lines and shows their value card on hover. */
-function variableHighlighting(scope: VariableScope): Extension {
+function variableHighlighting(scope: VariableContext): Extension {
   const build = (view: EditorView): DecorationSet => {
     const builder = new RangeSetBuilder<Decoration>();
     for (const { from, to } of view.visibleRanges) {

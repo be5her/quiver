@@ -1,4 +1,4 @@
-import { DYNAMIC_VARIABLE_HELP, buildVariableMap, type Environment, type HostApi, type Variable, type WorkspaceApi } from '@quiver/core';
+import { DYNAMIC_VARIABLE_HELP, QuiverError, buildVariableMap, setVariableValue, type Environment, type HostApi, type Variable, type WorkspaceApi } from '@quiver/core';
 
 export const COLLECTIONS = {
   requests: 'requests',
@@ -140,4 +140,33 @@ export async function listResolvedVariables(
     if (!byName.has(name)) byName.set(name, { name, value: null, secret: false, source: 'dynamic', help });
   }
   return { environment: env ? { id: env.id, name: env.name } : null, variables: [...byName.values()] };
+}
+
+/** Where `{{name}}` resolves from right now: the active environment wins over the globals. */
+export async function variableSource(ws: WorkspaceApi, host: HostApi, name: string): Promise<'environment' | 'global' | null> {
+  const envId = await getActiveEnvironmentId(ws);
+  const env = envId ? await ws.store.get<Environment>(COLLECTIONS.environments, envId) : undefined;
+  if (env && setVariableValue(env.variables, name, '')) return 'environment';
+  if (setVariableValue(host.config.get().globalVariables, name, '')) return 'global';
+  return null;
+}
+
+/**
+ * Change the value `{{name}}` resolves to, where it is defined: the active environment (secrets
+ * stay encrypted) or the global variables. Unknown names are refused rather than created.
+ */
+export async function setResolvedVariable(ws: WorkspaceApi, host: HostApi, name: string, value: string): Promise<{ name: string; source: 'environment' | 'global' }> {
+  const envId = await getActiveEnvironmentId(ws);
+  const env = envId ? await getEnvironment(ws, host, envId) : undefined;
+  const envRows = env && setVariableValue(env.variables, name, value);
+  if (env && envRows) {
+    await saveEnvironment(ws, host, { ...env, variables: envRows });
+    return { name, source: 'environment' };
+  }
+  const globalRows = setVariableValue(host.config.get().globalVariables, name, value);
+  if (globalRows) {
+    await host.config.update({ globalVariables: globalRows });
+    return { name, source: 'global' };
+  }
+  throw new QuiverError('NOT_FOUND', `No variable named ${name} in the active environment or the global variables`);
 }

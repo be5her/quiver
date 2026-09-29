@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildVariableMap, findUnresolved, findVariableSpans, isDynamicVariable, resolveDeep, resolveTemplate } from './variables';
+import { buildVariableMap, findUnresolved, findVariableSpans, isDynamicVariable, resolveDeep, resolveTemplate, setVariableValue } from './variables';
 
 const vars = buildVariableMap([
   [
@@ -54,5 +54,22 @@ describe('findVariableSpans', () => {
   it('knows the built-in dynamic variables', () => {
     expect(isDynamicVariable('$uuid')).toBe(true);
     expect(isDynamicVariable('uuid')).toBe(false);
+  });
+});
+
+describe('setVariableValue', () => {
+  const row = (id: string, key: string, value: string, enabled = true) => ({ id, key, value, enabled });
+
+  it('changes the row that resolution picks: the last enabled one with the key', () => {
+    const layer = [row('a', 'host', 'one'), row('b', ' host ', 'two'), row('c', 'host', 'three', false), row('d', 'other', 'x')];
+    const next = setVariableValue(layer, 'host', 'new');
+    expect(next?.map((v) => v.value)).toEqual(['one', 'new', 'three', 'x']);
+    expect(buildVariableMap([next!]).host).toBe('new');
+    expect(layer[1].value).toBe('two');
+  });
+
+  it('returns null when no enabled row has the key', () => {
+    expect(setVariableValue([row('a', 'host', 'one', false)], 'host', 'new')).toBeNull();
+    expect(setVariableValue([], 'host', 'new')).toBeNull();
   });
 });
