@@ -118,6 +118,18 @@ export class WorkspaceManager {
     this.events.onListChange(this.list());
   }
 
+  /** Put the open workspaces in this order; ids left out keep their relative order after the listed ones. */
+  reorder(ids: string[]): WorkspaceInfo[] {
+    const listed = ids.filter((id, i) => this.sessions.has(id) && ids.indexOf(id) === i);
+    const order = [...listed, ...[...this.sessions.keys()].filter((id) => !listed.includes(id))];
+    const sessions = order.map((id) => [id, this.sessions.get(id)!] as const);
+    this.sessions.clear();
+    for (const [id, session] of sessions) this.sessions.set(id, session);
+    const list = this.list();
+    this.events.onListChange(list);
+    return list;
+  }
+
   async closeAll(): Promise<void> {
     for (const id of [...this.sessions.keys()]) await this.close(id);
   }

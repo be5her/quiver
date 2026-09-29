@@ -277,6 +277,21 @@ export class Host {
         },
       }),
       defineCommand({
+        id: 'workspace.reorder',
+        title: 'Reorder workspaces',
+        description: 'Puts the open workspaces in the given order, which is also the order they reopen in.',
+        scope: 'global',
+        hidden: true,
+        input: z.object({ ids: z.array(z.string()) }),
+        handler: async ({ ids }) => {
+          const list = this.workspaces.reorder(ids);
+          const open = this.config.get().openWorkspaces;
+          const ordered = list.map((w) => w.path).filter((p) => open.includes(p));
+          await this.config.update({ openWorkspaces: [...ordered, ...open.filter((p) => !ordered.includes(p))] });
+          return list;
+        },
+      }),
+      defineCommand({
         id: 'workspace.recent',
         title: 'Recent workspaces',
         description: 'Lists recently opened workspace folders.',

@@ -1,9 +1,10 @@
-import { IconButton, Kbd, cn, openContextMenu, useAppStore, useTabsStore } from '@quiver/ui';
-import type { WorkspaceInfo } from '@quiver/core';
+import { IconButton, Kbd, cn, invoke, notify, openContextMenu, useAppStore, useTabsStore } from '@quiver/ui';
+import { moveItem, toErrorPayload, type WorkspaceInfo } from '@quiver/core';
 import { FolderOpen, Search, Settings, X } from 'lucide-react';
 import { useMemo, type MouseEvent } from 'react';
 import { QuiverMark } from './Logo';
 import { closeWorkspace, closeWorkspaces, copyText, openSettings, openWorkspace, revealWorkspace } from './actions';
+import { DropMarker, useDragReorder } from './useDragReorder';
 
 const revealLabel = /Mac/i.test(navigator.userAgent) ? 'Reveal in Finder' : /Windows/i.test(navigator.userAgent) ? 'Reveal in File Explorer' : 'Open Containing Folder';
 
@@ -29,6 +30,16 @@ export function TitleBar() {
   const setActive = useAppStore((s) => s.setActiveWorkspace);
   const setPalette = useAppStore((s) => s.setPaletteOpen);
   const scopes = useTabsStore((s) => s.scopes);
+  // Dropping a workspace reorders the title bar at once; the host keeps the order for the next start.
+  const { containerRef, drag, onPointerDown, suppressClick } = useDragReorder<HTMLDivElement>('x', (id, to) => {
+    const { workspaces: current, setWorkspaces, setActiveWorkspace } = useAppStore.getState();
+    const from = current.findIndex((w) => w.id === id);
+    if (from < 0) return;
+    const next = moveItem(current, from, to);
+    setWorkspaces(next);
+    setActiveWorkspace(id);
+    invoke<WorkspaceInfo[]>('workspace.reorder', { ids: next.map((w) => w.id) }, null).catch((err) => notify(toErrorPayload(err).message, 'error'));
+  });
   const dirtyScopes = useMemo(
     () => Object.fromEntries(Object.entries(scopes).map(([k, v]) => [k, v.tabs.some((t) => t.dirty)])) as Record<string, boolean>,
     [scopes],
@@ -41,22 +52,26 @@ export function TitleBar() {
         Quiver
       </div>
 
-      <div className="flex items-center gap-1 ml-2 min-w-0 overflow-x-auto">
+      <div ref={containerRef} className={cn('relative flex items-center gap-1 ml-2 min-w-0 overflow-x-auto no-scrollbar', drag && 'cursor-grabbing')}>
+        {drag && <DropMarker axis="x" at={drag.marker} testId="workspace-drop-marker" />}
         {workspaces.map((ws, index) => (
           <div
             key={ws.id}
             role="tab"
             aria-selected={ws.id === activeId}
             tabIndex={0}
-            onClick={() => setActive(ws.id)}
+            onPointerDown={(e) => onPointerDown(e, ws.id)}
+            onClick={() => !suppressClick.current && setActive(ws.id)}
             onKeyDown={(e) => e.key === 'Enter' && setActive(ws.id)}
             onContextMenu={(e) => showWorkspaceMenu(e, workspaces, ws)}
             data-testid="workspace-tab"
             data-name={ws.name}
+            data-drag-id={ws.id}
             title={`${ws.path}\nCtrl+${index + 1}`}
             className={cn(
               'group flex items-center gap-1.5 h-7 pl-2.5 pr-1 rounded-md text-xs cursor-pointer border',
               ws.id === activeId ? 'bg-canvas border-edge text-fg' : 'border-transparent text-muted hover:text-fg hover:bg-elevated',
+              drag?.id === ws.id && 'opacity-50',
             )}
           >
             <span className="truncate max-w-40">{ws.name}</span>

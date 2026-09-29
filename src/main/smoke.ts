@@ -2522,6 +2522,41 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await js(`document.querySelector('[data-testid=context-menu]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
       await wait(200);
       check('ui: Escape closes a context menu', (await js(`Boolean(document.querySelector('[data-testid=context-menu]'))`)) === false);
+      // Workspaces reorder by dragging too, and the host keeps the order for the next start.
+      const workspaceOrder = () => js(`[...document.querySelectorAll('[data-testid=workspace-tab]')].map((t) => t.getAttribute('data-drag-id'))`) as Promise<string[]>;
+      const wsBefore = await workspaceOrder();
+      const wsRects = (await js(
+        `[...document.querySelectorAll('[data-testid=workspace-tab]')].map((t) => { const r = t.getBoundingClientRect(); return { x: Math.round(r.left + 14), right: Math.round(r.right), y: Math.round(r.top + r.height / 2) }; })`,
+      )) as { x: number; right: number; y: number }[];
+      let wsMarker = false;
+      if (wsRects.length >= 2) {
+        const from = wsRects[0];
+        const to = wsRects[1].right - 4;
+        win.webContents.sendInputEvent({ type: 'mouseMove', x: from.x, y: from.y });
+        win.webContents.sendInputEvent({ type: 'mouseDown', x: from.x, y: from.y, button: 'left', clickCount: 1 });
+        for (let step = 1; step <= 8; step++) {
+          win.webContents.sendInputEvent({ type: 'mouseMove', x: Math.round(from.x + ((to - from.x) * step) / 8), y: from.y, button: 'left', modifiers: ['leftbuttondown'] });
+          await wait(30);
+        }
+        await wait(150);
+        wsMarker = (await js(`Boolean(document.querySelector('[data-testid=workspace-drop-marker]'))`)) === true;
+        await shot('24h-workspace-drag-light');
+        win.webContents.sendInputEvent({ type: 'mouseUp', x: to, y: from.y, button: 'left', clickCount: 1 });
+      }
+      await wait(600);
+      const wsAfter = await workspaceOrder();
+      const hostOrder = (await run<WorkspaceInfo[]>('workspace.list', {}, null)).map((w) => w.id);
+      const openOrder = host.config.get().openWorkspaces;
+      const expectedWs = [wsBefore[1], wsBefore[0], ...wsBefore.slice(2)];
+      check(
+        'ui: dragging a workspace reorders the title bar, the host list and the folders reopened on start',
+        wsBefore.length >= 2 && wsMarker && JSON.stringify(wsAfter) === JSON.stringify(expectedWs) && JSON.stringify(hostOrder) === JSON.stringify(expectedWs) && openOrder.indexOf(folder) > 0,
+        { wsBefore, wsAfter, hostOrder, wsMarker, openOrder },
+      );
+      await run('workspace.reorder', { ids: [ws.id] }, null);
+      await wait(300);
+      check('workspace.reorder: listed ids go first and the rest keep their order', (await workspaceOrder())[0] === ws.id && host.config.get().openWorkspaces[0] === folder, await workspaceOrder());
+
       const revealedFolder = await run<{ path: string; revealed: boolean }>('workspace.reveal', { id: ws.id }, null);
       const revealByAgent = await host.invoke('workspace.reveal', { id: ws.id }, { caller: 'mcp', workspaceId: null });
       check('workspace.reveal: answers the folder for the UI and refuses agents', revealedFolder.path === folder && !revealByAgent.ok, { revealedFolder, agent: revealByAgent.ok });
