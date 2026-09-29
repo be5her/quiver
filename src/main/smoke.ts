@@ -2078,6 +2078,35 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(200);
 
+      // Status bar: the environment picker is a themed menu above the bar, not a native select.
+      const pickerLabel = await js(`document.querySelector('[data-testid=env-picker]')?.textContent ?? null`);
+      check('ui: status bar names the active environment', pickerLabel === 'local', pickerLabel);
+      await js(`document.querySelector('[data-testid=env-picker]').click()`);
+      await wait(300);
+      const pickerOptions = await js(`[...document.querySelectorAll('[data-testid=env-picker-option]')].map((b) => b.textContent + ':' + b.getAttribute('aria-checked'))`);
+      check(
+        'ui: the environment menu lists none plus every environment and marks the active one',
+        Array.isArray(pickerOptions) && pickerOptions[0] === 'No environment:false' && pickerOptions.includes('local:true') && pickerOptions.length === 3,
+        pickerOptions,
+      );
+      await shot('24b-env-picker-light');
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(200);
+      await shot('24c-env-picker-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
+      await js(`[...document.querySelectorAll('[data-testid=env-picker-option]')].find((b) => b.textContent !== 'local' && b.getAttribute('data-env-id')).click()`);
+      await wait(600);
+      const pickedLabel = await js(`document.querySelector('[data-testid=env-picker]')?.textContent ?? null`);
+      const pickedActive = await run<{ id: string | null }>('api.environment.active', {}, ws.id);
+      check('ui: picking an environment closes the menu and activates it', pickedLabel !== 'local' && pickedActive.id !== null && pickedActive.id !== env.id && (await js(`Boolean(document.querySelector('[data-testid=env-picker-menu]'))`)) === false, { pickedLabel, pickedActive });
+      await js(`document.querySelector('[data-testid=env-picker]').click()`);
+      await wait(200);
+      await js(`document.querySelector('[data-testid=env-picker-menu]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+      await wait(200);
+      check('ui: Escape closes the environment menu', (await js(`Boolean(document.querySelector('[data-testid=env-picker-menu]'))`)) === false);
+      await run('api.environment.setActive', { id: env.id }, ws.id);
+      await wait(300);
+
       // Settings: the About section shows the version and says that a dev build does not update itself.
       await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: ',', ctrlKey: true, bubbles: true }))`);
       await wait(600);

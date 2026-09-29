@@ -74,6 +74,12 @@ body {
   scrollbar-color: color-mix(in srgb, var(--muted) 35%, transparent) transparent;
 }
 
+/* Native select popups draw options on the OS colours; pin them to the theme so they stay readable in dark mode. */
+option {
+  background: var(--surface);
+  color: var(--fg);
+}
+
 ::selection {
   background: color-mix(in srgb, var(--accent) 30%, transparent);
 }

@@ -1,6 +1,7 @@
 import type { Environment } from '@quiver/core';
 import { cn, invoke, selectActiveWorkspace, useAppStore, useInvoke } from '@quiver/ui';
-import { Download, ExternalLink, Moon, Plug, RotateCw, Sun } from 'lucide-react';
+import { Check, ChevronUp, Download, ExternalLink, Layers, Moon, Plug, RotateCw, Sun } from 'lucide-react';
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { openSettings, toggleTheme } from './actions';
 import { downloadUpdate, installUpdate, openExternal } from './updates';
 
@@ -81,25 +82,109 @@ function UpdateItem() {
   }
 }
 
+/** The active API environment of the workspace, with a menu that opens above the bar (the native select popup ignores the theme). */
 function EnvironmentPicker() {
   const environments = useInvoke<Environment[]>('api.environment.list', {}, { refreshOn: ['environments'] });
   const active = useInvoke<{ id: string | null }>('api.environment.active', {}, { refreshOnState: ['api.activeEnvironment'] });
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
   const list = environments.data ?? [];
+  const activeId = active.data?.id ?? null;
+  const current = list.find((env) => env.id === activeId);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onBlur = () => setOpen(false);
+    document.addEventListener('mousedown', onDown);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, [open]);
+
+  const pick = (id: string | null) => {
+    setOpen(false);
+    if (id !== activeId) void invoke('api.environment.setActive', { id });
+  };
+
   return (
-    <label className="flex items-center gap-1">
-      <span>env</span>
-      <select
-        className="bg-transparent text-fg text-[11px] outline-none cursor-pointer max-w-40"
-        value={active.data?.id ?? ''}
-        onChange={(e) => void invoke('api.environment.setActive', { id: e.target.value || null })}
+    <div ref={ref} className="relative flex items-center">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className={cn('flex items-center gap-1 h-5 px-1.5 -mx-0.5 rounded hover:bg-elevated hover:text-fg transition-colors', open && 'bg-elevated text-fg')}
+        title={current ? `Environment: ${current.name}` : 'No environment selected'}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        data-testid="env-picker"
       >
-        <option value="">none</option>
-        {list.map((env) => (
-          <option key={env.id} value={env.id}>
-            {env.name}
-          </option>
-        ))}
-      </select>
-    </label>
+        <Layers className="size-3" />
+        <span className={cn('truncate max-w-40', current && 'text-fg')}>{current?.name ?? 'No environment'}</span>
+        <ChevronUp className={cn('size-3 transition-transform', open && 'rotate-180')} />
+      </button>
+      {open && <EnvironmentMenu list={list} activeId={activeId} onPick={pick} onClose={() => setOpen(false)} />}
+    </div>
+  );
+}
+
+function EnvironmentMenu({ list, activeId, onPick, onClose }: { list: Environment[]; activeId: string | null; onPick(id: string | null): void; onClose(): void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const options: { id: string | null; name: string }[] = [{ id: null, name: 'No environment' }, ...list.map((env) => ({ id: env.id, name: env.name }))];
+
+  // Focus the active entry so the arrow keys pick up from there.
+  useEffect(() => {
+    const items = ref.current?.querySelectorAll<HTMLButtonElement>('[role=menuitemradio]');
+    const index = Math.max(0, options.findIndex((o) => o.id === activeId));
+    items?.[index]?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const onKeyDown = (e: KeyboardEvent) => {
+    const items = [...(ref.current?.querySelectorAll<HTMLButtonElement>('[role=menuitemradio]') ?? [])];
+    const index = items.indexOf(document.activeElement as HTMLButtonElement);
+    if (e.key === 'Escape') onClose();
+    else if (e.key === 'ArrowDown') items[(index + 1) % items.length]?.focus();
+    else if (e.key === 'ArrowUp') items[(index - 1 + items.length) % items.length]?.focus();
+    else if (e.key === 'Home') items[0]?.focus();
+    else if (e.key === 'End') items[items.length - 1]?.focus();
+    else return;
+    e.preventDefault();
+  };
+
+  return (
+    <div
+      ref={ref}
+      role="menu"
+      onKeyDown={onKeyDown}
+      className="absolute left-0 bottom-full mb-1.5 z-30 min-w-48 max-w-72 rounded-md border border-edge bg-elevated shadow-lg py-1 select-none"
+      data-testid="env-picker-menu"
+    >
+      <div className="px-3 pt-1 pb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted">Environment</div>
+      {options.map((option) => {
+        const selected = option.id === activeId;
+        return (
+          <button
+            key={option.id ?? ''}
+            type="button"
+            role="menuitemradio"
+            aria-checked={selected}
+            onClick={() => onPick(option.id)}
+            className={cn(
+              'w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left outline-none hover:bg-surface focus-visible:bg-surface',
+              option.id === null ? 'text-muted' : 'text-fg',
+            )}
+            data-testid="env-picker-option"
+            data-env-id={option.id ?? ''}
+          >
+            <span className="truncate flex-1">{option.name}</span>
+            <Check className={cn('size-3.5 shrink-0 text-accent', !selected && 'invisible')} />
+          </button>
+        );
+      })}
+    </div>
   );
 }
