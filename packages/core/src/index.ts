@@ -14,6 +14,7 @@ export * from './models/kube';
 export * from './models/mock';
 export * from './models/realtime';
 export * from './models/mcp';
+export * from './models/mcp-recording';
 export * from './models/env';
 export * from './models/todo';
 export * from './sql';

@@ -2,7 +2,9 @@ import { describeMcpServer, transportLabel, type McpConfigFile, type McpServerSu
 import { Button, IconButton, SectionHeader, Spinner, cn, useInvoke } from '@quiver/ui';
 import { Download, FileJson, Globe, Plug, Plus, Radio, Terminal, Trash2, Unplug } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import { recordingDot } from './RecorderTab';
 import { addThisQuiver, createServer, deleteServer, importServers, openServerTab, toggleServer } from './index';
+import { openRecorderTab, useRecordingStatus } from './recording';
 
 export function statusDot(status: McpServerSummary['status'], error: string | null): string {
   if (status === 'connected') return 'bg-success';
@@ -23,6 +25,8 @@ export function McpSidebar() {
 
   return (
     <div className="flex flex-col h-full min-h-0 overflow-y-auto text-sm">
+      <SectionHeader title="This Quiver" />
+      <RecorderRow />
       <SectionHeader title="Servers" actions={<NewServerMenu />} />
       {servers.loading && !servers.data && (
         <div className="px-3 py-2">
@@ -56,6 +60,32 @@ export function McpSidebar() {
             <ConfigFileRow key={file.file} file={file} />
           ))}
         </>
+      )}
+    </div>
+  );
+}
+
+/** Opens the recording of what agents call on Quiver's own server, and shows whether one is running. */
+function RecorderRow() {
+  const status = useRecordingStatus().data;
+  const state = status?.state ?? 'idle';
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={openRecorderTab}
+      onKeyDown={(e) => e.key === 'Enter' && openRecorderTab()}
+      className="flex items-center gap-1.5 pl-3 pr-2 h-7 cursor-pointer hover:bg-elevated min-w-0"
+      title="Record the calls agents make to Quiver's own MCP server"
+      data-testid="mcp-recorder-row"
+      data-state={state}
+    >
+      <span className={cn('size-2 rounded-full shrink-0', recordingDot(state))} aria-label={state} />
+      <span className="truncate flex-1 text-[13px]">Call recorder</span>
+      {status && state !== 'idle' && (
+        <span className="text-[10px] rounded-full bg-elevated px-1.5 text-muted shrink-0" title={`${status.count} recorded call${status.count === 1 ? '' : 's'}`}>
+          {status.count}
+        </span>
       )}
     </div>
   );

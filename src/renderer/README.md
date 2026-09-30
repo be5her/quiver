@@ -2,6 +2,8 @@
 
 The renderer is the frame around the modules: title bar, activity bar, sidebar, tab strip, tab content, status bar, command palette and settings. It talks to the host only through commands (`invoke`) and host events, over the three functions the preload exposes.
 
+The status bar shows the workspace folder, the active environment, the updater, and the MCP server with its port. While the MCP inspector's call recorder is recording, `REC` and the number of calls so far sit next to it and open the recorder.
+
 ## Workspaces and tabs
 
 Open several folders at once and switch instantly. Each workspace has its own tabs, and the open or collapsed state of sidebar folders and sections, restored on return and after a restart (kept under `.quiver/local`). Global-scope tabs (Settings, Tools) are not persisted.

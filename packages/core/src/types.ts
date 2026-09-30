@@ -1,4 +1,5 @@
 import type { ActivityBarLayout } from './activity-bar';
+import type { McpRecordingStatus } from './models/mcp-recording';
 import type { z } from 'zod';
 
 export type Caller = 'ui' | 'mcp' | 'cli' | 'system';
@@ -238,6 +239,8 @@ export interface HostEvents {
   'state.changed': { workspaceId: string; key: string };
   'mcp.status': { running: boolean; port: number; error?: string };
   'mcp.call': { tool: string; workspaceId?: string; ok: boolean; durationMs: number; at: string };
+  /** The recording of agent calls started, paused, ended or was dropped, or a call was recorded. Bursts of calls arrive as one event. */
+  'mcp.recording': McpRecordingStatus;
   /** Teleport session status, login progress, pins or tunnel list changed. Fetch teleport.status for details. */
   'teleport.changed': { reason: 'status' | 'tunnels' | 'login' | 'pins' };
   /** Kubernetes queries: the local history changed, or a followed log stream has new lines or ended. */

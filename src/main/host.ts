@@ -1,8 +1,11 @@
+import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import {
   CommandRegistry,
+  McpRecorder,
   QuiverError,
   defineCommand,
+  mcpRecordingFileName,
   toErrorPayload,
   type Caller,
   type ErrorPayload,
@@ -28,6 +31,8 @@ export interface HostOptions {
   broadcast(message: { event: HostEventName; payload: unknown }): void;
   pickFolder?(): Promise<string | undefined>;
   pickFile?(options?: { title?: string; filters?: { name: string; extensions: string[] }[]; defaultPath?: string }): Promise<string | undefined>;
+  /** Native "save as" dialog; returns the chosen path, which may not exist yet. */
+  pickSavePath?(options?: { title?: string; filters?: { name: string; extensions: string[] }[]; defaultPath?: string }): Promise<string | undefined>;
   /** Show a folder in the OS file manager; absent in smoke runs. */
   revealFolder?(folder: string): Promise<void>;
   /** In-app updates; absent in development and smoke runs. */
@@ -47,6 +52,10 @@ export class Host {
   readonly workspaces: WorkspaceManager;
   readonly api: HostApi;
   private mcp: RunningMcpServer | null = null;
+  /** The calls agents make to the MCP server, while the user records them. Lives across server restarts, in memory only. */
+  readonly recorder = new McpRecorder({ onChange: () => this.recordingChanged() });
+  private recordingTimer: NodeJS.Timeout | null = null;
+  private recordingDirty = false;
   private activeWorkspaceId: string | null = null;
 
   constructor(private readonly opts: HostOptions) {
@@ -186,6 +195,7 @@ export class Host {
         version: this.opts.version,
         resolveWorkspace: (hint) => this.resolveWorkspace(hint),
         onCall: (entry) => this.emit('mcp.call', entry),
+        calls: this.recorder,
       });
       this.emit('mcp.status', { running: true, port });
       console.log(`[quiver] MCP server listening on ${this.mcp.url}`);
@@ -205,6 +215,22 @@ export class Host {
 
   mcpStatus(): HostEvents['mcp.status'] {
     return { running: this.mcp !== null, port: this.config.get().mcp.port };
+  }
+
+  /** Tells the UI about the recording at once, then at most every 150 ms while calls keep arriving. */
+  private recordingChanged(): void {
+    if (this.recordingTimer) {
+      this.recordingDirty = true;
+      return;
+    }
+    this.emit('mcp.recording', this.recorder.status());
+    this.recordingTimer = setTimeout(() => {
+      this.recordingTimer = null;
+      if (!this.recordingDirty) return;
+      this.recordingDirty = false;
+      this.recordingChanged();
+    }, 150);
+    this.recordingTimer.unref();
   }
 
   private updateState(): UpdateState {
@@ -451,6 +477,106 @@ export class Host {
         handler: async () => {
           if (this.config.get().mcp.enabled) await this.startMcp();
           return this.mcpStatus();
+        },
+      }),
+      // The recording is the user's view of what agents do, so none of it is a tool agents can call.
+      defineCommand({
+        id: 'mcp.recording.status',
+        title: 'MCP call recording status',
+        description: 'Whether the calls agents make to the MCP server are being recorded, and how many were.',
+        scope: 'global',
+        hidden: true,
+        input: z.object({}),
+        handler: async () => this.recorder.status(),
+      }),
+      defineCommand({
+        id: 'mcp.recording.start',
+        title: 'Start recording MCP calls',
+        description: 'Starts a new recording of the calls agents make to the MCP server, in memory. A previous recording is dropped.',
+        scope: 'global',
+        hidden: true,
+        input: z.object({}),
+        handler: async () => this.recorder.start(),
+      }),
+      defineCommand({
+        id: 'mcp.recording.pause',
+        title: 'Pause recording MCP calls',
+        description: 'Stops keeping calls until the recording is resumed.',
+        scope: 'global',
+        hidden: true,
+        input: z.object({}),
+        handler: async () => this.recorder.pause(),
+      }),
+      defineCommand({
+        id: 'mcp.recording.resume',
+        title: 'Resume recording MCP calls',
+        description: 'Continues a paused recording.',
+        scope: 'global',
+        hidden: true,
+        input: z.object({}),
+        handler: async () => this.recorder.resume(),
+      }),
+      defineCommand({
+        id: 'mcp.recording.end',
+        title: 'End recording MCP calls',
+        description: 'Ends the recording. It stays in memory to be looked at and saved.',
+        scope: 'global',
+        hidden: true,
+        input: z.object({}),
+        handler: async () => this.recorder.end(),
+      }),
+      defineCommand({
+        id: 'mcp.recording.clear',
+        title: 'Discard the MCP call recording',
+        description: 'Drops the recording from memory.',
+        scope: 'global',
+        hidden: true,
+        input: z.object({}),
+        handler: async () => this.recorder.clear(),
+      }),
+      defineCommand({
+        id: 'mcp.recording.list',
+        title: 'List recorded MCP calls',
+        description: 'The recorded calls without their arguments and results, oldest first.',
+        scope: 'global',
+        hidden: true,
+        input: z.object({}),
+        handler: async () => ({ status: this.recorder.status(), calls: this.recorder.list() }),
+      }),
+      defineCommand({
+        id: 'mcp.recording.get',
+        title: 'Read a recorded MCP call',
+        description: 'One recorded call with its arguments and its result.',
+        scope: 'global',
+        hidden: true,
+        input: z.object({ id: z.string() }),
+        handler: async ({ id }) => {
+          const call = this.recorder.get(id);
+          if (!call) throw new QuiverError('NOT_FOUND', `No recorded call ${id}`);
+          return call;
+        },
+      }),
+      defineCommand({
+        id: 'mcp.recording.save',
+        title: 'Save the MCP call recording',
+        description: 'Writes the ended recording to a JSON file. Without a path the UI asks where to save it; returns null when that is cancelled.',
+        scope: 'global',
+        hidden: true,
+        input: z.object({ path: z.string().optional() }),
+        handler: async ({ path: file }, ctx) => {
+          if (ctx.caller !== 'ui') throw new QuiverError('INVALID_INPUT', 'Saving a recording is only available from the UI');
+          const status = this.recorder.status();
+          if (status.state !== 'ended') throw new QuiverError('INVALID_INPUT', 'End the recording before saving it');
+          let target = file;
+          if (!target) {
+            if (!this.opts.pickSavePath) throw new QuiverError('INVALID_INPUT', 'A file path is required');
+            target = await this.opts.pickSavePath({ title: 'Save MCP call recording', defaultPath: mcpRecordingFileName(status.startedAt), filters: [{ name: 'JSON', extensions: ['json'] }] });
+            if (!target) return null;
+          }
+          const recording = this.recorder.export(this.opts.version);
+          await fs.writeFile(target, `${JSON.stringify(recording, null, 2)}\n`);
+          this.recorder.markSaved(target);
+          return { path: target, calls: recording.calls.length };
         },
       }),
     ];
