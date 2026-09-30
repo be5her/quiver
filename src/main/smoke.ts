@@ -36,6 +36,10 @@ import type {
   McpPrompt,
   McpPromptResult,
   McpReadResourceResult,
+  McpRecordedCall,
+  McpRecordedCallSummary,
+  McpRecordingFile,
+  McpRecordingStatus,
   McpResource,
   McpResourceTemplate,
   McpServerSummary,
@@ -1234,6 +1238,16 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       });
       return (await res.json()) as { result?: { tools?: { name: string }[]; content?: { text: string }[]; isError?: boolean }; error?: unknown };
     };
+    /** A request with headers of its own, as one particular agent; gives back the session id the server handed out, if any. */
+    const agentRpc = async (headers: Record<string, string>, method: string, params: unknown): Promise<string | null> => {
+      const res = await fetch(mcpUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...headers },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+      });
+      await res.text();
+      return res.headers.get('mcp-session-id');
+    };
     const init = await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'smoke', version: '0' } });
     check('mcp initialize', !init.error, init.error);
     const tools = await rpc('tools/list', {});
@@ -1572,6 +1586,81 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       check(`mcp blocks ${tool} by default`, blockedEnv.result?.isError === true && (blockedEnv.result.content?.[0]?.text ?? '').includes('MUTATION_BLOCKED'));
     }
     check('env files: .env untouched by the blocked calls', (await fs.readFile(path.join(envRoot, '.env'), 'utf8')) === envOriginal);
+
+    // Call recorder: what agents call on Quiver's own server, kept in memory between start and end, then saved to a file.
+    {
+      const recorded = () => run<{ status: McpRecordingStatus; calls: McpRecordedCallSummary[] }>('mcp.recording.list', {}, null);
+      await rpc('tools/call', { name: 'app_info', arguments: {} });
+      const beforeStart = await recorded();
+      check('recorder: idle and empty until started', beforeStart.status.state === 'idle' && beforeStart.calls.length === 0, beforeStart.status);
+      check('recorder: its commands are not tools for agents', !names.some((n) => n.startsWith('mcp_recording')));
+      const sessionId = await agentRpc({ 'user-agent': 'smoke-http/1.0' }, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'smoke-agent', version: '4.2' } });
+      check('recorder: initialize hands the client a session id', typeof sessionId === 'string' && sessionId.startsWith('quiver.'), sessionId);
+      const asAgent = { 'mcp-session-id': sessionId ?? '', 'user-agent': 'smoke-http/1.0' };
+      const started = await run<McpRecordingStatus>('mcp.recording.start', {}, null);
+      check('recorder: start', started.state === 'recording' && typeof started.startedAt === 'string' && started.count === 0, started);
+      await agentRpc(asAgent, 'tools/call', { name: 'tools_base64_encode', arguments: { text: 'hi' } });
+      await agentRpc(asAgent, 'tools/call', { name: 'api_request_delete', arguments: { id: imported.id } });
+      await agentRpc(asAgent, 'tools/call', { name: 'tools_no_such_tool', arguments: {} });
+      await agentRpc({ 'user-agent': 'other-agent/9.9' }, 'tools/call', { name: 'tools_base64_encode', arguments: { text: 42 } });
+      await agentRpc(asAgent, 'tools/list', {});
+      // The inspector is an SDK client: it must send the session back by itself for its name to stick.
+      await run('mcp.connect', { id: selfServer.id }, ws.id);
+      await run('mcp.tool.call', { id: selfServer.id, name: 'workspace_current' }, ws.id);
+      const first = await recorded();
+      const [encode, refused, unknown, invalid, fromInspector] = first.calls;
+      check(
+        'recorder: keeps the tool calls, and only those, in order',
+        first.calls.map((c) => c.tool).join() === 'tools_base64_encode,api_request_delete,tools_no_such_tool,tools_base64_encode,workspace_current' && first.status.count === 5 && first.status.bytes > 0,
+        first.calls.map((c) => c.tool),
+      );
+      check(
+        'recorder: names the agent from its handshake, with the workspace, outcome and timing',
+        encode?.agent.name === 'smoke-agent' && encode.agent.version === '4.2' && encode.agent.userAgent === 'smoke-http/1.0' && encode.workspace?.id === ws.id && encode.ok === true && (encode.durationMs ?? -1) >= 0 && encode.preview === '{"text":"hi"}',
+        encode,
+      );
+      const encodeFull = await run<McpRecordedCall>('mcp.recording.get', { id: encode.id }, null);
+      check('recorder: a call carries its arguments and the result the agent got', JSON.stringify(encodeFull.arguments) === '{"text":"hi"}' && (encodeFull.result as { text?: string }).text === 'aGk=', encodeFull);
+      const refusedFull = await run<McpRecordedCall>('mcp.recording.get', { id: refused.id }, null);
+      check(
+        'recorder: refused, unknown and invalid calls are kept as failed',
+        refused.ok === false && (refusedFull.result as { code?: string }).code === 'MUTATION_BLOCKED' && unknown.ok === false && invalid.ok === false,
+        { refused: refusedFull.result, unknown: unknown.ok, invalid: invalid.ok },
+      );
+      check('recorder: a client without a session is named after its User-Agent', invalid.agent.name === 'other-agent' && invalid.agent.version === '9.9', invalid.agent);
+      check('recorder: an SDK client keeps its name across requests', fromInspector?.agent.name === 'quiver' && fromInspector.ok === true, fromInspector?.agent);
+      const paused = await run<McpRecordingStatus>('mcp.recording.pause', {}, null);
+      await agentRpc(asAgent, 'tools/call', { name: 'tools_uuid_generate', arguments: {} });
+      const whilePaused = (await recorded()).calls.length;
+      await run('mcp.recording.resume', {}, null);
+      await agentRpc(asAgent, 'tools/call', { name: 'tools_uuid_generate', arguments: {} });
+      const afterResume = (await recorded()).calls.length;
+      check('recorder: pause skips calls, resume keeps them again', paused.state === 'paused' && whilePaused === 5 && afterResume === 6, { whilePaused, afterResume });
+      const recordingFile = path.join(mcpDir, 'recording.json');
+      const earlySave = await host.invoke('mcp.recording.save', { path: recordingFile }, { caller: 'ui', workspaceId: null });
+      check('recorder: saving needs an ended recording', !earlySave.ok && earlySave.error.code === 'INVALID_INPUT', earlySave.ok ? 'saved?' : earlySave.error.message);
+      const ended = await run<McpRecordingStatus>('mcp.recording.end', {}, null);
+      await agentRpc(asAgent, 'tools/call', { name: 'tools_uuid_generate', arguments: {} });
+      check('recorder: end stops recording and keeps the calls', ended.state === 'ended' && typeof ended.endedAt === 'string' && ended.savedTo === null && (await recorded()).calls.length === 6, ended);
+      const agentSave = await host.invoke('mcp.recording.save', { path: recordingFile }, { caller: 'mcp', workspaceId: null });
+      check('recorder: only the UI can save', !agentSave.ok && agentSave.error.code === 'INVALID_INPUT');
+      const savedRecording = await run<{ path: string; calls: number }>('mcp.recording.save', { path: recordingFile }, null);
+      const onDisk = JSON.parse(await fs.readFile(recordingFile, 'utf8')) as McpRecordingFile;
+      check(
+        'recorder: saves the recording as a JSON file and remembers where',
+        savedRecording.calls === 6 &&
+          onDisk.format === 'quiver.mcp-recording' &&
+          onDisk.version === 1 &&
+          onDisk.quiver === host.api.version &&
+          onDisk.calls.length === 6 &&
+          onDisk.calls[0].agent.name === 'smoke-agent' &&
+          (onDisk.calls[0].result as { text?: string }).text === 'aGk=' &&
+          (await run<McpRecordingStatus>('mcp.recording.status', {}, null)).savedTo === recordingFile,
+        { saved: savedRecording, format: onDisk.format, calls: onDisk.calls.length },
+      );
+      const cleared = await run<McpRecordingStatus>('mcp.recording.clear', {}, null);
+      check('recorder: discard drops it from memory', cleared.state === 'idle' && cleared.count === 0 && (await recorded()).calls.length === 0, cleared);
+    }
 
     // Updater: a dev build reports that it cannot update itself, and the mutating commands are gated for agents.
     const updateState = await run<UpdateState>('app.update.check', {}, null);
@@ -2406,6 +2495,67 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await shot('21-mcp-log-dark');
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(200);
+
+      // Call recorder: opened from the inspector's sidebar, started in the UI, lists two agents' calls as they arrive, then ends.
+      const clickedRecorderRow = await js(`(() => { const row = document.querySelector('[data-testid=mcp-recorder-row]'); if (row) row.click(); return Boolean(row); })()`);
+      await wait(500);
+      const recorderIdle = await js(`document.querySelector('[data-testid=mcp-recorder]')?.getAttribute('data-state') + '|' + Boolean(document.querySelector('[data-testid=mcp-recording-status]'))`);
+      const clickedRecord = await js(`(() => { const btn = document.querySelector('[data-testid=mcp-recorder-start]'); if (btn) btn.click(); return Boolean(btn); })()`);
+      await wait(600);
+      const recorderStates = await js(
+        `[document.querySelector('[data-testid=mcp-recorder]')?.getAttribute('data-state'), document.querySelector('[data-testid=mcp-recorder-row]')?.getAttribute('data-state'), document.querySelector('[data-testid=mcp-recording-status]')?.textContent].join('|')`,
+      );
+      check(
+        'ui: recorder opens from the sidebar and starts, and the status bar says so',
+        clickedRecorderRow === true && recorderIdle === 'idle|false' && clickedRecord === true && recorderStates === 'recording|recording|REC 0',
+        { recorderIdle, recorderStates },
+      );
+      const claude = { 'mcp-session-id': (await agentRpc({}, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'claude-code', version: '2.1.0' } })) ?? '' };
+      const cursor = { 'mcp-session-id': (await agentRpc({}, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'cursor', version: '3.1' } })) ?? '' };
+      await agentRpc(claude, 'tools/call', { name: 'db_query_run', arguments: { connectionId: sqlite.id, query: 'SELECT name FROM users ORDER BY id' } });
+      await agentRpc(cursor, 'tools/call', { name: 'db_connection_list', arguments: {} });
+      await agentRpc(claude, 'tools/call', { name: 'api_request_delete', arguments: { id: imported.id } });
+      await agentRpc(cursor, 'tools/call', { name: 'tools_base64_encode', arguments: { text: 'hello' } });
+      await wait(700);
+      const recorderRows = await js(`[...document.querySelectorAll('[data-testid=mcp-recorded-call]')].map((r) => [r.getAttribute('data-agent'), r.getAttribute('data-tool'), r.getAttribute('data-ok')].join(':'))`);
+      check(
+        'ui: recorder lists the calls of each agent as they arrive',
+        Array.isArray(recorderRows) && recorderRows.join() === 'claude-code:db_query_run:true,cursor:db_connection_list:true,claude-code:api_request_delete:false,cursor:tools_base64_encode:true',
+        recorderRows,
+      );
+      await js(`document.querySelector('[data-testid=mcp-recorded-call][data-tool=db_query_run]')?.click()`);
+      await wait(700);
+      const recorderDetail = await js(
+        `[document.querySelector('[data-testid=mcp-recorder-detail]')?.textContent ?? '', document.querySelector('[data-testid=mcp-recorder-arguments] .cm-content')?.textContent ?? '', document.querySelector('[data-testid=mcp-recorder-result] .cm-content')?.textContent ?? '']`,
+      );
+      check(
+        'ui: a recorded call shows its agent, arguments and result',
+        Array.isArray(recorderDetail) && recorderDetail[0].includes('claude-code 2.1.0') && recorderDetail[1].includes('SELECT name FROM users') && recorderDetail[2].includes('"rows"'),
+        Array.isArray(recorderDetail) ? recorderDetail.map((t: string) => t.slice(0, 120)) : recorderDetail,
+      );
+      await shot('21b-mcp-recorder-light');
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(300);
+      await shot('21c-mcp-recorder-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
+      await js(`document.querySelector('[data-testid=mcp-recorder-end]')?.click()`);
+      await wait(500);
+      const recorderEnded = await js(
+        `[document.querySelector('[data-testid=mcp-recorder]')?.getAttribute('data-state'), Boolean(document.querySelector('[data-testid=mcp-recorder-save]')), Boolean(document.querySelector('[data-testid=mcp-recording-status]')), document.querySelector('[data-testid=mcp-recorder-summary]')?.textContent.startsWith('4 calls')].join('|')`,
+      );
+      check('ui: ending the recording offers to save it and clears the status bar', recorderEnded === 'ended|true|false|true', recorderEnded);
+      await shot('21d-mcp-recorder-ended-light');
+      // A recording that runs while another tab is on screen is one click away in the status bar.
+      await run('mcp.recording.start', {}, null);
+      await js(`document.querySelector('[data-testid=tab][data-title="smoke http"]')?.click()`);
+      await wait(500);
+      const recorderHidden = await js(`document.querySelector('[data-tab-type="mcp.recorder"]')?.classList.contains('hidden')`);
+      await js(`document.querySelector('[data-testid=mcp-recording-status]')?.click()`);
+      await wait(400);
+      const recorderShown = await js(`document.querySelector('[data-tab-type="mcp.recorder"]')?.classList.contains('hidden') === false`);
+      check('ui: the status bar entry opens the recorder', recorderHidden === true && recorderShown === true, { recorderHidden, recorderShown });
+      await run('mcp.recording.clear', {}, null);
+      await wait(300);
 
       // Env files: sidebar rows with kinds and git warnings, masked values, reveal, inline edits, the watcher, compare view.
       const clickedEnvModule = await js(

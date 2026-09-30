@@ -1,5 +1,5 @@
-import type { Environment } from '@quiver/core';
-import { cn, invoke, selectActiveWorkspace, useAppStore, useInvoke } from '@quiver/ui';
+import type { Environment, McpRecordingStatus } from '@quiver/core';
+import { cn, invoke, runAction, selectActiveWorkspace, useAppStore, useInvoke } from '@quiver/ui';
 import { Check, ChevronUp, Download, ExternalLink, Layers, Moon, Plug, RotateCw, Sun } from 'lucide-react';
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { openSettings, toggleTheme } from './actions';
@@ -26,6 +26,7 @@ export function StatusBar() {
       )}
       <div className="flex-1" />
       <UpdateItem />
+      <RecordingItem />
       <button type="button" onClick={openSettings} className="flex items-center gap-1 hover:text-fg" title={mcp?.error ?? 'MCP server'}>
         <Plug className="size-3" />
         <span className={cn('size-1.5 rounded-full', mcp?.running ? 'bg-success' : 'bg-danger')} />
@@ -35,6 +36,25 @@ export function StatusBar() {
         {theme === 'dark' ? <Sun className="size-3" /> : <Moon className="size-3" />}
       </button>
     </footer>
+  );
+}
+
+/** Shown while the calls agents make to the MCP server are being recorded, so a running recording is never out of sight. */
+function RecordingItem() {
+  const recording = useInvoke<McpRecordingStatus>('mcp.recording.status', {}, { workspaceId: null, refreshOnEvents: ['mcp.recording'] }).data;
+  if (recording?.state !== 'recording' && recording?.state !== 'paused') return null;
+  const paused = recording.state === 'paused';
+  return (
+    <button
+      type="button"
+      onClick={() => runAction('mcp.recorder.open')}
+      className="flex items-center gap-1 hover:text-fg"
+      title={`${paused ? 'Recording of MCP calls is paused' : 'Recording MCP calls'}: ${recording.count} so far. Click to open the recorder.`}
+      data-testid="mcp-recording-status"
+    >
+      <span className={cn('size-1.5 rounded-full', paused ? 'bg-warning' : 'bg-danger animate-pulse')} />
+      REC {paused ? 'paused' : recording.count}
+    </button>
   );
 }
 

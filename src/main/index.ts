@@ -50,6 +50,12 @@ async function pickFile(options: { title?: string; filters?: { name: string; ext
   return result.canceled ? undefined : result.filePaths[0];
 }
 
+async function pickSavePath(options: { title?: string; filters?: { name: string; extensions: string[] }[]; defaultPath?: string } = {}): Promise<string | undefined> {
+  const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+  const result = await dialog.showSaveDialog(win, { title: options.title, filters: options.filters, defaultPath: options.defaultPath });
+  return result.canceled ? undefined : result.filePath;
+}
+
 async function revealFolder(folder: string): Promise<void> {
   const error = await shell.openPath(folder);
   if (error) throw new Error(error);
@@ -80,6 +86,7 @@ async function main(): Promise<void> {
     broadcast,
     pickFolder,
     pickFile,
+    pickSavePath,
     revealFolder: process.env.QUIVER_SMOKE ? undefined : revealFolder,
     updates,
   });
