@@ -13,6 +13,13 @@ import { createMainWindow } from './window';
 process.env.QUIVER_VERSION = app.getVersion();
 // Windows groups taskbar entries and notifications by this id; the installer gives the shortcut the same one.
 app.setAppUserModelId('dev.quiver.app');
+if (process.env.QUIVER_SMOKE) {
+  // The smoke's UI checks need a window that keeps painting: Chromium stops drawing one that other windows cover,
+  // and then screenshots go stale and wheel and drag input is never delivered.
+  app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
+  app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+  app.commandLine.appendSwitch('disable-renderer-backgrounding');
+}
 
 function makeSecrets(): SecretsApi {
   const available = safeStorage.isEncryptionAvailable();
