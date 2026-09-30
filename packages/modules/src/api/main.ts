@@ -15,13 +15,19 @@ import {
   newId,
   nowIso,
   parseCurl,
+  redactHistoryEntry,
+  redactSent,
+  redactUrl,
+  requestSecretValues,
   resolveDeep,
+  scrubSecrets,
   toCurl,
   type ApiCollection,
   type ApiRequest,
   type ApiResponse,
   type CommandContext,
   type HistoryEntry,
+  type RedactUrlOptions,
   type WorkspaceApi,
 } from '@quiver/core';
 import { z } from 'zod';
@@ -33,6 +39,7 @@ import {
   listEnvironments,
   resolveVariableMap,
   saveEnvironment,
+  secretVariableValues,
   setActiveEnvironmentId,
   listResolvedVariables,
   setResolvedVariable,
@@ -43,6 +50,20 @@ import { graphqlEndpoint, introspect, readSchema } from './graphql';
 import { prepareRequest, sendPrepared } from './http';
 
 const HISTORY_LOG = 'history';
+
+/**
+ * History written before credentials were masked still holds them in plain text, so the log is
+ * rewritten once when its workspace opens. Reads and appends wait for that, so nothing is lost or reordered.
+ */
+const historyReady = new Map<string, Promise<void>>();
+
+async function scrubHistory(w: WorkspaceApi): Promise<void> {
+  const entries = (await w.store.readLog<HistoryEntry>(HISTORY_LOG, Number.MAX_SAFE_INTEGER)).reverse();
+  const clean = entries.map((entry) => redactHistoryEntry(entry));
+  if (JSON.stringify(clean) === JSON.stringify(entries)) return;
+  await w.store.clearLog(HISTORY_LOG);
+  for (const entry of clean) await w.store.appendLog(HISTORY_LOG, entry);
+}
 
 function ws(ctx: CommandContext): WorkspaceApi {
   return ctx.workspace!;
@@ -63,6 +84,24 @@ async function resolveRequest(ctx: CommandContext, request: ApiRequest, environm
     throw new QuiverError('UNRESOLVED_VARIABLES', `Unresolved variables: ${missing.join(', ')}`, { missing });
   }
   return { resolved, vars };
+}
+
+/**
+ * The credentials a resolved request carries and the secret variables it can use: what is masked in
+ * whatever gets written down about the request, or handed back to an agent.
+ */
+async function knownSecrets(ctx: CommandContext, resolved: ApiRequest, environmentId?: string | null): Promise<RedactUrlOptions> {
+  return {
+    names: resolved.auth.type === 'apikey' && resolved.auth.in === 'query' ? [resolved.auth.key] : [],
+    values: [...requestSecretValues(resolved), ...(await secretVariableValues(ws(ctx), ctx.host, environmentId))],
+  };
+}
+
+/** Secrets are masked for agents everywhere, so an error that names the URL it failed on must not carry them either. */
+function errorForAgent(err: unknown, secrets: RedactUrlOptions): unknown {
+  if (!(err instanceof QuiverError)) return err;
+  const details = err.details as { url?: unknown } | undefined;
+  return new QuiverError(err.code, scrubSecrets(err.message, secrets.values), details && typeof details.url === 'string' ? { ...details, url: redactUrl(details.url, secrets) } : err.details);
 }
 
 // ---------- requests ----------
@@ -161,7 +200,7 @@ const requestSend = defineCommand({
   id: 'api.request.send',
   title: 'Send API request',
   description:
-    'Sends an HTTP request and returns status, headers, body and timings. Pass a saved requestId or an inline request. Variables like {{baseUrl}} resolve from global variables and the active (or given) environment.',
+    'Sends an HTTP request and returns status, headers, body and timings. Pass a saved requestId or an inline request. Variables like {{baseUrl}} resolve from global variables and the active (or given) environment. For agents, the credentials and secret variables in `sent` (what went on the wire) are masked.',
   scope: 'workspace',
   input: z.object({
     requestId: z.string().optional(),
@@ -178,6 +217,9 @@ const requestSend = defineCommand({
     const options = SendOptionsSchema.parse(input.options ?? {});
     const { resolved } = await resolveRequest(ctx, request, input.environmentId);
     const prepared = prepareRequest(resolved);
+    // Known before sending, so a failed send is recorded just as carefully.
+    const secrets = await knownSecrets(ctx, resolved, input.environmentId);
+    const forAgent = ctx.caller === 'mcp';
 
     const entry: HistoryEntry = {
       id: newId(),
@@ -194,12 +236,17 @@ const requestSend = defineCommand({
       const response = await sendPrepared(prepared, options);
       entry.status = response.status;
       entry.durationMs = Math.round(response.timings.total);
-      return response;
+      // The response is the server's own; `sent` and the final URL are what Quiver adds, with the secrets resolved into them.
+      return forAgent ? { ...response, url: redactUrl(response.url, secrets), sent: redactSent(response.sent, secrets) } : response;
     } catch (err) {
       entry.error = err instanceof Error ? err.message : String(err);
-      throw err;
+      throw forAgent ? errorForAgent(err, secrets) : err;
     } finally {
-      if (input.record !== false) await w.store.appendLog(HISTORY_LOG, entry);
+      if (input.record !== false) {
+        await historyReady.get(w.id);
+        // The log is a plain file: credentials typed into the request, and secrets the URL resolved to, are masked before they reach it.
+        await w.store.appendLog(HISTORY_LOG, redactHistoryEntry(entry, secrets));
+      }
     }
   },
 });
@@ -228,7 +275,14 @@ const graphqlIntrospect = defineCommand({
   handler: async (input, ctx) => {
     const request = await requestFrom(ctx, input);
     const { resolved } = await resolveRequest(ctx, request, input.environmentId);
-    return introspect(ws(ctx), resolved);
+    if (ctx.caller !== 'mcp') return introspect(ws(ctx), resolved);
+    const secrets = await knownSecrets(ctx, resolved, input.environmentId);
+    try {
+      const doc = await introspect(ws(ctx), resolved);
+      return { ...doc, url: redactUrl(doc.url, secrets) };
+    } catch (err) {
+      throw errorForAgent(err, secrets);
+    }
   },
 });
 
@@ -239,13 +293,12 @@ const graphqlSchema = defineCommand({
   scope: 'workspace',
   input: RequestRefInput.extend({ url: z.string().optional() }),
   handler: async (input, ctx) => {
-    let url = input.url;
-    if (!url) {
-      const request = await requestFrom(ctx, input);
-      const vars = await resolveVariableMap(ws(ctx), ctx.host, input.environmentId);
-      url = prepareRequest(resolveDeep(request, vars)).url;
-    }
-    return readSchema(ws(ctx), graphqlEndpoint(url));
+    if (input.url) return readSchema(ws(ctx), graphqlEndpoint(input.url));
+    const request = await requestFrom(ctx, input);
+    const vars = await resolveVariableMap(ws(ctx), ctx.host, input.environmentId);
+    const resolved = resolveDeep(request, vars);
+    const doc = await readSchema(ws(ctx), graphqlEndpoint(prepareRequest(resolved).url));
+    return doc && ctx.caller === 'mcp' ? { ...doc, url: redactUrl(doc.url, await knownSecrets(ctx, resolved, input.environmentId)) } : doc;
   },
 });
 
@@ -429,10 +482,13 @@ const environmentSetActive = defineCommand({
 const historyList = defineCommand({
   id: 'api.history.list',
   title: 'Request history',
-  description: 'Most recent sent requests with status and timing.',
+  description: 'Most recent sent requests with status and timing. Tokens, passwords and API keys in them are masked; {{variable}} references are kept.',
   scope: 'workspace',
   input: z.object({ limit: z.number().int().min(1).max(500).default(50) }),
-  handler: async ({ limit }, ctx) => ws(ctx).store.readLog<HistoryEntry>(HISTORY_LOG, limit),
+  handler: async ({ limit }, ctx) => {
+    await historyReady.get(ws(ctx).id);
+    return (await ws(ctx).store.readLog<HistoryEntry>(HISTORY_LOG, limit)).map((entry) => redactHistoryEntry(entry));
+  },
 });
 
 const historyClear = defineCommand({
@@ -443,6 +499,7 @@ const historyClear = defineCommand({
   mutating: true,
   input: z.object({}),
   handler: async (_i, ctx) => {
+    await historyReady.get(ws(ctx).id);
     await ws(ctx).store.clearLog(HISTORY_LOG);
     ctx.host.emit('store.changed', { workspaceId: ws(ctx).id, collection: 'history' });
     return { cleared: true };
@@ -473,21 +530,26 @@ const importCurl = defineCommand({
 const exportCurl = defineCommand({
   id: 'api.export.curl',
   title: 'Copy as curl',
-  description: 'Renders a request as a curl command with variables resolved.',
+  description: 'Renders a request as a curl command with variables resolved. For agents, credentials and secret variables are masked in it.',
   scope: 'workspace',
   input: z.object({ requestId: z.string().optional(), request: ApiRequestSchema.optional(), environmentId: z.string().nullable().optional() }),
   handler: async (input, ctx) => {
     const request = input.request ?? (input.requestId ? await requireRequest(ws(ctx), input.requestId) : null);
     if (!request) throw new QuiverError('INVALID_INPUT', 'Provide requestId or request');
     const vars = await resolveVariableMap(ws(ctx), ctx.host, input.environmentId);
-    const prepared = prepareRequest(resolveDeep(request, vars));
+    const resolved = resolveDeep(request, vars);
+    const prepared = prepareRequest(resolved);
     const form = request.body.type === 'form' ? request.body.fields.filter((f) => f.enabled).map((f) => [f.key, f.value] as [string, string]) : undefined;
+    const body = typeof prepared.body === 'string' ? prepared.body : null;
+    // A command an agent asks for is one it reads, not one the user pastes into a terminal.
+    const wire = { method: prepared.method, url: prepared.url, headers: prepared.headers, bodyPreview: body };
+    const shown = ctx.caller === 'mcp' ? redactSent(wire, await knownSecrets(ctx, resolved, input.environmentId)) : wire;
     return {
       command: toCurl({
-        method: prepared.method,
-        url: prepared.url,
-        headers: form ? prepared.headers.filter(([k]) => k.toLowerCase() !== 'content-type') : prepared.headers,
-        body: typeof prepared.body === 'string' ? prepared.body : null,
+        method: shown.method,
+        url: shown.url,
+        headers: form ? shown.headers.filter(([k]) => k.toLowerCase() !== 'content-type') : shown.headers,
+        body: shown.bodyPreview,
         bodyType: form ? 'form' : 'raw',
         formFields: form,
       }),
@@ -507,6 +569,15 @@ const suggestName = defineCommand({
 
 export const apiModule = defineModule({
   id: 'api',
+  onWorkspaceOpen: (w) => {
+    historyReady.set(
+      w.id,
+      scrubHistory(w).catch((err) => console.warn(`[quiver] could not mask credentials in the request history of ${w.path}: ${(err as Error).message}`)),
+    );
+  },
+  onWorkspaceClose: (w) => {
+    historyReady.delete(w.id);
+  },
   commands: [
     requestList,
     requestGet,

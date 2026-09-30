@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import type { BrowserWindow } from 'electron';
 import { buildSchema, graphql as executeGraphql } from 'graphql';
 import type { WebSocket as WsSocket } from 'ws';
-import { DEFAULT_PALETTE, capabilityLabels, contentText, expandUriTemplate, resolvePalette, skeletonFromSchema } from '@quiver/core';
+import { DEFAULT_PALETTE, REDACTED, capabilityLabels, contentText, expandUriTemplate, resolvePalette, skeletonFromSchema } from '@quiver/core';
 import type {
   ApiRequest,
   ApiResponse,
@@ -36,6 +36,10 @@ import type {
   McpPrompt,
   McpPromptResult,
   McpReadResourceResult,
+  McpRecordedCall,
+  McpRecordedCallSummary,
+  McpRecordingFile,
+  McpRecordingStatus,
   McpResource,
   McpResourceTemplate,
   McpServerSummary,
@@ -382,6 +386,102 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
 
     const history = await run<HistoryEntry[]>('api.history.list', { limit: 5 }, ws.id);
     check('history recorded', history.length === 1 && history[0].status === 200);
+
+    // History is a plain file: credentials typed straight into a request, and secrets its URL resolves to, are masked before they reach it.
+    {
+      const historyFile = path.join(folder, '.quiver', 'local', 'history.jsonl');
+      const latest = async () => (await run<HistoryEntry[]>('api.history.list', { limit: 1 }, ws.id))[0];
+      const tokenOf = (e: HistoryEntry) => (e.request.auth.type === 'bearer' ? e.request.auth.token : null);
+      check('history: a request that only references variables is stored as it was written', tokenOf(history[0]) === '{{token}}' && !(await fs.readFile(historyFile, 'utf8')).includes('s3cret'), history[0].request.auth);
+      const typed = await run<ApiResponse>(
+        'api.request.send',
+        {
+          request: {
+            ...saved,
+            id: '',
+            name: 'typed token',
+            url: '{{baseUrl}}/login?api_key=query-key-123&ref={{token}}&page=2',
+            headers: [
+              { id: 'h1', key: 'Authorization', value: 'Bearer header-token-456', enabled: true },
+              { id: 'h2', key: 'X-Trace', value: 'keep-me', enabled: true },
+            ],
+            auth: { type: 'bearer', token: 'typed-token-789' },
+          },
+        },
+        ws.id,
+      );
+      const typedEcho = JSON.parse(typed.body) as { headers: Record<string, string>; url: string };
+      check('history: typed credentials still go on the wire as typed', typedEcho.headers.authorization === 'Bearer header-token-456' && typedEcho.url === '/login?api_key=query-key-123&ref=s3cret&page=2', typedEcho.url);
+      const typedEntry = await latest();
+      check(
+        'history: a typed token, an Authorization header, a key parameter and a resolved secret are masked',
+        tokenOf(typedEntry) === REDACTED &&
+          typedEntry.request.headers[0].value === `Bearer ${REDACTED}` &&
+          typedEntry.request.headers[1].value === 'keep-me' &&
+          typedEntry.request.url === `{{baseUrl}}/login?api_key=${REDACTED}&ref={{token}}&page=2` &&
+          typedEntry.url === `http://127.0.0.1:${echoPort}/login?api_key=${REDACTED}&ref=${REDACTED}&page=2` &&
+          typedEntry.status === 200,
+        { url: typedEntry.url, request: typedEntry.request.url, auth: typedEntry.request.auth, headers: typedEntry.request.headers.map((h) => h.value) },
+      );
+      await run('api.request.send', { request: { ...saved, id: '', name: 'basic', url: '{{baseUrl}}/b', headers: [], auth: { type: 'basic', username: 'ada', password: 'hunter2-pw' } } }, ws.id);
+      const basicEntry = await latest();
+      await run('api.request.send', { request: { ...saved, id: '', name: 'key', url: '{{baseUrl}}/k', headers: [], auth: { type: 'apikey', key: 'appid', value: 'app-key-321', in: 'query' } } }, ws.id);
+      const keyEntry = await latest();
+      check(
+        'history: a basic password and an API key are masked, the user and the key name kept',
+        basicEntry.request.auth.type === 'basic' &&
+          basicEntry.request.auth.username === 'ada' &&
+          basicEntry.request.auth.password === REDACTED &&
+          keyEntry.request.auth.type === 'apikey' &&
+          keyEntry.request.auth.key === 'appid' &&
+          keyEntry.request.auth.value === REDACTED &&
+          keyEntry.url === `http://127.0.0.1:${echoPort}/k?appid=${REDACTED}`,
+        { basic: basicEntry.request.auth, key: keyEntry.request.auth, url: keyEntry.url },
+      );
+      const down = await host.invoke('api.request.send', { request: { ...saved, id: '', name: 'down', url: 'http://127.0.0.1:1/down', headers: [], auth: { type: 'bearer', token: 'down-token-654' } }, options: { timeoutMs: 3000 } }, { caller: 'ui', workspaceId: ws.id });
+      const downEntry = await latest();
+      check('history: a send that fails is masked as well', !down.ok && downEntry.error !== null && tokenOf(downEntry) === REDACTED, downEntry.error);
+      const historyText = await fs.readFile(historyFile, 'utf8');
+      const leaked = ['typed-token-789', 'header-token-456', 'query-key-123', 'hunter2-pw', 'app-key-321', 'down-token-654', 's3cret'].filter((s) => historyText.includes(s));
+      check('history: none of it is in the file on disk', leaked.length === 0 && historyText.trim().split('\n').length === 5, leaked);
+
+      // A log written by an older version still holds its credentials; it is rewritten when the workspace opens.
+      const legacyFolder = await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-smoke-legacy-'));
+      const legacyFile = path.join(legacyFolder, '.quiver', 'local', 'history.jsonl');
+      await fs.mkdir(path.dirname(legacyFile), { recursive: true });
+      const legacy: HistoryEntry[] = [
+        {
+          id: 'old1',
+          at: '2026-09-01T10:00:00.000Z',
+          requestId: null,
+          method: 'POST',
+          url: 'https://merchant.example.com/login?api_key=old-key-111',
+          status: 200,
+          durationMs: 5,
+          error: null,
+          request: { ...saved, url: 'https://merchant.example.com/login?api_key=old-key-111', headers: [{ id: 'h', key: 'authorization', value: 'Bearer old-token-333', enabled: true }], auth: { type: 'bearer', token: 'old-token-222' } },
+        },
+        { id: 'old2', at: '2026-09-02T10:00:00.000Z', requestId: saved.id, method: 'POST', url: 'https://merchant.example.com/things', status: 204, durationMs: 7, error: null, request: saved },
+      ];
+      await fs.writeFile(legacyFile, legacy.map((e) => JSON.stringify(e)).join('\n') + '\n');
+      const legacyWs = await run<WorkspaceInfo>('workspace.open', { path: legacyFolder }, null);
+      const legacyList = await run<HistoryEntry[]>('api.history.list', { limit: 10 }, legacyWs.id);
+      const legacyText = await fs.readFile(legacyFile, 'utf8');
+      check(
+        'history: entries written before masking are cleaned when the workspace opens, in the same order',
+        legacyList.map((e) => e.id).join() === 'old2,old1' &&
+          tokenOf(legacyList[1]) === REDACTED &&
+          legacyList[1].request.headers[0].value === `Bearer ${REDACTED}` &&
+          legacyList[1].url === `https://merchant.example.com/login?api_key=${REDACTED}` &&
+          tokenOf(legacyList[0]) === '{{token}}' &&
+          !/old-(token|key)-\d/.test(legacyText) &&
+          legacyText.trim().split('\n').length === 2,
+        { ids: legacyList.map((e) => e.id), onDisk: legacyText.match(/old-(token|key)-\d+/g) },
+      );
+      await run('workspace.close', { id: legacyWs.id }, null);
+      await run('workspace.forgetRecent', { path: legacyFolder }, null);
+      await fs.rm(legacyFolder, { recursive: true, force: true }).catch(() => {});
+    }
 
     const imported = await run<ApiRequest>('api.import.curl', { command: `curl -X PUT '{{baseUrl}}/a?b=c' -H 'X-A: 1' -d '{"k":1}'` }, ws.id);
     check('curl import', imported.method === 'PUT' && imported.body.type === 'json');
@@ -1234,6 +1334,16 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       });
       return (await res.json()) as { result?: { tools?: { name: string }[]; content?: { text: string }[]; isError?: boolean }; error?: unknown };
     };
+    /** A request with headers of its own, as one particular agent; gives back the session id the server handed out, if any. */
+    const agentRpc = async (headers: Record<string, string>, method: string, params: unknown): Promise<string | null> => {
+      const res = await fetch(mcpUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...headers },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+      });
+      await res.text();
+      return res.headers.get('mcp-session-id');
+    };
     const init = await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'smoke', version: '0' } });
     check('mcp initialize', !init.error, init.error);
     const tools = await rpc('tools/list', {});
@@ -1247,6 +1357,32 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     check('mcp blocks mutations by default', blocked.result?.isError === true && (blocked.result.content?.[0]?.text ?? '').includes('MUTATION_BLOCKED'));
     const masked = await rpc('tools/call', { name: 'api_environment_get', arguments: { id: env.id } });
     check('mcp masks secrets', !(masked.result?.content?.[0]?.text ?? '').includes('s3cret'));
+    // What an agent reads back about a request it sent has the secrets masked; the UI still sees what went on the wire.
+    {
+      const viaSecret = { ...saved, id: '', url: '{{baseUrl}}/agent?ref={{token}}&page=1', headers: [{ id: 'h1', key: 'X-Note', value: 'note-{{token}}', enabled: true }], body: { type: 'json', content: '{"t":"{{token}}"}' } };
+      const agentSend = await rpc('tools/call', { name: 'api_request_send', arguments: { request: viaSecret, record: false } });
+      const agentGot = JSON.parse(agentSend.result?.content?.[0]?.text ?? '{}') as Partial<ApiResponse>;
+      const headerOf = (r: Partial<ApiResponse>, name: string) => r.sent?.headers.find(([k]) => k.toLowerCase() === name)?.[1];
+      check(
+        'mcp: what a send reports as sent has credentials and secret variables masked',
+        agentGot.status === 200 &&
+          headerOf(agentGot, 'authorization') === `Bearer ${REDACTED}` &&
+          headerOf(agentGot, 'x-note') === `note-${REDACTED}` &&
+          agentGot.sent?.url === `http://127.0.0.1:${echoPort}/agent?ref=${REDACTED}&page=1` &&
+          agentGot.sent.bodyPreview === `{"t":"${REDACTED}"}` &&
+          agentGot.url === agentGot.sent.url &&
+          !JSON.stringify(agentGot.sent).includes('s3cret'),
+        agentGot.sent,
+      );
+      const uiGot = await run<ApiResponse>('api.request.send', { request: viaSecret, record: false }, ws.id);
+      check('mcp: the UI still sees the request as it went out', uiGot.sent.headers.some(([k, v]) => k === 'Authorization' && v === 'Bearer s3cret') && uiGot.sent.url.endsWith('/agent?ref=s3cret&page=1') && uiGot.sent.bodyPreview === '{"t":"s3cret"}');
+      const agentDown = await rpc('tools/call', { name: 'api_request_send', arguments: { request: { ...saved, id: '', url: 'http://127.0.0.1:1/down?ref={{token}}' }, record: false, options: { timeoutMs: 3000 } } });
+      const agentDownText = agentDown.result?.content?.[0]?.text ?? '';
+      check('mcp: a failed send does not name the secret either', agentDown.result?.isError === true && agentDownText.includes(`ref=${REDACTED}`) && !agentDownText.includes('s3cret'), agentDownText.slice(0, 200));
+      const agentCurl = (await rpc('tools/call', { name: 'api_export_curl', arguments: { requestId: saved.id } })).result?.content?.[0]?.text ?? '';
+      const uiCurl = await run<{ command: string }>('api.export.curl', { requestId: saved.id }, ws.id);
+      check('mcp: curl export masks the secret for agents and keeps it for the UI', agentCurl.includes(`Bearer ${REDACTED}`) && !agentCurl.includes('s3cret') && uiCurl.command.includes('Bearer s3cret'), agentCurl.slice(0, 200));
+    }
     check('mcp lists db tools', names.includes('db_query_run') && names.includes('db_redis_keys') && names.includes('db_table_rows'));
     const mcpRead = await rpc('tools/call', { name: 'db_query_run', arguments: { connectionId: sqlite.id, query: 'SELECT name FROM users ORDER BY id' } });
     const mcpRows = JSON.parse(mcpRead.result?.content?.[0]?.text ?? '[]') as DbQueryResult[];
@@ -1572,6 +1708,81 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       check(`mcp blocks ${tool} by default`, blockedEnv.result?.isError === true && (blockedEnv.result.content?.[0]?.text ?? '').includes('MUTATION_BLOCKED'));
     }
     check('env files: .env untouched by the blocked calls', (await fs.readFile(path.join(envRoot, '.env'), 'utf8')) === envOriginal);
+
+    // Call recorder: what agents call on Quiver's own server, kept in memory between start and end, then saved to a file.
+    {
+      const recorded = () => run<{ status: McpRecordingStatus; calls: McpRecordedCallSummary[] }>('mcp.recording.list', {}, null);
+      await rpc('tools/call', { name: 'app_info', arguments: {} });
+      const beforeStart = await recorded();
+      check('recorder: idle and empty until started', beforeStart.status.state === 'idle' && beforeStart.calls.length === 0, beforeStart.status);
+      check('recorder: its commands are not tools for agents', !names.some((n) => n.startsWith('mcp_recording')));
+      const sessionId = await agentRpc({ 'user-agent': 'smoke-http/1.0' }, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'smoke-agent', version: '4.2' } });
+      check('recorder: initialize hands the client a session id', typeof sessionId === 'string' && sessionId.startsWith('quiver.'), sessionId);
+      const asAgent = { 'mcp-session-id': sessionId ?? '', 'user-agent': 'smoke-http/1.0' };
+      const started = await run<McpRecordingStatus>('mcp.recording.start', {}, null);
+      check('recorder: start', started.state === 'recording' && typeof started.startedAt === 'string' && started.count === 0, started);
+      await agentRpc(asAgent, 'tools/call', { name: 'tools_base64_encode', arguments: { text: 'hi' } });
+      await agentRpc(asAgent, 'tools/call', { name: 'api_request_delete', arguments: { id: imported.id } });
+      await agentRpc(asAgent, 'tools/call', { name: 'tools_no_such_tool', arguments: {} });
+      await agentRpc({ 'user-agent': 'other-agent/9.9' }, 'tools/call', { name: 'tools_base64_encode', arguments: { text: 42 } });
+      await agentRpc(asAgent, 'tools/list', {});
+      // The inspector is an SDK client: it must send the session back by itself for its name to stick.
+      await run('mcp.connect', { id: selfServer.id }, ws.id);
+      await run('mcp.tool.call', { id: selfServer.id, name: 'workspace_current' }, ws.id);
+      const first = await recorded();
+      const [encode, refused, unknown, invalid, fromInspector] = first.calls;
+      check(
+        'recorder: keeps the tool calls, and only those, in order',
+        first.calls.map((c) => c.tool).join() === 'tools_base64_encode,api_request_delete,tools_no_such_tool,tools_base64_encode,workspace_current' && first.status.count === 5 && first.status.bytes > 0,
+        first.calls.map((c) => c.tool),
+      );
+      check(
+        'recorder: names the agent from its handshake, with the workspace, outcome and timing',
+        encode?.agent.name === 'smoke-agent' && encode.agent.version === '4.2' && encode.agent.userAgent === 'smoke-http/1.0' && encode.workspace?.id === ws.id && encode.ok === true && (encode.durationMs ?? -1) >= 0 && encode.preview === '{"text":"hi"}',
+        encode,
+      );
+      const encodeFull = await run<McpRecordedCall>('mcp.recording.get', { id: encode.id }, null);
+      check('recorder: a call carries its arguments and the result the agent got', JSON.stringify(encodeFull.arguments) === '{"text":"hi"}' && (encodeFull.result as { text?: string }).text === 'aGk=', encodeFull);
+      const refusedFull = await run<McpRecordedCall>('mcp.recording.get', { id: refused.id }, null);
+      check(
+        'recorder: refused, unknown and invalid calls are kept as failed',
+        refused.ok === false && (refusedFull.result as { code?: string }).code === 'MUTATION_BLOCKED' && unknown.ok === false && invalid.ok === false,
+        { refused: refusedFull.result, unknown: unknown.ok, invalid: invalid.ok },
+      );
+      check('recorder: a client without a session is named after its User-Agent', invalid.agent.name === 'other-agent' && invalid.agent.version === '9.9', invalid.agent);
+      check('recorder: an SDK client keeps its name across requests', fromInspector?.agent.name === 'quiver' && fromInspector.ok === true, fromInspector?.agent);
+      const paused = await run<McpRecordingStatus>('mcp.recording.pause', {}, null);
+      await agentRpc(asAgent, 'tools/call', { name: 'tools_uuid_generate', arguments: {} });
+      const whilePaused = (await recorded()).calls.length;
+      await run('mcp.recording.resume', {}, null);
+      await agentRpc(asAgent, 'tools/call', { name: 'tools_uuid_generate', arguments: {} });
+      const afterResume = (await recorded()).calls.length;
+      check('recorder: pause skips calls, resume keeps them again', paused.state === 'paused' && whilePaused === 5 && afterResume === 6, { whilePaused, afterResume });
+      const recordingFile = path.join(mcpDir, 'recording.json');
+      const earlySave = await host.invoke('mcp.recording.save', { path: recordingFile }, { caller: 'ui', workspaceId: null });
+      check('recorder: saving needs an ended recording', !earlySave.ok && earlySave.error.code === 'INVALID_INPUT', earlySave.ok ? 'saved?' : earlySave.error.message);
+      const ended = await run<McpRecordingStatus>('mcp.recording.end', {}, null);
+      await agentRpc(asAgent, 'tools/call', { name: 'tools_uuid_generate', arguments: {} });
+      check('recorder: end stops recording and keeps the calls', ended.state === 'ended' && typeof ended.endedAt === 'string' && ended.savedTo === null && (await recorded()).calls.length === 6, ended);
+      const agentSave = await host.invoke('mcp.recording.save', { path: recordingFile }, { caller: 'mcp', workspaceId: null });
+      check('recorder: only the UI can save', !agentSave.ok && agentSave.error.code === 'INVALID_INPUT');
+      const savedRecording = await run<{ path: string; calls: number }>('mcp.recording.save', { path: recordingFile }, null);
+      const onDisk = JSON.parse(await fs.readFile(recordingFile, 'utf8')) as McpRecordingFile;
+      check(
+        'recorder: saves the recording as a JSON file and remembers where',
+        savedRecording.calls === 6 &&
+          onDisk.format === 'quiver.mcp-recording' &&
+          onDisk.version === 1 &&
+          onDisk.quiver === host.api.version &&
+          onDisk.calls.length === 6 &&
+          onDisk.calls[0].agent.name === 'smoke-agent' &&
+          (onDisk.calls[0].result as { text?: string }).text === 'aGk=' &&
+          (await run<McpRecordingStatus>('mcp.recording.status', {}, null)).savedTo === recordingFile,
+        { saved: savedRecording, format: onDisk.format, calls: onDisk.calls.length },
+      );
+      const cleared = await run<McpRecordingStatus>('mcp.recording.clear', {}, null);
+      check('recorder: discard drops it from memory', cleared.state === 'idle' && cleared.count === 0 && (await recorded()).calls.length === 0, cleared);
+    }
 
     // Updater: a dev build reports that it cannot update itself, and the mutating commands are gated for agents.
     const updateState = await run<UpdateState>('app.update.check', {}, null);
@@ -1912,6 +2123,43 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       const gridHasAda = await js(`[...document.querySelectorAll('[role=gridcell]')].some((c) => c.textContent === 'Ada')`);
       check('ui: table grid renders rows', gridHasAda === true);
       await shot('05-table-light');
+      // The WHERE filter completes the table's columns: Enter picks one while the list is open, then applies the filter.
+      const typeText = (text: string) => {
+        for (const ch of text) win.webContents.sendInputEvent({ type: 'char', keyCode: ch });
+      };
+      const pressEnter = () => {
+        win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
+        win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+      };
+      const whereFocused = await js(`(() => { const c = document.querySelector('[data-testid=db-table-where] .cm-content'); if (c) c.focus(); return document.activeElement === c; })()`);
+      check('ui: WHERE filter is an editor', whereFocused === true);
+      typeText('ema');
+      await wait(500);
+      const whereOptions = await js(`[...document.querySelectorAll('.cm-tooltip-autocomplete li')].map((li) => [li.querySelector('.cm-completionLabel')?.textContent, li.querySelector('.cm-completionDetail')?.textContent, li.getAttribute('aria-selected') === 'true'])`);
+      check(
+        'ui: WHERE filter offers the columns with their types',
+        Array.isArray(whereOptions) && whereOptions.some((o: unknown[]) => o[0] === 'email' && o[1] === 'TEXT' && o[2] === true),
+        whereOptions,
+      );
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(300);
+      await shot('05b-table-where-completion-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
+      pressEnter();
+      await wait(200);
+      const whereText = () => js(`document.querySelector('[data-testid=db-table-where] .cm-content')?.textContent ?? ''`);
+      const picked = await whereText();
+      typeText(" = 'linus@example.com'");
+      await wait(300);
+      pressEnter();
+      await wait(1200);
+      const filtered = await js(`[...document.querySelectorAll('[role=gridcell]')].filter((c) => c.offsetParent !== null).map((c) => c.textContent).join(',')`);
+      check('ui: Enter picks the column, then applies the filter', picked === 'email' && typeof filtered === 'string' && filtered.includes('Linus') && !filtered.includes('Ada'), { picked, filtered });
+      // A pasted line break becomes a space instead of a second line.
+      await js(`document.execCommand('insertText', false, '\\n  AND id > 0')`);
+      await wait(200);
+      const whereAfter = await js(`[...document.querySelectorAll('[data-testid=db-table-where] .cm-line')].map((l) => l.textContent)`);
+      check('ui: the WHERE filter stays one line', Array.isArray(whereAfter) && whereAfter.length === 1 && whereAfter[0] === "email = 'linus@example.com' AND id > 0", whereAfter);
       const clickedQuery = await js(
         `(() => { const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Query'); if (btn) btn.click(); return Boolean(btn); })()`,
       );
@@ -2370,6 +2618,67 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(200);
 
+      // Call recorder: opened from the inspector's sidebar, started in the UI, lists two agents' calls as they arrive, then ends.
+      const clickedRecorderRow = await js(`(() => { const row = document.querySelector('[data-testid=mcp-recorder-row]'); if (row) row.click(); return Boolean(row); })()`);
+      await wait(500);
+      const recorderIdle = await js(`document.querySelector('[data-testid=mcp-recorder]')?.getAttribute('data-state') + '|' + Boolean(document.querySelector('[data-testid=mcp-recording-status]'))`);
+      const clickedRecord = await js(`(() => { const btn = document.querySelector('[data-testid=mcp-recorder-start]'); if (btn) btn.click(); return Boolean(btn); })()`);
+      await wait(600);
+      const recorderStates = await js(
+        `[document.querySelector('[data-testid=mcp-recorder]')?.getAttribute('data-state'), document.querySelector('[data-testid=mcp-recorder-row]')?.getAttribute('data-state'), document.querySelector('[data-testid=mcp-recording-status]')?.textContent].join('|')`,
+      );
+      check(
+        'ui: recorder opens from the sidebar and starts, and the status bar says so',
+        clickedRecorderRow === true && recorderIdle === 'idle|false' && clickedRecord === true && recorderStates === 'recording|recording|REC 0',
+        { recorderIdle, recorderStates },
+      );
+      const claude = { 'mcp-session-id': (await agentRpc({}, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'claude-code', version: '2.1.0' } })) ?? '' };
+      const cursor = { 'mcp-session-id': (await agentRpc({}, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'cursor', version: '3.1' } })) ?? '' };
+      await agentRpc(claude, 'tools/call', { name: 'db_query_run', arguments: { connectionId: sqlite.id, query: 'SELECT name FROM users ORDER BY id' } });
+      await agentRpc(cursor, 'tools/call', { name: 'db_connection_list', arguments: {} });
+      await agentRpc(claude, 'tools/call', { name: 'api_request_delete', arguments: { id: imported.id } });
+      await agentRpc(cursor, 'tools/call', { name: 'tools_base64_encode', arguments: { text: 'hello' } });
+      await wait(700);
+      const recorderRows = await js(`[...document.querySelectorAll('[data-testid=mcp-recorded-call]')].map((r) => [r.getAttribute('data-agent'), r.getAttribute('data-tool'), r.getAttribute('data-ok')].join(':'))`);
+      check(
+        'ui: recorder lists the calls of each agent as they arrive',
+        Array.isArray(recorderRows) && recorderRows.join() === 'claude-code:db_query_run:true,cursor:db_connection_list:true,claude-code:api_request_delete:false,cursor:tools_base64_encode:true',
+        recorderRows,
+      );
+      await js(`document.querySelector('[data-testid=mcp-recorded-call][data-tool=db_query_run]')?.click()`);
+      await wait(700);
+      const recorderDetail = await js(
+        `[document.querySelector('[data-testid=mcp-recorder-detail]')?.textContent ?? '', document.querySelector('[data-testid=mcp-recorder-arguments] .cm-content')?.textContent ?? '', document.querySelector('[data-testid=mcp-recorder-result] .cm-content')?.textContent ?? '']`,
+      );
+      check(
+        'ui: a recorded call shows its agent, arguments and result',
+        Array.isArray(recorderDetail) && recorderDetail[0].includes('claude-code 2.1.0') && recorderDetail[1].includes('SELECT name FROM users') && recorderDetail[2].includes('"rows"'),
+        Array.isArray(recorderDetail) ? recorderDetail.map((t: string) => t.slice(0, 120)) : recorderDetail,
+      );
+      await shot('21b-mcp-recorder-light');
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(300);
+      await shot('21c-mcp-recorder-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
+      await js(`document.querySelector('[data-testid=mcp-recorder-end]')?.click()`);
+      await wait(500);
+      const recorderEnded = await js(
+        `[document.querySelector('[data-testid=mcp-recorder]')?.getAttribute('data-state'), Boolean(document.querySelector('[data-testid=mcp-recorder-save]')), Boolean(document.querySelector('[data-testid=mcp-recording-status]')), document.querySelector('[data-testid=mcp-recorder-summary]')?.textContent.startsWith('4 calls')].join('|')`,
+      );
+      check('ui: ending the recording offers to save it and clears the status bar', recorderEnded === 'ended|true|false|true', recorderEnded);
+      await shot('21d-mcp-recorder-ended-light');
+      // A recording that runs while another tab is on screen is one click away in the status bar.
+      await run('mcp.recording.start', {}, null);
+      await js(`document.querySelector('[data-testid=tab][data-title="smoke http"]')?.click()`);
+      await wait(500);
+      const recorderHidden = await js(`document.querySelector('[data-tab-type="mcp.recorder"]')?.classList.contains('hidden')`);
+      await js(`document.querySelector('[data-testid=mcp-recording-status]')?.click()`);
+      await wait(400);
+      const recorderShown = await js(`document.querySelector('[data-tab-type="mcp.recorder"]')?.classList.contains('hidden') === false`);
+      check('ui: the status bar entry opens the recorder', recorderHidden === true && recorderShown === true, { recorderHidden, recorderShown });
+      await run('mcp.recording.clear', {}, null);
+      await wait(300);
+
       // Env files: sidebar rows with kinds and git warnings, masked values, reveal, inline edits, the watcher, compare view.
       const clickedEnvModule = await js(
         `(() => { const btn = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.title || '') === 'Env files'); if (btn) btn.click(); return Boolean(btn); })()`,
@@ -2689,7 +2998,7 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         { afterReset, saved: host.config.get().activityBar },
       );
 
-      // Todo panel: type and Enter adds, ticking strikes through, a line opens for notes, Clear completed empties the done ones.
+      // Todo panel: type and Enter adds, ticking strikes through, a line opens for notes, long text stays readable, Clear completed empties the done ones.
       await js(`document.querySelector('[data-testid=activity-item][data-drag-id=todo]').click()`);
       await wait(400);
       const typeTodo = async (title: string) => {
@@ -2717,6 +3026,43 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await wait(500);
       const notedTodo = (await run<TodoItem[]>('todo.list', {}, ws.id)).find((t) => t.title === 'Reply to the design review');
       check('ui: todo: notes typed under a line are saved', notedTodo?.notes === 'Waiting on Sam for the mockups', notedTodo);
+      // Long text: a closed line wraps its title (three lines at most) and shows the start of its notes; an open one shows all of both.
+      const longTitle = 'Rewrite the billing reconciliation job so that retries are idempotent, then add a regression test for the double charge from https://status.example.com/incidents/2026-09-28-double-charge-on-retry';
+      const longNotes = ['Steps:', '1. Reproduce with the fixture from the incident channel.', '2. Make the retry key part of the ledger row.', '3. Backfill the rows that were charged twice.', '', 'Ask Dana which customers were refunded by hand, so the backfill skips them.'].join('\n');
+      await run('todo.add', { title: longTitle, notes: longNotes }, ws.id);
+      await wait(500);
+      const longRow = `[data-testid=todo-item][data-title^="Rewrite the billing"]`;
+      const closedLong = (await js(
+        `(() => { const row = document.querySelector('${longRow}'); const list = document.querySelector('[data-testid=todo-list]'); const title = row?.querySelector('[data-testid=todo-title] span'); const preview = row?.querySelector('[data-testid=todo-notes-preview]'); const other = document.querySelector('[data-testid=todo-item][data-title="Deploy staging"] [data-testid=todo-title] span'); if (!row || !list || !title || !preview || !other) return null; return { lines: Math.round(title.clientHeight / other.clientHeight), clipped: title.scrollHeight > title.clientHeight, wide: title.scrollWidth > title.clientWidth, previewLines: Math.round(preview.clientHeight / 18), overflow: list.scrollWidth > list.clientWidth }; })()`,
+      )) as { lines: number; clipped: boolean; wide: boolean; previewLines: number; overflow: boolean } | null;
+      check(
+        'ui: todo: a long title wraps to three lines with the start of its notes underneath, inside the panel',
+        closedLong !== null && closedLong.lines === 3 && closedLong.clipped && !closedLong.wide && closedLong.previewLines === 2 && !closedLong.overflow,
+        closedLong,
+      );
+      await shot('26-todo-long-closed-light');
+      await js(`document.querySelector('${longRow} [data-testid=todo-title]').click()`);
+      await wait(400);
+      const openLong = (await js(
+        `(() => { const row = document.querySelector('${longRow}'); const title = row?.querySelector('[data-testid=todo-edit-title]'); const notes = row?.querySelector('[data-testid=todo-notes]'); const list = document.querySelector('[data-testid=todo-list]'); if (!title || !notes || !list) return null; return { title: title.value, titleHeight: title.clientHeight, titleScrolls: title.scrollHeight > title.clientHeight + 1, notesHeight: notes.clientHeight, notesScroll: notes.scrollHeight > notes.clientHeight + 1, overflow: list.scrollWidth > list.clientWidth, closedPreview: document.querySelector('[data-testid=todo-item][data-title="Reply to the design review"] [data-testid=todo-notes-preview]')?.textContent ?? null }; })()`,
+      )) as { title: string; titleHeight: number; titleScrolls: boolean; notesHeight: number; notesScroll: boolean; overflow: boolean; closedPreview: string | null } | null;
+      check(
+        'ui: todo: an open line shows its whole title and notes without scrolling inside them',
+        openLong !== null && openLong.title === longTitle && openLong.titleHeight > 80 && !openLong.titleScrolls && openLong.notesHeight > 150 && !openLong.notesScroll && !openLong.overflow && openLong.closedPreview === 'Waiting on Sam for the mockups',
+        openLong,
+      );
+      await js(
+        `(() => { const t = document.querySelector('${longRow} [data-testid=todo-edit-title]'); const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; setter.call(t, ${JSON.stringify('Rewrite the billing reconciliation job\n  so that retries are idempotent')}); t.dispatchEvent(new Event('input', { bubbles: true })); t.dispatchEvent(new FocusEvent('focusout', { bubbles: true })); })()`,
+      );
+      await wait(500);
+      const retitled = (await run<TodoItem[]>('todo.list', {}, ws.id)).find((t) => t.title.startsWith('Rewrite the billing'));
+      check('ui: todo: the title is edited in place and stays one line of text', retitled?.title === 'Rewrite the billing reconciliation job so that retries are idempotent' && retitled.notes === longNotes, retitled?.title);
+      await run('todo.update', { id: retitled?.id ?? '', title: longTitle }, ws.id);
+      await js(`document.querySelector('[data-testid=todo-collapse]').click()`);
+      await wait(300);
+      await js(`document.querySelector('${longRow} [data-testid=todo-title]').click()`);
+      await wait(400);
+      check('ui: todo: the chevron collapses an open line', (await js(`document.querySelector('${longRow} [data-testid=todo-edit-title]')?.value`)) === longTitle);
       await shot('26a-todo-light');
       await js(`document.documentElement.classList.add('dark')`);
       await wait(200);
@@ -2726,7 +3072,7 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await wait(400);
       const todosCleared = await todoTitles();
       const todoHeader = await js(`document.querySelector('[data-testid=activity-item][data-drag-id=todo]') && [...document.querySelectorAll('span')].find((s) => /^List · /.test(s.textContent))?.textContent`);
-      check('ui: todo: Clear completed removes the done lines and the header counts what is left', JSON.stringify(todosCleared) === JSON.stringify(['Reply to the design review', 'Deploy staging']) && todoHeader === 'List · 0/2 done', { todosCleared, todoHeader });
+      check('ui: todo: Clear completed removes the done lines and the header counts what is left', JSON.stringify(todosCleared) === JSON.stringify(['Reply to the design review', 'Deploy staging', longTitle]) && todoHeader === 'List · 0/3 done', { todosCleared, todoHeader });
       await js(`document.querySelector('[data-testid=activity-item][data-drag-id=api]').click()`);
       await wait(200);
 

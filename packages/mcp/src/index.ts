@@ -1,8 +1,16 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { toErrorPayload, type CommandRegistry, type HostApi, type WorkspaceApi } from '@quiver/core';
+import { toErrorPayload, type CommandRegistry, type HostApi, type McpAgent, type WorkspaceApi, type WorkspaceInfo } from '@quiver/core';
 import { z } from 'zod';
+import { SESSION_HEADER, identifyAgent, rpcMessages, toolCallOutcome, type RpcMessage } from './agent';
+
+/** Sees every tools/call request that reaches the server and what it answered, e.g. a recorder. */
+export interface McpCallObserver {
+  /** Returns an id to finish the call with, or null when the call is of no interest. */
+  begin(call: { agent: McpAgent; workspace: WorkspaceInfo | null; tool: string; arguments: unknown }): string | null;
+  finish(id: string, outcome: { ok: boolean; result: unknown; durationMs: number }): void;
+}
 
 export interface McpServerOptions {
   registry: CommandRegistry;
@@ -12,6 +20,7 @@ export interface McpServerOptions {
   /** Map the `workspace` query parameter (a path or id) or the default choice to a session. */
   resolveWorkspace(hint: string | null): Promise<WorkspaceApi | undefined>;
   onCall?(entry: { tool: string; workspaceId?: string; ok: boolean; durationMs: number; at: string }): void;
+  calls?: McpCallObserver;
 }
 
 export interface RunningMcpServer {
@@ -90,6 +99,40 @@ function text(value: unknown) {
   return { content: [{ type: 'text' as const, text: typeof value === 'string' ? value : JSON.stringify(value ?? null, null, 2) }] };
 }
 
+/**
+ * Reports the tools/call requests of one HTTP request to the observer, and their responses as the
+ * transport sends them. The returned function closes whatever is still unanswered when the connection ends.
+ */
+function observeCalls(observer: McpCallObserver, messages: RpcMessage[], agent: McpAgent, workspace: WorkspaceApi | undefined, transport: StreamableHTTPServerTransport): () => void {
+  const pending = new Map<string | number, { id: string; started: number }>();
+  for (const message of messages) {
+    if (message.method !== 'tools/call' || message.id === undefined || message.id === null) continue;
+    const id = observer.begin({
+      agent,
+      workspace: workspace ? { id: workspace.id, name: workspace.name, path: workspace.path } : null,
+      tool: String(message.params?.name ?? ''),
+      arguments: message.params?.arguments ?? {},
+    });
+    if (id) pending.set(message.id, { id, started: performance.now() });
+  }
+  if (pending.size === 0) return () => {};
+  const send = transport.send.bind(transport);
+  transport.send = (message, options) => {
+    const reply = message as RpcMessage;
+    const key = reply.method === undefined ? reply.id : undefined;
+    const call = key !== undefined && key !== null ? pending.get(key) : undefined;
+    if (call) {
+      pending.delete(key!);
+      observer.finish(call.id, { ...toolCallOutcome(reply), durationMs: performance.now() - call.started });
+    }
+    return send(message, options);
+  };
+  return () => {
+    for (const call of pending.values()) observer.finish(call.id, { ok: false, result: { error: 'The connection closed before the call was answered.' }, durationMs: performance.now() - call.started });
+    pending.clear();
+  };
+}
+
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) chunks.push(chunk as Buffer);
@@ -114,14 +157,21 @@ export async function startMcpServer(opts: McpServerOptions): Promise<RunningMcp
     }
     try {
       const workspace = await opts.resolveWorkspace(url.searchParams.get('workspace'));
+      const body = await readJsonBody(req);
+      const messages = rpcMessages(body);
+      // No session is kept: the id only tells later requests which client this is, for whoever observes the calls.
+      const { agent, sessionId } = identifyAgent(req.headers, messages);
+      if (sessionId) res.setHeader(SESSION_HEADER, sessionId);
       const server = buildMcpServer(opts, workspace);
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+      const closeCalls = opts.calls ? observeCalls(opts.calls, messages, agent, workspace, transport) : undefined;
       res.on('close', () => {
+        closeCalls?.();
         void transport.close();
         void server.close();
       });
       await server.connect(transport);
-      await transport.handleRequest(req, res, await readJsonBody(req));
+      await transport.handleRequest(req, res, body);
     } catch (err) {
       if (!res.headersSent) {
         res.writeHead(500, { 'content-type': 'application/json' }).end(JSON.stringify({ error: toErrorPayload(err) }));

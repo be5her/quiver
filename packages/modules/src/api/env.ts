@@ -104,6 +104,13 @@ export async function resolveVariableMap(ws: WorkspaceApi, host: HostApi, enviro
   return buildVariableMap(layers);
 }
 
+/** The values of the secret variables a request sent with this environment can resolve: what must never be written down in plain text. */
+export async function secretVariableValues(ws: WorkspaceApi, host: HostApi, environmentId?: string | null): Promise<string[]> {
+  const envId = environmentId === undefined ? await getActiveEnvironmentId(ws) : environmentId;
+  const env = envId ? await getEnvironment(ws, host, envId) : undefined;
+  return [...host.config.get().globalVariables, ...(env?.variables ?? [])].filter((v) => v.enabled && v.secret && v.value).map((v) => v.value);
+}
+
 export const ACTIVE_ENVIRONMENT_STATE_KEY = ACTIVE_ENV_KEY;
 
 export interface ResolvedVariable {

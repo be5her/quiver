@@ -25,7 +25,7 @@ Each feature is a module with its own README that goes into the details: what it
 | Teleport | Several clusters side by side, SSO login, database tunnels that become Quiver connections, and a read-only Kubernetes query view that never touches your terminal's kubectl context. | [packages/modules/src/teleport](packages/modules/src/teleport/README.md) |
 | Mock servers | Local HTTP servers saved with the project: templated routes, forwarding to a real upstream, every request captured, so an empty server is a webhook receiver. | [packages/modules/src/mock](packages/modules/src/mock/README.md) |
 | Realtime | WebSocket and Server-Sent Events connections with a live log, a composer, saved messages and automatic reconnects. | [packages/modules/src/realtime](packages/modules/src/realtime/README.md) |
-| MCP inspector | Connect to any MCP server, browse and call its tools, resources and prompts, and watch the JSON-RPC traffic. | [packages/modules/src/mcp](packages/modules/src/mcp/README.md) |
+| MCP inspector | Connect to any MCP server, browse and call its tools, resources and prompts, and watch the JSON-RPC traffic. Record what agents call on Quiver's own server. | [packages/modules/src/mcp](packages/modules/src/mcp/README.md) |
 | Env files | Every `.env` of the project in one place: masked secrets, edits that keep the file's formatting, compare with the example, profiles, history. | [packages/modules/src/env](packages/modules/src/env/README.md) |
 | Todo | A plain list for the day, per workspace and per machine. | [packages/modules/src/todo](packages/modules/src/todo/README.md) |
 | Tools | JSON format, JWT decode, base64, URL encode, hash, UUID, timestamp. | [packages/modules/src/tools](packages/modules/src/tools/README.md) |
@@ -43,6 +43,8 @@ claude mcp add --transport http quiver "http://127.0.0.1:7411/mcp"
 ```
 
 Append `?workspace=<absolute folder path>` to bind a client to a specific project. Commands flagged as mutating (deletes, database writes, anything that changes state your terminal shares) are refused for agents until "Allow mutating commands" is enabled in Settings; some tools decide per call, such as `db_query_run`, which lets `SELECT` through and gates writes. Secrets are always masked for agents. Each module's README lists which of its tools are allowed and which are gated. Of the app's own tools, `app_update_check` is allowed; `app_update_download`, `app_update_install` and `app_update_channel` are gated.
+
+To see what agents actually do, record their calls: the call recorder in the MCP inspector keeps every tool call that reaches this server between Start and End, with the agent that made it, its arguments and its result, and saves the recording to a file. See the [MCP inspector](packages/modules/src/mcp/README.md#call-recorder).
 
 ## Run
 

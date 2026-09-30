@@ -1,8 +1,10 @@
 import { toErrorPayload, type McpServerSummary, type McpTransport } from '@quiver/core';
 import { confirmDialog, defineModuleUI, invoke, notify, promptDialog, selectActiveWorkspace, selectScope, useAppStore, useTabsStore } from '@quiver/ui';
 import { Plug } from 'lucide-react';
+import { RecorderTab } from './RecorderTab';
 import { ServerTab } from './ServerTab';
 import { McpSidebar } from './Sidebar';
+import { RECORDER_TAB, openRecorderTab, startRecording } from './recording';
 
 export type ServerView = 'tools' | 'resources' | 'prompts' | 'log' | 'info' | 'settings';
 
@@ -98,11 +100,23 @@ export const mcpModuleUI = defineModuleUI({
   Sidebar: McpSidebar,
   tabs: {
     'mcp.server': ServerTab,
+    [RECORDER_TAB]: RecorderTab,
   },
   actions: [
     { id: 'mcp.server.new', title: 'New MCP server (command)', group: 'MCP inspector', run: () => createServer('stdio'), when: hasWorkspace },
     { id: 'mcp.server.newHttp', title: 'New MCP server (HTTP)', group: 'MCP inspector', run: () => createServer('http'), when: hasWorkspace },
     { id: 'mcp.server.import', title: 'Import MCP servers from project files', group: 'MCP inspector', run: () => importServers(), when: hasWorkspace },
     { id: 'mcp.server.self', title: "Inspect Quiver's own MCP server", group: 'MCP inspector', run: () => addThisQuiver(), when: hasWorkspace },
+    { id: 'mcp.recorder.open', title: 'Open the MCP call recorder', group: 'MCP inspector', keywords: ['record', 'agent', 'calls'], run: openRecorderTab },
+    {
+      id: 'mcp.recorder.start',
+      title: 'Record the calls agents make to Quiver',
+      group: 'MCP inspector',
+      keywords: ['record', 'agent', 'mcp'],
+      run: async () => {
+        openRecorderTab();
+        await startRecording();
+      },
+    },
   ],
 });
