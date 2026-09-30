@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import type { BrowserWindow } from 'electron';
 import { buildSchema, graphql as executeGraphql } from 'graphql';
 import type { WebSocket as WsSocket } from 'ws';
-import { DEFAULT_PALETTE, capabilityLabels, contentText, expandUriTemplate, resolvePalette, skeletonFromSchema } from '@quiver/core';
+import { DEFAULT_PALETTE, REDACTED, capabilityLabels, contentText, expandUriTemplate, resolvePalette, skeletonFromSchema } from '@quiver/core';
 import type {
   ApiRequest,
   ApiResponse,
@@ -386,6 +386,102 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
 
     const history = await run<HistoryEntry[]>('api.history.list', { limit: 5 }, ws.id);
     check('history recorded', history.length === 1 && history[0].status === 200);
+
+    // History is a plain file: credentials typed straight into a request, and secrets its URL resolves to, are masked before they reach it.
+    {
+      const historyFile = path.join(folder, '.quiver', 'local', 'history.jsonl');
+      const latest = async () => (await run<HistoryEntry[]>('api.history.list', { limit: 1 }, ws.id))[0];
+      const tokenOf = (e: HistoryEntry) => (e.request.auth.type === 'bearer' ? e.request.auth.token : null);
+      check('history: a request that only references variables is stored as it was written', tokenOf(history[0]) === '{{token}}' && !(await fs.readFile(historyFile, 'utf8')).includes('s3cret'), history[0].request.auth);
+      const typed = await run<ApiResponse>(
+        'api.request.send',
+        {
+          request: {
+            ...saved,
+            id: '',
+            name: 'typed token',
+            url: '{{baseUrl}}/login?api_key=query-key-123&ref={{token}}&page=2',
+            headers: [
+              { id: 'h1', key: 'Authorization', value: 'Bearer header-token-456', enabled: true },
+              { id: 'h2', key: 'X-Trace', value: 'keep-me', enabled: true },
+            ],
+            auth: { type: 'bearer', token: 'typed-token-789' },
+          },
+        },
+        ws.id,
+      );
+      const typedEcho = JSON.parse(typed.body) as { headers: Record<string, string>; url: string };
+      check('history: typed credentials still go on the wire as typed', typedEcho.headers.authorization === 'Bearer header-token-456' && typedEcho.url === '/login?api_key=query-key-123&ref=s3cret&page=2', typedEcho.url);
+      const typedEntry = await latest();
+      check(
+        'history: a typed token, an Authorization header, a key parameter and a resolved secret are masked',
+        tokenOf(typedEntry) === REDACTED &&
+          typedEntry.request.headers[0].value === `Bearer ${REDACTED}` &&
+          typedEntry.request.headers[1].value === 'keep-me' &&
+          typedEntry.request.url === `{{baseUrl}}/login?api_key=${REDACTED}&ref={{token}}&page=2` &&
+          typedEntry.url === `http://127.0.0.1:${echoPort}/login?api_key=${REDACTED}&ref=${REDACTED}&page=2` &&
+          typedEntry.status === 200,
+        { url: typedEntry.url, request: typedEntry.request.url, auth: typedEntry.request.auth, headers: typedEntry.request.headers.map((h) => h.value) },
+      );
+      await run('api.request.send', { request: { ...saved, id: '', name: 'basic', url: '{{baseUrl}}/b', headers: [], auth: { type: 'basic', username: 'ada', password: 'hunter2-pw' } } }, ws.id);
+      const basicEntry = await latest();
+      await run('api.request.send', { request: { ...saved, id: '', name: 'key', url: '{{baseUrl}}/k', headers: [], auth: { type: 'apikey', key: 'appid', value: 'app-key-321', in: 'query' } } }, ws.id);
+      const keyEntry = await latest();
+      check(
+        'history: a basic password and an API key are masked, the user and the key name kept',
+        basicEntry.request.auth.type === 'basic' &&
+          basicEntry.request.auth.username === 'ada' &&
+          basicEntry.request.auth.password === REDACTED &&
+          keyEntry.request.auth.type === 'apikey' &&
+          keyEntry.request.auth.key === 'appid' &&
+          keyEntry.request.auth.value === REDACTED &&
+          keyEntry.url === `http://127.0.0.1:${echoPort}/k?appid=${REDACTED}`,
+        { basic: basicEntry.request.auth, key: keyEntry.request.auth, url: keyEntry.url },
+      );
+      const down = await host.invoke('api.request.send', { request: { ...saved, id: '', name: 'down', url: 'http://127.0.0.1:1/down', headers: [], auth: { type: 'bearer', token: 'down-token-654' } }, options: { timeoutMs: 3000 } }, { caller: 'ui', workspaceId: ws.id });
+      const downEntry = await latest();
+      check('history: a send that fails is masked as well', !down.ok && downEntry.error !== null && tokenOf(downEntry) === REDACTED, downEntry.error);
+      const historyText = await fs.readFile(historyFile, 'utf8');
+      const leaked = ['typed-token-789', 'header-token-456', 'query-key-123', 'hunter2-pw', 'app-key-321', 'down-token-654', 's3cret'].filter((s) => historyText.includes(s));
+      check('history: none of it is in the file on disk', leaked.length === 0 && historyText.trim().split('\n').length === 5, leaked);
+
+      // A log written by an older version still holds its credentials; it is rewritten when the workspace opens.
+      const legacyFolder = await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-smoke-legacy-'));
+      const legacyFile = path.join(legacyFolder, '.quiver', 'local', 'history.jsonl');
+      await fs.mkdir(path.dirname(legacyFile), { recursive: true });
+      const legacy: HistoryEntry[] = [
+        {
+          id: 'old1',
+          at: '2026-09-01T10:00:00.000Z',
+          requestId: null,
+          method: 'POST',
+          url: 'https://merchant.example.com/login?api_key=old-key-111',
+          status: 200,
+          durationMs: 5,
+          error: null,
+          request: { ...saved, url: 'https://merchant.example.com/login?api_key=old-key-111', headers: [{ id: 'h', key: 'authorization', value: 'Bearer old-token-333', enabled: true }], auth: { type: 'bearer', token: 'old-token-222' } },
+        },
+        { id: 'old2', at: '2026-09-02T10:00:00.000Z', requestId: saved.id, method: 'POST', url: 'https://merchant.example.com/things', status: 204, durationMs: 7, error: null, request: saved },
+      ];
+      await fs.writeFile(legacyFile, legacy.map((e) => JSON.stringify(e)).join('\n') + '\n');
+      const legacyWs = await run<WorkspaceInfo>('workspace.open', { path: legacyFolder }, null);
+      const legacyList = await run<HistoryEntry[]>('api.history.list', { limit: 10 }, legacyWs.id);
+      const legacyText = await fs.readFile(legacyFile, 'utf8');
+      check(
+        'history: entries written before masking are cleaned when the workspace opens, in the same order',
+        legacyList.map((e) => e.id).join() === 'old2,old1' &&
+          tokenOf(legacyList[1]) === REDACTED &&
+          legacyList[1].request.headers[0].value === `Bearer ${REDACTED}` &&
+          legacyList[1].url === `https://merchant.example.com/login?api_key=${REDACTED}` &&
+          tokenOf(legacyList[0]) === '{{token}}' &&
+          !/old-(token|key)-\d/.test(legacyText) &&
+          legacyText.trim().split('\n').length === 2,
+        { ids: legacyList.map((e) => e.id), onDisk: legacyText.match(/old-(token|key)-\d+/g) },
+      );
+      await run('workspace.close', { id: legacyWs.id }, null);
+      await run('workspace.forgetRecent', { path: legacyFolder }, null);
+      await fs.rm(legacyFolder, { recursive: true, force: true }).catch(() => {});
+    }
 
     const imported = await run<ApiRequest>('api.import.curl', { command: `curl -X PUT '{{baseUrl}}/a?b=c' -H 'X-A: 1' -d '{"k":1}'` }, ws.id);
     check('curl import', imported.method === 'PUT' && imported.body.type === 'json');

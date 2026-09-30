@@ -6,6 +6,7 @@ export * from './arrays';
 export * from './activity-bar';
 export * from './registry';
 export * from './variables';
+export * from './redact';
 export * from './curl';
 export * from './models/api';
 export * from './models/db';

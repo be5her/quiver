@@ -15,6 +15,8 @@ import {
   newId,
   nowIso,
   parseCurl,
+  redactHistoryEntry,
+  requestSecretValues,
   resolveDeep,
   toCurl,
   type ApiCollection,
@@ -33,6 +35,7 @@ import {
   listEnvironments,
   resolveVariableMap,
   saveEnvironment,
+  secretVariableValues,
   setActiveEnvironmentId,
   listResolvedVariables,
   setResolvedVariable,
@@ -43,6 +46,20 @@ import { graphqlEndpoint, introspect, readSchema } from './graphql';
 import { prepareRequest, sendPrepared } from './http';
 
 const HISTORY_LOG = 'history';
+
+/**
+ * History written before credentials were masked still holds them in plain text, so the log is
+ * rewritten once when its workspace opens. Reads and appends wait for that, so nothing is lost or reordered.
+ */
+const historyReady = new Map<string, Promise<void>>();
+
+async function scrubHistory(w: WorkspaceApi): Promise<void> {
+  const entries = (await w.store.readLog<HistoryEntry>(HISTORY_LOG, Number.MAX_SAFE_INTEGER)).reverse();
+  const clean = entries.map((entry) => redactHistoryEntry(entry));
+  if (JSON.stringify(clean) === JSON.stringify(entries)) return;
+  await w.store.clearLog(HISTORY_LOG);
+  for (const entry of clean) await w.store.appendLog(HISTORY_LOG, entry);
+}
 
 function ws(ctx: CommandContext): WorkspaceApi {
   return ctx.workspace!;
@@ -178,6 +195,11 @@ const requestSend = defineCommand({
     const options = SendOptionsSchema.parse(input.options ?? {});
     const { resolved } = await resolveRequest(ctx, request, input.environmentId);
     const prepared = prepareRequest(resolved);
+    // Known before sending, so a failed send is recorded just as carefully.
+    const secrets = {
+      names: resolved.auth.type === 'apikey' && resolved.auth.in === 'query' ? [resolved.auth.key] : [],
+      values: [...requestSecretValues(resolved), ...(await secretVariableValues(w, ctx.host, input.environmentId))],
+    };
 
     const entry: HistoryEntry = {
       id: newId(),
@@ -199,7 +221,11 @@ const requestSend = defineCommand({
       entry.error = err instanceof Error ? err.message : String(err);
       throw err;
     } finally {
-      if (input.record !== false) await w.store.appendLog(HISTORY_LOG, entry);
+      if (input.record !== false) {
+        await historyReady.get(w.id);
+        // The log is a plain file: credentials typed into the request, and secrets the URL resolved to, are masked before they reach it.
+        await w.store.appendLog(HISTORY_LOG, redactHistoryEntry(entry, secrets));
+      }
     }
   },
 });
@@ -429,10 +455,13 @@ const environmentSetActive = defineCommand({
 const historyList = defineCommand({
   id: 'api.history.list',
   title: 'Request history',
-  description: 'Most recent sent requests with status and timing.',
+  description: 'Most recent sent requests with status and timing. Tokens, passwords and API keys in them are masked; {{variable}} references are kept.',
   scope: 'workspace',
   input: z.object({ limit: z.number().int().min(1).max(500).default(50) }),
-  handler: async ({ limit }, ctx) => ws(ctx).store.readLog<HistoryEntry>(HISTORY_LOG, limit),
+  handler: async ({ limit }, ctx) => {
+    await historyReady.get(ws(ctx).id);
+    return (await ws(ctx).store.readLog<HistoryEntry>(HISTORY_LOG, limit)).map((entry) => redactHistoryEntry(entry));
+  },
 });
 
 const historyClear = defineCommand({
@@ -443,6 +472,7 @@ const historyClear = defineCommand({
   mutating: true,
   input: z.object({}),
   handler: async (_i, ctx) => {
+    await historyReady.get(ws(ctx).id);
     await ws(ctx).store.clearLog(HISTORY_LOG);
     ctx.host.emit('store.changed', { workspaceId: ws(ctx).id, collection: 'history' });
     return { cleared: true };
@@ -507,6 +537,15 @@ const suggestName = defineCommand({
 
 export const apiModule = defineModule({
   id: 'api',
+  onWorkspaceOpen: (w) => {
+    historyReady.set(
+      w.id,
+      scrubHistory(w).catch((err) => console.warn(`[quiver] could not mask credentials in the request history of ${w.path}: ${(err as Error).message}`)),
+    );
+  },
+  onWorkspaceClose: (w) => {
+    historyReady.delete(w.id);
+  },
   commands: [
     requestList,
     requestGet,
