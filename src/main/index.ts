@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { BrowserWindow, app, dialog, safeStorage } from 'electron';
+import { BrowserWindow, app, dialog, safeStorage, shell } from 'electron';
 import type { SecretsApi } from '@quiver/core';
 import { Host } from './host';
 import { registerIpc } from './ipc';
@@ -13,6 +13,13 @@ import { createMainWindow } from './window';
 process.env.QUIVER_VERSION = app.getVersion();
 // Windows groups taskbar entries and notifications by this id; the installer gives the shortcut the same one.
 app.setAppUserModelId('dev.quiver.app');
+if (process.env.QUIVER_SMOKE) {
+  // The smoke's UI checks need a window that keeps painting: Chromium stops drawing one that other windows cover,
+  // and then screenshots go stale and wheel and drag input is never delivered.
+  app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
+  app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+  app.commandLine.appendSwitch('disable-renderer-backgrounding');
+}
 
 function makeSecrets(): SecretsApi {
   const available = safeStorage.isEncryptionAvailable();
@@ -50,6 +57,17 @@ async function pickFile(options: { title?: string; filters?: { name: string; ext
   return result.canceled ? undefined : result.filePaths[0];
 }
 
+async function pickSavePath(options: { title?: string; filters?: { name: string; extensions: string[] }[]; defaultPath?: string } = {}): Promise<string | undefined> {
+  const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+  const result = await dialog.showSaveDialog(win, { title: options.title, filters: options.filters, defaultPath: options.defaultPath });
+  return result.canceled ? undefined : result.filePath;
+}
+
+async function revealFolder(folder: string): Promise<void> {
+  const error = await shell.openPath(folder);
+  if (error) throw new Error(error);
+}
+
 let host: Host | null = null;
 
 async function main(): Promise<void> {
@@ -75,6 +93,8 @@ async function main(): Promise<void> {
     broadcast,
     pickFolder,
     pickFile,
+    pickSavePath,
+    revealFolder: process.env.QUIVER_SMOKE ? undefined : revealFolder,
     updates,
   });
   registerIpc(host);

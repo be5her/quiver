@@ -1,7 +1,7 @@
 import { toErrorPayload, type Environment, type Variable } from '@quiver/core';
-import { Button, Checkbox, Input, KeyValueEditor, Spinner, invoke, notify, useTabsStore, type TabProps } from '@quiver/ui';
+import { Button, Checkbox, Input, KeyValueEditor, Spinner, invoke, notify, onHostEvent, useTabsStore, type TabProps } from '@quiver/ui';
 import { Save } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 export function EnvironmentTab({ tab, scope }: TabProps) {
   const id = String(tab.data?.id ?? '');
@@ -25,6 +25,26 @@ export function EnvironmentTab({ tab, scope }: TabProps) {
   }, [id]);
 
   const dirty = useMemo(() => JSON.stringify(env) !== JSON.stringify(saved), [env, saved]);
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+
+  // Pick up changes made elsewhere (a variable edited from its hover card, an agent, the file on
+  // disk) unless there are unsaved edits here, which saving would then write over.
+  useEffect(
+    () =>
+      onHostEvent('store.changed', (p) => {
+        if (p.workspaceId !== scope || p.collection !== 'environments' || dirtyRef.current) return;
+        invoke<Environment>('api.environment.get', { id }, scope)
+          .then((e) => {
+            if (dirtyRef.current) return;
+            setEnv(e);
+            setSaved(e);
+          })
+          .catch(() => undefined);
+      }),
+    [id, scope],
+  );
+
   useEffect(() => {
     if (tab.dirty !== dirty) updateTab(scope, tab.id, { dirty });
   }, [dirty, scope, tab.id, tab.dirty, updateTab]);

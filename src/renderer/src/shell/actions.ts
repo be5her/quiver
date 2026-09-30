@@ -18,9 +18,47 @@ export async function openWorkspace(path?: string): Promise<void> {
 }
 
 export async function closeWorkspace(id: string): Promise<void> {
-  const tabs = useTabsStore.getState().scopes[id]?.tabs ?? [];
-  if (tabs.some((t) => t.dirty) && !(await confirmDialog({ title: 'Close workspace with unsaved tabs?', danger: true, confirmLabel: 'Close' }))) return;
-  await invoke('workspace.close', { id }, null);
+  await closeWorkspaces([id]);
+}
+
+/** Close several tabs of a scope at once, asking first when any of them has unsaved changes. */
+export async function closeTabs(scope: string, ids: string[]): Promise<void> {
+  const { tabs } = useTabsStore.getState().scopes[scope] ?? { tabs: [] };
+  const closing = tabs.filter((t) => ids.includes(t.id));
+  const dirty = closing.filter((t) => t.dirty);
+  if (dirty.length) {
+    const ok = await confirmDialog({
+      title: dirty.length === 1 ? `Close "${dirty[0].title}" with unsaved changes?` : `Close ${dirty.length} tabs with unsaved changes?`,
+      message: 'Unsaved changes in those tabs are lost.',
+      danger: true,
+      confirmLabel: 'Close',
+    });
+    if (!ok) return;
+  }
+  useTabsStore.getState().closeWhere(scope, (t) => ids.includes(t.id));
+}
+
+/** Close several workspaces, with one question for all their unsaved tabs. */
+export async function closeWorkspaces(ids: string[]): Promise<void> {
+  const scopes = useTabsStore.getState().scopes;
+  const dirty = ids.filter((id) => scopes[id]?.tabs.some((t) => t.dirty));
+  if (dirty.length && !(await confirmDialog({ title: dirty.length === 1 && ids.length === 1 ? 'Close workspace with unsaved tabs?' : `Close ${ids.length} workspaces, ${dirty.length} with unsaved tabs?`, danger: true, confirmLabel: 'Close' }))) return;
+  for (const id of ids) await invoke('workspace.close', { id }, null);
+}
+
+export async function revealWorkspace(id: string): Promise<void> {
+  try {
+    await invoke('workspace.reveal', { id }, null);
+  } catch (err) {
+    notify(toErrorPayload(err).message, 'error');
+  }
+}
+
+export function copyText(text: string, what = 'Copied'): void {
+  void navigator.clipboard.writeText(text).then(
+    () => notify(what, 'success'),
+    () => notify('Could not copy to the clipboard', 'error'),
+  );
 }
 
 export async function toggleTheme(): Promise<void> {

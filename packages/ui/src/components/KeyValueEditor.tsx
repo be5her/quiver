@@ -1,7 +1,8 @@
 import { keyValue, type KeyValue } from '@quiver/core';
 import { Plus, Trash2 } from 'lucide-react';
 import { cn } from '../cn';
-import { Checkbox, IconButton, Input } from './primitives';
+import { Checkbox, IconButton } from './primitives';
+import { VariableInput } from './Variables';
 
 export interface KeyValueEditorProps<T extends KeyValue> {
   rows: T[];
@@ -42,14 +43,14 @@ export function KeyValueEditor<T extends KeyValue>({
         {rows.map((row) => (
           <div key={row.id} className="grid grid-cols-[24px_1fr_1fr_auto] gap-1 items-center px-1">
             <Checkbox checked={row.enabled} onChange={(e) => update(row.id, { enabled: e.target.checked } as Partial<T>)} disabled={readOnly} />
-            <Input
+            <VariableInput
               value={row.key}
               placeholder={keyPlaceholder}
               onChange={(e) => update(row.id, { key: e.target.value } as Partial<T>)}
               readOnly={readOnly}
               className="h-7 font-mono text-xs"
             />
-            <Input
+            <VariableInput
               value={row.value}
               placeholder={valuePlaceholder}
               onChange={(e) => update(row.id, { value: e.target.value } as Partial<T>)}

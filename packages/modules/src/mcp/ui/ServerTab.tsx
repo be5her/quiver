@@ -10,10 +10,11 @@ import {
   type McpServer,
   type McpServerSummary,
 } from '@quiver/core';
-import { Badge, Button, Checkbox, Input, KeyValueEditor, Label, Segmented, Select, Spinner, cn, invoke, notify, onHostEvent, useTabsStore, type TabProps } from '@quiver/ui';
+import { Badge, Button, Checkbox, Input, KeyValueEditor, Label, Segmented, Select, Spinner, cn, invoke, notify, onHostEvent, useTabsStore, VariableInput, type TabProps } from '@quiver/ui';
 import { Activity, Plug, Save, Trash2, Unplug } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AuthEditor } from '../../api/ui/RequestTab';
+import { ApiVariablesProvider } from '../../api/ui/variables';
 import { LogView } from './LogView';
 import { PromptsView } from './PromptsView';
 import { ResourcesView } from './ResourcesView';
@@ -31,7 +32,15 @@ function definitionOf(summary: McpServerSummary): McpServer {
   return McpServerSchema.parse(summary);
 }
 
-export function ServerTab({ tab, scope }: TabProps) {
+export function ServerTab(props: TabProps) {
+  return (
+    <ApiVariablesProvider>
+      <ServerTabBody {...props} />
+    </ApiVariablesProvider>
+  );
+}
+
+function ServerTabBody({ tab, scope }: TabProps) {
   const serverId = String(tab.data?.id ?? '');
   const [summary, setSummary] = useState<McpServerSummary | null>(null);
   const [draft, setDraft] = useState<McpServer | null>(null);
@@ -191,7 +200,7 @@ export function ServerTab({ tab, scope }: TabProps) {
       </div>
       <div className="flex items-center gap-2 px-3 py-2 shrink-0">
         {isStdio ? (
-          <Input
+          <VariableInput
             value={commandLine}
             onChange={(e) => setCommand(e.target.value)}
             placeholder="npx -y @modelcontextprotocol/server-filesystem {{projectDir}}"
@@ -203,7 +212,7 @@ export function ServerTab({ tab, scope }: TabProps) {
             }}
           />
         ) : (
-          <Input
+          <VariableInput
             value={draft.url}
             onChange={(e) => patch({ url: e.target.value })}
             placeholder={draft.transport === 'sse' ? 'https://{{host}}/sse' : 'https://{{host}}/mcp'}

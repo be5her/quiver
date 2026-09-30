@@ -1,3 +1,5 @@
+import type { ActivityBarLayout } from './activity-bar';
+import type { McpRecordingStatus } from './models/mcp-recording';
 import type { z } from 'zod';
 
 export type Caller = 'ui' | 'mcp' | 'cli' | 'system';
@@ -76,6 +78,8 @@ export interface GlobalConfig {
   teleport: TeleportConfig;
   mock: MockConfig;
   updates: UpdatesConfig;
+  /** The user's order of the activity bar and the modules hidden from it. */
+  activityBar: ActivityBarLayout;
 }
 
 /** Which releases the in-app updater follows. `beta` adds the Windows prereleases built from every merge to main. */
@@ -235,6 +239,8 @@ export interface HostEvents {
   'state.changed': { workspaceId: string; key: string };
   'mcp.status': { running: boolean; port: number; error?: string };
   'mcp.call': { tool: string; workspaceId?: string; ok: boolean; durationMs: number; at: string };
+  /** The recording of agent calls started, paused, ended or was dropped, or a call was recorded. Bursts of calls arrive as one event. */
+  'mcp.recording': McpRecordingStatus;
   /** Teleport session status, login progress, pins or tunnel list changed. Fetch teleport.status for details. */
   'teleport.changed': { reason: 'status' | 'tunnels' | 'login' | 'pins' };
   /** Kubernetes queries: the local history changed, or a followed log stream has new lines or ended. */
@@ -247,6 +253,8 @@ export interface HostEvents {
   'mcp.changed': { workspaceId: string; serverId: string; reason: 'status' | 'servers' | 'lists' | 'log' };
   /** Env files: a dotenv file or .gitignore changed on disk (from Quiver or outside), or a backup was taken. */
   'env.changed': { workspaceId: string; reason: 'files'; path?: string };
+  /** The workspace's todo list changed. */
+  'todo.changed': { workspaceId: string };
   /** The in-app updater moved: checking, a version found, download progress, downloaded, or an error. */
   'app.update': UpdateState;
 }

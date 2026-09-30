@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildVariableMap, findUnresolved, resolveDeep, resolveTemplate } from './variables';
+import { buildVariableMap, findUnresolved, findVariableSpans, isDynamicVariable, resolveDeep, resolveTemplate, setVariableValue, defineVariableIn, DEFINABLE_VARIABLE_NAME } from './variables';
 
 const vars = buildVariableMap([
   [
@@ -34,5 +34,73 @@ describe('variables', () => {
   it('resolves nested structures', () => {
     const out = resolveDeep({ a: '{{host}}', b: [{ c: '{{token}}' }], d: 3 }, vars);
     expect(out).toEqual({ a: 'env.example', b: [{ c: 'global-token' }], d: 3 });
+  });
+});
+
+describe('findVariableSpans', () => {
+  it('finds every placeholder with its offsets and trimmed name', () => {
+    const text = 'https://{{host}}/v1/{{ id }}?t={{$uuid}}';
+    const spans = findVariableSpans(text);
+    expect(spans.map((s) => s.name)).toEqual(['host', 'id', '$uuid']);
+    expect(spans.map((s) => text.slice(s.from, s.to))).toEqual(['{{host}}', '{{ id }}', '{{$uuid}}']);
+  });
+
+  it('ignores text that is not a placeholder', () => {
+    expect(findVariableSpans('')).toEqual([]);
+    expect(findVariableSpans('no vars')).toEqual([]);
+    expect(findVariableSpans('{{}} {{1abc}} {{ spaced name }} {single}')).toEqual([]);
+  });
+
+  it('knows the built-in dynamic variables', () => {
+    expect(isDynamicVariable('$uuid')).toBe(true);
+    expect(isDynamicVariable('uuid')).toBe(false);
+  });
+});
+
+describe('setVariableValue', () => {
+  const row = (id: string, key: string, value: string, enabled = true) => ({ id, key, value, enabled });
+
+  it('changes the row that resolution picks: the last enabled one with the key', () => {
+    const layer = [row('a', 'host', 'one'), row('b', ' host ', 'two'), row('c', 'host', 'three', false), row('d', 'other', 'x')];
+    const next = setVariableValue(layer, 'host', 'new');
+    expect(next?.map((v) => v.value)).toEqual(['one', 'new', 'three', 'x']);
+    expect(buildVariableMap([next!]).host).toBe('new');
+    expect(layer[1].value).toBe('two');
+  });
+
+  it('returns null when no enabled row has the key', () => {
+    expect(setVariableValue([row('a', 'host', 'one', false)], 'host', 'new')).toBeNull();
+    expect(setVariableValue([], 'host', 'new')).toBeNull();
+  });
+});
+
+describe('defineVariableIn', () => {
+  const row = (id: string, key: string, value: string, enabled = true) => ({ id, key, value, enabled });
+
+  it('appends an enabled row when the name is not defined, keeping disabled rows', () => {
+    const layer = [row('a', 'host', 'one', false)];
+    const next = defineVariableIn(layer, 'host', 'two', 'new-id', true);
+    expect(next).toEqual([row('a', 'host', 'one', false), { id: 'new-id', key: 'host', value: 'two', enabled: true, secret: true }]);
+    expect(buildVariableMap([next]).host).toBe('two');
+  });
+
+  it('updates the row resolution picks when the name is defined', () => {
+    const next = defineVariableIn([row('a', 'host', 'one'), row('b', 'host', 'two')], 'host', 'new', 'unused');
+    expect(next.map((v) => v.value)).toEqual(['one', 'new']);
+    expect(next).toHaveLength(2);
+    expect(defineVariableIn(next, 'host', 'x', 'unused', true)[1].secret).toBe(true);
+  });
+
+  it('never turns an existing secret into a plain value', () => {
+    const layer = [{ ...row('a', 'token', ''), secret: true }];
+    expect(defineVariableIn(layer, 'token', 'new', 'unused', false)[0]).toEqual({ id: 'a', key: 'token', value: 'new', enabled: true, secret: true });
+    expect(defineVariableIn(layer, 'token', 'new', 'unused')[0].secret).toBe(true);
+  });
+
+  it('accepts ordinary names and refuses built-in and malformed ones', () => {
+    expect(DEFINABLE_VARIABLE_NAME.test('partnerName')).toBe(true);
+    expect(DEFINABLE_VARIABLE_NAME.test('api.v2-key')).toBe(true);
+    expect(DEFINABLE_VARIABLE_NAME.test('$uuid')).toBe(false);
+    expect(DEFINABLE_VARIABLE_NAME.test('9lives')).toBe(false);
   });
 });

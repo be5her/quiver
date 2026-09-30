@@ -1,4 +1,4 @@
-import { newId } from '@quiver/core';
+import { moveItem, newId } from '@quiver/core';
 import { create } from 'zustand';
 
 export interface Tab {
@@ -25,6 +25,8 @@ interface TabsState {
   closeOthers(scope: string, id: string): void;
   closeAll(scope: string): void;
   setActiveTab(scope: string, id: string | null): void;
+  /** Reorder: the tab ends up at index `to`. */
+  moveTab(scope: string, id: string, to: number): void;
   updateTab(scope: string, id: string, patch: Partial<Tab>): void;
   hydrate(scope: string, tabs: Tab[], activeTabId: string | null): void;
   /** Close tabs of the given type whose data matches, e.g. after deleting the underlying item. */
@@ -75,6 +77,14 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   closeAll: (scope) => set((s) => withScope(s, scope, (sc) => ({ ...sc, tabs: [], activeTabId: null }))),
 
   setActiveTab: (scope, id) => set((s) => withScope(s, scope, (sc) => ({ ...sc, activeTabId: id }))),
+
+  moveTab: (scope, id, to) =>
+    set((s) =>
+      withScope(s, scope, (sc) => {
+        const from = sc.tabs.findIndex((t) => t.id === id);
+        return from < 0 || from === to ? sc : { ...sc, tabs: moveItem(sc.tabs, from, to) };
+      }),
+    ),
 
   updateTab: (scope, id, patch) =>
     set((s) => withScope(s, scope, (sc) => ({ ...sc, tabs: sc.tabs.map((t) => (t.id === id ? { ...t, ...patch } : t)) }))),

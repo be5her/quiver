@@ -1,7 +1,7 @@
 import { PALETTES, resolvePalette, type GlobalConfig, type TeleportStatus, type UpdateState, type Variable } from '@quiver/core';
 import { Button, Checkbox, Input, KeyValueEditor, Label, Select, applyTheme, cn, invoke, notify, useAppStore, useInvoke, type TabProps } from '@quiver/ui';
 import { Copy, Download, ExternalLink, RotateCw, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { QuiverMark } from './Logo';
 import { checkForUpdates, downloadUpdate, installUpdate, openExternal, setUpdateChannel } from './updates';
 
@@ -18,9 +18,14 @@ export function SettingsTab(_props: TabProps) {
   const [tshPath, setTshPath] = useState('');
   const teleport = useInvoke<TeleportStatus>('teleport.status', {}, { workspaceId: null, refreshOnEvents: ['teleport.changed'] });
 
+  // Unsaved edits to the global variables survive other config changes (the theme, a variable
+  // edited from its hover card); an untouched list follows the stored one.
+  const storedGlobals = useRef<Variable[] | null>(null);
   useEffect(() => {
     if (config) {
-      setGlobals(config.globalVariables);
+      const previous = storedGlobals.current;
+      setGlobals((current) => (previous === null || JSON.stringify(current) === JSON.stringify(previous) ? config.globalVariables : current));
+      storedGlobals.current = config.globalVariables;
       setPort(config.mcp.port);
       setTshPath(config.teleport.tshPath);
     }

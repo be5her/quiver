@@ -6,7 +6,8 @@ import { mcpModuleUI } from './mcp/ui';
 import { mockModuleUI } from './mock/ui';
 import { realtimeModuleUI } from './realtime/ui';
 import { teleportModuleUI } from './teleport/ui';
+import { todoModuleUI } from './todo/ui';
 import { toolsModuleUI } from './tools/ui';
 
 /** Renderer-side module list, mirrored by `mainModules` in `main.ts`. */
-export const uiModules: ModuleUI[] = [apiModuleUI, dbModuleUI, envModuleUI, mcpModuleUI, mockModuleUI, realtimeModuleUI, teleportModuleUI, toolsModuleUI].sort((a, b) => a.order - b.order);
+export const uiModules: ModuleUI[] = [apiModuleUI, dbModuleUI, envModuleUI, mcpModuleUI, mockModuleUI, realtimeModuleUI, teleportModuleUI, todoModuleUI, toolsModuleUI].sort((a, b) => a.order - b.order);

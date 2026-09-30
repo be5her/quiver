@@ -1,4 +1,4 @@
-import { buildVariableMap, type Environment, type HostApi, type Variable, type WorkspaceApi } from '@quiver/core';
+import { DYNAMIC_VARIABLE_HELP, QuiverError, buildVariableMap, defineVariableIn, newId, setVariableValue, type Environment, type HostApi, type Variable, type WorkspaceApi } from '@quiver/core';
 
 export const COLLECTIONS = {
   requests: 'requests',
@@ -104,4 +104,103 @@ export async function resolveVariableMap(ws: WorkspaceApi, host: HostApi, enviro
   return buildVariableMap(layers);
 }
 
+/** The values of the secret variables a request sent with this environment can resolve: what must never be written down in plain text. */
+export async function secretVariableValues(ws: WorkspaceApi, host: HostApi, environmentId?: string | null): Promise<string[]> {
+  const envId = environmentId === undefined ? await getActiveEnvironmentId(ws) : environmentId;
+  const env = envId ? await getEnvironment(ws, host, envId) : undefined;
+  return [...host.config.get().globalVariables, ...(env?.variables ?? [])].filter((v) => v.enabled && v.secret && v.value).map((v) => v.value);
+}
+
 export const ACTIVE_ENVIRONMENT_STATE_KEY = ACTIVE_ENV_KEY;
+
+export interface ResolvedVariable {
+  name: string;
+  /** Null for built-in dynamic variables, which get a new value on every send. */
+  value: string | null;
+  secret: boolean;
+  source: 'global' | 'environment' | 'dynamic';
+  /** Set when an environment value hides a global one of the same name. */
+  overridesGlobal?: boolean;
+  help?: string;
+}
+
+/** Every variable a `{{name}}` can reach right now, in resolution order, with where it comes from. */
+export async function listResolvedVariables(
+  ws: WorkspaceApi,
+  host: HostApi,
+  mask: boolean,
+): Promise<{ environment: { id: string; name: string } | null; environments: { id: string; name: string }[]; variables: ResolvedVariable[] }> {
+  const byName = new Map<string, ResolvedVariable>();
+  for (const v of host.config.get().globalVariables) {
+    if (!v.enabled || !v.key.trim()) continue;
+    const secret = Boolean(v.secret);
+    byName.set(v.key.trim(), { name: v.key.trim(), value: secret && mask ? MASK : v.value, secret, source: 'global' });
+  }
+  const envId = await getActiveEnvironmentId(ws);
+  const env = envId ? await getEnvironment(ws, host, envId, mask) : undefined;
+  for (const v of env?.variables ?? []) {
+    if (!v.enabled || !v.key.trim()) continue;
+    const name = v.key.trim();
+    byName.set(name, { name, value: v.value, secret: Boolean(v.secret), source: 'environment', overridesGlobal: byName.get(name)?.source === 'global' || undefined });
+  }
+  for (const [name, help] of Object.entries(DYNAMIC_VARIABLE_HELP)) {
+    if (!byName.has(name)) byName.set(name, { name, value: null, secret: false, source: 'dynamic', help });
+  }
+  const environments = (await ws.store.list<Environment>(COLLECTIONS.environments)).map((e) => ({ id: e.id, name: e.name })).sort((a, b) => a.name.localeCompare(b.name));
+  return { environment: env ? { id: env.id, name: env.name } : null, environments, variables: [...byName.values()] };
+}
+
+/** Where `{{name}}` resolves from right now: the active environment wins over the globals. */
+export async function variableSource(ws: WorkspaceApi, host: HostApi, name: string): Promise<'environment' | 'global' | null> {
+  const envId = await getActiveEnvironmentId(ws);
+  const env = envId ? await ws.store.get<Environment>(COLLECTIONS.environments, envId) : undefined;
+  if (env && setVariableValue(env.variables, name, '')) return 'environment';
+  if (setVariableValue(host.config.get().globalVariables, name, '')) return 'global';
+  return null;
+}
+
+/**
+ * Change the value `{{name}}` resolves to, where it is defined: the active environment (secrets
+ * stay encrypted) or the global variables. Unknown names are refused rather than created.
+ */
+export async function setResolvedVariable(ws: WorkspaceApi, host: HostApi, name: string, value: string): Promise<{ name: string; source: 'environment' | 'global' }> {
+  const envId = await getActiveEnvironmentId(ws);
+  const env = envId ? await getEnvironment(ws, host, envId) : undefined;
+  const envRows = env && setVariableValue(env.variables, name, value);
+  if (env && envRows) {
+    await saveEnvironment(ws, host, { ...env, variables: envRows });
+    return { name, source: 'environment' };
+  }
+  const globalRows = setVariableValue(host.config.get().globalVariables, name, value);
+  if (globalRows) {
+    await host.config.update({ globalVariables: globalRows });
+    return { name, source: 'global' };
+  }
+  throw new QuiverError('NOT_FOUND', `No variable named ${name} in the active environment or the global variables`);
+}
+
+export type VariableTarget = { kind: 'environment'; id: string } | { kind: 'global' };
+
+/**
+ * Give `{{name}}` a value in a chosen place: any environment (a secret there is encrypted on
+ * this machine) or the global variables, which are plain config and so take no secrets.
+ * An existing definition in that place is updated rather than duplicated.
+ */
+export async function defineVariable(
+  ws: WorkspaceApi,
+  host: HostApi,
+  name: string,
+  value: string,
+  target: VariableTarget,
+  secret?: boolean,
+): Promise<{ name: string; target: VariableTarget; environmentName?: string }> {
+  if (target.kind === 'global') {
+    if (secret) throw new QuiverError('INVALID_INPUT', 'Global variables are stored in plain config; keep secrets in an environment');
+    await host.config.update({ globalVariables: defineVariableIn(host.config.get().globalVariables, name, value, newId()) });
+    return { name, target };
+  }
+  const env = await getEnvironment(ws, host, target.id);
+  if (!env) throw new QuiverError('NOT_FOUND', `Environment ${target.id} not found`);
+  await saveEnvironment(ws, host, { ...env, variables: defineVariableIn(env.variables, name, value, newId(), secret) });
+  return { name, target, environmentName: env.name };
+}

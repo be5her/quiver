@@ -1,5 +1,5 @@
-import type { CommandMeta, GlobalConfig, UpdateState, WorkspaceInfo } from '@quiver/core';
-import { DialogHost, ToastHost, applyTheme, invoke, onHostEvent, useAppStore, watchSystemTheme } from '@quiver/ui';
+import { arrangeActivityBar, type CommandMeta, type GlobalConfig, type UpdateState, type WorkspaceInfo } from '@quiver/core';
+import { ContextMenuHost, DialogHost, ToastHost, VariableHoverHost, applyTheme, invoke, onHostEvent, useAppStore, watchSystemTheme } from '@quiver/ui';
 import { useEffect } from 'react';
 import { ActivityBar } from './shell/ActivityBar';
 import { CommandPalette } from './shell/CommandPalette';
@@ -10,13 +10,14 @@ import { TabContent } from './shell/TabContent';
 import { TitleBar } from './shell/TitleBar';
 import { handleShortcut, registerShellActions } from './shell/actions';
 import { modules } from './shell/modules';
-import { useTabPersistence } from './shell/persistence';
+import { useTabPersistence, useTreePersistence } from './shell/persistence';
 import { handleUpdateEvent } from './shell/updates';
 
 export function App() {
   const ready = useAppStore((s) => s.ready);
   useBootstrap();
   useTabPersistence();
+  useTreePersistence();
   useDefaultModule();
 
   if (!ready) return <div className="h-full bg-canvas" />;
@@ -34,6 +35,8 @@ export function App() {
       </div>
       <StatusBar />
       <CommandPalette />
+      <ContextMenuHost />
+      <VariableHoverHost />
       <DialogHost />
       <ToastHost />
     </div>
@@ -94,10 +97,16 @@ function useDefaultModule() {
   const activeWorkspaceId = useAppStore((s) => s.activeWorkspaceId);
   const activeModuleByScope = useAppStore((s) => s.activeModuleByScope);
   const setActiveModule = useAppStore((s) => s.setActiveModule);
+  const layout = useAppStore((s) => s.config?.activityBar);
   useEffect(() => {
     const scope = activeWorkspaceId ?? '__global__';
-    if (activeModuleByScope[scope]) return;
-    const candidate = modules.find((m) => (activeWorkspaceId ? true : m.availability === 'always'));
+    // Wait for the config, so the first module follows the user's activity bar order.
+    if (activeModuleByScope[scope] || !layout) return;
+    const shown = arrangeActivityBar(
+      modules.map((m) => m.id),
+      layout,
+    ).visible.map((id) => modules.find((m) => m.id === id)!);
+    const candidate = shown.find((m) => (activeWorkspaceId ? true : m.availability === 'always'));
     if (candidate) setActiveModule(candidate.id);
-  }, [activeWorkspaceId, activeModuleByScope, setActiveModule]);
+  }, [activeWorkspaceId, activeModuleByScope, setActiveModule, layout]);
 }

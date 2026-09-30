@@ -8,6 +8,7 @@ import {
   invoke,
   notify,
   promptDialog,
+  useExpanded,
   useInvoke,
   useAppStore,
   useTabsStore,
@@ -15,7 +16,7 @@ import {
   statusColor,
 } from '@quiver/ui';
 import { Braces, ChevronDown, ChevronRight, Copy, FolderPlus, Import, Pencil, Plus, Trash2, Check } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { createEnvironment, createGraphqlRequest, createRequest, importCurl, openEnvironmentTab, openRequestTab } from './index';
 
 export function ApiSidebar() {
@@ -24,8 +25,8 @@ export function ApiSidebar() {
   const environments = useInvoke<Environment[]>('api.environment.list', {}, { refreshOn: ['environments'] });
   const active = useInvoke<{ id: string | null }>('api.environment.active', {}, { refreshOnState: ['api.activeEnvironment'] });
   const history = useInvoke<HistoryEntry[]>('api.history.list', { limit: 30 }, { refreshOn: ['history'] });
-  const [historyOpen, setHistoryOpen] = useState(false);
-  const [envOpen, setEnvOpen] = useState(true);
+  const [historyOpen, toggleHistory] = useExpanded('api/section/history');
+  const [envOpen, toggleEnv] = useExpanded('api/section/environments', true);
 
   return (
     <div className="flex flex-col h-full min-h-0 overflow-y-auto text-sm">
@@ -56,7 +57,7 @@ export function ApiSidebar() {
       <div className="mt-3">
         <SectionHeader
           title={
-            <button type="button" className="flex items-center gap-1" onClick={() => setEnvOpen((o) => !o)}>
+            <button type="button" className="flex items-center gap-1" onClick={toggleEnv}>
               {envOpen ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />} Environments
             </button>
           }
@@ -98,7 +99,7 @@ export function ApiSidebar() {
       <div className="mt-3">
         <SectionHeader
           title={
-            <button type="button" className="flex items-center gap-1" onClick={() => setHistoryOpen((o) => !o)}>
+            <button type="button" className="flex items-center gap-1" onClick={toggleHistory}>
               {historyOpen ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />} History
             </button>
           }
@@ -162,12 +163,12 @@ function CollectionTree({ collections, requests, parentId, depth }: { collection
 }
 
 function CollectionNode({ collection, collections, requests, depth }: { collection: ApiCollection; collections: ApiCollection[]; requests: ApiRequest[]; depth: number }) {
-  const [open, setOpen] = useState(true);
+  const [open, toggle] = useExpanded(`api/collection/${collection.id}`, true);
   return (
-    <div>
+    <div data-testid="api-collection" data-name={collection.name} data-open={open ? 'true' : 'false'}>
       <Row
         depth={depth}
-        onClick={() => setOpen((o) => !o)}
+        onClick={toggle}
         prefix={open ? <ChevronDown className="size-3.5 text-muted" /> : <ChevronRight className="size-3.5 text-muted" />}
         label={collection.name}
         bold

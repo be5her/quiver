@@ -43,7 +43,7 @@ mac:
       arch: [x64, arm64]
   category: public.app-category.developer-tools
   artifactName: ${productName}-${version}-mac-${arch}.${ext}
-  # Unsigned until an Apple Developer certificate is added; see README "Releasing".
+  # Unsigned until an Apple Developer certificate is added; see docs/releasing.md.
   identity: null
 
 linux:

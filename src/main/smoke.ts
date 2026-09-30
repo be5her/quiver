@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import type { BrowserWindow } from 'electron';
 import { buildSchema, graphql as executeGraphql } from 'graphql';
 import type { WebSocket as WsSocket } from 'ws';
-import { DEFAULT_PALETTE, capabilityLabels, contentText, expandUriTemplate, resolvePalette, skeletonFromSchema } from '@quiver/core';
+import { DEFAULT_PALETTE, REDACTED, capabilityLabels, contentText, expandUriTemplate, resolvePalette, skeletonFromSchema } from '@quiver/core';
 import type {
   ApiRequest,
   ApiResponse,
@@ -36,6 +36,10 @@ import type {
   McpPrompt,
   McpPromptResult,
   McpReadResourceResult,
+  McpRecordedCall,
+  McpRecordedCallSummary,
+  McpRecordingFile,
+  McpRecordingStatus,
   McpResource,
   McpResourceTemplate,
   McpServerSummary,
@@ -58,6 +62,7 @@ import type {
   TeleportTunnel,
   UpdateState,
   WorkspaceInfo,
+  TodoItem,
 } from '@quiver/core';
 import type { Host } from './host';
 import { startFakeMcpHttp, writeFakeMcpStdio } from './smoke-mcp';
@@ -279,6 +284,84 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     const onDisk = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'environments', `${env.id}.json`), 'utf8')) as Environment;
     check('secret not written to committed file', onDisk.variables[1].value === '');
     await run('api.environment.setActive', { id: env.id }, ws.id);
+    type VarList = { environment: { name: string } | null; variables: { name: string; value: string | null; secret: boolean; source: string }[] };
+    const varsForUi = await run<VarList>('api.variables.list', {}, ws.id);
+    const varsForAgent = await host.invoke('api.variables.list', {}, { caller: 'mcp', workspaceId: ws.id });
+    const agentToken = varsForAgent.ok ? (varsForAgent.result as VarList).variables.find((v) => v.name === 'token') : undefined;
+    check(
+      'api.variables.list: the active environment and built-ins, secrets shown to the UI and masked for agents',
+      varsForUi.environment?.name === 'local' &&
+        varsForUi.variables.find((v) => v.name === 'baseUrl')?.source === 'environment' &&
+        varsForUi.variables.find((v) => v.name === 'token')?.value === 's3cret' &&
+        varsForUi.variables.find((v) => v.name === '$uuid')?.source === 'dynamic' &&
+        agentToken?.value === '••••••••' && agentToken.secret,
+      { ui: varsForUi.variables.map((v) => `${v.name}:${v.source}`), agentToken },
+    );
+
+    // api.variables.set changes a value where it is defined, keeping secrets encrypted; globals are gated for agents.
+    const globalsBefore = host.config.get().globalVariables;
+    await run('config.update', { patch: { globalVariables: [...globalsBefore, { id: 'g1', key: 'region', value: 'eu', enabled: true }] } }, null);
+    const setSecret = await run<{ source: string }>('api.variables.set', { name: 'token', value: 'n3w' }, ws.id);
+    const tokenAfterSet = (await run<VarList>('api.variables.list', {}, ws.id)).variables.find((v) => v.name === 'token');
+    const diskAfterSet = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'environments', `${env.id}.json`), 'utf8')) as Environment;
+    check(
+      'api.variables.set: updates the active environment and keeps a secret out of the committed file',
+      setSecret.source === 'environment' && tokenAfterSet?.value === 'n3w' && tokenAfterSet.secret && diskAfterSet.variables[1].value === '' && diskAfterSet.variables[1].secret === true,
+      { setSecret, tokenAfterSet, disk: diskAfterSet.variables[1] },
+    );
+    await run('api.variables.set', { name: 'token', value: 's3cret' }, ws.id);
+    const agentSetEnv = await host.invoke('api.variables.set', { name: 'baseUrl', value: `http://127.0.0.1:${echoPort}` }, { caller: 'mcp', workspaceId: ws.id });
+    const agentSetGlobal = await host.invoke('api.variables.set', { name: 'region', value: 'us' }, { caller: 'mcp', workspaceId: ws.id });
+    const uiSetGlobal = await run<{ source: string }>('api.variables.set', { name: 'region', value: 'us' }, ws.id);
+    const unknownSet = await host.invoke('api.variables.set', { name: 'nope', value: 'x' }, { caller: 'ui', workspaceId: ws.id });
+    check(
+      'api.variables.set: agents may change an environment value, a global one needs mutations, unknown names are refused',
+      agentSetEnv.ok &&
+        !agentSetGlobal.ok && agentSetGlobal.error.code === 'MUTATION_BLOCKED' &&
+        uiSetGlobal.source === 'global' && host.config.get().globalVariables.find((v) => v.key === 'region')?.value === 'us' &&
+        !unknownSet.ok && unknownSet.error.code === 'NOT_FOUND',
+      { agentSetEnv: agentSetEnv.ok, agentSetGlobal: agentSetGlobal.ok ? 'ok?' : agentSetGlobal.error.code, uiSetGlobal, unknownSet: unknownSet.ok ? 'ok?' : unknownSet.error.code },
+    );
+    await run('config.update', { patch: { globalVariables: globalsBefore } }, null);
+
+    // api.variables.define adds a missing variable to a chosen environment (secret or not) or the globals.
+    const defined = await run<{ environmentName?: string }>('api.variables.define', { name: 'partner', value: 'acme', target: { kind: 'environment', id: env.id }, secret: true }, ws.id);
+    await run('api.variables.define', { name: 'partner', value: 'acme2', target: { kind: 'environment', id: env.id }, secret: true }, ws.id);
+    const listAfterDefine = await run<VarList & { environments: { id: string; name: string }[] }>('api.variables.list', {}, ws.id);
+    const diskAfterDefine = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'environments', `${env.id}.json`), 'utf8')) as Environment;
+    const partnerRows = diskAfterDefine.variables.filter((v) => v.key === 'partner');
+    check(
+      'api.variables.define: adds to the chosen environment once, a secret stays out of the committed file',
+      defined.environmentName === 'local' &&
+        listAfterDefine.variables.find((v) => v.name === 'partner')?.value === 'acme2' &&
+        partnerRows.length === 1 && partnerRows[0].value === '' && partnerRows[0].secret === true &&
+        listAfterDefine.environments.some((e) => e.id === env.id && e.name === 'local'),
+      { defined, partnerRows, environments: listAfterDefine.environments },
+    );
+    const agentDefineGlobal = await host.invoke('api.variables.define', { name: 'partner', value: 'x', target: { kind: 'global' } }, { caller: 'mcp', workspaceId: ws.id });
+    const secretGlobal = await host.invoke('api.variables.define', { name: 'partner', value: 'x', target: { kind: 'global' }, secret: true }, { caller: 'ui', workspaceId: ws.id });
+    const builtinName = await host.invoke('api.variables.define', { name: '$uuid', value: 'x', target: { kind: 'environment', id: env.id } }, { caller: 'ui', workspaceId: ws.id });
+    await run('api.variables.define', { name: 'shared', value: 'yes', target: { kind: 'global' } }, ws.id);
+    check(
+      'api.variables.define: a global needs mutations for agents, cannot be secret, and built-in names are refused',
+      !agentDefineGlobal.ok && agentDefineGlobal.error.code === 'MUTATION_BLOCKED' &&
+        !secretGlobal.ok && secretGlobal.error.code === 'INVALID_INPUT' &&
+        !builtinName.ok && builtinName.error.code === 'INVALID_INPUT' &&
+        host.config.get().globalVariables.find((v) => v.key === 'shared')?.value === 'yes',
+      { agentDefineGlobal: agentDefineGlobal.ok || agentDefineGlobal.error.code, secretGlobal: secretGlobal.ok || secretGlobal.error.code, builtinName: builtinName.ok || builtinName.error.code },
+    );
+    // Defining a name that is already a secret, without asking for a secret, keeps it encrypted.
+    await run('api.variables.define', { name: 'partner', value: 'acme3', target: { kind: 'environment', id: env.id }, secret: false }, ws.id);
+    const partnerKept = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'environments', `${env.id}.json`), 'utf8')) as Environment;
+    const partnerRow = partnerKept.variables.find((v) => v.key === 'partner');
+    check(
+      'api.variables.define: an existing secret stays secret and out of the committed file',
+      partnerRow?.secret === true && partnerRow.value === '' && (await run<Environment>('api.environment.get', { id: env.id }, ws.id)).variables.find((v) => v.key === 'partner')?.value === 'acme3',
+      partnerRow,
+    );
+    const envWithPartner = await run<Environment>('api.environment.get', { id: env.id }, ws.id);
+    await run('api.environment.save', { environment: { ...envWithPartner, variables: envWithPartner.variables.filter((v) => v.key !== 'partner') } }, ws.id);
+    await run('config.update', { patch: { globalVariables: globalsBefore } }, null);
 
     const created = await run<ApiRequest>('api.request.create', { name: 'echo', method: 'POST', url: '{{baseUrl}}/things?x=1' }, ws.id);
     const saved = await run<ApiRequest>(
@@ -303,6 +386,102 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
 
     const history = await run<HistoryEntry[]>('api.history.list', { limit: 5 }, ws.id);
     check('history recorded', history.length === 1 && history[0].status === 200);
+
+    // History is a plain file: credentials typed straight into a request, and secrets its URL resolves to, are masked before they reach it.
+    {
+      const historyFile = path.join(folder, '.quiver', 'local', 'history.jsonl');
+      const latest = async () => (await run<HistoryEntry[]>('api.history.list', { limit: 1 }, ws.id))[0];
+      const tokenOf = (e: HistoryEntry) => (e.request.auth.type === 'bearer' ? e.request.auth.token : null);
+      check('history: a request that only references variables is stored as it was written', tokenOf(history[0]) === '{{token}}' && !(await fs.readFile(historyFile, 'utf8')).includes('s3cret'), history[0].request.auth);
+      const typed = await run<ApiResponse>(
+        'api.request.send',
+        {
+          request: {
+            ...saved,
+            id: '',
+            name: 'typed token',
+            url: '{{baseUrl}}/login?api_key=query-key-123&ref={{token}}&page=2',
+            headers: [
+              { id: 'h1', key: 'Authorization', value: 'Bearer header-token-456', enabled: true },
+              { id: 'h2', key: 'X-Trace', value: 'keep-me', enabled: true },
+            ],
+            auth: { type: 'bearer', token: 'typed-token-789' },
+          },
+        },
+        ws.id,
+      );
+      const typedEcho = JSON.parse(typed.body) as { headers: Record<string, string>; url: string };
+      check('history: typed credentials still go on the wire as typed', typedEcho.headers.authorization === 'Bearer header-token-456' && typedEcho.url === '/login?api_key=query-key-123&ref=s3cret&page=2', typedEcho.url);
+      const typedEntry = await latest();
+      check(
+        'history: a typed token, an Authorization header, a key parameter and a resolved secret are masked',
+        tokenOf(typedEntry) === REDACTED &&
+          typedEntry.request.headers[0].value === `Bearer ${REDACTED}` &&
+          typedEntry.request.headers[1].value === 'keep-me' &&
+          typedEntry.request.url === `{{baseUrl}}/login?api_key=${REDACTED}&ref={{token}}&page=2` &&
+          typedEntry.url === `http://127.0.0.1:${echoPort}/login?api_key=${REDACTED}&ref=${REDACTED}&page=2` &&
+          typedEntry.status === 200,
+        { url: typedEntry.url, request: typedEntry.request.url, auth: typedEntry.request.auth, headers: typedEntry.request.headers.map((h) => h.value) },
+      );
+      await run('api.request.send', { request: { ...saved, id: '', name: 'basic', url: '{{baseUrl}}/b', headers: [], auth: { type: 'basic', username: 'ada', password: 'hunter2-pw' } } }, ws.id);
+      const basicEntry = await latest();
+      await run('api.request.send', { request: { ...saved, id: '', name: 'key', url: '{{baseUrl}}/k', headers: [], auth: { type: 'apikey', key: 'appid', value: 'app-key-321', in: 'query' } } }, ws.id);
+      const keyEntry = await latest();
+      check(
+        'history: a basic password and an API key are masked, the user and the key name kept',
+        basicEntry.request.auth.type === 'basic' &&
+          basicEntry.request.auth.username === 'ada' &&
+          basicEntry.request.auth.password === REDACTED &&
+          keyEntry.request.auth.type === 'apikey' &&
+          keyEntry.request.auth.key === 'appid' &&
+          keyEntry.request.auth.value === REDACTED &&
+          keyEntry.url === `http://127.0.0.1:${echoPort}/k?appid=${REDACTED}`,
+        { basic: basicEntry.request.auth, key: keyEntry.request.auth, url: keyEntry.url },
+      );
+      const down = await host.invoke('api.request.send', { request: { ...saved, id: '', name: 'down', url: 'http://127.0.0.1:1/down', headers: [], auth: { type: 'bearer', token: 'down-token-654' } }, options: { timeoutMs: 3000 } }, { caller: 'ui', workspaceId: ws.id });
+      const downEntry = await latest();
+      check('history: a send that fails is masked as well', !down.ok && downEntry.error !== null && tokenOf(downEntry) === REDACTED, downEntry.error);
+      const historyText = await fs.readFile(historyFile, 'utf8');
+      const leaked = ['typed-token-789', 'header-token-456', 'query-key-123', 'hunter2-pw', 'app-key-321', 'down-token-654', 's3cret'].filter((s) => historyText.includes(s));
+      check('history: none of it is in the file on disk', leaked.length === 0 && historyText.trim().split('\n').length === 5, leaked);
+
+      // A log written by an older version still holds its credentials; it is rewritten when the workspace opens.
+      const legacyFolder = await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-smoke-legacy-'));
+      const legacyFile = path.join(legacyFolder, '.quiver', 'local', 'history.jsonl');
+      await fs.mkdir(path.dirname(legacyFile), { recursive: true });
+      const legacy: HistoryEntry[] = [
+        {
+          id: 'old1',
+          at: '2026-09-01T10:00:00.000Z',
+          requestId: null,
+          method: 'POST',
+          url: 'https://merchant.example.com/login?api_key=old-key-111',
+          status: 200,
+          durationMs: 5,
+          error: null,
+          request: { ...saved, url: 'https://merchant.example.com/login?api_key=old-key-111', headers: [{ id: 'h', key: 'authorization', value: 'Bearer old-token-333', enabled: true }], auth: { type: 'bearer', token: 'old-token-222' } },
+        },
+        { id: 'old2', at: '2026-09-02T10:00:00.000Z', requestId: saved.id, method: 'POST', url: 'https://merchant.example.com/things', status: 204, durationMs: 7, error: null, request: saved },
+      ];
+      await fs.writeFile(legacyFile, legacy.map((e) => JSON.stringify(e)).join('\n') + '\n');
+      const legacyWs = await run<WorkspaceInfo>('workspace.open', { path: legacyFolder }, null);
+      const legacyList = await run<HistoryEntry[]>('api.history.list', { limit: 10 }, legacyWs.id);
+      const legacyText = await fs.readFile(legacyFile, 'utf8');
+      check(
+        'history: entries written before masking are cleaned when the workspace opens, in the same order',
+        legacyList.map((e) => e.id).join() === 'old2,old1' &&
+          tokenOf(legacyList[1]) === REDACTED &&
+          legacyList[1].request.headers[0].value === `Bearer ${REDACTED}` &&
+          legacyList[1].url === `https://merchant.example.com/login?api_key=${REDACTED}` &&
+          tokenOf(legacyList[0]) === '{{token}}' &&
+          !/old-(token|key)-\d/.test(legacyText) &&
+          legacyText.trim().split('\n').length === 2,
+        { ids: legacyList.map((e) => e.id), onDisk: legacyText.match(/old-(token|key)-\d+/g) },
+      );
+      await run('workspace.close', { id: legacyWs.id }, null);
+      await run('workspace.forgetRecent', { path: legacyFolder }, null);
+      await fs.rm(legacyFolder, { recursive: true, force: true }).catch(() => {});
+    }
 
     const imported = await run<ApiRequest>('api.import.curl', { command: `curl -X PUT '{{baseUrl}}/a?b=c' -H 'X-A: 1' -d '{"k":1}'` }, ws.id);
     check('curl import', imported.method === 'PUT' && imported.body.type === 'json');
@@ -1155,6 +1334,16 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       });
       return (await res.json()) as { result?: { tools?: { name: string }[]; content?: { text: string }[]; isError?: boolean }; error?: unknown };
     };
+    /** A request with headers of its own, as one particular agent; gives back the session id the server handed out, if any. */
+    const agentRpc = async (headers: Record<string, string>, method: string, params: unknown): Promise<string | null> => {
+      const res = await fetch(mcpUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...headers },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+      });
+      await res.text();
+      return res.headers.get('mcp-session-id');
+    };
     const init = await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'smoke', version: '0' } });
     check('mcp initialize', !init.error, init.error);
     const tools = await rpc('tools/list', {});
@@ -1168,6 +1357,32 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     check('mcp blocks mutations by default', blocked.result?.isError === true && (blocked.result.content?.[0]?.text ?? '').includes('MUTATION_BLOCKED'));
     const masked = await rpc('tools/call', { name: 'api_environment_get', arguments: { id: env.id } });
     check('mcp masks secrets', !(masked.result?.content?.[0]?.text ?? '').includes('s3cret'));
+    // What an agent reads back about a request it sent has the secrets masked; the UI still sees what went on the wire.
+    {
+      const viaSecret = { ...saved, id: '', url: '{{baseUrl}}/agent?ref={{token}}&page=1', headers: [{ id: 'h1', key: 'X-Note', value: 'note-{{token}}', enabled: true }], body: { type: 'json', content: '{"t":"{{token}}"}' } };
+      const agentSend = await rpc('tools/call', { name: 'api_request_send', arguments: { request: viaSecret, record: false } });
+      const agentGot = JSON.parse(agentSend.result?.content?.[0]?.text ?? '{}') as Partial<ApiResponse>;
+      const headerOf = (r: Partial<ApiResponse>, name: string) => r.sent?.headers.find(([k]) => k.toLowerCase() === name)?.[1];
+      check(
+        'mcp: what a send reports as sent has credentials and secret variables masked',
+        agentGot.status === 200 &&
+          headerOf(agentGot, 'authorization') === `Bearer ${REDACTED}` &&
+          headerOf(agentGot, 'x-note') === `note-${REDACTED}` &&
+          agentGot.sent?.url === `http://127.0.0.1:${echoPort}/agent?ref=${REDACTED}&page=1` &&
+          agentGot.sent.bodyPreview === `{"t":"${REDACTED}"}` &&
+          agentGot.url === agentGot.sent.url &&
+          !JSON.stringify(agentGot.sent).includes('s3cret'),
+        agentGot.sent,
+      );
+      const uiGot = await run<ApiResponse>('api.request.send', { request: viaSecret, record: false }, ws.id);
+      check('mcp: the UI still sees the request as it went out', uiGot.sent.headers.some(([k, v]) => k === 'Authorization' && v === 'Bearer s3cret') && uiGot.sent.url.endsWith('/agent?ref=s3cret&page=1') && uiGot.sent.bodyPreview === '{"t":"s3cret"}');
+      const agentDown = await rpc('tools/call', { name: 'api_request_send', arguments: { request: { ...saved, id: '', url: 'http://127.0.0.1:1/down?ref={{token}}' }, record: false, options: { timeoutMs: 3000 } } });
+      const agentDownText = agentDown.result?.content?.[0]?.text ?? '';
+      check('mcp: a failed send does not name the secret either', agentDown.result?.isError === true && agentDownText.includes(`ref=${REDACTED}`) && !agentDownText.includes('s3cret'), agentDownText.slice(0, 200));
+      const agentCurl = (await rpc('tools/call', { name: 'api_export_curl', arguments: { requestId: saved.id } })).result?.content?.[0]?.text ?? '';
+      const uiCurl = await run<{ command: string }>('api.export.curl', { requestId: saved.id }, ws.id);
+      check('mcp: curl export masks the secret for agents and keeps it for the UI', agentCurl.includes(`Bearer ${REDACTED}`) && !agentCurl.includes('s3cret') && uiCurl.command.includes('Bearer s3cret'), agentCurl.slice(0, 200));
+    }
     check('mcp lists db tools', names.includes('db_query_run') && names.includes('db_redis_keys') && names.includes('db_table_rows'));
     const mcpRead = await rpc('tools/call', { name: 'db_query_run', arguments: { connectionId: sqlite.id, query: 'SELECT name FROM users ORDER BY id' } });
     const mcpRows = JSON.parse(mcpRead.result?.content?.[0]?.text ?? '[]') as DbQueryResult[];
@@ -1321,6 +1536,30 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     const hasGit = (await git('init', '-q')) && (await git('add', '.env', '.gitignore')) && (await git('commit', '-q', '-m', 'init'));
     console.log(`env files: git ${hasGit ? 'available, .env committed' : 'not available, git checks skipped'}`);
 
+    // Todo list: a per-machine list under .quiver/local; deleting is gated for agents, adding and ticking are not.
+    const todoA = await run<TodoItem>('todo.add', { title: '  write the release notes ' }, ws.id);
+    const todoB = await run<TodoItem>('todo.add', { title: 'review PR 42', notes: 'ask about the migration' }, ws.id);
+    const todoDone = await run<TodoItem>('todo.update', { id: todoA.id, done: true }, ws.id);
+    const todoNoted = await run<TodoItem>('todo.update', { id: todoB.id, notes: 'ask about the migration and the index' }, ws.id);
+    const todoList = await run<TodoItem[]>('todo.list', {}, ws.id);
+    const todoOnDisk = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'local', 'todos.json'), 'utf8')) as TodoItem[];
+    check(
+      'todo: add trims the title, update ticks and annotates, the list lives under .quiver/local',
+      todoA.title === 'write the release notes' && todoDone.done && typeof todoDone.completedAt === 'string' && todoNoted.notes.endsWith('the index') && !todoNoted.done && todoList.length === 2 && todoOnDisk.length === 2,
+      { todoDone, todoNoted, todoList: todoList.map((t) => `${t.title}:${t.done}`) },
+    );
+    const agentTodoAdd = await host.invoke('todo.add', { title: 'from an agent' }, { caller: 'mcp', workspaceId: ws.id });
+    const agentTodoRemove = await host.invoke('todo.remove', { id: todoB.id }, { caller: 'mcp', workspaceId: ws.id });
+    const agentTodoClear = await host.invoke('todo.clear', {}, { caller: 'mcp', workspaceId: ws.id });
+    const todoCleared = await run<{ removed: number }>('todo.clear', {}, ws.id);
+    const todoAfterClear = await run<TodoItem[]>('todo.list', {}, ws.id);
+    check(
+      'todo: agents may add and tick but not remove or clear; clear drops only the completed items',
+      agentTodoAdd.ok && !agentTodoRemove.ok && agentTodoRemove.error.code === 'MUTATION_BLOCKED' && !agentTodoClear.ok && agentTodoClear.error.code === 'MUTATION_BLOCKED' && todoCleared.removed === 1 && todoAfterClear.length === 2 && todoAfterClear.every((t) => !t.done),
+      { agentTodoAdd: agentTodoAdd.ok, agentTodoRemove: agentTodoRemove.ok || agentTodoRemove.error.code, agentTodoClear: agentTodoClear.ok || agentTodoClear.error.code, todoCleared, left: todoAfterClear.map((t) => t.title) },
+    );
+    for (const t of todoAfterClear) await run('todo.remove', { id: t.id }, ws.id);
+
     const envFiles = await run<EnvFileSummary[]>('env.file.list', {}, ws.id);
     check('env files: finds dotenv files up to four folders deep, ordered by kind, skipping node_modules', envFiles.map((f) => f.path).join() === '.env,.env.local,.env.staging,.env.example,docker.env,apps/web/.env', envFiles.map((f) => f.path));
     const envMain = envFiles.find((f) => f.path === '.env')!;
@@ -1470,6 +1709,81 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     }
     check('env files: .env untouched by the blocked calls', (await fs.readFile(path.join(envRoot, '.env'), 'utf8')) === envOriginal);
 
+    // Call recorder: what agents call on Quiver's own server, kept in memory between start and end, then saved to a file.
+    {
+      const recorded = () => run<{ status: McpRecordingStatus; calls: McpRecordedCallSummary[] }>('mcp.recording.list', {}, null);
+      await rpc('tools/call', { name: 'app_info', arguments: {} });
+      const beforeStart = await recorded();
+      check('recorder: idle and empty until started', beforeStart.status.state === 'idle' && beforeStart.calls.length === 0, beforeStart.status);
+      check('recorder: its commands are not tools for agents', !names.some((n) => n.startsWith('mcp_recording')));
+      const sessionId = await agentRpc({ 'user-agent': 'smoke-http/1.0' }, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'smoke-agent', version: '4.2' } });
+      check('recorder: initialize hands the client a session id', typeof sessionId === 'string' && sessionId.startsWith('quiver.'), sessionId);
+      const asAgent = { 'mcp-session-id': sessionId ?? '', 'user-agent': 'smoke-http/1.0' };
+      const started = await run<McpRecordingStatus>('mcp.recording.start', {}, null);
+      check('recorder: start', started.state === 'recording' && typeof started.startedAt === 'string' && started.count === 0, started);
+      await agentRpc(asAgent, 'tools/call', { name: 'tools_base64_encode', arguments: { text: 'hi' } });
+      await agentRpc(asAgent, 'tools/call', { name: 'api_request_delete', arguments: { id: imported.id } });
+      await agentRpc(asAgent, 'tools/call', { name: 'tools_no_such_tool', arguments: {} });
+      await agentRpc({ 'user-agent': 'other-agent/9.9' }, 'tools/call', { name: 'tools_base64_encode', arguments: { text: 42 } });
+      await agentRpc(asAgent, 'tools/list', {});
+      // The inspector is an SDK client: it must send the session back by itself for its name to stick.
+      await run('mcp.connect', { id: selfServer.id }, ws.id);
+      await run('mcp.tool.call', { id: selfServer.id, name: 'workspace_current' }, ws.id);
+      const first = await recorded();
+      const [encode, refused, unknown, invalid, fromInspector] = first.calls;
+      check(
+        'recorder: keeps the tool calls, and only those, in order',
+        first.calls.map((c) => c.tool).join() === 'tools_base64_encode,api_request_delete,tools_no_such_tool,tools_base64_encode,workspace_current' && first.status.count === 5 && first.status.bytes > 0,
+        first.calls.map((c) => c.tool),
+      );
+      check(
+        'recorder: names the agent from its handshake, with the workspace, outcome and timing',
+        encode?.agent.name === 'smoke-agent' && encode.agent.version === '4.2' && encode.agent.userAgent === 'smoke-http/1.0' && encode.workspace?.id === ws.id && encode.ok === true && (encode.durationMs ?? -1) >= 0 && encode.preview === '{"text":"hi"}',
+        encode,
+      );
+      const encodeFull = await run<McpRecordedCall>('mcp.recording.get', { id: encode.id }, null);
+      check('recorder: a call carries its arguments and the result the agent got', JSON.stringify(encodeFull.arguments) === '{"text":"hi"}' && (encodeFull.result as { text?: string }).text === 'aGk=', encodeFull);
+      const refusedFull = await run<McpRecordedCall>('mcp.recording.get', { id: refused.id }, null);
+      check(
+        'recorder: refused, unknown and invalid calls are kept as failed',
+        refused.ok === false && (refusedFull.result as { code?: string }).code === 'MUTATION_BLOCKED' && unknown.ok === false && invalid.ok === false,
+        { refused: refusedFull.result, unknown: unknown.ok, invalid: invalid.ok },
+      );
+      check('recorder: a client without a session is named after its User-Agent', invalid.agent.name === 'other-agent' && invalid.agent.version === '9.9', invalid.agent);
+      check('recorder: an SDK client keeps its name across requests', fromInspector?.agent.name === 'quiver' && fromInspector.ok === true, fromInspector?.agent);
+      const paused = await run<McpRecordingStatus>('mcp.recording.pause', {}, null);
+      await agentRpc(asAgent, 'tools/call', { name: 'tools_uuid_generate', arguments: {} });
+      const whilePaused = (await recorded()).calls.length;
+      await run('mcp.recording.resume', {}, null);
+      await agentRpc(asAgent, 'tools/call', { name: 'tools_uuid_generate', arguments: {} });
+      const afterResume = (await recorded()).calls.length;
+      check('recorder: pause skips calls, resume keeps them again', paused.state === 'paused' && whilePaused === 5 && afterResume === 6, { whilePaused, afterResume });
+      const recordingFile = path.join(mcpDir, 'recording.json');
+      const earlySave = await host.invoke('mcp.recording.save', { path: recordingFile }, { caller: 'ui', workspaceId: null });
+      check('recorder: saving needs an ended recording', !earlySave.ok && earlySave.error.code === 'INVALID_INPUT', earlySave.ok ? 'saved?' : earlySave.error.message);
+      const ended = await run<McpRecordingStatus>('mcp.recording.end', {}, null);
+      await agentRpc(asAgent, 'tools/call', { name: 'tools_uuid_generate', arguments: {} });
+      check('recorder: end stops recording and keeps the calls', ended.state === 'ended' && typeof ended.endedAt === 'string' && ended.savedTo === null && (await recorded()).calls.length === 6, ended);
+      const agentSave = await host.invoke('mcp.recording.save', { path: recordingFile }, { caller: 'mcp', workspaceId: null });
+      check('recorder: only the UI can save', !agentSave.ok && agentSave.error.code === 'INVALID_INPUT');
+      const savedRecording = await run<{ path: string; calls: number }>('mcp.recording.save', { path: recordingFile }, null);
+      const onDisk = JSON.parse(await fs.readFile(recordingFile, 'utf8')) as McpRecordingFile;
+      check(
+        'recorder: saves the recording as a JSON file and remembers where',
+        savedRecording.calls === 6 &&
+          onDisk.format === 'quiver.mcp-recording' &&
+          onDisk.version === 1 &&
+          onDisk.quiver === host.api.version &&
+          onDisk.calls.length === 6 &&
+          onDisk.calls[0].agent.name === 'smoke-agent' &&
+          (onDisk.calls[0].result as { text?: string }).text === 'aGk=' &&
+          (await run<McpRecordingStatus>('mcp.recording.status', {}, null)).savedTo === recordingFile,
+        { saved: savedRecording, format: onDisk.format, calls: onDisk.calls.length },
+      );
+      const cleared = await run<McpRecordingStatus>('mcp.recording.clear', {}, null);
+      check('recorder: discard drops it from memory', cleared.state === 'idle' && cleared.count === 0 && (await recorded()).calls.length === 0, cleared);
+    }
+
     // Updater: a dev build reports that it cannot update itself, and the mutating commands are gated for agents.
     const updateState = await run<UpdateState>('app.update.check', {}, null);
     check(
@@ -1568,6 +1882,222 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(300);
       await shot('03-request-light');
+
+      // Variables: {{name}} is marked in inputs and editors, and hovering shows the value, with secrets masked until revealed.
+      const hoverVariable = (inputSelector: string, name: string) =>
+        js(
+          `(() => { const pane = [...document.querySelectorAll('[data-tab-type="api.request"]')].find((el) => !el.classList.contains('hidden')) ?? document; const input = [...pane.querySelectorAll(${JSON.stringify(inputSelector)})].find((i) => (i.getAttribute('data-variables') || '').split(',').includes(${JSON.stringify(name)})); if (!input) return 'no input'; const chip = input.parentElement.querySelector('[data-var-name="${name}"]'); if (!chip) return 'no chip'; const r = chip.getBoundingClientRect(); input.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 })); return 'ok'; })()`,
+        );
+      const card = () =>
+        js(
+          `(() => { const c = document.querySelector('[data-testid=variable-card]'); return c ? { name: c.getAttribute('data-name'), source: c.querySelector('[data-testid=variable-card-source]')?.textContent, value: c.querySelector('[data-testid=variable-card-value]')?.textContent ?? null } : null; })()`,
+        ) as Promise<{ name: string; source: string; value: string | null } | null>;
+      const hoveredUrl = await hoverVariable('input', 'baseUrl');
+      await wait(250);
+      const urlCard = await card();
+      check(
+        'ui: hovering {{baseUrl}} in the URL shows its value and environment',
+        hoveredUrl === 'ok' && urlCard?.name === 'baseUrl' && urlCard.value === `http://127.0.0.1:${echoPort}` && urlCard.source === 'Environment · local',
+        { hoveredUrl, urlCard },
+      );
+      await shot('03b-variable-hover-light');
+      await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+      await js(
+        `(() => { const pane = [...document.querySelectorAll('[data-tab-type="api.request"]')].find((el) => !el.classList.contains('hidden')); const tab = pane && [...pane.querySelectorAll('[role=tab]')].find((b) => b.textContent.startsWith('Auth')); if (tab) tab.click(); })()`,
+      );
+      await wait(300);
+      const hoveredToken = await hoverVariable('input', 'token');
+      await wait(250);
+      const tokenMasked = await card();
+      await js(`document.querySelector('[data-testid=variable-card-reveal]')?.click()`);
+      await wait(150);
+      const tokenRevealed = await card();
+      check(
+        'ui: a secret variable is masked in the card until revealed',
+        hoveredToken === 'ok' && tokenMasked?.value === '••••••••' && tokenRevealed?.value === 's3cret',
+        { hoveredToken, tokenMasked, tokenRevealed },
+      );
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(200);
+      await shot('03c-variable-secret-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
+      await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+      const typeUrl = (value: string) =>
+        js(
+          `(() => { const pane = [...document.querySelectorAll('[data-tab-type="api.request"]')].find((el) => !el.classList.contains('hidden')); const input = [...pane.querySelectorAll('input')].find((i) => i.value.startsWith('{{baseUrl}}')); if (!input) return false; const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; setter.call(input, ${JSON.stringify(value)}); input.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`,
+        );
+      await typeUrl('{{baseUrl}}/things?x=1&k={{nope}}');
+      await wait(200);
+      const hoveredMissing = await hoverVariable('input', 'nope');
+      await wait(250);
+      const missingCard = await card();
+      const missingChip = await js(`document.querySelector('[data-var-name=nope]')?.className ?? ''`);
+      check(
+        'ui: an undefined variable is marked and its card says so',
+        hoveredMissing === 'ok' && missingCard?.source === 'Not defined' && typeof missingChip === 'string' && missingChip.includes('bg-danger'),
+        { hoveredMissing, missingCard, missingChip },
+      );
+      await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+
+      // A long value scrolls inside the card without closing it, and the card edits the value where it is defined.
+      const globalsBeforeUi = host.config.get().globalVariables;
+      const longValue = Array.from({ length: 60 }, (_, i) => `segment-${i}`).join('/');
+      await run('config.update', { patch: { globalVariables: [...globalsBeforeUi, { id: 'glong', key: 'long', value: longValue, enabled: true }] } }, null);
+      await typeUrl('{{baseUrl}}/things?x=1&l={{long}}');
+      await wait(400);
+      const hoveredLong = await hoverVariable('input', 'long');
+      await wait(250);
+      const valueBox = (await js(
+        `(() => { const el = document.querySelector('[data-testid=variable-card-value]'); if (!el) return null; const r = el.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), overflow: el.scrollHeight > el.clientHeight }; })()`,
+      )) as { x: number; y: number; overflow: boolean } | null;
+      if (valueBox) {
+        win.webContents.sendInputEvent({ type: 'mouseMove', x: valueBox.x, y: valueBox.y });
+        await wait(100);
+        for (let i = 0; i < 3; i++) {
+          win.webContents.sendInputEvent({ type: 'mouseWheel', x: valueBox.x, y: valueBox.y, deltaX: 0, deltaY: -120 });
+          await wait(80);
+        }
+      }
+      await wait(300);
+      const afterWheel = await js(`(() => { const el = document.querySelector('[data-testid=variable-card-value]'); return el ? el.scrollTop : null; })()`);
+      const longCard = await card();
+      check(
+        'ui: the wheel scrolls a long value inside the card and the card stays open',
+        hoveredLong === 'ok' && valueBox?.overflow === true && typeof afterWheel === 'number' && afterWheel > 0 && longCard?.name === 'long',
+        { hoveredLong, valueBox, afterWheel, longCard: longCard?.name },
+      );
+      await shot('03e-variable-long-scrolled-light');
+
+      await js(`document.querySelector('[data-testid=variable-card-edit]')?.click()`);
+      await wait(150);
+      const editor = await js(
+        `(() => { const t = document.querySelector('[data-testid=variable-card-input]'); return t ? { focused: document.activeElement === t, value: t.value } : null; })()`,
+      ) as { focused: boolean; value: string } | null;
+      await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+      await wait(150);
+      const afterCancel = await js(
+        `(() => { const c = document.querySelector('[data-testid=variable-card]'); return c ? { editing: c.hasAttribute('data-editing'), input: Boolean(c.querySelector('[data-testid=variable-card-input]')) } : null; })()`,
+      ) as { editing: boolean; input: boolean } | null;
+      check(
+        'ui: the card edits a value in place, and Escape backs out of the edit without closing it',
+        editor?.focused === true && editor.value === longValue && afterCancel?.editing === false && afterCancel.input === false,
+        { editor: editor && { focused: editor.focused, same: editor.value === longValue }, afterCancel },
+      );
+      await js(`document.querySelector('[data-testid=variable-card-edit]')?.click()`);
+      await wait(150);
+      await js(
+        `(() => { const t = document.querySelector('[data-testid=variable-card-input]'); const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; setter.call(t, 'short/value'); t.dispatchEvent(new Event('input', { bubbles: true })); })()`,
+      );
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(200);
+      await shot('03f-variable-editing-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
+      win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
+      win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+      await wait(500);
+      const edited = await card();
+      const editedFlag = await js(`document.querySelector('[data-testid=variable-card]')?.hasAttribute('data-editing') ?? null`);
+      check(
+        'ui: Enter saves the edited value to where it is defined and the card shows it',
+        edited?.value === 'short/value' && editedFlag === false && host.config.get().globalVariables.find((v) => v.key === 'long')?.value === 'short/value',
+        { edited, editedFlag, stored: host.config.get().globalVariables.find((v) => v.key === 'long')?.value },
+      );
+      await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+      await run('config.update', { patch: { globalVariables: globalsBeforeUi } }, null);
+      await wait(400);
+
+      // With {{long}} gone from the globals, its card offers to define it, here as a secret of the active environment.
+      await hoverVariable('input', 'long');
+      await wait(250);
+      await js(`document.querySelector('[data-testid=variable-card-define]')?.click()`);
+      await wait(150);
+      const defineForm = await js(
+        `(() => { const s = document.querySelector('[data-testid=variable-card-target]'); return s ? { target: s.value, options: [...s.options].map((o) => o.textContent), focused: document.activeElement?.getAttribute('data-testid') } : null; })()`,
+      ) as { target: string; options: string[]; focused: string } | null;
+      await js(
+        `(() => { const s = document.querySelector('[data-testid=variable-card-target]'); const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set; set.call(s, 'global'); s.dispatchEvent(new Event('change', { bubbles: true })); })()`,
+      );
+      await wait(100);
+      const secretDisabledForGlobal = await js(`document.querySelector('[data-testid=variable-card-secret]')?.disabled`);
+      await js(
+        `(() => { const s = document.querySelector('[data-testid=variable-card-target]'); const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set; set.call(s, ${JSON.stringify(env.id)}); s.dispatchEvent(new Event('change', { bubbles: true })); })()`,
+      );
+      await wait(100);
+      await js(`document.querySelector('[data-testid=variable-card-secret]')?.click()`);
+      await js(
+        `(() => { const t = document.querySelector('[data-testid=variable-card-input]'); const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; setter.call(t, 'l0ng-secret'); t.dispatchEvent(new Event('input', { bubbles: true })); t.focus(); })()`,
+      );
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(200);
+      await shot('03g-variable-define-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
+      win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
+      win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+      await wait(600);
+      const definedCard = await card();
+      const definedChip = await js(`document.querySelector('[data-var-name=long]')?.className ?? ''`);
+      const definedRow = (await run<Environment>('api.environment.get', { id: env.id }, ws.id)).variables.find((v) => v.key === 'long');
+      check(
+        'ui: an undefined variable can be defined from its card, in the chosen environment and as a secret',
+        defineForm?.target === env.id && defineForm.options[0] === 'local (active)' && defineForm.options.includes('Global variables') && defineForm.focused === 'variable-card-input' &&
+          secretDisabledForGlobal === true &&
+          definedCard?.source === 'Environment · local' && definedCard.value === '••••••••' &&
+          typeof definedChip === 'string' && !definedChip.includes('bg-danger') &&
+          definedRow?.value === 'l0ng-secret' && definedRow.secret === true,
+        { defineForm, secretDisabledForGlobal, definedCard, definedChip, definedRow },
+      );
+      await shot('03h-variable-defined-light');
+      await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+      const envWithLong = await run<Environment>('api.environment.get', { id: env.id }, ws.id);
+      await run('api.environment.save', { environment: { ...envWithLong, variables: envWithLong.variables.filter((v) => v.key !== 'long') } }, ws.id);
+      await typeUrl('{{baseUrl}}/things?x=1');
+      await wait(200);
+      check('ui: restoring the URL leaves the request unmodified', (await js(`document.querySelector('[data-testid=tab][aria-selected=true]')?.textContent.includes('echo') && !document.querySelector('[data-testid=tab][aria-selected=true] .bg-warning')`)) === true);
+
+      // A clean request tab follows the file when it changes on disk (an agent, a git pull).
+      const saveLabel = () =>
+        js(`(() => { const pane = [...document.querySelectorAll('[data-tab-type="api.request"]')].find((el) => !el.classList.contains('hidden')); return [...(pane?.querySelectorAll('button') ?? [])].find((b) => b.textContent.startsWith('Save'))?.textContent ?? null; })()`);
+      const labelBefore = await saveLabel();
+      const echoes = (await run<ApiRequest[]>('api.request.list', {}, ws.id)).filter((r) => r.name === 'echo');
+      const echoReq = echoes[0];
+      const echoFile = path.join(folder, '.quiver', 'requests', `${echoReq.id}.json`);
+      const echoOriginal = await fs.readFile(echoFile, 'utf8');
+      await fs.writeFile(echoFile, JSON.stringify({ ...echoReq, url: '{{baseUrl}}/changed-on-disk' }, null, 2) + '\n');
+      await wait(1200);
+      const tabUrl = await js(
+        `(() => { const pane = [...document.querySelectorAll('[data-tab-type="api.request"]')].find((el) => !el.classList.contains('hidden')); return [...(pane?.querySelectorAll('input') ?? [])].find((i) => i.value.startsWith('{{baseUrl}}'))?.value ?? null; })()`,
+      );
+      const labelAfter = await saveLabel();
+      check('ui: an open request tab without edits picks up a change made on disk', tabUrl === '{{baseUrl}}/changed-on-disk' && labelAfter === 'Save', { tabUrl, labelBefore, labelAfter, echoes: echoes.map((r) => r.url) });
+      await fs.writeFile(echoFile, echoOriginal);
+      await wait(1200);
+
+      const bodyVars = await run<ApiRequest>('api.request.create', { name: 'vars in body', method: 'POST', url: '{{baseUrl}}/b', body: { type: 'json', content: '{\n  "auth": "{{token}}",\n  "other": "{{nope}}"\n}' } }, ws.id);
+      await wait(500);
+      await js(`(() => { const row = [...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('vars in body')); if (row) row.click(); })()`);
+      await wait(800);
+      await js(
+        `(() => { const pane = [...document.querySelectorAll('[data-tab-type="api.request"]')].find((el) => !el.classList.contains('hidden')); const tab = pane && [...pane.querySelectorAll('[role=tab]')].find((b) => b.textContent.startsWith('Body')); if (tab) tab.click(); })()`,
+      );
+      await wait(500);
+      const editorMarks = await js(
+        `(() => { const pane = [...document.querySelectorAll('[data-tab-type="api.request"]')].find((el) => !el.classList.contains('hidden')); return [...pane.querySelectorAll('.cm-content [data-var-name]')].map((el) => el.getAttribute('data-var-name') + ':' + el.className); })()`,
+      );
+      await js(
+        `(() => { const pane = [...document.querySelectorAll('[data-tab-type="api.request"]')].find((el) => !el.classList.contains('hidden')); const el = pane.querySelector('.cm-content [data-var-name=token]'); if (!el) return; const r = el.getBoundingClientRect(); el.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: r.left + 2, clientY: r.top + 2 })); })()`,
+      );
+      await wait(250);
+      const editorCard = await card();
+      check(
+        'ui: the body editor marks known and unknown variables and shows the card on hover',
+        Array.isArray(editorMarks) && editorMarks.some((m: string) => m.startsWith('token:') && m.includes('cm-variable') && !m.includes('missing')) && editorMarks.some((m: string) => m.startsWith('nope:') && m.includes('cm-variable-missing')) && editorCard?.name === 'token' && editorCard.value === '••••••••',
+        { editorMarks, editorCard },
+      );
+      await shot('03d-variable-body-light');
+      await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+      await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+      await run('api.request.delete', { id: bodyVars.id }, ws.id);
+      await wait(300);
       await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }))`);
       await wait(400);
       await shot('04-palette-light');
@@ -1593,6 +2123,43 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       const gridHasAda = await js(`[...document.querySelectorAll('[role=gridcell]')].some((c) => c.textContent === 'Ada')`);
       check('ui: table grid renders rows', gridHasAda === true);
       await shot('05-table-light');
+      // The WHERE filter completes the table's columns: Enter picks one while the list is open, then applies the filter.
+      const typeText = (text: string) => {
+        for (const ch of text) win.webContents.sendInputEvent({ type: 'char', keyCode: ch });
+      };
+      const pressEnter = () => {
+        win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
+        win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+      };
+      const whereFocused = await js(`(() => { const c = document.querySelector('[data-testid=db-table-where] .cm-content'); if (c) c.focus(); return document.activeElement === c; })()`);
+      check('ui: WHERE filter is an editor', whereFocused === true);
+      typeText('ema');
+      await wait(500);
+      const whereOptions = await js(`[...document.querySelectorAll('.cm-tooltip-autocomplete li')].map((li) => [li.querySelector('.cm-completionLabel')?.textContent, li.querySelector('.cm-completionDetail')?.textContent, li.getAttribute('aria-selected') === 'true'])`);
+      check(
+        'ui: WHERE filter offers the columns with their types',
+        Array.isArray(whereOptions) && whereOptions.some((o: unknown[]) => o[0] === 'email' && o[1] === 'TEXT' && o[2] === true),
+        whereOptions,
+      );
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(300);
+      await shot('05b-table-where-completion-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
+      pressEnter();
+      await wait(200);
+      const whereText = () => js(`document.querySelector('[data-testid=db-table-where] .cm-content')?.textContent ?? ''`);
+      const picked = await whereText();
+      typeText(" = 'linus@example.com'");
+      await wait(300);
+      pressEnter();
+      await wait(1200);
+      const filtered = await js(`[...document.querySelectorAll('[role=gridcell]')].filter((c) => c.offsetParent !== null).map((c) => c.textContent).join(',')`);
+      check('ui: Enter picks the column, then applies the filter', picked === 'email' && typeof filtered === 'string' && filtered.includes('Linus') && !filtered.includes('Ada'), { picked, filtered });
+      // A pasted line break becomes a space instead of a second line.
+      await js(`document.execCommand('insertText', false, '\\n  AND id > 0')`);
+      await wait(200);
+      const whereAfter = await js(`[...document.querySelectorAll('[data-testid=db-table-where] .cm-line')].map((l) => l.textContent)`);
+      check('ui: the WHERE filter stays one line', Array.isArray(whereAfter) && whereAfter.length === 1 && whereAfter[0] === "email = 'linus@example.com' AND id > 0", whereAfter);
       const clickedQuery = await js(
         `(() => { const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Query'); if (btn) btn.click(); return Boolean(btn); })()`,
       );
@@ -1912,6 +2479,52 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       );
       check('ui: api module button', clickedApi === true);
       await wait(500);
+
+      // API sidebar: a collapsed collection stays collapsed after leaving the module, and the choice is saved per machine.
+      const foldCollection = await run<{ id: string }>('api.collection.create', { name: 'smoke folder' }, ws.id);
+      await run('api.request.create', { name: 'inside folder', collectionId: foldCollection.id }, ws.id);
+      await wait(600);
+      const folderOpen = () => js(`document.querySelector('[data-testid=api-collection][data-name="smoke folder"]')?.getAttribute('data-open') ?? null`);
+      const openedByDefault = await folderOpen();
+      await js(`document.querySelector('[data-testid=api-collection][data-name="smoke folder"] [role=button]').click()`);
+      await wait(200);
+      const collapsed = await folderOpen();
+      const hiddenChild = await js(`[...document.querySelectorAll('[role=button]')].some((r) => r.textContent.includes('inside folder'))`);
+      await js(`[...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.title || '') === 'Databases').click()`);
+      await wait(400);
+      await js(`[...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.title || '') === 'API client').click()`);
+      await wait(600);
+      const afterReturn = await folderOpen();
+      const savedTree = await run<{ value: Record<string, boolean> | null }>('workspace.state.get', { key: 'ui.tree' }, ws.id);
+      check(
+        'ui: a collapsed API collection stays collapsed after switching modules and is saved',
+        openedByDefault === 'true' && collapsed === 'false' && hiddenChild === false && afterReturn === 'false' && savedTree.value?.[`api/collection/${foldCollection.id}`] === false,
+        { openedByDefault, collapsed, hiddenChild, afterReturn, saved: savedTree.value },
+      );
+      await run('api.collection.delete', { id: foldCollection.id }, ws.id).catch(() => {});
+      await wait(300);
+
+      // API sidebar: requests added by an agent show up without a restart, through MCP or written straight to disk.
+      const viaMcp = await host.invoke('api.request.create', { name: 'added over mcp' }, { caller: 'mcp', workspaceId: ws.id });
+      const onDiskId = 'smokeexternal01';
+      await fs.writeFile(
+        path.join(folder, '.quiver', 'requests', `${onDiskId}.json`),
+        JSON.stringify({ ...(viaMcp.ok ? (viaMcp.result as object) : {}), id: onDiskId, name: 'written to disk', collectionId: null }, null, 2),
+      );
+      await wait(1200);
+      const sidebarRows = await js(`[...document.querySelectorAll('[role=button]')].map((r) => r.textContent)`);
+      const sawDiskRow = Array.isArray(sidebarRows) && sidebarRows.some((t: string) => t.includes('written to disk'));
+      check(
+        'ui: requests created over MCP or written to .quiver by hand appear in the sidebar without a restart',
+        viaMcp.ok && Array.isArray(sidebarRows) && sidebarRows.some((t: string) => t.includes('added over mcp')) && sidebarRows.some((t: string) => t.includes('written to disk')),
+        viaMcp.ok ? 'ok' : viaMcp.error.message,
+      );
+      await fs.rm(path.join(folder, '.quiver', 'requests', `${onDiskId}.json`));
+      await wait(600);
+      const goneRow = await js(`[...document.querySelectorAll('[role=button]')].some((r) => r.textContent.includes('written to disk'))`);
+      check('ui: a request file deleted on disk disappears from the sidebar', sawDiskRow && goneRow === false);
+      if (viaMcp.ok) await run('api.request.delete', { id: (viaMcp.result as { id: string }).id }, ws.id).catch(() => {});
+      await wait(300);
       const gqlRowLabel = await js(
         `(() => { const row = [...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('smoke graphql')); if (!row) return null; const label = row.textContent.slice(0, 3); row.click(); return label; })()`,
       );
@@ -2005,6 +2618,67 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(200);
 
+      // Call recorder: opened from the inspector's sidebar, started in the UI, lists two agents' calls as they arrive, then ends.
+      const clickedRecorderRow = await js(`(() => { const row = document.querySelector('[data-testid=mcp-recorder-row]'); if (row) row.click(); return Boolean(row); })()`);
+      await wait(500);
+      const recorderIdle = await js(`document.querySelector('[data-testid=mcp-recorder]')?.getAttribute('data-state') + '|' + Boolean(document.querySelector('[data-testid=mcp-recording-status]'))`);
+      const clickedRecord = await js(`(() => { const btn = document.querySelector('[data-testid=mcp-recorder-start]'); if (btn) btn.click(); return Boolean(btn); })()`);
+      await wait(600);
+      const recorderStates = await js(
+        `[document.querySelector('[data-testid=mcp-recorder]')?.getAttribute('data-state'), document.querySelector('[data-testid=mcp-recorder-row]')?.getAttribute('data-state'), document.querySelector('[data-testid=mcp-recording-status]')?.textContent].join('|')`,
+      );
+      check(
+        'ui: recorder opens from the sidebar and starts, and the status bar says so',
+        clickedRecorderRow === true && recorderIdle === 'idle|false' && clickedRecord === true && recorderStates === 'recording|recording|REC 0',
+        { recorderIdle, recorderStates },
+      );
+      const claude = { 'mcp-session-id': (await agentRpc({}, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'claude-code', version: '2.1.0' } })) ?? '' };
+      const cursor = { 'mcp-session-id': (await agentRpc({}, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'cursor', version: '3.1' } })) ?? '' };
+      await agentRpc(claude, 'tools/call', { name: 'db_query_run', arguments: { connectionId: sqlite.id, query: 'SELECT name FROM users ORDER BY id' } });
+      await agentRpc(cursor, 'tools/call', { name: 'db_connection_list', arguments: {} });
+      await agentRpc(claude, 'tools/call', { name: 'api_request_delete', arguments: { id: imported.id } });
+      await agentRpc(cursor, 'tools/call', { name: 'tools_base64_encode', arguments: { text: 'hello' } });
+      await wait(700);
+      const recorderRows = await js(`[...document.querySelectorAll('[data-testid=mcp-recorded-call]')].map((r) => [r.getAttribute('data-agent'), r.getAttribute('data-tool'), r.getAttribute('data-ok')].join(':'))`);
+      check(
+        'ui: recorder lists the calls of each agent as they arrive',
+        Array.isArray(recorderRows) && recorderRows.join() === 'claude-code:db_query_run:true,cursor:db_connection_list:true,claude-code:api_request_delete:false,cursor:tools_base64_encode:true',
+        recorderRows,
+      );
+      await js(`document.querySelector('[data-testid=mcp-recorded-call][data-tool=db_query_run]')?.click()`);
+      await wait(700);
+      const recorderDetail = await js(
+        `[document.querySelector('[data-testid=mcp-recorder-detail]')?.textContent ?? '', document.querySelector('[data-testid=mcp-recorder-arguments] .cm-content')?.textContent ?? '', document.querySelector('[data-testid=mcp-recorder-result] .cm-content')?.textContent ?? '']`,
+      );
+      check(
+        'ui: a recorded call shows its agent, arguments and result',
+        Array.isArray(recorderDetail) && recorderDetail[0].includes('claude-code 2.1.0') && recorderDetail[1].includes('SELECT name FROM users') && recorderDetail[2].includes('"rows"'),
+        Array.isArray(recorderDetail) ? recorderDetail.map((t: string) => t.slice(0, 120)) : recorderDetail,
+      );
+      await shot('21b-mcp-recorder-light');
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(300);
+      await shot('21c-mcp-recorder-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
+      await js(`document.querySelector('[data-testid=mcp-recorder-end]')?.click()`);
+      await wait(500);
+      const recorderEnded = await js(
+        `[document.querySelector('[data-testid=mcp-recorder]')?.getAttribute('data-state'), Boolean(document.querySelector('[data-testid=mcp-recorder-save]')), Boolean(document.querySelector('[data-testid=mcp-recording-status]')), document.querySelector('[data-testid=mcp-recorder-summary]')?.textContent.startsWith('4 calls')].join('|')`,
+      );
+      check('ui: ending the recording offers to save it and clears the status bar', recorderEnded === 'ended|true|false|true', recorderEnded);
+      await shot('21d-mcp-recorder-ended-light');
+      // A recording that runs while another tab is on screen is one click away in the status bar.
+      await run('mcp.recording.start', {}, null);
+      await js(`document.querySelector('[data-testid=tab][data-title="smoke http"]')?.click()`);
+      await wait(500);
+      const recorderHidden = await js(`document.querySelector('[data-tab-type="mcp.recorder"]')?.classList.contains('hidden')`);
+      await js(`document.querySelector('[data-testid=mcp-recording-status]')?.click()`);
+      await wait(400);
+      const recorderShown = await js(`document.querySelector('[data-tab-type="mcp.recorder"]')?.classList.contains('hidden') === false`);
+      check('ui: the status bar entry opens the recorder', recorderHidden === true && recorderShown === true, { recorderHidden, recorderShown });
+      await run('mcp.recording.clear', {}, null);
+      await wait(300);
+
       // Env files: sidebar rows with kinds and git warnings, masked values, reveal, inline edits, the watcher, compare view.
       const clickedEnvModule = await js(
         `(() => { const btn = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.title || '') === 'Env files'); if (btn) btn.click(); return Boolean(btn); })()`,
@@ -2077,6 +2751,334 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await shot('24-env-keys-dark');
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(200);
+
+      // Status bar: the environment picker is a themed menu above the bar, not a native select.
+      const pickerLabel = await js(`document.querySelector('[data-testid=env-picker]')?.textContent ?? null`);
+      check('ui: status bar names the active environment', pickerLabel === 'local', pickerLabel);
+      await js(`document.querySelector('[data-testid=env-picker]').click()`);
+      await wait(300);
+      const pickerOptions = await js(`[...document.querySelectorAll('[data-testid=env-picker-option]')].map((b) => b.textContent + ':' + b.getAttribute('aria-checked'))`);
+      check(
+        'ui: the environment menu lists none plus every environment and marks the active one',
+        Array.isArray(pickerOptions) && pickerOptions[0] === 'No environment:false' && pickerOptions.includes('local:true') && pickerOptions.length === 3,
+        pickerOptions,
+      );
+      await shot('24b-env-picker-light');
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(200);
+      await shot('24c-env-picker-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
+      await js(`[...document.querySelectorAll('[data-testid=env-picker-option]')].find((b) => b.textContent !== 'local' && b.getAttribute('data-env-id')).click()`);
+      await wait(600);
+      const pickedLabel = await js(`document.querySelector('[data-testid=env-picker]')?.textContent ?? null`);
+      const pickedActive = await run<{ id: string | null }>('api.environment.active', {}, ws.id);
+      check('ui: picking an environment closes the menu and activates it', pickedLabel !== 'local' && pickedActive.id !== null && pickedActive.id !== env.id && (await js(`Boolean(document.querySelector('[data-testid=env-picker-menu]'))`)) === false, { pickedLabel, pickedActive });
+      await js(`document.querySelector('[data-testid=env-picker]').click()`);
+      await wait(200);
+      await js(`document.querySelector('[data-testid=env-picker-menu]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+      await wait(200);
+      check('ui: Escape closes the environment menu', (await js(`Boolean(document.querySelector('[data-testid=env-picker-menu]'))`)) === false);
+      await run('api.environment.setActive', { id: env.id }, ws.id);
+      await wait(300);
+
+      // Right-click menus: tabs get VS Code's close actions, workspaces get close, copy path and reveal.
+      const rightClick = (selector: string) =>
+        js(
+          `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return false; const r = el.getBoundingClientRect(); el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 10, clientY: r.top + 10 })); return true; })()`,
+        );
+      const menuLabels = () => js(`[...document.querySelectorAll('[data-testid=context-menu] [role=menuitem]')].map((b) => b.textContent)`);
+      const tabTitles = () => js(`[...document.querySelectorAll('[data-testid=tab]')].map((t) => t.getAttribute('data-title'))`) as Promise<string[]>;
+      // Dragging a tab with the mouse reorders the strip and the new order is saved with the workspace.
+      const orderBefore = await tabTitles();
+      const stripScrolled = await js(`(() => { const strip = document.querySelector('[data-testid=tab]')?.parentElement; if (!strip) return null; const scrolled = strip.scrollLeft > 0 && strip.scrollWidth > strip.clientWidth; strip.scrollLeft = 0; return scrolled; })()`);
+      check('ui: with many tabs open the strip scrolls to the active tab instead of squeezing the tabs', stripScrolled === true, stripScrolled);
+      const wheeled = await js(`(() => { const strip = document.querySelector('[data-testid=tab]').parentElement; strip.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, bubbles: true, cancelable: true })); const moved = strip.scrollLeft; strip.scrollLeft = 0; return moved; })()`);
+      check('ui: the mouse wheel scrolls the tab strip sideways', typeof wheeled === 'number' && wheeled > 0, wheeled);
+      await wait(100);
+      const tabRects = (await js(
+        `[...document.querySelectorAll('[data-testid=tab]')].map((t) => { const r = t.getBoundingClientRect(); return { x: Math.round(r.left + 16), right: Math.round(r.right), y: Math.round(r.top + r.height / 2) }; })`,
+      )) as { x: number; right: number; y: number }[];
+      let markerShown = false;
+      if (tabRects.length >= 3) {
+        const from = tabRects[0];
+        const to = tabRects[2].right - 4;
+        win.webContents.sendInputEvent({ type: 'mouseMove', x: from.x, y: from.y });
+        win.webContents.sendInputEvent({ type: 'mouseDown', x: from.x, y: from.y, button: 'left', clickCount: 1 });
+        for (let step = 1; step <= 8; step++) {
+          win.webContents.sendInputEvent({ type: 'mouseMove', x: Math.round(from.x + ((to - from.x) * step) / 8), y: from.y, button: 'left', modifiers: ['leftbuttondown'] });
+          await wait(30);
+        }
+        await wait(150);
+        markerShown = (await js(`Boolean(document.querySelector('[data-testid=tab-drop-marker]'))`)) === true;
+        await shot('24g-tab-drag-light');
+        win.webContents.sendInputEvent({ type: 'mouseUp', x: to, y: from.y, button: 'left', clickCount: 1 });
+      }
+      await wait(700);
+      const orderAfter = await tabTitles();
+      const expectedOrder = [orderBefore[1], orderBefore[2], orderBefore[0], ...orderBefore.slice(3)];
+      const draggedActive = await js(`document.querySelector('[data-testid=tab][aria-selected=true]')?.getAttribute('data-title') ?? null`);
+      const savedTabs = await run<{ value: { tabs: { title: string }[] } | null }>('workspace.state.get', { key: 'ui.tabs' }, ws.id);
+      check(
+        'ui: dragging a tab past its neighbours reorders the tabs, activates it and saves the order',
+        orderBefore.length >= 3 && markerShown && JSON.stringify(orderAfter) === JSON.stringify(expectedOrder) && draggedActive === orderBefore[0] && JSON.stringify(savedTabs.value?.tabs.map((t) => t.title)) === JSON.stringify(expectedOrder),
+        { orderBefore, orderAfter, markerShown, draggedActive, saved: savedTabs.value?.tabs.map((t) => t.title) },
+      );
+      // Escape during a drag puts everything back.
+      const escRects = (await js(
+        `[...document.querySelectorAll('[data-testid=tab]')].map((t) => { const r = t.getBoundingClientRect(); return { x: Math.round(r.left + 16), y: Math.round(r.top + r.height / 2) }; })`,
+      )) as { x: number; y: number }[];
+      let markerBeforeEsc = false;
+      if (escRects.length >= 2) {
+        win.webContents.sendInputEvent({ type: 'mouseDown', x: escRects[0].x, y: escRects[0].y, button: 'left', clickCount: 1 });
+        for (let step = 1; step <= 5; step++) {
+          win.webContents.sendInputEvent({ type: 'mouseMove', x: escRects[0].x + ((escRects[1].x + 40 - escRects[0].x) * step) / 5, y: escRects[0].y, button: 'left', modifiers: ['leftbuttondown'] });
+          await wait(30);
+        }
+        await wait(100);
+        markerBeforeEsc = (await js(`Boolean(document.querySelector('[data-testid=tab-drop-marker]'))`)) === true;
+        win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+        win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+        await wait(100);
+        win.webContents.sendInputEvent({ type: 'mouseUp', x: escRects[1].x + 40, y: escRects[0].y, button: 'left', clickCount: 1 });
+      }
+      await wait(300);
+      const orderAfterEsc = await tabTitles();
+      check('ui: Escape cancels a tab drag and keeps the order', markerBeforeEsc && JSON.stringify(orderAfterEsc) === JSON.stringify(expectedOrder) && (await js(`Boolean(document.querySelector('[data-testid=tab-drop-marker]'))`)) === false, orderAfterEsc);
+
+      const tabsBefore = await tabTitles();
+      const secondTab = `[data-testid=tab][data-title=${JSON.stringify(tabsBefore[1] ?? '')}]`;
+      const openedTabMenu = await rightClick(secondTab);
+      await wait(200);
+      const tabMenu = await menuLabels();
+      check(
+        'ui: right-clicking a tab shows Close, Close Others, Close to the Right, Close Saved and Close All',
+        openedTabMenu === true && tabsBefore.length >= 3 && JSON.stringify(tabMenu) === JSON.stringify(['CloseCtrl+W', 'Close Others', 'Close to the Right', 'Close Saved', 'Close All']),
+        { tabs: tabsBefore.length, tabMenu },
+      );
+      await shot('24d-tab-menu-light');
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(200);
+      await shot('24e-tab-menu-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
+      await js(`document.querySelector('[data-testid=tab-menu-close-right]').click()`);
+      await wait(300);
+      const tabsAfterRight = await tabTitles();
+      check('ui: Close to the Right keeps the tabs up to the clicked one', JSON.stringify(tabsAfterRight) === JSON.stringify(tabsBefore.slice(0, 2)), tabsAfterRight);
+      await rightClick(secondTab);
+      await wait(200);
+      await js(`document.querySelector('[data-testid=tab-menu-close-others]').click()`);
+      await wait(300);
+      const tabsAfterOthers = await tabTitles();
+      const activeTitle = await js(`document.querySelector('[data-testid=tab][aria-selected=true]')?.getAttribute('data-title') ?? null`);
+      check('ui: Close Others leaves only the clicked tab, active', JSON.stringify(tabsAfterOthers) === JSON.stringify([tabsBefore[1]]) && activeTitle === tabsBefore[1], { tabsAfterOthers, activeTitle });
+      await rightClick('[data-testid=workspace-tab]');
+      await wait(200);
+      const workspaceMenu = await menuLabels();
+      check(
+        'ui: right-clicking a workspace shows close actions, Copy Path and reveal',
+        Array.isArray(workspaceMenu) && ['Close', 'Close Others', 'Close to the Right', 'Close All', 'Copy Path'].every((l) => workspaceMenu.includes(l)) && workspaceMenu.length === 6,
+        workspaceMenu,
+      );
+      await shot('24f-workspace-menu-light');
+      await js(`document.querySelector('[data-testid=context-menu]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+      await wait(200);
+      check('ui: Escape closes a context menu', (await js(`Boolean(document.querySelector('[data-testid=context-menu]'))`)) === false);
+      // Workspaces reorder by dragging too, and the host keeps the order for the next start.
+      const workspaceOrder = () => js(`[...document.querySelectorAll('[data-testid=workspace-tab]')].map((t) => t.getAttribute('data-drag-id'))`) as Promise<string[]>;
+      const wsBefore = await workspaceOrder();
+      const wsRects = (await js(
+        `[...document.querySelectorAll('[data-testid=workspace-tab]')].map((t) => { const r = t.getBoundingClientRect(); return { x: Math.round(r.left + 14), right: Math.round(r.right), y: Math.round(r.top + r.height / 2) }; })`,
+      )) as { x: number; right: number; y: number }[];
+      let wsMarker = false;
+      if (wsRects.length >= 2) {
+        const from = wsRects[0];
+        const to = wsRects[1].right - 4;
+        win.webContents.sendInputEvent({ type: 'mouseMove', x: from.x, y: from.y });
+        win.webContents.sendInputEvent({ type: 'mouseDown', x: from.x, y: from.y, button: 'left', clickCount: 1 });
+        for (let step = 1; step <= 8; step++) {
+          win.webContents.sendInputEvent({ type: 'mouseMove', x: Math.round(from.x + ((to - from.x) * step) / 8), y: from.y, button: 'left', modifiers: ['leftbuttondown'] });
+          await wait(30);
+        }
+        await wait(150);
+        wsMarker = (await js(`Boolean(document.querySelector('[data-testid=workspace-drop-marker]'))`)) === true;
+        await shot('24h-workspace-drag-light');
+        win.webContents.sendInputEvent({ type: 'mouseUp', x: to, y: from.y, button: 'left', clickCount: 1 });
+      }
+      await wait(600);
+      const wsAfter = await workspaceOrder();
+      const hostOrder = (await run<WorkspaceInfo[]>('workspace.list', {}, null)).map((w) => w.id);
+      const openOrder = host.config.get().openWorkspaces;
+      const expectedWs = [wsBefore[1], wsBefore[0], ...wsBefore.slice(2)];
+      check(
+        'ui: dragging a workspace reorders the title bar, the host list and the folders reopened on start',
+        wsBefore.length >= 2 && wsMarker && JSON.stringify(wsAfter) === JSON.stringify(expectedWs) && JSON.stringify(hostOrder) === JSON.stringify(expectedWs) && openOrder.indexOf(folder) > 0,
+        { wsBefore, wsAfter, hostOrder, wsMarker, openOrder },
+      );
+      await run('workspace.reorder', { ids: [ws.id] }, null);
+      await wait(300);
+      check('workspace.reorder: listed ids go first and the rest keep their order', (await workspaceOrder())[0] === ws.id && host.config.get().openWorkspaces[0] === folder, await workspaceOrder());
+
+      // The activity bar: right-click to hide modules (VS Code's ticked list), drag to reorder, reset.
+      const activityOrder = () => js(`[...document.querySelectorAll('[data-testid=activity-item]')].map((b) => b.getAttribute('data-drag-id'))`) as Promise<string[]>;
+      const activeActivity = () => js(`document.querySelector('[data-testid=activity-item][data-active]')?.getAttribute('data-drag-id') ?? null`);
+      const activityDefault = await activityOrder();
+      await rightClick('[data-testid=activity-item]');
+      await wait(200);
+      const activityMenu = (await js(
+        `[...document.querySelectorAll('[data-testid=context-menu] [role^=menuitem]')].map((b) => ({ label: b.textContent, checked: b.getAttribute('aria-checked'), disabled: b.disabled }))`,
+      )) as { label: string; checked: string | null; disabled: boolean }[];
+      check(
+        'ui: right-clicking the activity bar offers Hide, every module ticked, and a reset',
+        activityMenu[0]?.label.startsWith('Hide ') &&
+          activityMenu.filter((i) => i.checked === 'true').length === activityDefault.length &&
+          activityMenu[activityMenu.length - 1]?.label === 'Reset Order and Visibility' && activityMenu[activityMenu.length - 1].disabled,
+        activityMenu,
+      );
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(200);
+      await shot('25a-activity-menu-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
+      const toHide = activityDefault[1];
+      await js(`document.querySelector('[data-testid=activity-menu-${toHide}]').click()`);
+      await wait(300);
+      const afterHide = await activityOrder();
+      check(
+        'ui: unticking a module hides it from the activity bar and keeps that in the config',
+        !afterHide.includes(toHide) && afterHide.length === activityDefault.length - 1 && host.config.get().activityBar.hidden.includes(toHide),
+        { afterHide, saved: host.config.get().activityBar },
+      );
+      const itemRects = (await js(
+        `[...document.querySelectorAll('[data-testid=activity-item]')].map((b) => { const r = b.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), bottom: Math.round(r.bottom) }; })`,
+      )) as { x: number; y: number; bottom: number }[];
+      let activityMarker = false;
+      if (itemRects.length >= 3) {
+        const from = itemRects[0];
+        const to = itemRects[2].bottom - 3;
+        win.webContents.sendInputEvent({ type: 'mouseMove', x: from.x, y: from.y });
+        win.webContents.sendInputEvent({ type: 'mouseDown', x: from.x, y: from.y, button: 'left', clickCount: 1 });
+        for (let step = 1; step <= 8; step++) {
+          win.webContents.sendInputEvent({ type: 'mouseMove', x: from.x, y: Math.round(from.y + ((to - from.y) * step) / 8), button: 'left', modifiers: ['leftbuttondown'] });
+          await wait(30);
+        }
+        await wait(150);
+        activityMarker = (await js(`Boolean(document.querySelector('[data-testid=activity-drop-marker]'))`)) === true;
+        await shot('25b-activity-drag-light');
+        win.webContents.sendInputEvent({ type: 'mouseUp', x: from.x, y: to, button: 'left', clickCount: 1 });
+      }
+      await wait(400);
+      const afterDrag = await activityOrder();
+      check(
+        'ui: dragging an activity bar icon reorders the modules and keeps the order in the config',
+        activityMarker && JSON.stringify(afterDrag) === JSON.stringify([afterHide[1], afterHide[2], afterHide[0], ...afterHide.slice(3)]) && host.config.get().activityBar.order.filter((id) => id !== toHide).slice(0, 3).join() === afterDrag.slice(0, 3).join(),
+        { afterHide, afterDrag, activityMarker, saved: host.config.get().activityBar },
+      );
+      const toActivate = afterDrag[1];
+      await js(`document.querySelector('[data-testid=activity-item][data-drag-id=${toActivate}]').click()`);
+      await wait(200);
+      await rightClick(`[data-testid=activity-item][data-drag-id=${toActivate}]`);
+      await wait(200);
+      await js(`document.querySelector('[data-testid=activity-menu-hide]').click()`);
+      await wait(300);
+      const afterHideActive = await activityOrder();
+      const nowActive = await activeActivity();
+      check(
+        'ui: hiding the module on screen switches to the first module still shown',
+        !afterHideActive.includes(toActivate) && nowActive === afterHideActive[0],
+        { toActivate, afterHideActive, nowActive },
+      );
+      await shot('25c-activity-arranged-light');
+      await rightClick('[data-testid=activity-bar]');
+      await wait(200);
+      await js(`document.querySelector('[data-testid=activity-menu-reset]').click()`);
+      await wait(300);
+      const afterReset = await activityOrder();
+      check(
+        'ui: Reset Order and Visibility brings back every module in the default order',
+        JSON.stringify(afterReset) === JSON.stringify(activityDefault) && host.config.get().activityBar.order.length === 0 && host.config.get().activityBar.hidden.length === 0,
+        { afterReset, saved: host.config.get().activityBar },
+      );
+
+      // Todo panel: type and Enter adds, ticking strikes through, a line opens for notes, long text stays readable, Clear completed empties the done ones.
+      await js(`document.querySelector('[data-testid=activity-item][data-drag-id=todo]').click()`);
+      await wait(400);
+      const typeTodo = async (title: string) => {
+        await js(
+          `(() => { const i = document.querySelector('[data-testid=todo-input]'); const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; setter.call(i, ${JSON.stringify(title)}); i.dispatchEvent(new Event('input', { bubbles: true })); i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); })()`,
+        );
+        await wait(300);
+      };
+      await typeTodo('Fix the flaky login test');
+      await typeTodo('Reply to the design review');
+      await typeTodo('Deploy staging');
+      const todoTitles = () => js(`[...document.querySelectorAll('[data-testid=todo-item]')].map((r) => r.getAttribute('data-title') + (r.hasAttribute('data-done') ? ':done' : ''))`) as Promise<string[]>;
+      const todosTyped = await todoTitles();
+      const todoInputCleared = await js(`document.querySelector('[data-testid=todo-input]').value`);
+      check('ui: todo: Enter adds the typed line and clears the box', JSON.stringify(todosTyped) === JSON.stringify(['Fix the flaky login test', 'Reply to the design review', 'Deploy staging']) && todoInputCleared === '', { todosTyped, todoInputCleared });
+      await js(`document.querySelectorAll('[data-testid=todo-toggle]')[0].click()`);
+      await wait(400);
+      const todosTicked = await todoTitles();
+      check('ui: todo: ticking a line marks it done and moves it below the open ones', JSON.stringify(todosTicked) === JSON.stringify(['Reply to the design review', 'Deploy staging', 'Fix the flaky login test:done']), todosTicked);
+      await js(`document.querySelectorAll('[data-testid=todo-title]')[0].click()`);
+      await wait(200);
+      await js(
+        `(() => { const t = document.querySelector('[data-testid=todo-notes]'); const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; setter.call(t, 'Waiting on Sam for the mockups'); t.dispatchEvent(new Event('input', { bubbles: true })); t.dispatchEvent(new FocusEvent('focusout', { bubbles: true })); })()`,
+      );
+      await wait(500);
+      const notedTodo = (await run<TodoItem[]>('todo.list', {}, ws.id)).find((t) => t.title === 'Reply to the design review');
+      check('ui: todo: notes typed under a line are saved', notedTodo?.notes === 'Waiting on Sam for the mockups', notedTodo);
+      // Long text: a closed line wraps its title (three lines at most) and shows the start of its notes; an open one shows all of both.
+      const longTitle = 'Rewrite the billing reconciliation job so that retries are idempotent, then add a regression test for the double charge from https://status.example.com/incidents/2026-09-28-double-charge-on-retry';
+      const longNotes = ['Steps:', '1. Reproduce with the fixture from the incident channel.', '2. Make the retry key part of the ledger row.', '3. Backfill the rows that were charged twice.', '', 'Ask Dana which customers were refunded by hand, so the backfill skips them.'].join('\n');
+      await run('todo.add', { title: longTitle, notes: longNotes }, ws.id);
+      await wait(500);
+      const longRow = `[data-testid=todo-item][data-title^="Rewrite the billing"]`;
+      const closedLong = (await js(
+        `(() => { const row = document.querySelector('${longRow}'); const list = document.querySelector('[data-testid=todo-list]'); const title = row?.querySelector('[data-testid=todo-title] span'); const preview = row?.querySelector('[data-testid=todo-notes-preview]'); const other = document.querySelector('[data-testid=todo-item][data-title="Deploy staging"] [data-testid=todo-title] span'); if (!row || !list || !title || !preview || !other) return null; return { lines: Math.round(title.clientHeight / other.clientHeight), clipped: title.scrollHeight > title.clientHeight, wide: title.scrollWidth > title.clientWidth, previewLines: Math.round(preview.clientHeight / 18), overflow: list.scrollWidth > list.clientWidth }; })()`,
+      )) as { lines: number; clipped: boolean; wide: boolean; previewLines: number; overflow: boolean } | null;
+      check(
+        'ui: todo: a long title wraps to three lines with the start of its notes underneath, inside the panel',
+        closedLong !== null && closedLong.lines === 3 && closedLong.clipped && !closedLong.wide && closedLong.previewLines === 2 && !closedLong.overflow,
+        closedLong,
+      );
+      await shot('26-todo-long-closed-light');
+      await js(`document.querySelector('${longRow} [data-testid=todo-title]').click()`);
+      await wait(400);
+      const openLong = (await js(
+        `(() => { const row = document.querySelector('${longRow}'); const title = row?.querySelector('[data-testid=todo-edit-title]'); const notes = row?.querySelector('[data-testid=todo-notes]'); const list = document.querySelector('[data-testid=todo-list]'); if (!title || !notes || !list) return null; return { title: title.value, titleHeight: title.clientHeight, titleScrolls: title.scrollHeight > title.clientHeight + 1, notesHeight: notes.clientHeight, notesScroll: notes.scrollHeight > notes.clientHeight + 1, overflow: list.scrollWidth > list.clientWidth, closedPreview: document.querySelector('[data-testid=todo-item][data-title="Reply to the design review"] [data-testid=todo-notes-preview]')?.textContent ?? null }; })()`,
+      )) as { title: string; titleHeight: number; titleScrolls: boolean; notesHeight: number; notesScroll: boolean; overflow: boolean; closedPreview: string | null } | null;
+      check(
+        'ui: todo: an open line shows its whole title and notes without scrolling inside them',
+        openLong !== null && openLong.title === longTitle && openLong.titleHeight > 80 && !openLong.titleScrolls && openLong.notesHeight > 150 && !openLong.notesScroll && !openLong.overflow && openLong.closedPreview === 'Waiting on Sam for the mockups',
+        openLong,
+      );
+      await js(
+        `(() => { const t = document.querySelector('${longRow} [data-testid=todo-edit-title]'); const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; setter.call(t, ${JSON.stringify('Rewrite the billing reconciliation job\n  so that retries are idempotent')}); t.dispatchEvent(new Event('input', { bubbles: true })); t.dispatchEvent(new FocusEvent('focusout', { bubbles: true })); })()`,
+      );
+      await wait(500);
+      const retitled = (await run<TodoItem[]>('todo.list', {}, ws.id)).find((t) => t.title.startsWith('Rewrite the billing'));
+      check('ui: todo: the title is edited in place and stays one line of text', retitled?.title === 'Rewrite the billing reconciliation job so that retries are idempotent' && retitled.notes === longNotes, retitled?.title);
+      await run('todo.update', { id: retitled?.id ?? '', title: longTitle }, ws.id);
+      await js(`document.querySelector('[data-testid=todo-collapse]').click()`);
+      await wait(300);
+      await js(`document.querySelector('${longRow} [data-testid=todo-title]').click()`);
+      await wait(400);
+      check('ui: todo: the chevron collapses an open line', (await js(`document.querySelector('${longRow} [data-testid=todo-edit-title]')?.value`)) === longTitle);
+      await shot('26a-todo-light');
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(200);
+      await shot('26b-todo-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
+      await js(`document.querySelector('[data-testid=todo-clear]').click()`);
+      await wait(400);
+      const todosCleared = await todoTitles();
+      const todoHeader = await js(`document.querySelector('[data-testid=activity-item][data-drag-id=todo]') && [...document.querySelectorAll('span')].find((s) => /^List · /.test(s.textContent))?.textContent`);
+      check('ui: todo: Clear completed removes the done lines and the header counts what is left', JSON.stringify(todosCleared) === JSON.stringify(['Reply to the design review', 'Deploy staging', longTitle]) && todoHeader === 'List · 0/3 done', { todosCleared, todoHeader });
+      await js(`document.querySelector('[data-testid=activity-item][data-drag-id=api]').click()`);
+      await wait(200);
+
+      const revealedFolder = await run<{ path: string; revealed: boolean }>('workspace.reveal', { id: ws.id }, null);
+      const revealByAgent = await host.invoke('workspace.reveal', { id: ws.id }, { caller: 'mcp', workspaceId: null });
+      check('workspace.reveal: answers the folder for the UI and refuses agents', revealedFolder.path === folder && !revealByAgent.ok, { revealedFolder, agent: revealByAgent.ok });
 
       // Settings: the About section shows the version and says that a dev build does not update itself.
       await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: ',', ctrlKey: true, bubbles: true }))`);
