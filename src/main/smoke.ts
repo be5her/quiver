@@ -2689,7 +2689,7 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         { afterReset, saved: host.config.get().activityBar },
       );
 
-      // Todo panel: type and Enter adds, ticking strikes through, a line opens for notes, Clear completed empties the done ones.
+      // Todo panel: type and Enter adds, ticking strikes through, a line opens for notes, long text stays readable, Clear completed empties the done ones.
       await js(`document.querySelector('[data-testid=activity-item][data-drag-id=todo]').click()`);
       await wait(400);
       const typeTodo = async (title: string) => {
@@ -2717,6 +2717,43 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await wait(500);
       const notedTodo = (await run<TodoItem[]>('todo.list', {}, ws.id)).find((t) => t.title === 'Reply to the design review');
       check('ui: todo: notes typed under a line are saved', notedTodo?.notes === 'Waiting on Sam for the mockups', notedTodo);
+      // Long text: a closed line wraps its title (three lines at most) and shows the start of its notes; an open one shows all of both.
+      const longTitle = 'Rewrite the billing reconciliation job so that retries are idempotent, then add a regression test for the double charge from https://status.example.com/incidents/2026-09-28-double-charge-on-retry';
+      const longNotes = ['Steps:', '1. Reproduce with the fixture from the incident channel.', '2. Make the retry key part of the ledger row.', '3. Backfill the rows that were charged twice.', '', 'Ask Dana which customers were refunded by hand, so the backfill skips them.'].join('\n');
+      await run('todo.add', { title: longTitle, notes: longNotes }, ws.id);
+      await wait(500);
+      const longRow = `[data-testid=todo-item][data-title^="Rewrite the billing"]`;
+      const closedLong = (await js(
+        `(() => { const row = document.querySelector('${longRow}'); const list = document.querySelector('[data-testid=todo-list]'); const title = row?.querySelector('[data-testid=todo-title] span'); const preview = row?.querySelector('[data-testid=todo-notes-preview]'); const other = document.querySelector('[data-testid=todo-item][data-title="Deploy staging"] [data-testid=todo-title] span'); if (!row || !list || !title || !preview || !other) return null; return { lines: Math.round(title.clientHeight / other.clientHeight), clipped: title.scrollHeight > title.clientHeight, wide: title.scrollWidth > title.clientWidth, previewLines: Math.round(preview.clientHeight / 18), overflow: list.scrollWidth > list.clientWidth }; })()`,
+      )) as { lines: number; clipped: boolean; wide: boolean; previewLines: number; overflow: boolean } | null;
+      check(
+        'ui: todo: a long title wraps to three lines with the start of its notes underneath, inside the panel',
+        closedLong !== null && closedLong.lines === 3 && closedLong.clipped && !closedLong.wide && closedLong.previewLines === 2 && !closedLong.overflow,
+        closedLong,
+      );
+      await shot('26-todo-long-closed-light');
+      await js(`document.querySelector('${longRow} [data-testid=todo-title]').click()`);
+      await wait(400);
+      const openLong = (await js(
+        `(() => { const row = document.querySelector('${longRow}'); const title = row?.querySelector('[data-testid=todo-edit-title]'); const notes = row?.querySelector('[data-testid=todo-notes]'); const list = document.querySelector('[data-testid=todo-list]'); if (!title || !notes || !list) return null; return { title: title.value, titleHeight: title.clientHeight, titleScrolls: title.scrollHeight > title.clientHeight + 1, notesHeight: notes.clientHeight, notesScroll: notes.scrollHeight > notes.clientHeight + 1, overflow: list.scrollWidth > list.clientWidth, closedPreview: document.querySelector('[data-testid=todo-item][data-title="Reply to the design review"] [data-testid=todo-notes-preview]')?.textContent ?? null }; })()`,
+      )) as { title: string; titleHeight: number; titleScrolls: boolean; notesHeight: number; notesScroll: boolean; overflow: boolean; closedPreview: string | null } | null;
+      check(
+        'ui: todo: an open line shows its whole title and notes without scrolling inside them',
+        openLong !== null && openLong.title === longTitle && openLong.titleHeight > 80 && !openLong.titleScrolls && openLong.notesHeight > 150 && !openLong.notesScroll && !openLong.overflow && openLong.closedPreview === 'Waiting on Sam for the mockups',
+        openLong,
+      );
+      await js(
+        `(() => { const t = document.querySelector('${longRow} [data-testid=todo-edit-title]'); const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; setter.call(t, ${JSON.stringify('Rewrite the billing reconciliation job\n  so that retries are idempotent')}); t.dispatchEvent(new Event('input', { bubbles: true })); t.dispatchEvent(new FocusEvent('focusout', { bubbles: true })); })()`,
+      );
+      await wait(500);
+      const retitled = (await run<TodoItem[]>('todo.list', {}, ws.id)).find((t) => t.title.startsWith('Rewrite the billing'));
+      check('ui: todo: the title is edited in place and stays one line of text', retitled?.title === 'Rewrite the billing reconciliation job so that retries are idempotent' && retitled.notes === longNotes, retitled?.title);
+      await run('todo.update', { id: retitled?.id ?? '', title: longTitle }, ws.id);
+      await js(`document.querySelector('[data-testid=todo-collapse]').click()`);
+      await wait(300);
+      await js(`document.querySelector('${longRow} [data-testid=todo-title]').click()`);
+      await wait(400);
+      check('ui: todo: the chevron collapses an open line', (await js(`document.querySelector('${longRow} [data-testid=todo-edit-title]')?.value`)) === longTitle);
       await shot('26a-todo-light');
       await js(`document.documentElement.classList.add('dark')`);
       await wait(200);
@@ -2726,7 +2763,7 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await wait(400);
       const todosCleared = await todoTitles();
       const todoHeader = await js(`document.querySelector('[data-testid=activity-item][data-drag-id=todo]') && [...document.querySelectorAll('span')].find((s) => /^List · /.test(s.textContent))?.textContent`);
-      check('ui: todo: Clear completed removes the done lines and the header counts what is left', JSON.stringify(todosCleared) === JSON.stringify(['Reply to the design review', 'Deploy staging']) && todoHeader === 'List · 0/2 done', { todosCleared, todoHeader });
+      check('ui: todo: Clear completed removes the done lines and the header counts what is left', JSON.stringify(todosCleared) === JSON.stringify(['Reply to the design review', 'Deploy staging', longTitle]) && todoHeader === 'List · 0/3 done', { todosCleared, todoHeader });
       await js(`document.querySelector('[data-testid=activity-item][data-drag-id=api]').click()`);
       await wait(200);
 
