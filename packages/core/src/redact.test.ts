@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { keyValue, newApiRequest, type ApiRequest, type HistoryEntry } from './models/api';
-import { REDACTED, isSecretName, redactHistoryEntry, redactLiteral, redactRequest, redactUrl, requestSecretValues } from './redact';
+import { REDACTED, isSecretName, redactHistoryEntry, redactLiteral, redactRequest, redactSent, redactUrl, requestSecretValues, scrubSecrets } from './redact';
 
 const M = REDACTED;
 
@@ -29,6 +29,23 @@ describe('redactLiteral', () => {
     expect(redactLiteral('')).toBe('');
     expect(redactLiteral('  ')).toBe('  ');
     expect(redactLiteral(redactLiteral('secret'))).toBe(M);
+  });
+});
+
+describe('scrubSecrets', () => {
+  it('masks a secret as it is, URL-encoded and form-encoded', () => {
+    expect(scrubSecrets('{"t":"p@ss word"}', ['p@ss word'])).toBe(`{"t":"${M}"}`);
+    expect(scrubSecrets('a=p%40ss%20word&b=1', ['p@ss word'])).toBe(`a=${M}&b=1`);
+    expect(scrubSecrets('a=p%40ss+word&b=1', ['p@ss word'])).toBe(`a=${M}&b=1`);
+    expect(scrubSecrets('token token', ['token'])).toBe(`${M} ${M}`);
+  });
+
+  it('takes the longest secret first, skips short ones and leaves the rest of the text', () => {
+    expect(scrubSecrets('abcdef abcd', ['abcd', 'abcdef'])).toBe(`${M} ${M}`);
+    expect(scrubSecrets('a1 b1 c1', ['1', 'a1', ''])).toBe('a1 b1 c1');
+    expect(scrubSecrets('nothing here', ['s3cret'])).toBe('nothing here');
+    expect(scrubSecrets('as is')).toBe('as is');
+    expect(scrubSecrets(scrubSecrets('x s3cret', ['s3cret']), ['s3cret', M])).toBe(`x ${M}`);
   });
 });
 
@@ -147,6 +164,49 @@ describe('requestSecretValues', () => {
     expect(requestSecretValues(request({ auth: { type: 'bearer', token: 't0ken' } }))).toEqual(['t0ken']);
     expect(requestSecretValues(request({ auth: { type: 'apikey', key: 'k', value: 'v4lue', in: 'query' } }))).toEqual(['v4lue']);
   });
+
+  it('includes credential parameters written into the URL itself', () => {
+    expect(requestSecretValues(request({ url: 'https://x.test/a?page=2&api_key=in%20url&flag#token=no' }))).toEqual(['in url']);
+  });
+});
+
+describe('redactSent', () => {
+  const sent = {
+    method: 'POST' as const,
+    url: 'https://x.test/pay?ref=s3cr3t-ref&appid=k-123&page=1',
+    headers: [
+      ['Authorization', 'Bearer s3cr3t-tok'],
+      ['X-Api-Key', 'k-123'],
+      ['X-Note', 'for s3cr3t-ref'],
+      ['Content-Type', 'application/json'],
+    ] as [string, string][],
+    bodyPreview: '{"token":"s3cr3t-tok","n":1}',
+  };
+
+  it('masks credential headers by name and the known secrets everywhere else', () => {
+    expect(redactSent(sent, { names: ['appid'], values: ['s3cr3t-ref', 's3cr3t-tok'] })).toEqual({
+      method: 'POST',
+      url: `https://x.test/pay?ref=${M}&appid=${M}&page=1`,
+      headers: [
+        ['Authorization', `Bearer ${M}`],
+        ['X-Api-Key', M],
+        ['X-Note', `for ${M}`],
+        ['Content-Type', 'application/json'],
+      ],
+      bodyPreview: `{"token":"${M}","n":1}`,
+    });
+  });
+
+  it('still masks credential headers when nothing else is known, and copes with no body', () => {
+    const out = redactSent({ ...sent, bodyPreview: null });
+    expect(out.headers.slice(0, 3)).toEqual([
+      ['Authorization', `Bearer ${M}`],
+      ['X-Api-Key', M],
+      ['X-Note', 'for s3cr3t-ref'],
+    ]);
+    expect(out.bodyPreview).toBeNull();
+    expect(sent.headers[0][1]).toBe('Bearer s3cr3t-tok');
+  });
 });
 
 describe('redactHistoryEntry', () => {
@@ -158,6 +218,14 @@ describe('redactHistoryEntry', () => {
     expect(out.url).toBe(`https://pay.test/pay?ref=${M}&appid=${M}`);
     expect(out.request).toEqual(req);
     expect(out).toMatchObject({ id: 'h1', status: 200, durationMs: 12 });
+  });
+
+  it('masks a secret an error message quotes', () => {
+    const failed = { ...entry(request({ url: '{{baseUrl}}/x?ref={{secretRef}}' }), 'htp:/bad/x?ref=s3cr3t-ref'), status: null, error: 'Failed to parse URL from htp:/bad/x?ref=s3cr3t-ref' };
+    const out = redactHistoryEntry(failed, { values: ['s3cr3t-ref'] });
+    expect(out.error).toBe(`Failed to parse URL from htp:/bad/x?ref=${M}`);
+    expect(out.url).toBe(`htp:/bad/x?ref=${M}`);
+    expect(Object.keys(out)).toEqual(Object.keys(failed));
   });
 
   it('cleans an entry written before masking existed, once', () => {

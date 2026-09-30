@@ -1357,6 +1357,32 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     check('mcp blocks mutations by default', blocked.result?.isError === true && (blocked.result.content?.[0]?.text ?? '').includes('MUTATION_BLOCKED'));
     const masked = await rpc('tools/call', { name: 'api_environment_get', arguments: { id: env.id } });
     check('mcp masks secrets', !(masked.result?.content?.[0]?.text ?? '').includes('s3cret'));
+    // What an agent reads back about a request it sent has the secrets masked; the UI still sees what went on the wire.
+    {
+      const viaSecret = { ...saved, id: '', url: '{{baseUrl}}/agent?ref={{token}}&page=1', headers: [{ id: 'h1', key: 'X-Note', value: 'note-{{token}}', enabled: true }], body: { type: 'json', content: '{"t":"{{token}}"}' } };
+      const agentSend = await rpc('tools/call', { name: 'api_request_send', arguments: { request: viaSecret, record: false } });
+      const agentGot = JSON.parse(agentSend.result?.content?.[0]?.text ?? '{}') as Partial<ApiResponse>;
+      const headerOf = (r: Partial<ApiResponse>, name: string) => r.sent?.headers.find(([k]) => k.toLowerCase() === name)?.[1];
+      check(
+        'mcp: what a send reports as sent has credentials and secret variables masked',
+        agentGot.status === 200 &&
+          headerOf(agentGot, 'authorization') === `Bearer ${REDACTED}` &&
+          headerOf(agentGot, 'x-note') === `note-${REDACTED}` &&
+          agentGot.sent?.url === `http://127.0.0.1:${echoPort}/agent?ref=${REDACTED}&page=1` &&
+          agentGot.sent.bodyPreview === `{"t":"${REDACTED}"}` &&
+          agentGot.url === agentGot.sent.url &&
+          !JSON.stringify(agentGot.sent).includes('s3cret'),
+        agentGot.sent,
+      );
+      const uiGot = await run<ApiResponse>('api.request.send', { request: viaSecret, record: false }, ws.id);
+      check('mcp: the UI still sees the request as it went out', uiGot.sent.headers.some(([k, v]) => k === 'Authorization' && v === 'Bearer s3cret') && uiGot.sent.url.endsWith('/agent?ref=s3cret&page=1') && uiGot.sent.bodyPreview === '{"t":"s3cret"}');
+      const agentDown = await rpc('tools/call', { name: 'api_request_send', arguments: { request: { ...saved, id: '', url: 'http://127.0.0.1:1/down?ref={{token}}' }, record: false, options: { timeoutMs: 3000 } } });
+      const agentDownText = agentDown.result?.content?.[0]?.text ?? '';
+      check('mcp: a failed send does not name the secret either', agentDown.result?.isError === true && agentDownText.includes(`ref=${REDACTED}`) && !agentDownText.includes('s3cret'), agentDownText.slice(0, 200));
+      const agentCurl = (await rpc('tools/call', { name: 'api_export_curl', arguments: { requestId: saved.id } })).result?.content?.[0]?.text ?? '';
+      const uiCurl = await run<{ command: string }>('api.export.curl', { requestId: saved.id }, ws.id);
+      check('mcp: curl export masks the secret for agents and keeps it for the UI', agentCurl.includes(`Bearer ${REDACTED}`) && !agentCurl.includes('s3cret') && uiCurl.command.includes('Bearer s3cret'), agentCurl.slice(0, 200));
+    }
     check('mcp lists db tools', names.includes('db_query_run') && names.includes('db_redis_keys') && names.includes('db_table_rows'));
     const mcpRead = await rpc('tools/call', { name: 'db_query_run', arguments: { connectionId: sqlite.id, query: 'SELECT name FROM users ORDER BY id' } });
     const mcpRows = JSON.parse(mcpRead.result?.content?.[0]?.text ?? '[]') as DbQueryResult[];
