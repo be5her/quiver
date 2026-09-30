@@ -1,7 +1,7 @@
-import { toErrorPayload, type DbTableDetail, type DbTableRows, type ErrorPayload } from '@quiver/core';
-import { Badge, Button, CodeEditor, IconButton, Input, Segmented, Spinner, cn, invoke, useInvoke, type TabProps } from '@quiver/ui';
+import { toErrorPayload, type DbColumn, type DbConnectionSummary, type DbTableDetail, type DbTableRows, type ErrorPayload } from '@quiver/core';
+import { Badge, Button, CodeEditor, IconButton, Segmented, Spinner, cn, invoke, useInvoke, type SQLNamespace, type TabProps, type UseInvokeResult } from '@quiver/ui';
 import { ChevronLeft, ChevronRight, RefreshCw, Terminal } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ResultGrid } from './ResultGrid';
 import { openQueryTab } from './index';
 import { DbError, formatCount, formatDuration } from './shared';
@@ -14,6 +14,10 @@ export function TableTab({ tab }: TabProps) {
   const table = String(tab.data?.table ?? '');
   const database = typeof tab.data?.database === 'string' ? tab.data.database : null;
   const [view, setView] = useState<View>('data');
+  // The columns feed both the Structure view and the WHERE filter's autocompletion.
+  const detail = useInvoke<DbTableDetail>('db.schema.table', { connectionId, table, database }, { refreshOn: [`db-schema:${connectionId}`] });
+  const connections = useInvoke<DbConnectionSummary[]>('db.connection.list', {}, { refreshOn: ['db-connections'] });
+  const kind = connections.data?.find((c) => c.id === connectionId)?.kind;
 
   return (
     <div className="flex flex-col h-full min-h-0">
@@ -37,13 +41,30 @@ export function TableTab({ tab }: TabProps) {
         ]}
       />
       <div className="flex-1 min-h-0">
-        {view === 'data' ? <DataView connectionId={connectionId} table={table} database={database} /> : <StructureView connectionId={connectionId} table={table} database={database} />}
+        {view === 'data' ? (
+          <DataView connectionId={connectionId} table={table} database={database} columns={detail.data?.columns} sqlite={kind === 'sqlite'} />
+        ) : (
+          <StructureView detail={detail} />
+        )}
       </div>
     </div>
   );
 }
 
-function DataView({ connectionId, table, database }: { connectionId: string; table: string; database: string | null }) {
+/** Column completions for the WHERE filter; names that are not plain identifiers are inserted quoted. */
+function filterSchema(table: string, columns: DbColumn[] | undefined): SQLNamespace | undefined {
+  if (!columns) return undefined;
+  return {
+    [table]: columns.map((c) => ({
+      label: c.name,
+      type: 'property',
+      detail: c.type,
+      apply: /^[A-Za-z_][A-Za-z0-9_]*$/.test(c.name) ? undefined : `\`${c.name.replace(/`/g, '``')}\``,
+    })),
+  };
+}
+
+function DataView({ connectionId, table, database, columns, sqlite }: { connectionId: string; table: string; database: string | null; columns: DbColumn[] | undefined; sqlite: boolean }) {
   const [offset, setOffset] = useState(0);
   const [sort, setSort] = useState<{ column: string; direction: 'asc' | 'desc' } | null>(null);
   const [where, setWhere] = useState('');
@@ -51,6 +72,7 @@ function DataView({ connectionId, table, database }: { connectionId: string; tab
   const [data, setData] = useState<DbTableRows | null>(null);
   const [error, setError] = useState<ErrorPayload | null>(null);
   const [loading, setLoading] = useState(true);
+  const schema = useMemo(() => filterSchema(table, columns), [table, columns]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -87,18 +109,23 @@ function DataView({ connectionId, table, database }: { connectionId: string; tab
     <div className="flex flex-col h-full min-h-0">
       <div className="flex items-center gap-2 px-3 h-9 border-b border-edge shrink-0 text-xs">
         <span className="text-muted shrink-0">WHERE</span>
-        <Input
-          value={where}
-          onChange={(e) => setWhere(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
+        <div className="flex-1 min-w-0 max-w-xl" data-testid="db-table-where">
+          <CodeEditor
+            value={where}
+            onChange={setWhere}
+            onRun={() => {
               setOffset(0);
               setApplied(where.trim());
-            }
-          }}
-          placeholder="id > 100 AND status = 'active'  (Enter to apply)"
-          className="h-7 font-mono text-xs max-w-xl"
-        />
+            }}
+            singleLine
+            language="sql"
+            sqlDialect={sqlite ? 'sqlite' : 'mysql'}
+            sqlSchema={schema}
+            sqlDefaultTable={table}
+            placeholder="id > 100 AND status = 'active'  (Enter to apply)"
+            className="h-7"
+          />
+        </div>
         <div className="flex-1" />
         {loading && <Spinner className="size-3.5" />}
         {data && !loading && (
@@ -141,8 +168,7 @@ function DataView({ connectionId, table, database }: { connectionId: string; tab
   );
 }
 
-function StructureView({ connectionId, table, database }: { connectionId: string; table: string; database: string | null }) {
-  const detail = useInvoke<DbTableDetail>('db.schema.table', { connectionId, table, database }, { refreshOn: [`db-schema:${connectionId}`] });
+function StructureView({ detail }: { detail: UseInvokeResult<DbTableDetail> }) {
   if (detail.error) return <DbError error={detail.error} onRetry={() => void detail.refresh()} />;
   if (!detail.data)
     return (

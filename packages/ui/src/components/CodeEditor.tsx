@@ -2,7 +2,7 @@ import { html } from '@codemirror/lang-html';
 import { javascript } from '@codemirror/lang-javascript';
 import { json } from '@codemirror/lang-json';
 import { MySQL, SQLite, StandardSQL, sql, type SQLNamespace } from '@codemirror/lang-sql';
-import { Prec, RangeSetBuilder } from '@codemirror/state';
+import { EditorState, Prec, RangeSetBuilder, type ChangeSpec } from '@codemirror/state';
 import { Decoration, EditorView, ViewPlugin, keymap, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import { findVariableSpans } from '@quiver/core';
 import CodeMirror, { type Extension, type ReactCodeMirrorRef } from '@uiw/react-codemirror';
@@ -31,16 +31,23 @@ export interface CodeEditorProps {
   sqlDialect?: SqlDialect;
   /** SQL only: table names (and optionally columns) offered by autocompletion. */
   sqlSchema?: SQLNamespace;
+  /** SQL only: a table in `sqlSchema` whose columns complete without the table name in front. */
+  sqlDefaultTable?: string;
   /** GraphQL only: schema for autocompletion and lint. Without it, highlighting only. */
   graphqlSchema?: GraphQLSchema | null;
-  /** Bound to Mod+Enter inside the editor. */
+  /** Bound to Mod+Enter inside the editor, and to Enter when `singleLine`. */
   onRun?(): void;
+  /**
+   * A one-line field that looks like an Input: no gutters, newlines typed or pasted become
+   * spaces, Enter runs `onRun` (unless it picks a completion) and Tab moves focus. Size it with `className`.
+   */
+  singleLine?: boolean;
   /** Access to the underlying CodeMirror view, e.g. to read the selection. */
   editorRef?: Ref<ReactCodeMirrorRef>;
   autoFocus?: boolean;
 }
 
-function languageExtension(language: CodeLanguage, dialect: SqlDialect, schema?: SQLNamespace, graphqlSchema?: GraphQLSchema | null): Extension[] {
+function languageExtension(language: CodeLanguage, dialect: SqlDialect, schema?: SQLNamespace, defaultTable?: string, graphqlSchema?: GraphQLSchema | null): Extension[] {
   switch (language) {
     case 'graphql':
       return [graphqlLanguage(graphqlSchema ?? undefined)];
@@ -52,7 +59,7 @@ function languageExtension(language: CodeLanguage, dialect: SqlDialect, schema?:
     case 'xml':
       return [html()];
     case 'sql':
-      return [sql({ dialect: dialect === 'mysql' ? MySQL : dialect === 'sqlite' ? SQLite : StandardSQL, schema, upperCaseKeywords: true })];
+      return [sql({ dialect: dialect === 'mysql' ? MySQL : dialect === 'sqlite' ? SQLite : StandardSQL, schema, defaultTable, upperCaseKeywords: true })];
     default:
       return [];
   }
@@ -67,6 +74,23 @@ const baseTheme = EditorView.theme({
   '.cm-activeLineGutter': { backgroundColor: 'transparent' },
   '.cm-tooltip': { backgroundColor: 'var(--elevated)', border: '1px solid var(--edge)', color: 'var(--fg)' },
   '.cm-tooltip-autocomplete ul li[aria-selected]': { backgroundColor: 'var(--accent)', color: 'var(--accent-fg)' },
+});
+
+// Matches Input: text-xs, px-2.5 and the muted placeholder; the scrollbar is hidden since the line scrolls with the cursor.
+const singleLineTheme = EditorView.theme({
+  '&': { fontSize: '12px' },
+  '.cm-content': { padding: '0' },
+  '.cm-line': { padding: '0 10px' },
+  '.cm-scroller': { scrollbarWidth: 'none' },
+  '.cm-placeholder': { color: 'color-mix(in srgb, var(--muted) 70%, transparent)' },
+});
+
+/** Keeps the document on one line: every newline, with the whitespace around it, becomes one space. */
+const oneLine = EditorState.transactionFilter.of((tr) => {
+  if (!tr.docChanged || tr.newDoc.lines === 1) return tr;
+  const changes: ChangeSpec[] = [];
+  for (const m of tr.newDoc.toString().matchAll(/\s*\n\s*/g)) changes.push({ from: m.index, to: m.index + m[0].length, insert: ' ' });
+  return [tr, { changes, sequential: true }];
 });
 
 const variableTheme = EditorView.baseTheme({
@@ -123,8 +147,10 @@ export function CodeEditor({
   wrap,
   sqlDialect = 'standard',
   sqlSchema,
+  sqlDefaultTable,
   graphqlSchema,
   onRun,
+  singleLine,
   editorRef,
   autoFocus,
 }: CodeEditorProps) {
@@ -135,8 +161,26 @@ export function CodeEditor({
   onRunRef.current = onRun;
 
   const extensions = useMemo(() => {
-    const list = [baseTheme, ...languageExtension(language, sqlDialect, sqlSchema, graphqlSchema)];
+    const list = [baseTheme, ...languageExtension(language, sqlDialect, sqlSchema, sqlDefaultTable, graphqlSchema)];
     if (wrap) list.push(EditorView.lineWrapping);
+    if (singleLine) {
+      list.push(
+        Prec.high(singleLineTheme),
+        oneLine,
+        // Below the completion keymap (Prec.highest), so Enter still picks a completion while the list is open.
+        Prec.high(
+          keymap.of([
+            {
+              key: 'Enter',
+              run: () => {
+                onRunRef.current?.();
+                return true;
+              },
+            },
+          ]),
+        ),
+      );
+    }
     if (variables && !readOnly) list.push(variableHighlighting(variables));
     list.push(
       Prec.highest(
@@ -153,12 +197,21 @@ export function CodeEditor({
       ),
     );
     return list;
-  }, [language, wrap, sqlDialect, sqlSchema, graphqlSchema, variables, readOnly]);
+  }, [language, wrap, singleLine, sqlDialect, sqlSchema, sqlDefaultTable, graphqlSchema, variables, readOnly]);
+  const filled = fill && !singleLine;
 
   return (
-    <div className={cn('overflow-hidden rounded-md border border-edge bg-surface', fill && 'h-full min-h-0', className)}>
+    <div
+      className={cn(
+        'overflow-hidden rounded-md border border-edge bg-surface',
+        filled && 'h-full min-h-0',
+        singleLine && 'flex items-center focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/30',
+        className,
+      )}
+    >
       <CodeMirror
         ref={editorRef}
+        className={singleLine ? 'flex-1 min-w-0' : undefined}
         value={value}
         onChange={onChange}
         readOnly={readOnly}
@@ -167,12 +220,15 @@ export function CodeEditor({
         extensions={extensions}
         placeholder={placeholder}
         autoFocus={autoFocus}
-        height={fill ? '100%' : undefined}
-        style={{ height: fill ? '100%' : undefined }}
+        height={filled ? '100%' : undefined}
+        style={{ height: filled ? '100%' : undefined }}
+        indentWithTab={!singleLine}
         basicSetup={{
-          lineNumbers: true,
-          foldGutter: true,
-          highlightActiveLine: !readOnly,
+          lineNumbers: !singleLine,
+          foldGutter: !singleLine,
+          foldKeymap: !singleLine,
+          searchKeymap: !singleLine,
+          highlightActiveLine: !readOnly && !singleLine,
           highlightActiveLineGutter: false,
           autocompletion: (language === 'sql' || language === 'graphql') && !readOnly,
         }}

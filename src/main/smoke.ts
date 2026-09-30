@@ -1912,6 +1912,43 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       const gridHasAda = await js(`[...document.querySelectorAll('[role=gridcell]')].some((c) => c.textContent === 'Ada')`);
       check('ui: table grid renders rows', gridHasAda === true);
       await shot('05-table-light');
+      // The WHERE filter completes the table's columns: Enter picks one while the list is open, then applies the filter.
+      const typeText = (text: string) => {
+        for (const ch of text) win.webContents.sendInputEvent({ type: 'char', keyCode: ch });
+      };
+      const pressEnter = () => {
+        win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
+        win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+      };
+      const whereFocused = await js(`(() => { const c = document.querySelector('[data-testid=db-table-where] .cm-content'); if (c) c.focus(); return document.activeElement === c; })()`);
+      check('ui: WHERE filter is an editor', whereFocused === true);
+      typeText('ema');
+      await wait(500);
+      const whereOptions = await js(`[...document.querySelectorAll('.cm-tooltip-autocomplete li')].map((li) => [li.querySelector('.cm-completionLabel')?.textContent, li.querySelector('.cm-completionDetail')?.textContent, li.getAttribute('aria-selected') === 'true'])`);
+      check(
+        'ui: WHERE filter offers the columns with their types',
+        Array.isArray(whereOptions) && whereOptions.some((o: unknown[]) => o[0] === 'email' && o[1] === 'TEXT' && o[2] === true),
+        whereOptions,
+      );
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(300);
+      await shot('05b-table-where-completion-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
+      pressEnter();
+      await wait(200);
+      const whereText = () => js(`document.querySelector('[data-testid=db-table-where] .cm-content')?.textContent ?? ''`);
+      const picked = await whereText();
+      typeText(" = 'linus@example.com'");
+      await wait(300);
+      pressEnter();
+      await wait(1200);
+      const filtered = await js(`[...document.querySelectorAll('[role=gridcell]')].filter((c) => c.offsetParent !== null).map((c) => c.textContent).join(',')`);
+      check('ui: Enter picks the column, then applies the filter', picked === 'email' && typeof filtered === 'string' && filtered.includes('Linus') && !filtered.includes('Ada'), { picked, filtered });
+      // A pasted line break becomes a space instead of a second line.
+      await js(`document.execCommand('insertText', false, '\\n  AND id > 0')`);
+      await wait(200);
+      const whereAfter = await js(`[...document.querySelectorAll('[data-testid=db-table-where] .cm-line')].map((l) => l.textContent)`);
+      check('ui: the WHERE filter stays one line', Array.isArray(whereAfter) && whereAfter.length === 1 && whereAfter[0] === "email = 'linus@example.com' AND id > 0", whereAfter);
       const clickedQuery = await js(
         `(() => { const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Query'); if (btn) btn.click(); return Boolean(btn); })()`,
       );
