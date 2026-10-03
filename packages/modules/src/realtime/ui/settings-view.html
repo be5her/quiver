@@ -1,0 +1,43 @@
+@let c = connection();
+<section class="grid grid-cols-2 gap-3">
+  <div>
+    <label qLabel>Kind</label>
+    <select qSelect [formField]="form().kind" class="w-full" data-testid="realtime-kind">
+      <option value="websocket">WebSocket (two-way messages)</option>
+      <option value="sse">Server-Sent Events (server pushes events)</option>
+    </select>
+  </div>
+  @if (isWs()) {
+    <div>
+      <label qLabel>Subprotocols</label>
+      <input qInput [value]="protocols()" placeholder="e.g. graphql-transport-ws" class="font-mono" (input)="setProtocols($event)" />
+    </div>
+  } @else {
+    <div>
+      <label qLabel>Request method</label>
+      <select qSelect [formField]="form().method" class="w-full">
+        <option value="GET">GET</option>
+        <option value="POST">POST with a body</option>
+      </select>
+    </div>
+  }
+  <label class="flex items-center gap-2 text-sm"><input type="checkbox" qCheckbox [formField]="form().reconnect" /> Reconnect when the connection drops</label>
+  <label class="flex items-center gap-2 text-sm"><input type="checkbox" qCheckbox [formField]="form().autoConnect" /> Connect when the workspace opens</label>
+  <label class="flex items-center gap-2 text-sm"><input type="checkbox" qCheckbox [formField]="form().insecure" /> Accept self-signed certificates</label>
+  <div>
+    <label qLabel>Messages to keep</label>
+    <input qInput type="number" min="10" max="5000" [value]="c.logLimit" class="font-mono" (input)="setLogLimit($event)" />
+  </div>
+</section>
+@if (!isWs() && c.method === 'POST') {
+  <section>
+    <label qLabel>Request body</label>
+    <div class="border border-edge rounded-md h-40">
+      <q-code-editor [formField]="form().body" [language]="bodyLanguage()" fill [placeholder]="bodyPlaceholder" />
+    </div>
+  </section>
+}
+<p class="text-[11px] text-muted">{{ isWs() ? 'Reconnects back off from 1 s to 30 s. A close with code 1000 (normal) is not retried.' : 'Reconnects honour the retry hint of the server (3 s otherwise) and resume with Last-Event-ID. A non-2xx answer or a wrong content type is not retried.' }}</p>
+<section class="border-t border-edge pt-3">
+  <button qButton variant="danger" size="sm" [icon]="trash" (click)="remove.emit()">Delete this connection</button>
+</section>

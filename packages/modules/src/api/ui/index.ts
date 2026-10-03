@@ -8,6 +8,8 @@ import { RequestTab } from './request-tab';
 import { SchemaTab } from './schema-tab';
 
 export { ApiActions } from './api-actions';
+export { ApiVariables } from './api-variables';
+export { AuthEditor } from './auth-editor';
 export { HeaderTable } from './header-table';
 
 export const apiModuleUI = defineModuleUI({

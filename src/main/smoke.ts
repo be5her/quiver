@@ -2561,6 +2561,32 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(200);
 
+      // The composed message is kept as an unsaved saved message; deleting it again leaves nothing to save.
+      const rtSaveLabel = () => js(`document.querySelector('[data-testid=realtime-connection-tab] button[title="Ctrl+S"]')?.textContent.trim() ?? ''`);
+      const savedItems = () => js(`[...document.querySelectorAll('[data-testid=realtime-connection-tab] .w-56 .overflow-y-auto button')].map((b) => b.textContent.trim())`);
+      await js(`[...document.querySelectorAll('[data-testid=realtime-composer] button')].find((b) => b.textContent.trim() === 'Save message')?.click()`);
+      await wait(400);
+      const kept = {
+        view: await js(`document.querySelector('[data-testid=realtime-connection-tab] [role=tab][aria-selected=true]')?.textContent ?? ''`),
+        items: await savedItems(),
+        firstName: await js(`document.querySelector('[data-testid=realtime-connection-tab] .w-56.border-r + div input')?.value ?? null`),
+        save: await rtSaveLabel(),
+      };
+      check(
+        'ui: a composed message joins the saved messages, unsaved, with the first one open',
+        kept.view === 'Saved (2)' && JSON.stringify(kept.items) === JSON.stringify(['ping', 'Message 2']) && kept.firstName === 'ping' && kept.save === 'Save*',
+        kept,
+      );
+      await js(`[...document.querySelectorAll('[data-testid=realtime-connection-tab] .w-56 .overflow-y-auto button')].find((b) => b.textContent.trim() === 'Message 2')?.click()`);
+      await wait(300);
+      const keptBody = await js(`document.querySelector('[data-testid=realtime-connection-tab] .cm-content')?.textContent ?? ''`);
+      await js(`document.querySelector('[data-testid=realtime-connection-tab] [aria-label="Delete message"]')?.click()`);
+      await wait(300);
+      const afterRemove = { items: await savedItems(), save: await rtSaveLabel() };
+      check('ui: deleting the kept message leaves the connection unchanged', keptBody.includes('from the ui') && afterRemove.items.length === 1 && afterRemove.save === 'Save', { keptBody, ...afterRemove });
+      await js(`[...document.querySelectorAll('[data-testid=realtime-connection-tab] [role=tab]')].find((b) => b.textContent.startsWith('Messages'))?.click()`);
+      await wait(200);
+
       // GraphQL: request row label, body editor with schema status, docs explorer.
       const clickedApi = await js(
         `(() => { const btn = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.title || '') === 'API client'); if (btn) btn.click(); return Boolean(btn); })()`,
