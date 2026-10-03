@@ -2477,6 +2477,37 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(200);
 
+      // A captured request becomes an unsaved route; deleting it again leaves nothing to save. Same for a settings toggle.
+      const mockSaveLabel = () => js(`document.querySelector('[data-testid=mock-server-tab] button[title="Ctrl+S"]')?.textContent.trim() ?? ''`);
+      const clickMockTab = (label: string) =>
+        js(`(() => { const btn = [...document.querySelectorAll('[data-testid=mock-server-tab] [role=tab]')].find((b) => b.textContent.startsWith(${JSON.stringify(label)})); if (btn) btn.click(); return Boolean(btn); })()`);
+      await js(`[...document.querySelectorAll('[data-testid=mock-request-detail] button')].find((b) => b.textContent.trim() === 'Route')?.click()`);
+      await wait(500);
+      const fromRequest = {
+        view: await js(`document.querySelector('[data-testid=mock-server-tab] [role=tab][aria-selected=true]')?.textContent ?? ''`),
+        path: await js(`document.querySelector('[data-testid=mock-route-path]')?.value ?? null`),
+        save: await mockSaveLabel(),
+      };
+      check('ui: a captured request turns into a selected, unsaved route', fromRequest.view === 'Routes (6)' && fromRequest.path === '/echo' && fromRequest.save === 'Save*', fromRequest);
+      await js(`document.querySelector('[data-testid=mock-route-editor] [aria-label="Delete route"]')?.click()`);
+      await wait(300);
+      const afterDelete = { routes: await js(`document.querySelectorAll('[data-testid=mock-route-item]').length`), save: await mockSaveLabel() };
+      check('ui: deleting the new route leaves the server unchanged', afterDelete.routes === 5 && afterDelete.save === 'Save', afterDelete);
+      await clickMockTab('Settings');
+      await wait(400);
+      const toggleCors = () => js(`[...document.querySelectorAll('[data-testid=mock-server-tab] label')].find((l) => l.textContent.includes('Allow browser calls'))?.querySelector('input')?.click()`);
+      const settingsPort = await js(`document.querySelector('[data-testid=mock-port]')?.value ?? null`);
+      await toggleCors();
+      await wait(200);
+      const corsToggled = await mockSaveLabel();
+      await toggleCors();
+      await wait(200);
+      const corsRestored = await mockSaveLabel();
+      check('ui: settings show the port and a toggle marks the server unsaved until undone', settingsPort === String(mock.port) && corsToggled === 'Save*' && corsRestored === 'Save', { settingsPort, corsToggled, corsRestored });
+      await shot('14b-mock-settings-light');
+      await clickMockTab('Routes');
+      await wait(200);
+
       // Realtime module: connection rows, live message log, composer.
       const clickedRealtime = await js(
         `(() => { const btn = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.title || '') === 'Realtime'); if (btn) btn.click(); return Boolean(btn); })()`,

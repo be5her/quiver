@@ -7,6 +7,9 @@ import { EnvironmentTab } from './environment-tab';
 import { RequestTab } from './request-tab';
 import { SchemaTab } from './schema-tab';
 
+export { ApiActions } from './api-actions';
+export { HeaderTable } from './header-table';
+
 export const apiModuleUI = defineModuleUI({
   id: 'api',
   title: 'API client',

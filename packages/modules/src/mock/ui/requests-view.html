@@ -1,0 +1,53 @@
+@let all = items.value();
+<div class="w-80 border-r border-edge flex flex-col min-h-0 shrink-0">
+  <div class="flex items-center gap-1 px-2 h-9 border-b border-edge shrink-0">
+    <input qInput [value]="filter()" (input)="typed($event)" placeholder="Filter by method, path, status" class="h-7 text-xs" />
+    <button qIconButton label="Refresh" size="sm" (click)="items.reload()"><svg [qIcon]="icons.RefreshCw" class="size-3.5"></svg></button>
+    <button qIconButton label="Clear requests" size="sm" [disabled]="!all?.length" (click)="clear()"><svg [qIcon]="icons.Trash2" class="size-3.5"></svg></button>
+  </div>
+  <div class="flex-1 overflow-y-auto" data-testid="mock-request-list">
+    @for (r of filtered(); track r.id) {
+      <button
+        type="button"
+        class="w-full text-left px-2 py-1 border-b border-edge/60 hover:bg-elevated flex flex-col gap-0.5 min-w-0"
+        [class.bg-elevated]="r.id === selectedId()"
+        data-testid="mock-request"
+        (click)="selectedId.set(r.id)"
+      >
+        <span class="flex items-center gap-2 min-w-0">
+          <span class="text-[10px] font-semibold w-12 shrink-0" [class]="methodColors[r.method] ?? 'text-muted'">{{ r.method }}</span>
+          <span class="truncate flex-1 text-xs font-mono">{{ r.url }}</span>
+          <span class="text-[11px] font-semibold shrink-0" [class]="statusColor(r.response.status)">{{ r.response.status }}</span>
+        </span>
+        <span class="flex items-center gap-2 pl-14 text-[10px] text-muted min-w-0">
+          <span [class]="outcomeClass[r.outcome]">{{ outcomeLabel[r.outcome] }}</span>
+          <span>{{ formatMs(r.response.durationMs) }}</span>
+          @if (r.size > 0) {
+            <span>{{ formatBytes(r.size) }}</span>
+          }
+          <span class="flex-1"></span>
+          <span>{{ time(r.at) }}</span>
+        </span>
+      </button>
+    }
+    @if (all && all.length === 0) {
+      <div class="px-3 py-3 text-xs text-muted">
+        @if (server().running) {
+          Waiting for requests on <code class="font-mono text-fg">{{ server().url }}</code>. Anything sent there shows up here, matched or not.
+        } @else {
+          The server is stopped. Start it to receive requests.
+        }
+      </div>
+    }
+    @if (all && all.length > 0 && filtered().length === 0) {
+      <p class="px-3 py-3 text-xs text-muted">No request matches the filter.</p>
+    }
+  </div>
+</div>
+<div class="flex-1 min-w-0 flex flex-col min-h-0">
+  @if (selected(); as req) {
+    <q-mock-request-detail [req]="req" [server]="server()" (createRoute)="createRoute.emit($event)" />
+  } @else {
+    <q-empty-state title="Select a request" hint="Inspect headers and body, replay it against your app, or turn it into a route." />
+  }
+</div>
