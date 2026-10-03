@@ -2583,7 +2583,11 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await js(`document.querySelector('[data-testid=realtime-connection-tab] [aria-label="Delete message"]')?.click()`);
       await wait(300);
       const afterRemove = { items: await savedItems(), save: await rtSaveLabel() };
-      check('ui: deleting the kept message leaves the connection unchanged', keptBody.includes('from the ui') && afterRemove.items.length === 1 && afterRemove.save === 'Save', { keptBody, ...afterRemove });
+      check(
+        'ui: deleting the kept message leaves the connection unchanged',
+        typeof keptBody === 'string' && keptBody.includes('from the ui') && Array.isArray(afterRemove.items) && afterRemove.items.length === 1 && afterRemove.save === 'Save',
+        { keptBody, ...afterRemove },
+      );
       await js(`[...document.querySelectorAll('[data-testid=realtime-connection-tab] [role=tab]')].find((b) => b.textContent.startsWith('Messages'))?.click()`);
       await wait(200);
 

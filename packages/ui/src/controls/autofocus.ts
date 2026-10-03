@@ -1,6 +1,6 @@
 import { Directive, ElementRef, afterNextRender, booleanAttribute, inject, input } from '@angular/core';
 
-/** Focuses the element once it is rendered, like React's `autoFocus`: `<input qAutofocus>` or `[qAutofocus]="!url"`. */
+/** Focuses the element once it is rendered, also when it appears after the page has loaded: `<input qAutofocus>` or `[qAutofocus]="!url"`. */
 @Directive({ selector: '[qAutofocus]' })
 export class Autofocus {
   readonly qAutofocus = input(true, { transform: booleanAttribute });
