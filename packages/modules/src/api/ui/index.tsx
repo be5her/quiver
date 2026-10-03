@@ -1,5 +1,5 @@
-import { defineModuleUI, invoke, notify, promptDialog, selectScope, useAppStore, useTabsStore } from '@quiver/ui';
-import type { ApiRequest, Environment } from '@quiver/core';
+import { defineModuleUI, invoke, notify, promptDialog, promptWithChoiceDialog, selectScope, useAppStore, useTabsStore } from '@quiver/ui';
+import { SHELL_DIALECT_LABELS, SHELL_DIALECTS, detectShellDialect, type ApiRequest, type Environment } from '@quiver/core';
 import { Globe } from 'lucide-react';
 import { EnvironmentTab } from './EnvironmentTab';
 import { RequestTab } from './RequestTab';
@@ -42,10 +42,21 @@ export async function createGraphqlRequest(collectionId: string | null = null): 
 }
 
 export async function importCurl(collectionId: string | null = null): Promise<void> {
-  const command = await promptDialog({ title: 'Import from curl', label: 'Paste a curl command', multiline: true, confirmLabel: 'Import' });
-  if (!command?.trim()) return;
+  const result = await promptWithChoiceDialog({
+    title: 'Import from curl',
+    label: 'Paste a curl command (Copy as cURL from bash, cmd or PowerShell)',
+    multiline: true,
+    confirmLabel: 'Import',
+    choice: {
+      label: 'Shell',
+      defaultValue: 'auto',
+      options: [{ value: 'auto', label: 'Detect' }, ...SHELL_DIALECTS.map((d) => ({ value: d, label: SHELL_DIALECT_LABELS[d] }))],
+      hint: (text, choice) => (choice === 'auto' && text.trim() ? `Reads as ${SHELL_DIALECT_LABELS[detectShellDialect(text)]}` : null),
+    },
+  });
+  if (!result?.value.trim()) return;
   try {
-    const created = await invoke<ApiRequest>('api.import.curl', { command, collectionId });
+    const created = await invoke<ApiRequest>('api.import.curl', { command: result.value, collectionId, dialect: result.choice });
     openRequestTab(created);
     notify(`Imported ${created.name}`, 'success');
   } catch (err) {

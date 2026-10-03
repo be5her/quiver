@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useDialogStore } from '../stores/dialogs';
-import { Button, Input, Label, TextArea } from './primitives';
+import { Button, Input, Label, Select, TextArea } from './primitives';
 
 /** Renders the pending prompt/confirm dialog. Mount once in the shell. */
 export function DialogHost() {
@@ -26,12 +26,16 @@ export function DialogHost() {
 function PromptBody() {
   const pending = useDialogStore((s) => s.pending);
   const [value, setValue] = useState('');
+  const [choice, setChoice] = useState('');
   useEffect(() => {
-    if (pending?.kind === 'prompt') setValue(pending.options.defaultValue ?? '');
+    if (pending?.kind !== 'prompt') return;
+    setValue(pending.options.defaultValue ?? '');
+    setChoice(pending.options.choice?.defaultValue ?? '');
   }, [pending]);
   if (pending?.kind !== 'prompt') return null;
   const { options, resolve } = pending;
-  const submit = () => resolve(value);
+  const submit = () => resolve(value, options.choice ? choice : undefined);
+  const hint = options.choice?.hint?.(value, choice) ?? null;
 
   return (
     <form
@@ -50,6 +54,19 @@ function PromptBody() {
         <TextArea autoFocus rows={8} value={value} placeholder={options.placeholder} onChange={(e) => setValue(e.target.value)} />
       ) : (
         <Input autoFocus value={value} placeholder={options.placeholder} onChange={(e) => setValue(e.target.value)} onFocus={(e) => e.target.select()} />
+      )}
+      {options.choice && (
+        <div className="flex items-center gap-2 mt-3">
+          <Label className="mb-0">{options.choice.label}</Label>
+          <Select value={choice} onChange={(e) => setChoice(e.target.value)} aria-label={options.choice.label}>
+            {options.choice.options.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </Select>
+          {hint && <span className="text-xs text-muted">{hint}</span>}
+        </div>
       )}
       <div className="flex justify-end gap-2 mt-4">
         <Button variant="ghost" onClick={() => resolve(null)}>
