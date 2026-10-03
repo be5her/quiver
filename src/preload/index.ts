@@ -1,14 +1,16 @@
+import { QuiverBridge } from '@quiver/ui';
 import { contextBridge, ipcRenderer } from 'electron';
+import { HostEventMessage } from '../../packages/core/src/types';
 
 /**
  * The only bridge between renderer and main. Modules never touch IPC directly:
  * they call commands by id, and the host routes them through the registry.
  */
-const bridge = {
+const bridge: QuiverBridge = {
   invoke: (id: string, input: unknown, workspaceId: string | null) => ipcRenderer.invoke('quiver:invoke', { id, input, workspaceId }),
   listCommands: () => ipcRenderer.invoke('quiver:commands'),
-  onEvent: (listener: (message: unknown) => void) => {
-    const wrapped = (_event: Electron.IpcRendererEvent, message: unknown) => listener(message);
+  onEvent: (listener: (message: HostEventMessage) => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, message: HostEventMessage) => listener(message);
     ipcRenderer.on('quiver:event', wrapped);
     return () => ipcRenderer.removeListener('quiver:event', wrapped);
   },

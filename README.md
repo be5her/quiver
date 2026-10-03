@@ -20,7 +20,7 @@ Each feature is a module with its own README that goes into the details: what it
 
 | Module | In one line | Details |
 | ------ | ----------- | ------- |
-| API client | Collections, requests, environments with encrypted secrets, history, curl import and export, `{{variables}}` everywhere with their value on hover, GraphQL with schema-aware editing. | [packages/modules/src/api](packages/modules/src/api/README.md) |
+| API client | Collections, requests, environments with encrypted secrets, history, curl import (bash, cmd.exe, PowerShell) and export, `{{variables}}` everywhere with their value on hover, GraphQL with schema-aware editing. | [packages/modules/src/api](packages/modules/src/api/README.md) |
 | Databases | MySQL, SQLite and Redis: schema tree, table browser, SQL editor with autocompletion, Redis key browser and console, saved queries and history. | [packages/modules/src/db](packages/modules/src/db/README.md) |
 | Teleport | Several clusters side by side, SSO login, database tunnels that become Quiver connections, and a read-only Kubernetes query view that never touches your terminal's kubectl context. | [packages/modules/src/teleport](packages/modules/src/teleport/README.md) |
 | Mock servers | Local HTTP servers saved with the project: templated routes, forwarding to a real upstream, every request captured, so an empty server is a webhook receiver. | [packages/modules/src/mock](packages/modules/src/mock/README.md) |
