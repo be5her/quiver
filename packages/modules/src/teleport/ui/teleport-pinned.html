@@ -1,0 +1,37 @@
+<q-section-header title="Pinned" />
+@for (row of rows(); track row.key) {
+  <div
+    role="button"
+    tabindex="0"
+    class="group flex flex-col gap-0.5 px-3 py-1 hover:bg-elevated cursor-pointer min-w-0"
+    [class.opacity-70]="!row.usable"
+    [title]="row.pin.name + ' on ' + row.clusterName + (row.usable ? '' : ' (log in to use)')"
+    data-testid="teleport-pin"
+    (click)="open(row)"
+    (keydown.enter)="open(row)"
+  >
+    <div class="flex items-center gap-2 min-w-0">
+      <svg [qIcon]="row.pin.kind === 'db' ? icons.Database : icons.Boxes" class="size-3.5 text-muted shrink-0"></svg>
+      <span class="truncate text-[13px] flex-1">{{ row.pin.name }}</span>
+      @if (row.tunnel; as tunnel) {
+        <span class="text-[11px] text-success font-mono shrink-0" [title]="'Tunnel as ' + tunnel.dbUser">:{{ tunnel.port }}</span>
+      } @else if (row.protocol) {
+        <span qBadge class="font-mono text-[10px]" [class]="protocolColors[row.protocol] ?? ''">{{ row.protocol }}</span>
+      } @else if (row.kubeActive) {
+        <svg [qIcon]="icons.Check" class="size-3.5 text-success shrink-0" aria-label="active"></svg>
+      }
+      @if (busy() === row.key) {
+        <svg qSpinner class="size-3.5"></svg>
+      }
+    </div>
+    <div class="flex items-center gap-2 min-w-0 h-5 pl-[22px]">
+      <span class="truncate text-[11px] text-muted flex-1">{{ row.clusterName }}{{ row.usable ? '' : ' · log in to use' }}</span>
+      <span class="hidden group-hover:flex items-center gap-0.5 shrink-0">
+        @if (row.pin.kind === 'db' && row.tunnel) {
+          <button qIconButton label="Stop tunnel" size="sm" (click)="stop($event, row)"><svg [qIcon]="icons.Square" class="size-3"></svg></button>
+        }
+        <button qIconButton label="Unpin" size="sm" (click)="unpin($event, row)"><svg [qIcon]="icons.PinOff" class="size-3.5"></svg></button>
+      </span>
+    </div>
+  </div>
+}
