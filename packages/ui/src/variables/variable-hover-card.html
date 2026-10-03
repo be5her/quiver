@@ -11,7 +11,8 @@
     [attr.data-name]="c.name"
     [attr.data-editing]="editing() || null"
     (mouseenter)="cancelHide()"
-    (mouseleave)="scheduleHide()"
+    (mousemove)="pointerMoved()"
+    (mouseleave)="pointerLeft()"
   >
     <div class="flex items-center gap-2 min-w-0">
       <code class="font-mono font-semibold truncate" [class]="c.info ? 'text-fg' : 'text-danger'">{{ braced() }}</code>

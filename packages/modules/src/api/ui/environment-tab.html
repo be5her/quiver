@@ -1,0 +1,26 @@
+@if (loadError(); as error) {
+  <div class="p-4 text-sm text-danger">{{ error }}</div>
+} @else if (!loaded()) {
+  <div class="flex items-center justify-center h-full"><svg qSpinner></svg></div>
+} @else {
+  <div class="flex flex-col h-full min-h-0">
+    <div class="flex items-center gap-2 px-3 py-2 border-b border-edge shrink-0">
+      <input qInput [formField]="environmentForm.name" class="w-56 h-7 font-medium" placeholder="Environment name" />
+      <div class="flex-1"></div>
+      <button qButton size="sm" [variant]="dirty() ? 'primary' : 'ghost'" [icon]="saveIcon" (click)="save()">Save{{ dirty() ? '*' : '' }}</button>
+    </div>
+    <div class="flex-1 overflow-auto p-3">
+      <q-key-value-editor [formField]="environmentForm.variables" keyPlaceholder="Variable" valuePlaceholder="Value" extraHeader="Secret">
+        <ng-template let-row let-update="update">
+          <label class="flex items-center gap-1 text-[11px] text-muted" title="Stored encrypted on this machine, never committed">
+            <input qCheckbox [checked]="!!row.secret" (change)="secretToggled(update, $event)" />
+          </label>
+        </ng-template>
+      </q-key-value-editor>
+      <p class="text-xs text-muted mt-3 max-w-lg">
+        Use variables as <code class="font-mono">{{ variableSyntax }}</code> in URLs, headers, bodies and auth fields. Secret values live in
+        <code class="font-mono"> .quiver/local/secrets.json</code>, encrypted by the OS keychain, and are masked for MCP clients.
+      </p>
+    </div>
+  </div>
+}

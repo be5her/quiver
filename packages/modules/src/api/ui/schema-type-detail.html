@@ -1,0 +1,58 @@
+<div>
+  <div class="flex items-baseline gap-2">
+    <span class="text-muted">{{ kind() }}</span>
+    <span class="font-mono text-base font-semibold">{{ type().name }}</span>
+    @if (interfaces().length) {
+      <span class="text-muted">implements @for (i of interfaces(); track i.name; let first = $first) {@if (!first) {<span> &amp; </span>}<button type="button" class="font-mono text-accent hover:underline" (click)="follow(i.name)">{{ i.name }}</button>}</span>
+    }
+  </div>
+  @if (type().description) {
+    <p class="text-muted mt-1 whitespace-pre-wrap">{{ type().description }}</p>
+  }
+</div>
+@if (fields().length) {
+  <table class="w-full">
+    <tbody>
+      @for (f of fields(); track f.name) {
+        <tr class="border-t border-edge/60 align-top">
+          <td class="py-1.5 pr-3 whitespace-nowrap">
+            <span class="font-mono" [class]="f.deprecationReason ? 'line-through text-muted' : ''">{{ f.name }}</span>
+            @if (f.args.length) {
+              <span class="text-muted">(@for (a of f.args; track a.name; let first = $first) {<span>@if (!first) {<span>, </span>}<span class="font-mono text-fg">{{ a.name }}</span>: <button type="button" class="font-mono text-accent hover:underline" (click)="follow(a.type.toString())">{{ a.type.toString() }}</button>@if (a.defaultValue !== undefined) {<span class="text-muted"> = {{ json(a.defaultValue) }}</span>}</span>})</span>
+            }
+            <span>: </span><button type="button" class="font-mono text-accent hover:underline" (click)="follow(f.type)">{{ f.type }}</button>
+          </td>
+          <td class="py-1.5 text-muted w-1/2">{{ f.description }}@if (f.deprecationReason) {<span class="text-warning"> Deprecated: {{ f.deprecationReason }}</span>}</td>
+        </tr>
+      }
+    </tbody>
+  </table>
+}
+@if (values().length) {
+  <table class="w-full">
+    <tbody>
+      @for (v of values(); track v.name) {
+        <tr class="border-t border-edge/60 align-top">
+          <td class="py-1.5 pr-3 font-mono whitespace-nowrap">{{ v.name }}</td>
+          <td class="py-1.5 text-muted w-1/2">{{ v.description }}@if (v.deprecationReason) {<span class="text-warning"> Deprecated: {{ v.deprecationReason }}</span>}</td>
+        </tr>
+      }
+    </tbody>
+  </table>
+}
+@if (possible().length) {
+  <div>
+    <div class="text-muted mb-1">{{ isUnion() ? 'Members' : 'Implemented by' }}</div>
+    <div class="flex flex-wrap gap-2">
+      @for (p of possible(); track p.name) {
+        <button type="button" class="font-mono text-accent hover:underline" (click)="follow(p.name)">{{ p.name }}</button>
+      }
+    </div>
+  </div>
+}
+@if (specifiedBy(); as url) {
+  <p class="text-muted">Specified by <span class="font-mono">{{ url }}</span></p>
+}
+@if (nothingMore()) {
+  <p class="text-muted">Nothing more to show for {{ namedType() }}.</p>
+}

@@ -11,6 +11,7 @@
     "src/**/*.ts",
     "../../packages/ui/src/**/*.ts",
     "../../packages/modules/src/ui.ts",
+    "../../packages/modules/src/api/ui/**/*.ts",
     "../../packages/modules/src/tools/ui/**/*.ts"
   ],
   "exclude": ["**/*.test.ts", "**/*.spec.ts"]

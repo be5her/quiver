@@ -1,0 +1,60 @@
+@if (response(); as response) {
+  <div class="flex flex-col h-full min-h-0">
+    <div class="flex items-center gap-3 px-3 h-8 border-b border-edge text-xs shrink-0">
+      <span class="font-semibold" [class]="statusColor(response.status)">{{ response.status }} {{ response.statusText }}</span>
+      <span class="text-muted">{{ formatMs(response.timings.total) }}</span>
+      <span class="text-muted">{{ formatBytes(response.size) }}</span>
+      @if (response.truncated) {
+        <span class="text-warning">truncated</span>
+      }
+      @if (error(); as error) {
+        <span class="text-danger truncate">{{ error }}</span>
+      }
+      <div class="flex-1"></div>
+      <q-segmented [(value)]="view" class="border-b-0">
+        <button qSegment="body">Body</button>
+        <button qSegment="headers">Headers ({{ response.headers.length }})</button>
+        <button qSegment="request">Request</button>
+      </q-segmented>
+    </div>
+    <div class="flex-1 min-h-0 p-2">
+      @switch (view()) {
+        @case ('body') {
+          <div class="flex flex-col h-full gap-1">
+            <div class="flex items-center gap-2 text-xs text-muted">
+              <span class="truncate">{{ response.contentType ?? 'unknown content type' }}</span>
+              <div class="flex-1"></div>
+              @if (body().language === 'json') {
+                <button qButton size="sm" variant="ghost" (click)="togglePretty()">{{ pretty() ? 'Raw' : 'Pretty' }}</button>
+              }
+              <button qButton size="sm" variant="ghost" [icon]="copyIcon" (click)="copyBody()">Copy</button>
+            </div>
+            <div class="flex-1 min-h-0">
+              <q-code-editor [value]="body().text" readonly [language]="body().language" [wrap]="body().language !== 'json'" />
+            </div>
+          </div>
+        }
+        @case ('headers') {
+          <q-header-table [headers]="response.headers" />
+        }
+        @case ('request') {
+          <div class="flex flex-col h-full gap-2 text-xs">
+            <div class="font-mono break-all"><span class="font-semibold">{{ response.sent.method }}</span> {{ response.sent.url }}</div>
+            <q-header-table [headers]="response.sent.headers" />
+            @if (response.sent.bodyPreview) {
+              <div class="flex-1 min-h-[80px]">
+                <q-code-editor [value]="response.sent.bodyPreview" readonly language="text" wrap />
+              </div>
+            }
+          </div>
+        }
+      }
+    </div>
+  </div>
+} @else if (sending()) {
+  <div class="flex items-center justify-center h-full gap-2 text-sm text-muted"><svg qSpinner></svg> Sending…</div>
+} @else if (error(); as error) {
+  <q-empty-state title="Request failed" [hint]="error" />
+} @else {
+  <q-empty-state title="No response yet" hint="Press Send or Ctrl+Enter." />
+}

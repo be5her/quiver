@@ -1,0 +1,43 @@
+@if (tool(); as tool) {
+  <div class="flex items-center gap-3 px-3 h-10 border-b border-edge shrink-0 flex-wrap">
+    <span class="text-sm font-medium">{{ tool.title }}</span>
+    @for (opt of tool.options ?? []; track opt.key) {
+      <label class="flex items-center gap-1.5 text-xs text-muted">
+        @switch (opt.type) {
+          @case ('boolean') {
+            <input qCheckbox [checked]="isOn(opt)" (change)="setOption(opt, checked($event))" />{{ opt.label }}
+          }
+          @case ('select') {
+            {{ opt.label }}
+            <select qSelect class="h-6 text-xs" (change)="setOption(opt, text($event))">
+              @for (c of opt.choices ?? []; track c.value) {
+                <option [value]="c.value" [selected]="c.value === valueOf(opt)">{{ c.label }}</option>
+              }
+            </select>
+          }
+          @default {
+            {{ opt.label }}
+            <input type="number" class="h-6 w-16 rounded border border-edge bg-surface px-1 text-xs text-fg" [value]="valueOf(opt)" (input)="setOption(opt, number($event))" />
+          }
+        }
+      </label>
+    }
+    <div class="flex-1"></div>
+    @if (!tool.live) {
+      <button qButton variant="primary" size="sm" [loading]="running()" (click)="run()">Run</button>
+    }
+  </div>
+  <div class="flex-1 min-h-0 grid gap-2 p-2" [class]="tool.inputKey ? 'grid-cols-2' : 'grid-cols-1'">
+    @if (tool.inputKey) {
+      <q-code-editor [(value)]="input" [language]="tool.inputLanguage ?? 'text'" [placeholder]="tool.placeholder ?? ''" wrap />
+    }
+    <div class="flex flex-col min-h-0 gap-1">
+      @if (error(); as error) {
+        <div class="text-xs text-danger px-1">{{ error }}</div>
+      }
+      <q-code-editor [value]="output()" readonly [language]="outputLanguage()" placeholder="Output" wrap />
+    </div>
+  </div>
+} @else {
+  <div class="p-4 text-sm text-muted">Unknown tool.</div>
+}

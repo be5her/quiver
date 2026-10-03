@@ -33,13 +33,22 @@ export interface VariableContext extends VariableScope {
 }
 
 /**
+ * Where the variables in reach come from. The variable input, the key/value editor and the code
+ * editor inject it from their surroundings; a directive provides it, e.g. `[qVariables]` below, or a
+ * module's own provider that loads its variables.
+ */
+export abstract class VariableSource {
+  abstract readonly context: Signal<VariableContext | null>;
+}
+
+/**
  * Makes `{{variables}}` inside the variable input, the key/value editor and the code editor
  * highlighted, with their value on hover: `<div [qVariables]="scope" [variablesSave]="save">`.
  * Outside it those components behave as plain inputs. With `variablesSave`, the hover card can
  * also edit a value, and with `variablesDefine` define a missing one.
  */
-@Directive({ selector: '[qVariables]' })
-export class VariablesProvider {
+@Directive({ selector: '[qVariables]', providers: [{ provide: VariableSource, useExisting: VariablesProvider }] })
+export class VariablesProvider implements VariableSource {
   readonly qVariables = input<VariableScope | null | undefined>();
   readonly variablesSave = input<SaveVariable>();
   readonly variablesDefine = input<DefineVariable>();
@@ -50,10 +59,10 @@ export class VariablesProvider {
   });
 }
 
-/** The variables of the nearest `[qVariables]` around the caller, or null outside one. */
+/** The variables of the nearest variable source around the caller, or null outside one. */
 export function injectVariables(): Signal<VariableContext | null> {
-  const provider = inject(VariablesProvider, { optional: true });
-  return provider ? provider.context : computed(() => null);
+  const source = inject(VariableSource, { optional: true });
+  return source ? source.context : computed(() => null);
 }
 
 export function lookupVariable(scope: VariableScope, name: string): VariableInfo | undefined {

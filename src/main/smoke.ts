@@ -2071,12 +2071,12 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         `(() => { const s = document.querySelector('[data-testid=variable-card-target]'); return s ? { target: s.value, options: [...s.options].map((o) => o.textContent), focused: document.activeElement?.getAttribute('data-testid') } : null; })()`,
       ) as { target: string; options: string[]; focused: string } | null;
       await js(
-        `(() => { const s = document.querySelector('[data-testid=variable-card-target]'); const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set; set.call(s, 'global'); s.dispatchEvent(new Event('change', { bubbles: true })); })()`,
+        `(() => { const s = document.querySelector('[data-testid=variable-card-target]'); const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set; set.call(s, 'global'); s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); })()`,
       );
       await wait(100);
       const secretDisabledForGlobal = await js(`document.querySelector('[data-testid=variable-card-secret]')?.disabled`);
       await js(
-        `(() => { const s = document.querySelector('[data-testid=variable-card-target]'); const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set; set.call(s, ${JSON.stringify(env.id)}); s.dispatchEvent(new Event('change', { bubbles: true })); })()`,
+        `(() => { const s = document.querySelector('[data-testid=variable-card-target]'); const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set; set.call(s, ${JSON.stringify(env.id)}); s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); })()`,
       );
       await wait(100);
       await js(`document.querySelector('[data-testid=variable-card-secret]')?.click()`);
@@ -2307,14 +2307,15 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         await wait(1500);
         const viewCluster = await js(`document.querySelector('[data-testid=kube-query]')?.getAttribute('data-cluster') ?? null`);
         check('ui: query view is for the clicked cluster', viewCluster === 'prod-eks', viewCluster);
-        // React-controlled inputs need the native setter plus an input/change event.
+        // Set the value as a user would: the native setter, then the events a browser fires (a select fires input, then change).
         const setField = (testid: string, value: string) =>
           js(`(() => {
             const el = document.querySelector('[data-testid=${testid}]');
             if (!el) return false;
             const proto = el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
             Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, ${JSON.stringify(value)});
-            el.dispatchEvent(new Event(el instanceof HTMLSelectElement ? 'change' : 'input', { bubbles: true }));
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            if (el instanceof HTMLSelectElement) el.dispatchEvent(new Event('change', { bubbles: true }));
             return true;
           })()`);
         const text = (testid: string) => js(`document.querySelector('[data-testid=${testid}]')?.textContent ?? null`);

@@ -1,0 +1,55 @@
+@if (loadError(); as error) {
+  <div class="p-4 text-sm text-danger">{{ error }}</div>
+} @else if (!loaded()) {
+  <div class="flex items-center justify-center h-full"><svg qSpinner></svg></div>
+} @else {
+  @let current = request();
+  <div class="flex flex-col h-full min-h-0">
+    <div class="flex items-center gap-2 px-3 py-2 border-b border-edge shrink-0">
+      <input qInput [formField]="requestForm.name" class="w-56 h-7 text-sm font-medium border-transparent bg-transparent hover:border-edge" placeholder="Request name" />
+      <div class="flex-1"></div>
+      <button qButton size="sm" variant="ghost" [icon]="icons.Copy" (click)="copyCurl()">curl</button>
+      <button qButton size="sm" [variant]="dirty() ? 'secondary' : 'ghost'" [icon]="icons.Save" title="Ctrl+S" (click)="save()">Save{{ dirty() ? '*' : '' }}</button>
+    </div>
+
+    <div class="flex items-center gap-2 px-3 py-2 shrink-0">
+      <select qSelect [formField]="requestForm.method" class="font-bold w-28" [class]="methodColors[current.method]">
+        @for (m of methods; track m) {
+          <option [value]="m">{{ m }}</option>
+        }
+      </select>
+      <q-variable-input [formField]="requestForm.url" [placeholder]="urlPlaceholder" inputClass="font-mono" [autofocus]="!current.url" />
+      <button qButton variant="primary" [icon]="icons.Send" [loading]="sending()" title="Ctrl+Enter" (click)="send()">Send</button>
+    </div>
+
+    <div class="flex flex-col flex-1 min-h-0">
+      <div class="flex flex-col min-h-[140px] border-b border-edge" [class]="current.body.type === 'graphql' && section() === 'body' ? 'basis-[60%]' : 'basis-[45%]'">
+        <q-segmented [(value)]="section" class="px-3 shrink-0">
+          <button qSegment="params"><span class="flex items-center gap-1">Params@if (counts().params) {<span class="text-[10px] rounded-full bg-elevated px-1.5 text-muted">{{ counts().params }}</span>}</span></button>
+          <button qSegment="headers"><span class="flex items-center gap-1">Headers@if (counts().headers) {<span class="text-[10px] rounded-full bg-elevated px-1.5 text-muted">{{ counts().headers }}</span>}</span></button>
+          <button qSegment="body"><span class="flex items-center gap-1">Body@if (counts().body) {<span class="text-[10px] rounded-full bg-elevated px-1.5 text-muted">{{ counts().body }}</span>}</span></button>
+          <button qSegment="auth"><span class="flex items-center gap-1">Auth@if (counts().auth) {<span class="text-[10px] rounded-full bg-elevated px-1.5 text-muted">{{ counts().auth }}</span>}</span></button>
+        </q-segmented>
+        <div class="flex-1 min-h-0 overflow-auto p-2">
+          @switch (section()) {
+            @case ('params') {
+              <q-key-value-editor [formField]="requestForm.params" keyPlaceholder="Parameter" />
+            }
+            @case ('headers') {
+              <q-key-value-editor [formField]="requestForm.headers" keyPlaceholder="Header" />
+            }
+            @case ('body') {
+              <q-body-editor [formField]="requestForm.body" [request]="current" />
+            }
+            @case ('auth') {
+              <q-auth-editor [formField]="requestForm.auth" />
+            }
+          }
+        </div>
+      </div>
+      <div class="flex-1 min-h-0">
+        <q-response-pane [response]="response()" [error]="sendError()" [sending]="sending()" />
+      </div>
+    </div>
+  </div>
+}

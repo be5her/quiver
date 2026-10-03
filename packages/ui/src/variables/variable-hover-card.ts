@@ -69,8 +69,15 @@ export class VariableHoverCard {
     return active ? [active, ...card.environments.filter((e) => e.id !== active.id)] : card.environments;
   });
   protected readonly note = computed(() => this.describe());
+  /** Whether the pointer moved inside the card since it last changed between showing and editing. */
+  private pointerInside = false;
 
   constructor() {
+    effect(() => {
+      this.editing();
+      this.pointerInside = false;
+    });
+
     // Below the variable, or above it when there is no room, and always inside the window.
     afterRenderEffect({
       write: () => {
@@ -121,8 +128,16 @@ export class VariableHoverCard {
     this.hover.cancelHide();
   }
 
-  protected scheduleHide(): void {
-    this.hover.scheduleHide();
+  protected pointerMoved(): void {
+    this.pointerInside = true;
+  }
+
+  /**
+   * Hide when the pointer leaves the card, not when the card shrinks from under a pointer that did
+   * not move (saving an edit drops the note line), so a saved value stays on screen.
+   */
+  protected pointerLeft(): void {
+    if (this.pointerInside) this.hover.scheduleHide();
   }
 
   protected toggleReveal(): void {

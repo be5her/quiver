@@ -1,0 +1,32 @@
+<div class="flex items-center gap-2 text-xs min-w-0">
+  @if (named().length > 1) {
+    <select qSelect class="h-7 text-xs w-44" title="Operation to run" (change)="pickOperation($event)">
+      <option value="" [selected]="!value().operationName">Operation: first</option>
+      @for (op of named(); track op.name) {
+        <option [value]="op.name" [selected]="value().operationName === op.name">{{ op.operation }} {{ op.name }}</option>
+      }
+    </select>
+  }
+  <button qButton size="sm" variant="ghost" [icon]="icons.Sparkles" title="Format the query and variables" (click)="prettify()">Prettify</button>
+  <div class="flex-1"></div>
+  <span class="text-muted truncate" data-testid="graphql-schema-status">{{ status() }}</span>
+  <button
+    qButton
+    size="sm"
+    variant="ghost"
+    [icon]="icons.RefreshCw"
+    [loading]="schemaState.fetching()"
+    title="Run the introspection query against this URL with these headers and auth"
+    (click)="schemaState.fetch()"
+  >{{ schemaState.doc() ? 'Refresh schema' : 'Fetch schema' }}</button>
+  <button qButton size="sm" variant="ghost" [icon]="icons.BookOpen" title="Browse the schema" (click)="api.openSchemaTab(request())">Docs</button>
+</div>
+<div class="flex-1 min-h-[80px]" data-testid="graphql-query">
+  <q-code-editor [value]="value().query" (valueChange)="patch({ query: $event })" language="graphql" [graphqlSchema]="schemaState.schema()" [placeholder]="queryPlaceholder" />
+</div>
+<div class="flex flex-col h-24 shrink-0 gap-1">
+  <label qLabel>Variables (JSON)</label>
+  <div class="flex-1 min-h-0" data-testid="graphql-variables">
+    <q-code-editor [value]="value().variables" (valueChange)="patch({ variables: $event })" language="json" [placeholder]="variablesPlaceholder" />
+  </div>
+</div>
