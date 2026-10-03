@@ -2932,6 +2932,49 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(200);
 
+      // Text view: masked while secrets are hidden, the raw text once revealed, saved as a whole; History lists what Quiver kept.
+      const clickEnvView = (label: string) =>
+        js(
+          `(() => { const pane = [...document.querySelectorAll('[data-tab-type="env.file"]')].find((el) => !el.classList.contains('hidden')); const btn = pane && [...pane.querySelectorAll('[role=tab]')].find((b) => b.textContent.startsWith(${JSON.stringify(label)})); if (btn) btn.click(); return Boolean(btn); })()`,
+        );
+      const envLabels = () =>
+        js(
+          `[document.querySelector('[data-testid=env-save]')?.textContent.trim() ?? '', [...document.querySelectorAll('[data-tab-type="env.file"] [role=tab]')].find((b) => b.textContent.startsWith('Text'))?.textContent ?? ''].join('|')`,
+        );
+      await js(`document.querySelector('[data-testid=env-reveal]')?.click()`);
+      await clickEnvView('Text');
+      await wait(400);
+      const maskedTextView = await js(`document.querySelector('[data-testid=env-text-masked] .cm-content')?.textContent ?? ''`);
+      await js(`document.querySelector('[data-testid=env-reveal]')?.click()`);
+      await wait(300);
+      const envBefore = await fs.readFile(path.join(envRoot, '.env'), 'utf8');
+      const typedText = await js(
+        `(() => { const content = document.querySelector('[data-testid=env-text] .cm-content'); if (!content) return false; content.focus(); document.execCommand('selectAll'); return document.execCommand('insertText', false, ${JSON.stringify(`${envBefore}FROM_TEXT=1\n`)}); })()`,
+      );
+      await wait(200);
+      const dirtyLabels = await envLabels();
+      await js(`document.querySelector('[data-testid=env-save]')?.click()`);
+      await wait(1200);
+      const envAfter = await fs.readFile(path.join(envRoot, '.env'), 'utf8');
+      const savedLabels = await envLabels();
+      check(
+        'ui: the text view masks secrets until revealed, then edits and saves the whole file',
+        typeof maskedTextView === 'string' &&
+          maskedTextView.includes('DB_PASSWORD="••••••••" # keep') &&
+          !maskedTextView.includes('p@ss word') &&
+          typedText === true &&
+          dirtyLabels === 'Save*|Text*' &&
+          envAfter === `${envBefore}FROM_TEXT=1\n` &&
+          savedLabels === 'Save|Text',
+        { maskedTextView: String(maskedTextView).slice(0, 120), dirtyLabels, savedLabels, tail: envAfter.split('\n').slice(-3) },
+      );
+      await clickEnvView('History');
+      await wait(800);
+      const backupRows = await js(`[...document.querySelectorAll('[data-testid=env-backup]')].map((r) => r.textContent)`);
+      check('ui: history lists the backups kept before each change', Array.isArray(backupRows) && backupRows.length >= 3 && backupRows.every((t: string) => t.includes('Restore')), backupRows);
+      await clickEnvView('Keys');
+      await wait(200);
+
       // Status bar: the environment picker is a themed menu above the bar, not a native select.
       const pickerLabel = await js(`document.querySelector('[data-testid=env-picker]')?.textContent ?? null`);
       check('ui: status bar names the active environment', pickerLabel === 'local', pickerLabel);
