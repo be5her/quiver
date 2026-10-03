@@ -1,0 +1,52 @@
+@if (server().status !== 'connected') {
+  <q-empty-state title="Not connected" hint="Connect to list the tools of this server." />
+} @else {
+  <div class="flex h-full min-h-0">
+    <div class="w-64 border-r border-edge flex flex-col min-h-0 shrink-0">
+      <div class="flex items-center gap-1 px-2 h-9 border-b border-edge shrink-0">
+        <input qInput [value]="filter()" (input)="typed($event)" placeholder="Filter tools" class="h-7 text-xs" />
+        <button qButton size="sm" variant="ghost" [icon]="refreshIcon" title="Ask the server for its tool list again" (click)="refresh()"></button>
+      </div>
+      <div class="flex-1 overflow-y-auto">
+        @if (tools.isLoading() && !tools.value()) {
+          <div class="px-3 py-2"><svg qSpinner></svg></div>
+        }
+        @for (tool of filtered(); track tool.name) {
+          <button
+            type="button"
+            class="w-full text-left px-3 py-1.5 border-b border-edge/60 hover:bg-elevated flex flex-col gap-0.5 min-w-0"
+            [class.bg-elevated]="tool.name === selectedName()"
+            data-testid="mcp-tool"
+            (click)="selectedName.set(tool.name)"
+          >
+            <span class="flex items-center gap-1.5 min-w-0">
+              <span class="font-mono text-xs truncate flex-1">{{ tool.name }}</span>
+              @if (tool.annotations?.readOnlyHint) {
+                <span class="size-1.5 rounded-full bg-success shrink-0" title="read-only"></span>
+              }
+              @if (tool.annotations?.destructiveHint) {
+                <span class="size-1.5 rounded-full bg-danger shrink-0" title="destructive"></span>
+              }
+            </span>
+            @if (tool.title || tool.description) {
+              <span class="text-[11px] text-muted truncate">{{ tool.title ?? tool.description }}</span>
+            }
+          </button>
+        }
+        @if (tools.value() && list().length === 0) {
+          <p class="px-3 py-3 text-xs text-muted">This server has no tools.</p>
+        }
+        @if (list().length > 0 && filtered().length === 0) {
+          <p class="px-3 py-3 text-xs text-muted">No tool matches the filter.</p>
+        }
+      </div>
+    </div>
+    <div class="flex-1 min-w-0 min-h-0">
+      @if (selected(); as tool) {
+        <q-mcp-tool-detail [tool]="tool" [args]="argsText()" (argsChange)="setArgs(tool.name, $event)" [state]="callState()" [busy]="busy()" (call)="call(tool)" />
+      } @else {
+        <q-empty-state title="Pick a tool" hint="Tools show their description and input schema; arguments are prefilled from the schema." />
+      }
+    </div>
+  </div>
+}

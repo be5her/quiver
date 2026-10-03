@@ -1,0 +1,111 @@
+@let s = status();
+<div class="flex items-center gap-2 px-3 h-10 border-b border-edge shrink-0">
+  <span class="size-2 rounded-full shrink-0" [class]="dot()"></span>
+  <span class="text-sm font-medium shrink-0">{{ stateLabel[s.state] }}</span>
+  @if (s.state !== 'idle') {
+    <span class="text-xs text-muted truncate" data-testid="mcp-recorder-summary">{{ summary() }}@if (s.savedTo) {<span [title]="s.savedTo"> · saved to {{ s.savedTo }}</span>}</span>
+  }
+  <div class="flex-1"></div>
+  @switch (s.state) {
+    @case ('idle') {
+      <button qButton size="sm" variant="primary" [icon]="icons.Circle" iconClass="size-3 fill-current" data-testid="mcp-recorder-start" (click)="recorder.start()">Start recording</button>
+    }
+    @case ('recording') {
+      <button qButton size="sm" [icon]="icons.Pause" data-testid="mcp-recorder-pause" (click)="recorder.pause()">Pause</button>
+    }
+    @case ('paused') {
+      <button qButton size="sm" [icon]="icons.Play" data-testid="mcp-recorder-resume" (click)="recorder.resume()">Resume</button>
+    }
+  }
+  @if (active()) {
+    <button qButton size="sm" [icon]="icons.Square" iconClass="size-3 fill-current" data-testid="mcp-recorder-end" (click)="recorder.end()">End</button>
+  }
+  @if (s.state === 'ended') {
+    <button qButton size="sm" variant="primary" [icon]="icons.Download" [disabled]="s.count === 0" data-testid="mcp-recorder-save" (click)="recorder.save()">Save as…</button>
+    <button qButton size="sm" [icon]="icons.Circle" iconClass="size-3 fill-current" data-testid="mcp-recorder-start" (click)="recorder.start()">New recording</button>
+    <button qButton size="sm" variant="ghost" [icon]="icons.Trash2" data-testid="mcp-recorder-discard" (click)="recorder.discard(s)">Discard</button>
+  }
+</div>
+@if (s.limitReached) {
+  <div class="flex items-center gap-2 px-3 py-1.5 border-b border-edge text-xs text-warning shrink-0" data-testid="mcp-recorder-notice">
+    <svg [qIcon]="icons.TriangleAlert" class="size-3.5 shrink-0"></svg>The recording reached its size limit and ended itself. Save it, then start a new one to keep going.
+  </div>
+}
+@if (active() && server() && !server()?.running) {
+  <div class="flex items-center gap-2 px-3 py-1.5 border-b border-edge text-xs text-warning shrink-0" data-testid="mcp-recorder-notice">
+    <svg [qIcon]="icons.TriangleAlert" class="size-3.5 shrink-0"></svg>Quiver's MCP server is off, so no call can arrive. Turn it on in Settings.
+  </div>
+}
+@if (calls().length === 0) {
+  @switch (s.state) {
+    @case ('idle') {
+      <q-empty-state
+        title="Record what agents call"
+        hint="Start a recording, then let an agent work. Every tool call that reaches Quiver's MCP server is listed with the agent that made it, its arguments and its result. The recording stays in memory until you end it and save it to a file."
+      >
+        <button qButton variant="primary" [icon]="icons.Circle" iconClass="size-3 fill-current" (click)="recorder.start()">Start recording</button>
+      </q-empty-state>
+    }
+    @case ('ended') {
+      <q-empty-state title="No call was recorded" hint="No agent called Quiver while this recording ran." />
+    }
+    @default {
+      <q-empty-state [title]="s.state === 'paused' ? 'Paused' : 'Waiting for calls…'" [hint]="waitingHint()" />
+    }
+  }
+} @else {
+  <div class="flex flex-1 min-h-0">
+    <div class="flex-1 min-w-0 flex flex-col min-h-0">
+      <div class="flex items-center gap-2 px-2 h-9 border-b border-edge shrink-0">
+        <input qInput [value]="filter()" (input)="typed($event)" placeholder="Filter by tool, agent or arguments" class="h-7 text-xs" data-testid="mcp-recorder-filter" />
+        @if (agents().length > 1) {
+          <select qSelect [value]="agent()" class="h-7 text-xs w-40" title="Agent" (change)="pickAgent($event)">
+            <option value="">All agents</option>
+            @for (a of agents(); track a) {
+              <option [value]="a">{{ a }}</option>
+            }
+          </select>
+        }
+        <label class="flex items-center gap-1.5 text-xs text-muted shrink-0"><input type="checkbox" qCheckbox [checked]="failedOnly()" (change)="toggleFailed($event)" />Failed only</label>
+        @if (!follow()) {
+          <button qIconButton label="Jump to latest" size="sm" (click)="follow.set(true)"><svg [qIcon]="icons.ArrowDownToLine" class="size-3.5"></svg></button>
+        }
+      </div>
+      <div #list class="flex-1 overflow-y-auto" data-testid="mcp-recorder-list" (scroll)="scrolled()">
+        @for (c of filtered(); track c.id) {
+          <button
+            type="button"
+            class="w-full text-left px-2 py-1 border-b border-edge/60 hover:bg-elevated flex items-center gap-2 min-w-0"
+            [class.bg-elevated]="c.id === selectedId()"
+            data-testid="mcp-recorded-call"
+            [attr.data-tool]="c.tool"
+            [attr.data-agent]="c.agent.name"
+            [attr.data-ok]="c.ok === null ? 'null' : c.ok ? 'true' : 'false'"
+            (click)="pick(c.id)"
+          >
+            <span class="text-[10px] text-muted shrink-0 w-16 whitespace-nowrap">{{ time(c.at) }}</span>
+            <span class="text-[11px] font-medium shrink-0 w-28 truncate" [class]="agentColor(c.agent.name)" [title]="c.agent.userAgent ?? agentLabel(c.agent)">{{ c.agent.name }}</span>
+            <span class="font-mono text-xs shrink-0 max-w-56 truncate">{{ c.tool }}</span>
+            <span class="truncate flex-1 text-xs font-mono text-muted">{{ c.preview === '{}' ? '' : c.preview }}</span>
+            <span class="w-12 shrink-0 flex justify-end">
+              @if (c.ok === null) {
+                <svg qSpinner class="size-3"></svg>
+              } @else {
+                <span qBadge class="shrink-0" [class]="c.ok ? 'text-success' : 'text-danger'">{{ c.ok ? 'ok' : 'failed' }}</span>
+              }
+            </span>
+            <span class="text-[10px] text-muted shrink-0 w-14 text-right">{{ c.durationMs === null ? '' : formatMs(c.durationMs) }}</span>
+            <span class="text-[10px] text-muted shrink-0 w-14 text-right">{{ formatBytes(c.size) }}</span>
+          </button>
+        } @empty {
+          <p class="px-3 py-3 text-xs text-muted">No call matches the filter.</p>
+        }
+      </div>
+    </div>
+    @if (selected(); as call) {
+      <div class="w-[30rem] max-w-[55%] border-l border-edge flex flex-col min-h-0 shrink-0">
+        <q-mcp-call-detail [summary]="call" />
+      </div>
+    }
+  </div>
+}

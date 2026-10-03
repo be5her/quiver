@@ -13,6 +13,7 @@
     "../../packages/modules/src/ui.ts",
     "../../packages/modules/src/api/ui/**/*.ts",
     "../../packages/modules/src/db/ui/**/*.ts",
+    "../../packages/modules/src/mcp/ui/**/*.ts",
     "../../packages/modules/src/mock/ui/**/*.ts",
     "../../packages/modules/src/realtime/ui/**/*.ts",
     "../../packages/modules/src/teleport/ui/**/*.ts",

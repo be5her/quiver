@@ -2732,6 +2732,72 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(200);
 
+      // Resources, a resource template, a prompt and the handshake info, driven from the same tab.
+      const clickMcpView = (label: string) =>
+        js(
+          `(() => { const pane = [...document.querySelectorAll('[data-tab-type="mcp.server"]')].find((el) => !el.classList.contains('hidden')); const btn = pane && [...pane.querySelectorAll('[role=tab]')].find((b) => b.textContent.startsWith(${JSON.stringify(label)})); if (btn) btn.click(); return Boolean(btn); })()`,
+        );
+      const typeInto = (selector: string, value: string) =>
+        js(
+          `(() => { const input = document.querySelector(${JSON.stringify(selector)}); if (!input) return false; const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; setter.call(input, ${JSON.stringify(value)}); input.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`,
+        );
+      await clickMcpView('Resources');
+      await wait(800);
+      const resourceRows = await js(`[...document.querySelectorAll('[data-testid=mcp-resource], [data-testid=mcp-resource-template]')].map((r) => r.getAttribute('data-testid') + ':' + r.textContent)`);
+      await js(`document.querySelector('[data-testid=mcp-resource]')?.click()`);
+      await wait(800);
+      const resourceRead = await js(`document.querySelector('[data-testid=mcp-resource-result]')?.textContent ?? ''`);
+      check(
+        'ui: resources and templates listed, and picking a resource reads it',
+        Array.isArray(resourceRows) &&
+          resourceRows.some((r: string) => r.startsWith('mcp-resource:') && r.includes('Greeting') && r.includes('smoke://greeting')) &&
+          resourceRows.some((r: string) => r.startsWith('mcp-resource-template:') && r.includes('(template)') && r.includes('smoke://users/{id}')) &&
+          typeof resourceRead === 'string' &&
+          resourceRead.includes('1 part') &&
+          resourceRead.includes('hello, inspector'),
+        { resourceRows, resourceRead: String(resourceRead).slice(0, 160) },
+      );
+      await js(`document.querySelector('[data-testid=mcp-resource-template]')?.click()`);
+      await wait(300);
+      const typedVariable = await typeInto('[data-testid=mcp-template-variable]', '7');
+      await wait(100);
+      await js(`document.querySelector('[data-testid=mcp-resource-read]')?.click()`);
+      await wait(800);
+      const templateRead = await js(`document.querySelector('[data-testid=mcp-resource-result]')?.textContent ?? ''`);
+      check(
+        'ui: a template expands its variables into the uri it reads',
+        typedVariable === true && typeof templateRead === 'string' && templateRead.includes('smoke://users/7') && templateRead.includes('"user 7"'),
+        String(templateRead).slice(0, 200),
+      );
+      await shot('21e-mcp-resources-light');
+      await clickMcpView('Prompts');
+      await wait(800);
+      await js(`[...document.querySelectorAll('[data-testid=mcp-prompt]')].find((p) => p.textContent.includes('summarize'))?.click()`);
+      await wait(300);
+      const promptArgs = await js(`document.querySelectorAll('[data-testid=mcp-prompt-argument]').length`);
+      await typeInto('[data-testid=mcp-prompt-argument]', 'signals');
+      await wait(100);
+      await js(`document.querySelector('[data-testid=mcp-prompt-get]')?.click()`);
+      await wait(800);
+      const promptResult = await js(`document.querySelector('[data-testid=mcp-prompt-result]')?.textContent ?? ''`);
+      check(
+        'ui: a prompt renders with its arguments into messages',
+        promptArgs === 2 && typeof promptResult === 'string' && promptResult.includes('1 message') && promptResult.includes('Summary of signals') && promptResult.includes('Summarize signals'),
+        { promptArgs, promptResult: String(promptResult).slice(0, 200) },
+      );
+      await clickMcpView('Info');
+      await wait(300);
+      const info = await js(
+        `[document.querySelector('[data-testid=mcp-info]')?.textContent ?? '', document.querySelector('[data-testid=mcp-capabilities]')?.textContent ?? '', document.querySelector('[data-testid=mcp-instructions]')?.textContent ?? '']`,
+      );
+      check(
+        'ui: info shows the server, its capabilities and its instructions',
+        Array.isArray(info) && info[0].includes('smoke-http 1.2.3') && info[1].includes('logging') && info[1].includes('tools') && info[2] === 'Use echo to test the connection.',
+        Array.isArray(info) ? info.map((t: string) => t.slice(0, 160)) : info,
+      );
+      await clickMcpView('Tools');
+      await wait(200);
+
       // Call recorder: opened from the inspector's sidebar, started in the UI, lists two agents' calls as they arrive, then ends.
       const clickedRecorderRow = await js(`(() => { const row = document.querySelector('[data-testid=mcp-recorder-row]'); if (row) row.click(); return Boolean(row); })()`);
       await wait(500);
