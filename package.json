@@ -17,16 +17,17 @@
   },
   "bugs": "https://github.com/be5her/quiver/issues",
   "workspaces": [
-    "packages/*"
+    "packages/*",
+    "src/renderer"
   ],
   "scripts": {
-    "dev": "electron-vite dev",
-    "build": "electron-vite build",
-    "preview": "electron-vite preview",
-    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "dev": "node scripts/dev.mjs",
+    "build": "electron-vite build && npm run build -w @quiver/renderer",
+    "preview": "npm run build -w @quiver/renderer && electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && npm run typecheck -w @quiver/renderer",
     "test": "vitest run",
-    "smoke": "electron-vite build && cross-env QUIVER_SMOKE=1 electron .",
-    "package": "electron-vite build && electron-builder --publish never",
+    "smoke": "npm run build && cross-env QUIVER_SMOKE=1 electron .",
+    "package": "npm run build && electron-builder --publish never",
     "icon": "electron scripts/render-icon.cjs",
     "release:plan": "node scripts/release/plan.mjs stable"
   },
@@ -36,23 +37,16 @@
     "graphql": "^17.0.2",
     "ioredis": "^6.0.0",
     "mysql2": "^3.24.4",
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0",
     "undici": "^7.29.1",
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^26.6.2",
-    "@types/react": "^19.3.0",
-    "@types/react-dom": "^19.3.0",
     "@types/ws": "^8.18.1",
-    "@vitejs/plugin-react": "^5.2.0",
     "cross-env": "^10.1.0",
     "electron": "^44.4.5",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
-    "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
     "vite": "^7.3.6",
     "vitest": "^5.0.1",

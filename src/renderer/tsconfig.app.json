@@ -1,0 +1,17 @@
+/* The application: the shell under src/, the shared UI in packages/ui and every module's ui/ folder. */
+/* @quiver/core comes in through those imports. */
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "../..",
+    "outDir": "../../out/renderer-tsc",
+    "types": []
+  },
+  "include": [
+    "src/**/*.ts",
+    "../../packages/ui/src/**/*.ts",
+    "../../packages/modules/src/ui.ts",
+    "../../packages/modules/src/tools/ui/**/*.ts"
+  ],
+  "exclude": ["**/*.test.ts", "**/*.spec.ts"]
+}

@@ -1,6 +1,6 @@
-import { QuiverBridge } from '@quiver/ui';
+import type { QuiverBridge } from '@quiver/ui/bridge';
 import { contextBridge, ipcRenderer } from 'electron';
-import { HostEventMessage } from '../../packages/core/src/types';
+import type { HostEventMessage } from '../../packages/core/src/types';
 
 /**
  * The only bridge between renderer and main. Modules never touch IPC directly:

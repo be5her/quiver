@@ -1,0 +1,55 @@
+<svg qQuiverMark class="size-14 shrink-0"></svg>
+<div class="flex-1 min-w-0">
+  <p class="text-sm font-semibold" data-testid="about-version">
+    Quiver {{ version() }}
+    @if (isBeta()) {
+      <span class="ml-2 text-[10px] font-medium uppercase tracking-wide text-accent border border-accent/40 rounded px-1 py-px align-middle">Beta</span>
+    }
+  </p>
+  <p class="text-xs text-muted mt-0.5">
+    {{ platform }} ·
+    <button type="button" class="underline hover:text-fg" (click)="updates.openExternal(releasesUrl)">Releases</button>
+    ·
+    <button type="button" class="underline hover:text-fg" (click)="updates.openExternal(issuesUrl)">Report an issue</button>
+  </p>
+  <div class="flex items-center gap-2 mt-3 flex-wrap">
+    <button qButton size="sm" variant="secondary" [icon]="icons.RotateCw" [loading]="checking() || update()?.status === 'checking'" [disabled]="!update()?.supported" data-testid="update-check" (click)="check()">
+      Check for updates
+    </button>
+    @if (update(); as update) {
+      @if (update.status === 'available' && update.installable) {
+        <button qButton size="sm" variant="primary" [icon]="icons.Download" (click)="updates.download()">Download {{ update.version }}</button>
+      }
+      @if (update.status === 'available' && !update.installable) {
+        <button qButton size="sm" variant="primary" [icon]="icons.ExternalLink" (click)="updates.openExternal(update.url)">Get {{ update.version }} from GitHub</button>
+      }
+      @if (update.status === 'downloaded') {
+        <button qButton size="sm" variant="primary" [icon]="icons.RotateCw" (click)="updates.install()">Restart to install {{ update.version }}</button>
+      }
+      @if (hasRelease()) {
+        <button qButton size="sm" variant="ghost" (click)="updates.openExternal(update.url)">Release notes</button>
+      }
+    }
+  </div>
+  <p class="text-xs mt-2" [class]="update()?.status === 'error' ? 'text-danger' : 'text-muted'" data-testid="update-note">{{ note() }}</p>
+  @if (update()?.status === 'downloading') {
+    <div class="h-1 mt-2 rounded bg-elevated overflow-hidden max-w-xs">
+      <div class="h-full bg-accent transition-[width]" [style.width.%]="update()?.progress?.percent ?? 0"></div>
+    </div>
+  }
+  @if (update()?.betaSupported) {
+    <div class="mt-4">
+      <label class="flex items-center gap-2 text-sm"
+        ><input qCheckbox data-testid="update-beta" [checked]="update()?.channel === 'beta'" [disabled]="switching()" (change)="switchChannel($event)" />Beta builds</label
+      >
+      <p class="text-xs text-muted mt-1">
+        @if (update()?.channel === 'beta') {
+          Quiver also offers the build made from every change merged on GitHub, before it reaches a stable release. Turning this off keeps the version you have until a newer
+          stable release ships.
+        } @else {
+          Get a new build for every change merged on GitHub, before it reaches a stable release. Beta builds are published for Windows only.
+        }
+      </p>
+    </div>
+  }
+</div>

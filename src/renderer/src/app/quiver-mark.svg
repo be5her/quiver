@@ -1,0 +1,11 @@
+<svg:g class="stroke-fg" fill="none" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round">
+  <svg:path d="M40 52 V25 M33 33 L40 25 L47 33" />
+  <svg:path d="M64 52 V25 M57 33 L64 25 L71 33" />
+</svg:g>
+<svg:path d="M52 52 V15 M45 23 L52 15 L59 23" class="stroke-accent" fill="none" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" />
+<svg:path
+  d="M12 40 V84 a8 8 0 0 0 8 8 H80 a8 8 0 0 0 8 -8 V52 a8 8 0 0 0 -8 -8 H50 l-8 -8 H20 a8 8 0 0 0 -8 8 Z"
+  class="stroke-fg fill-canvas"
+  stroke-width="9"
+  stroke-linejoin="round"
+/>

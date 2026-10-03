@@ -1,0 +1,47 @@
+@for (pending of open(); track pending) {
+  <div class="fixed inset-0 z-50 flex items-start justify-center bg-black/40 pt-[18vh]" (mousedown)="cancel(pending)">
+    <div class="w-[440px] max-w-[90vw] rounded-lg border border-edge bg-canvas shadow-xl p-4" (mousedown)="$event.stopPropagation()">
+      @if (pending.kind === 'prompt') {
+        <form (submit)="submitPrompt($event, pending)" (keydown)="promptKeys($event, pending)">
+          <h2 class="text-sm font-semibold mb-3">{{ pending.options.title }}</h2>
+          @if (pending.options.label) {
+            <label qLabel>{{ pending.options.label }}</label>
+          }
+          @if (pending.options.multiline) {
+            <textarea qTextarea qAutofocus rows="8" [formField]="answerForm.text" [placeholder]="pending.options.placeholder ?? ''"></textarea>
+          } @else {
+            <input qInput qAutofocus [formField]="answerForm.text" [placeholder]="pending.options.placeholder ?? ''" (focus)="selectAll($event)" />
+          }
+          @if (pending.options.choice; as choice) {
+            <div class="flex items-center gap-2 mt-3">
+              <label qLabel class="mb-0">{{ choice.label }}</label>
+              <select qSelect [formField]="answerForm.choice" [attr.aria-label]="choice.label">
+                @for (o of choice.options; track o.value) {
+                  <option [value]="o.value">{{ o.label }}</option>
+                }
+              </select>
+              @if (hint(); as hint) {
+                <span class="text-xs text-muted">{{ hint }}</span>
+              }
+            </div>
+          }
+          <div class="flex justify-end gap-2 mt-4">
+            <button qButton variant="ghost" (click)="cancel(pending)">Cancel</button>
+            <button qButton variant="primary" type="submit">{{ pending.options.confirmLabel ?? 'OK' }}</button>
+          </div>
+        </form>
+      } @else {
+        <div (keydown.escape)="cancel(pending)">
+          <h2 class="text-sm font-semibold mb-1">{{ pending.options.title }}</h2>
+          @if (pending.options.message) {
+            <p class="text-sm text-muted">{{ pending.options.message }}</p>
+          }
+          <div class="flex justify-end gap-2 mt-4">
+            <button qButton variant="ghost" qAutofocus (click)="cancel(pending)">Cancel</button>
+            <button qButton [variant]="pending.options.danger ? 'danger' : 'primary'" [class]="pending.options.danger ? 'border-danger/40' : ''" (click)="pending.resolve(true)">{{ pending.options.confirmLabel ?? 'Confirm' }}</button>
+          </div>
+        </div>
+      }
+    </div>
+  </div>
+}

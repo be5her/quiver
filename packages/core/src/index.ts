@@ -8,6 +8,7 @@ export * from './registry';
 export * from './variables';
 export * from './redact';
 export * from './curl';
+export * from './command-score';
 export * from './shell';
 export * from './models/api';
 export * from './models/db';
