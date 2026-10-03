@@ -8,6 +8,21 @@ export interface PromptOptions {
   confirmLabel?: string;
   /** Multi-line text area instead of a single input. */
   multiline?: boolean;
+  /** A select shown under the text, whose value comes back with it (see promptWithChoiceDialog). */
+  choice?: PromptChoice;
+}
+
+export interface PromptChoice {
+  label: string;
+  options: { value: string; label: string }[];
+  defaultValue: string;
+  /** A line shown next to the select, recomputed as the text and the choice change. */
+  hint?(text: string, choice: string): string | null;
+}
+
+export interface PromptResult {
+  value: string;
+  choice: string;
 }
 
 export interface ConfirmOptions {
@@ -18,7 +33,7 @@ export interface ConfirmOptions {
 }
 
 type PendingDialog =
-  | { kind: 'prompt'; options: PromptOptions; resolve(value: string | null): void }
+  | { kind: 'prompt'; options: PromptOptions; resolve(value: string | null, choice?: string): void }
   | { kind: 'confirm'; options: ConfirmOptions; resolve(value: boolean): void };
 
 interface DialogState {
@@ -41,6 +56,20 @@ export function promptDialog(options: PromptOptions): Promise<string | null> {
       resolve: (value) => {
         useDialogStore.getState().close();
         resolve(value);
+      },
+    });
+  });
+}
+
+/** A prompt with a select next to the text; resolves with both, or null when cancelled. */
+export function promptWithChoiceDialog(options: PromptOptions & { choice: PromptChoice }): Promise<PromptResult | null> {
+  return new Promise((resolve) => {
+    useDialogStore.getState().open({
+      kind: 'prompt',
+      options,
+      resolve: (value, choice) => {
+        useDialogStore.getState().close();
+        resolve(value === null ? null : { value, choice: choice ?? options.choice.defaultValue });
       },
     });
   });

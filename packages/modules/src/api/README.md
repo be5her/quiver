@@ -1,6 +1,6 @@
 # API client
 
-Collections, requests with params, headers, body and auth, environments with encrypted secrets, a history of what was sent, curl import and export, and `{{variables}}` everywhere.
+Collections, requests with params, headers, body and auth, environments with encrypted secrets, a history of what was sent, curl import (bash, cmd.exe and PowerShell copies) and export, and `{{variables}}` everywhere.
 
 ## Variables
 
@@ -14,6 +14,18 @@ Every send is appended to `.quiver/local/history.jsonl`, a plain file on this ma
 
 The request is still sent exactly as typed; only the record of it is masked. Opening an entry from the history gives the request back with the masks in place, so a credential that was typed in has to be typed again, while one that came from a variable just works. A history written before this existed is rewritten, masked, the next time its workspace opens.
 
+## curl import
+
+Import from curl (sidebar, palette, `api_import_curl`) reads a pasted command with the quoting rules of the shell it was copied for, then maps curl's options to the request the way curl would send it. The shell is detected from the text and can be picked in the dialog (`dialect` for agents):
+
+- **cmd.exe**, Chrome's "Copy as cURL (cmd)": recognised by `^` line continuations or arguments wrapped in `^"…^"`. Read in the two layers Windows applies: cmd.exe's carets (`^x` is a literal `x`, `^` at the end of a line continues it, `^` + line break + empty line is a line break in the value), then the MSVC argument rules (`\"` is a quote, backslashes are only halved in front of a quote). Chrome doubles every backslash in this format, so one that is not in front of a quote reaches curl.exe doubled, and is imported that way.
+- **PowerShell**: recognised by backtick line continuations or a command starting with `curl.exe`. `'…'` is literal (`''` for a quote), `"…"` takes backtick escapes.
+- **bash/zsh** otherwise, Chrome's "Copy as cURL (bash)" and Postman or Insomnia exports: `'…'`, `"…"`, `$'…'` (ANSI-C escapes), backslash escapes and continuations.
+
+Options are read by their curl meaning, not their position: `--url`, `-X`, `-H`, `-b` (and a `Cookie` header, merged into one), `-u`, `-A`, `-e`, `--oauth2-bearer`, the `-d` family (several are joined with `&` and make it a POST unless `-X` says otherwise; `--data-urlencode` encodes its value; `--json` also sets `Content-Type` and `Accept`), `-F`/`--form-string` (multipart), `-G` (the data goes into the query string) and `-I`; `-XPOST`, bundled flags like `-sSL` and `--opt=value` work too. Options that only affect how curl runs (`--compressed`, `-k`, `-L`, `-s`, `-o`, timeouts, TLS and so on) are accepted and ignored. The query string becomes params, each key and value decoded once.
+
+A command that cannot be imported exactly is refused and nothing is saved, with the shell and the line and column in the error: an unterminated quote, a `^`, backtick or `\` left over as an argument, an argument still wrapped in `^…^` (cmd syntax read as bash), something the shell would expand (`$VAR`, `$(…)`) or treat as an operator (an unquoted `&`), a body, header or cookie file (`-d @file`), an unknown option, a second URL, or malformed `%`-encoding in the query.
+
 ## GraphQL
 
 A GraphQL request is an ordinary request whose body type is `graphql`: a query document, variables as JSON text (with `{{variables}}` inside) and an optional operation name. Over POST it goes out as `{"query","variables","operationName"}` JSON; over GET the same three become query parameters. `api.graphql.introspect` runs the standard introspection query against the request's URL with its headers and auth, and caches the result as SDL under `.quiver/local`, keyed by endpoint; the editor uses it for autocompletion and lint, the Docs tab explores it (search and an SDL view), and `api.graphql.schema` hands it to agents. Documents with several operations get an operation picker; prettify reformats the document.
@@ -24,4 +36,4 @@ Listing, reading, creating, saving and sending requests, the environment command
 
 ## Verified by
 
-The smoke sends requests to a local echo server (variables, dynamic values, secrets, curl export), checks that typed tokens, passwords, API keys, an `Authorization` header and a secret resolved into the URL reach the server but not the history file (also for a failed send, and for a log left by an older version), that an agent gets the sent request, a failed send's error and a curl export with the secrets masked while the UI does not, runs a graphql-js endpoint (POST, GET, operation names, introspection), and drives the UI: hovering variables, revealing a secret, an undefined variable marked red, editing and defining values from the hover card.
+The smoke sends requests to a local echo server (variables, dynamic values, secrets, curl export, a Chrome cmd.exe copy imported and sent with no caret left in the URL, headers, cookie or body), checks that typed tokens, passwords, API keys, an `Authorization` header and a secret resolved into the URL reach the server but not the history file (also for a failed send, and for a log left by an older version), that an agent gets the sent request, a failed send's error and a curl export with the secrets masked while the UI does not, runs a graphql-js endpoint (POST, GET, operation names, introspection), checks that an unterminated quote or a command read with the wrong shell is refused without saving anything, and drives the UI: the curl import dialog naming the detected shell, hovering variables, revealing a secret, an undefined variable marked red, editing and defining values from the hover card.

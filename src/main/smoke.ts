@@ -488,6 +488,41 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     const curl = await run<{ command: string }>('api.export.curl', { requestId: imported.id }, ws.id);
     check('curl export resolves variables', curl.command.includes(`http://127.0.0.1:${echoPort}/a?b=c`), curl.command);
 
+    // Chrome's "Copy as cURL (cmd)" escapes with carets; none may reach the saved request or the wire.
+    {
+      const cmdCurl = [
+        `curl ^"http://127.0.0.1:${echoPort}/x?merchantId=376^" ^`,
+        '  -H ^"accept: application/json^" ^',
+        '  -H ^"sec-ch-ua: ^\\^"Chromium^\\^";v=^\\^"154^\\^"^" ^',
+        '  -b ^"session=a%^2Fb^" ^',
+        '  --data-raw ^"null^"',
+      ].join('\r\n');
+      const fromCmd = await run<ApiRequest>('api.import.curl', { command: cmdCurl }, ws.id);
+      const sent = await run<ApiResponse>('api.request.send', { requestId: fromCmd.id }, ws.id);
+      const echoedCmd = JSON.parse(sent.body) as { method: string; headers: Record<string, string>; body: string; url: string };
+      check(
+        'curl import: cmd.exe carets are removed and the request sends as copied',
+        sent.status === 200 &&
+          echoedCmd.method === 'POST' &&
+          echoedCmd.url === '/x?merchantId=376' &&
+          echoedCmd.headers.accept === 'application/json' &&
+          echoedCmd.headers['sec-ch-ua'] === '"Chromium";v="154"' &&
+          echoedCmd.headers.cookie === 'session=a%2Fb' &&
+          echoedCmd.body === 'null',
+        echoedCmd,
+      );
+      const before = (await run<ApiRequest[]>('api.request.list', {}, ws.id)).length;
+      const broken = await host.invoke('api.import.curl', { command: 'curl ^"https://x.test/a ^\r\n  -H ^"a: b^"' }, { caller: 'ui', workspaceId: ws.id });
+      const forced = await host.invoke('api.import.curl', { command: cmdCurl, dialect: 'posix' }, { caller: 'ui', workspaceId: ws.id });
+      const after = (await run<ApiRequest[]>('api.request.list', {}, ws.id)).length;
+      check(
+        'curl import: an unterminated quote or the wrong shell is refused and nothing is saved',
+        !broken.ok && /cmd\.exe: unterminated/.test(broken.error.message) && !forced.ok && /bash\/zsh: .*cmd\.exe/.test(forced.error.message) && after === before,
+        { broken: broken.ok ? 'ok?' : broken.error.message, forced: forced.ok ? 'ok?' : forced.error.message, before, after },
+      );
+      await run('api.request.delete', { id: fromCmd.id }, ws.id);
+    }
+
     const missing = await host.invoke('api.request.send', { request: { ...saved, url: '{{nope}}/x' } }, { caller: 'ui', workspaceId: ws.id });
     check('unresolved variable is reported', !missing.ok && missing.error.code === 'UNRESOLVED_VARIABLES');
 
@@ -1882,6 +1917,27 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(300);
       await shot('03-request-light');
+
+      // Import from curl: the dialog says which shell it will read the paste as, and the shell can be picked.
+      {
+        const opened = await js(`(() => { const b = document.querySelector('button[aria-label="Import from curl"]'); if (b) b.click(); return Boolean(b); })()`);
+        await wait(300);
+        const typed = await js(
+          `(() => { const ta = document.querySelector('textarea'); if (!ta) return false; const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; set.call(ta, ${JSON.stringify('curl ^"https://example.test/x?merchantId=376^" ^\n  -H ^"accept: application/json^" ^\n  --data-raw ^"null^"')}); ta.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`,
+        );
+        await wait(200);
+        const dialog = (await js(
+          `(() => { const s = document.querySelector('select[aria-label="Shell"]'); return s ? { options: [...s.options].map((o) => o.textContent), hint: s.parentElement.querySelector('span')?.textContent ?? null } : null; })()`,
+        )) as { options: string[]; hint: string | null } | null;
+        check(
+          'ui: curl import offers the shells and reads a Chrome cmd copy as cmd.exe',
+          opened === true && typed === true && dialog?.options.join() === 'Detect,bash/zsh,cmd.exe,PowerShell' && dialog.hint === 'Reads as cmd.exe',
+          dialog,
+        );
+        await shot('03a-curl-import-light');
+        await js(`(() => { const b = [...document.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Cancel'); if (b) b.click(); })()`);
+        await wait(200);
+      }
 
       // Variables: {{name}} is marked in inputs and editors, and hovering shows the value, with secrets masked until revealed.
       const hoverVariable = (inputSelector: string, name: string) =>
