@@ -1,0 +1,30 @@
+@let conn = connection();
+<div qDbRow [label]="conn.name" bold (click)="toggle()" (keydown.enter)="toggle()">
+  <svg rowPrefix [qIcon]="open() ? icons.ChevronDown : icons.ChevronRight" class="size-3.5 text-muted shrink-0"></svg>
+  <svg rowPrefix [qKindIcon]="conn.kind"></svg>
+  <q-access-badge rowBadge [access]="conn.access" />
+  @if (conn.kind === 'redis') {
+    <button qIconButton label="Browse keys" size="sm" (click)="browseKeys($event)"><svg [qIcon]="icons.KeyRound" class="size-3.5"></svg></button>
+  }
+  <button qIconButton label="New query" size="sm" (click)="newQuery($event)"><svg [qIcon]="icons.Terminal" class="size-3.5"></svg></button>
+  <button qIconButton label="Edit connection" size="sm" (click)="edit($event)"><svg [qIcon]="icons.Pencil" class="size-3.5"></svg></button>
+  <button qIconButton label="Delete connection" size="sm" (click)="remove($event)"><svg [qIcon]="icons.Trash2" class="size-3.5"></svg></button>
+</div>
+@if (open()) {
+  @switch (conn.kind) {
+    @case ('mysql') {
+      <q-db-database-list [connection]="conn" />
+    }
+    @case ('sqlite') {
+      <q-db-table-list [connectionId]="conn.id" [database]="null" [depth]="1" />
+    }
+    @case ('redis') {
+      <div qDbRow [depth]="1" label="Keys" (click)="db.openRedisTab(conn)" (keydown.enter)="db.openRedisTab(conn)">
+        <svg rowPrefix [qIcon]="icons.KeyRound" class="size-3.5 text-muted shrink-0"></svg>
+      </div>
+      <div qDbRow [depth]="1" label="Console" (click)="db.openQueryTab({ connectionId: conn.id })" (keydown.enter)="db.openQueryTab({ connectionId: conn.id })">
+        <svg rowPrefix [qIcon]="icons.Terminal" class="size-3.5 text-muted shrink-0"></svg>
+      </div>
+    }
+  }
+}

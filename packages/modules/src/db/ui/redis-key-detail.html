@@ -1,0 +1,45 @@
+@if (detail.error(); as error) {
+  <q-db-error [error]="error" (retry)="detail.reload()" />
+} @else if (detail.value(); as d) {
+  <div class="flex flex-col h-full min-h-0">
+    <div class="flex items-center gap-2 px-3 h-10 border-b border-edge shrink-0 min-w-0">
+      <span [qRedisType]="d.type"></span>
+      <span class="font-mono text-sm truncate" [title]="keyName()">{{ keyName() }}</span>
+      <div class="flex-1"></div>
+      @if (detail.isLoading()) {
+        <svg qSpinner class="size-3.5"></svg>
+      }
+      <button qIconButton label="Copy value" size="sm" (click)="copyValue()"><svg [qIcon]="icons.Copy" class="size-3.5"></svg></button>
+      <button qIconButton label="Refresh" size="sm" (click)="detail.reload()"><svg [qIcon]="icons.RefreshCw" class="size-3.5"></svg></button>
+      <button qIconButton label="Delete key" size="sm" class="hover:text-danger" (click)="remove()"><svg [qIcon]="icons.Trash2" class="size-3.5"></svg></button>
+    </div>
+    <div class="flex items-center gap-4 px-3 h-7 border-b border-edge shrink-0 text-[11px] text-muted">
+      <span>TTL: {{ formatTtl(d.ttl) }}</span>
+      @if (d.length !== null) {
+        <span>{{ d.type === 'string' ? 'length' : 'items' }}: {{ formatCount(d.length) }}</span>
+      }
+      @if (d.encoding) {
+        <span>encoding: {{ d.encoding }}</span>
+      }
+      @if (d.memory !== null) {
+        <span>memory: {{ formatCount(d.memory) }} B</span>
+      }
+      @if (d.truncated) {
+        <span class="text-warning">showing first {{ shownCount() }}</span>
+      }
+    </div>
+    <div class="flex-1 min-h-0">
+      @if (grid(); as grid) {
+        <q-result-grid [columns]="grid.columns" [rows]="grid.rows" emptyMessage="(empty)" />
+      } @else if (text(); as text) {
+        <div class="p-2 h-full">
+          <q-code-editor [value]="text.text" [language]="text.language" readonly wrap />
+        </div>
+      } @else {
+        <pre class="p-3 text-xs font-mono whitespace-pre-wrap break-all overflow-auto h-full">{{ raw() }}</pre>
+      }
+    </div>
+  </div>
+} @else {
+  <div class="flex items-center justify-center h-full"><svg qSpinner></svg></div>
+}

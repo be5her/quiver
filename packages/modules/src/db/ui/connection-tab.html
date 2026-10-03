@@ -1,0 +1,118 @@
+@if (loadError(); as error) {
+  <div class="p-4 text-sm text-danger">{{ error }}</div>
+} @else if (!loaded()) {
+  <div class="flex items-center justify-center h-full"><svg qSpinner></svg></div>
+} @else {
+  @let conn = connection();
+  <div class="flex flex-col h-full min-h-0">
+    <div class="flex items-center gap-2 px-3 py-2 border-b border-edge shrink-0">
+      <svg [qKindIcon]="conn.kind" class="size-4"></svg>
+      <input qInput [formField]="connectionForm.name" class="w-64 h-7 font-medium" [placeholder]="kindLabels[conn.kind] + ' connection name'" [qAutofocus]="isNew()" />
+      <div class="flex-1"></div>
+      <button qButton size="sm" variant="ghost" [icon]="icons.PlugZap" [loading]="testing()" (click)="test()">Test</button>
+      <button qButton size="sm" [variant]="dirty() ? 'primary' : 'ghost'" [icon]="icons.Save" title="Ctrl+S" (click)="save()">Save{{ dirty() ? '*' : '' }}</button>
+    </div>
+
+    <div class="flex-1 overflow-auto p-4">
+      <div class="max-w-xl flex flex-col gap-4">
+        <div>
+          <label qLabel>Type</label>
+          <select qSelect (change)="switchKind($event)">
+            @for (k of kinds; track k) {
+              <option [value]="k" [selected]="k === conn.kind">{{ kindLabels[k] }}</option>
+            }
+          </select>
+        </div>
+
+        @if (conn.kind === 'sqlite') {
+          <div>
+            <label qLabel>Database file</label>
+            <div class="flex gap-2">
+              <input qInput class="font-mono" [formField]="connectionForm.file" placeholder="data/app.db (relative to the project) or an absolute path" />
+              <button qButton variant="secondary" [icon]="icons.FolderOpen" (click)="browseFile()">Browse</button>
+            </div>
+            <p class="text-xs text-muted mt-1">A missing file is created on first connect. Relative paths keep the connection portable for teammates.</p>
+          </div>
+          <label class="flex items-center gap-2 text-sm"><input type="checkbox" qCheckbox [formField]="connectionForm.readOnly" /> Open read-only</label>
+        } @else {
+          <div>
+            <label qLabel>Access</label>
+            <select qSelect data-testid="db-access" (change)="switchAccess($event)">
+              @for (t of accessTypes; track t) {
+                <option [value]="t" [selected]="t === conn.access.type">{{ accessLabels[t] }}</option>
+              }
+            </select>
+          </div>
+
+          @if (teleportAccess(); as access) {
+            <q-teleport-access-fields [value]="access" [kind]="conn.kind" (valueChange)="setTeleportAccess($event)" />
+          }
+
+          @if (commandAccess(); as access) {
+            <div>
+              <label qLabel>Tunnel command</label>
+              <input qInput class="font-mono" [value]="access.command" placeholder="ssh -N -L {port}:db.internal:3306 bastion" (input)="setCommand($event)" />
+              <p class="text-xs text-muted mt-1">
+                <code class="font-mono">{{ portSyntax }}</code> is replaced with a free local port. The command runs without a shell, is started before connecting and stopped on
+                disconnect.
+              </p>
+            </div>
+          }
+
+          @if (conn.access.type === 'direct') {
+            <div class="grid grid-cols-[1fr_120px] gap-2">
+              <div>
+                <label qLabel>Host</label>
+                <input qInput class="font-mono" [formField]="connectionForm.host" placeholder="127.0.0.1" />
+              </div>
+              <div>
+                <label qLabel>Port</label>
+                <input qInput class="font-mono" type="number" [value]="conn.port || ''" [placeholder]="portPlaceholder()" (input)="setPort($event)" />
+              </div>
+            </div>
+          }
+
+          @if (conn.access.type !== 'teleport') {
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <label qLabel>{{ conn.kind === 'redis' ? 'Username (ACL, optional)' : 'User' }}</label>
+                <input qInput class="font-mono" [formField]="connectionForm.user" [placeholder]="conn.kind === 'redis' ? 'default' : 'root'" />
+              </div>
+              <div>
+                <label qLabel>Password</label>
+                <input qInput type="password" class="font-mono" [formField]="secretForm.password" [placeholder]="passwordPlaceholder()" />
+                @if (hasPassword()) {
+                  <label class="flex items-center gap-1.5 text-[11px] text-muted mt-1"><input type="checkbox" qCheckbox [formField]="secretForm.clearPassword" /> Remove stored password</label>
+                }
+              </div>
+            </div>
+          }
+          @if (conn.kind === 'mysql') {
+            <div>
+              <label qLabel>Default database (optional)</label>
+              <input qInput class="font-mono" [formField]="connectionForm.database" placeholder="app" />
+            </div>
+          }
+          @if (conn.kind === 'redis') {
+            <div class="w-40">
+              <label qLabel>Database index</label>
+              <input qInput class="font-mono" type="number" min="0" [value]="conn.dbIndex" (input)="setDbIndex($event)" />
+            </div>
+          }
+          @if (conn.access.type !== 'teleport') {
+            <label class="flex items-center gap-2 text-sm"><input type="checkbox" qCheckbox [formField]="connectionForm.ssl" /> Use TLS (self-signed certificates are accepted)</label>
+          }
+        }
+
+        @if (testResult(); as result) {
+          <div [class]="result.ok ? 'text-sm text-success' : 'text-sm text-danger break-words'" role="status">{{ result.message }}</div>
+        }
+
+        <p class="text-xs text-muted">
+          Connection settings are saved in <code class="font-mono">.quiver/db-connections/</code> and can be committed. The password is encrypted with the OS keychain into
+          <code class="font-mono"> .quiver/local/db-secrets.json</code>, which is gitignored, so each teammate enters their own.@if (conn.access.type === 'teleport') {<span> Teleport tunnels authenticate with your own certificate, so no password is needed.</span>}
+        </p>
+      </div>
+    </div>
+  </div>
+}

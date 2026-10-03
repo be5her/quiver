@@ -6,8 +6,11 @@ import { HostBridge } from './host-bridge';
 export interface InvokeResourceOptions {
   /** Explicit workspace, `null` for global. Defaults to the active workspace. */
   workspaceId?: string | null | (() => string | null);
-  /** Reload when one of these collections changes in the target workspace. */
-  refreshOn?: readonly string[];
+  /**
+   * Reload when one of these collections changes in the target workspace. A function is read when
+   * an event arrives, for names that depend on inputs, e.g. `db-schema:<connection id>`.
+   */
+  refreshOn?: readonly string[] | (() => readonly string[]);
   /** Reload when one of these workspace state keys changes. */
   refreshOnState?: readonly string[];
   /** Reload on these host events regardless of workspace, e.g. `teleport.changed`. */
@@ -59,10 +62,11 @@ export function invokeResource<T>(id: string, input: () => unknown = () => ({}),
   });
 
   const offs: (() => void)[] = [];
-  const collections = options.refreshOn ?? [];
+  const refreshOn = options.refreshOn ?? [];
+  const collections = typeof refreshOn === 'function' ? () => untracked(refreshOn) : () => refreshOn;
   const stateKeys = options.refreshOnState ?? [];
-  if (collections.length) {
-    offs.push(host.on('store.changed', (p) => p.workspaceId === untracked(workspaceId) && collections.includes(p.collection) && ref.reload()));
+  if (typeof refreshOn === 'function' || refreshOn.length) {
+    offs.push(host.on('store.changed', (p) => p.workspaceId === untracked(workspaceId) && collections().includes(p.collection) && ref.reload()));
   }
   if (stateKeys.length) {
     offs.push(host.on('state.changed', (p) => p.workspaceId === untracked(workspaceId) && stateKeys.includes(p.key) && ref.reload()));

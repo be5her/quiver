@@ -1,0 +1,58 @@
+<q-section-header title="Connections">
+  <q-db-new-connection-menu />
+</q-section-header>
+@if (connections.isLoading() && !connections.value()) {
+  <div class="px-3 py-2"><svg qSpinner></svg></div>
+}
+@for (conn of connections.value() ?? []; track conn.id) {
+  <q-db-connection-node [connection]="conn" />
+}
+@if (connections.value()?.length === 0) {
+  <p class="px-3 py-2 text-xs text-muted">No connections yet. Add a MySQL, SQLite or Redis connection for this project.</p>
+}
+
+<div class="mt-3">
+  <q-section-header>
+    <button sectionTitle type="button" class="flex items-center gap-1" (click)="toggleQueries()">
+      <svg [qIcon]="queriesOpen() ? icons.ChevronDown : icons.ChevronRight" class="size-3"></svg> Saved queries
+    </button>
+    <button qIconButton label="New query" size="sm" (click)="newQuery()"><svg [qIcon]="icons.Plus" class="size-3.5"></svg></button>
+  </q-section-header>
+  @if (queriesOpen()) {
+    @for (query of queries.value() ?? []; track query.id) {
+      <div qDbRow [label]="query.name" (click)="db.openQueryTab({ queryId: query.id, title: query.name })" (keydown.enter)="db.openQueryTab({ queryId: query.id, title: query.name })">
+        <svg rowPrefix [qIcon]="icons.Terminal" class="size-3.5 text-muted shrink-0"></svg>
+        <button qIconButton label="Rename" size="sm" (click)="renameQuery($event, query)"><svg [qIcon]="icons.Pencil" class="size-3.5"></svg></button>
+        <button qIconButton label="Delete" size="sm" (click)="deleteQuery($event, query)"><svg [qIcon]="icons.Trash2" class="size-3.5"></svg></button>
+      </div>
+    }
+    @if (queries.value()?.length === 0) {
+      <p class="px-3 py-1 text-xs text-muted">Save a query from the editor to keep it with the project.</p>
+    }
+  }
+</div>
+
+<div class="mt-3">
+  <q-section-header>
+    <button sectionTitle type="button" class="flex items-center gap-1" (click)="toggleHistory()">
+      <svg [qIcon]="historyOpen() ? icons.ChevronDown : icons.ChevronRight" class="size-3"></svg> History
+    </button>
+    @if (history.value()?.length) {
+      <button qIconButton label="Clear history" size="sm" (click)="db.clearHistory()"><svg [qIcon]="icons.Trash2" class="size-3.5"></svg></button>
+    }
+  </q-section-header>
+  @if (historyOpen()) {
+    @for (entry of history.value() ?? []; track entry.id) {
+      <button
+        type="button"
+        class="w-full text-left px-3 py-1 hover:bg-elevated flex items-center gap-2 min-w-0"
+        [title]="entry.at + '\n' + entry.connectionName + '\n' + entry.text"
+        (click)="replay(entry)"
+      >
+        <span class="size-1.5 rounded-full shrink-0" [class]="entry.ok ? 'bg-success' : 'bg-danger'"></span>
+        <span class="truncate text-xs font-mono text-fg flex-1">{{ firstLine(entry.text) }}</span>
+        <span class="text-[10px] text-muted shrink-0">{{ entry.durationMs }} ms</span>
+      </button>
+    }
+  }
+</div>

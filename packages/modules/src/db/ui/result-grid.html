@@ -1,0 +1,57 @@
+<div #scroller class="flex-1 min-h-0 overflow-auto font-mono text-xs select-text" role="grid" [attr.aria-rowcount]="rows().length" [attr.aria-colcount]="columns().length" (scroll)="scrolled()">
+  <div class="relative" [style.width.px]="totalWidth()" [style.height.px]="headerHeight + rows().length * rowHeight">
+    <div class="sticky top-0 z-10 grid bg-elevated border-b border-edge font-sans font-medium text-muted" [style.grid-template-columns]="template()" [style.height.px]="headerHeight" role="row">
+      <div class="px-2 flex items-center justify-end border-r border-edge/60">#</div>
+      @for (column of columns(); track $index) {
+        @let sorted = sort()?.column === column.name ? sort()!.direction : null;
+        <button
+          type="button"
+          role="columnheader"
+          class="px-2 flex items-center gap-1 min-w-0 border-r border-edge/60 text-left"
+          [class]="sortable() ? 'hover:text-fg cursor-pointer' : 'cursor-default'"
+          [title]="column.type ? column.name + ': ' + column.type : column.name"
+          (click)="requestSort(column.name)"
+        >
+          <span class="truncate">{{ column.name }}</span>
+          @if (sorted === 'asc') {
+            <svg [qIcon]="icons.ArrowUp" class="size-3 shrink-0"></svg>
+          } @else if (sorted === 'desc') {
+            <svg [qIcon]="icons.ArrowDown" class="size-3 shrink-0"></svg>
+          }
+        </button>
+      }
+    </div>
+    @for (row of visible(); track row.index) {
+      <div
+        role="row"
+        class="absolute left-0 grid items-center hover:bg-elevated/60"
+        [class]="row.index % 2 === 1 ? 'bg-elevated/25' : ''"
+        [style.top.px]="headerHeight + row.index * rowHeight"
+        [style.height.px]="rowHeight"
+        [style.grid-template-columns]="template()"
+        [style.width.px]="totalWidth()"
+      >
+        <div class="px-2 text-right text-muted border-r border-edge/40">{{ row.index + 1 }}</div>
+        @for (column of columns(); track $index; let col = $index) {
+          @let value = row.cells[col];
+          <div
+            role="gridcell"
+            class="px-2 truncate h-full leading-[26px] border-r border-edge/40 cursor-default"
+            [class]="(isNull(value) ? 'text-muted italic' : '') + (selected()?.row === row.index && selected()?.col === col ? ' ring-1 ring-inset ring-accent bg-accent/10' : '')"
+            (click)="select(row.index, col)"
+          >{{ formatCell(value) }}</div>
+        }
+      </div>
+    }
+    @if (rows().length === 0) {
+      <div class="absolute inset-x-0 top-8 p-4 text-center text-muted font-sans">{{ emptyMessage() }}</div>
+    }
+  </div>
+</div>
+@if (selected(); as cell) {
+  <div class="shrink-0 border-t border-edge bg-surface flex items-start gap-2 px-2 py-1 max-h-32">
+    <span class="text-[10px] uppercase tracking-wide text-muted shrink-0 pt-1">{{ columns()[cell.col]?.name }} · row {{ cell.row + 1 }}</span>
+    <pre class="flex-1 min-w-0 overflow-auto text-xs font-mono whitespace-pre-wrap break-all max-h-28">{{ selectedText() }}</pre>
+    <button qIconButton label="Copy value" size="sm" (click)="copySelected()"><svg [qIcon]="icons.Copy" class="size-3.5"></svg></button>
+  </div>
+}

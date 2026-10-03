@@ -1,0 +1,48 @@
+<div class="w-80 shrink-0 border-r border-edge flex flex-col min-h-0">
+  <div class="flex items-center gap-1 p-2 border-b border-edge">
+    <input qInput [value]="pattern()" placeholder="user:*" class="h-7 font-mono text-xs" (input)="typed($event)" (keydown.enter)="scan(true)" />
+    <button qIconButton label="Scan" size="sm" (click)="scan(true)">
+      @if (scanning()) {
+        <svg qSpinner class="size-3.5"></svg>
+      } @else {
+        <svg [qIcon]="searchIcon" class="size-3.5"></svg>
+      }
+    </button>
+  </div>
+  <div class="flex-1 min-h-0 overflow-auto">
+    @if (scanError(); as error) {
+      <q-db-error [error]="error" compact (retry)="scan(true)" />
+    }
+    @for (k of keys(); track k.key) {
+      <button
+        type="button"
+        class="w-full flex items-center gap-2 px-2 h-7 text-left hover:bg-elevated min-w-0"
+        [class.bg-elevated]="selected() === k.key"
+        [title]="k.key + '\n' + k.type + ' · ' + formatTtl(k.ttl)"
+        (click)="selected.set(k.key)"
+      >
+        <span [qRedisType]="k.type"></span>
+        <span class="truncate text-xs font-mono flex-1">{{ k.key }}</span>
+        @if (k.ttl >= 0) {
+          <span class="text-[10px] text-muted shrink-0">{{ formatTtl(k.ttl) }}</span>
+        }
+      </button>
+    }
+    @if (!scanning() && !scanError() && keys().length === 0) {
+      <p class="p-3 text-xs text-muted">No keys match.</p>
+    }
+  </div>
+  <div class="flex items-center justify-between px-2 h-8 border-t border-edge text-[11px] text-muted shrink-0">
+    <span>{{ count() }}</span>
+    @if (cursor()) {
+      <button qButton size="sm" variant="ghost" [loading]="scanning()" (click)="scan(false)">Load more</button>
+    }
+  </div>
+</div>
+<div class="flex-1 min-w-0 min-h-0">
+  @if (selected(); as key) {
+    <q-redis-key-detail [connectionId]="connectionId()" [keyName]="key" (deleted)="removeKey(key)" />
+  } @else {
+    <div class="h-full flex items-center justify-center text-xs text-muted">Select a key to inspect it.</div>
+  }
+</div>

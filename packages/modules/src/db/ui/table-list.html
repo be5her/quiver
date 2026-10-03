@@ -1,0 +1,19 @@
+@if (tables.error(); as error) {
+  <div [style.padding-left.px]="4 + depth() * 14"><q-db-error [error]="error" compact (retry)="tables.reload()" /></div>
+} @else if (tables.value(); as list) {
+  @for (table of list; track table.name) {
+    <div qDbRow [depth]="depth()" [label]="table.name" [hint]="rows(table)" (click)="db.openTableTab(connectionId(), table.name, database())" (keydown.enter)="db.openTableTab(connectionId(), table.name, database())">
+      <svg rowPrefix [qIcon]="table.type === 'view' ? icons.Eye : icons.Table2" class="size-3.5 text-muted shrink-0"></svg>
+      <button qIconButton label="Query this table" size="sm" (click)="queryTable($event, table)"><svg [qIcon]="icons.Terminal" class="size-3.5"></svg></button>
+    </div>
+  } @empty {
+    <p class="text-xs text-muted py-1" [style.padding-left.px]="12 + depth() * 14">No tables</p>
+  }
+  @if (list.length) {
+    <button type="button" class="flex items-center gap-1 text-[11px] text-muted hover:text-fg py-1" [style.padding-left.px]="12 + depth() * 14" (click)="tables.reload()">
+      <svg [qIcon]="icons.RefreshCw" class="size-3"></svg> Refresh
+    </button>
+  }
+} @else {
+  <div class="flex items-center h-7" [style.padding-left.px]="12 + depth() * 14"><svg qSpinner class="size-3.5"></svg></div>
+}
