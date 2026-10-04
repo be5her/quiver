@@ -59,6 +59,11 @@ export class TabBar {
     this.tabsState.closeTab(untracked(this.scope), tab.id);
   }
 
+  /** The middle button would start the browser's autoscroll on the scrollable strip instead of reaching `auxclick`. */
+  protected mouseDown(event: MouseEvent): void {
+    if (event.button === 1) event.preventDefault();
+  }
+
   protected auxClick(event: MouseEvent, tab: Tab): void {
     if (event.button === 1) this.tabsState.closeTab(untracked(this.scope), tab.id);
   }

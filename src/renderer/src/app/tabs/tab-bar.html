@@ -6,6 +6,7 @@
     role="tablist"
     [attr.data-dragging]="reorder.drag()?.id"
     (wheel)="wheel($event)"
+    (mousedown)="mouseDown($event)"
   >
     @if (reorder.drag(); as drag) {
       <q-drop-marker axis="x" [at]="drag.marker" testId="tab-drop-marker" />

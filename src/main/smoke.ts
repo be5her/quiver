@@ -3119,8 +3119,27 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       const orderAfterEsc = await tabTitles();
       check('ui: Escape cancels a tab drag and keeps the order', markerBeforeEsc && JSON.stringify(orderAfterEsc) === JSON.stringify(expectedOrder) && (await js(`Boolean(document.querySelector('[data-testid=tab-drop-marker]'))`)) === false, orderAfterEsc);
 
+      // A middle click closes the tab under the pointer; the scrollable strip must not start the browser's autoscroll instead.
+      const middleTabs = await tabTitles();
+      const middleTarget = (await js(
+        `(() => { const strip = document.querySelector('[role=tablist]').getBoundingClientRect(); const tabs = [...document.querySelectorAll('[data-testid=tab]')]; const t = tabs.reverse().find((t) => { const r = t.getBoundingClientRect(); return r.left >= strip.left && r.right <= strip.right; }); if (!t) return null; const r = t.getBoundingClientRect(); return { title: t.getAttribute('data-title'), x: Math.round(r.left + 24), y: Math.round(r.top + r.height / 2) }; })()`,
+      )) as { title: string; x: number; y: number } | null;
+      if (middleTabs.length >= 4 && middleTarget) {
+        win.webContents.sendInputEvent({ type: 'mouseMove', x: middleTarget.x, y: middleTarget.y });
+        win.webContents.sendInputEvent({ type: 'mouseDown', x: middleTarget.x, y: middleTarget.y, button: 'middle', clickCount: 1 });
+        await wait(50);
+        win.webContents.sendInputEvent({ type: 'mouseUp', x: middleTarget.x, y: middleTarget.y, button: 'middle', clickCount: 1 });
+      }
+      await wait(400);
+      const afterMiddle = await tabTitles();
+      check(
+        'ui: middle-clicking a tab closes it',
+        middleTabs.length >= 4 && middleTarget !== null && afterMiddle.length === middleTabs.length - 1 && !afterMiddle.includes(middleTarget.title),
+        { middleTabs, middleTarget, afterMiddle },
+      );
+
       const tabsBefore = await tabTitles();
-      const secondTab = `[data-testid=tab][data-title=${JSON.stringify(tabsBefore[1] ?? '')}]`;
+      const secondTab =`[data-testid=tab][data-title=${JSON.stringify(tabsBefore[1] ?? '')}]`;
       const openedTabMenu = await rightClick(secondTab);
       await wait(200);
       const tabMenu = await menuLabels();
