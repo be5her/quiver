@@ -1917,6 +1917,17 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(300);
       await shot('03-request-light');
+      // The sidebar's history follows each send without leaving the module.
+      {
+        const historyTitles = () => js(`[...document.querySelectorAll('[data-testid=api-history-entry]')].map((b) => b.title)`) as Promise<string[]>;
+        if (!(await historyTitles()).length) await js(`[...document.querySelectorAll('aside button')].find((b) => b.textContent.trim() === 'History')?.click()`);
+        await wait(300);
+        const before = await historyTitles();
+        await js(`[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Send')?.click()`);
+        await wait(1500);
+        const after = await historyTitles();
+        check('ui: a send shows up in the history right away', before.length > 0 && after.length > 0 && after[0] !== before[0] && after.slice(1).includes(before[0]), { before: before.slice(0, 2), after: after.slice(0, 2) });
+      }
 
       // Import from curl: the dialog says which shell it will read the paste as, and the shell can be picked.
       {
@@ -2179,6 +2190,24 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       const gridHasAda = await js(`[...document.querySelectorAll('[role=gridcell]')].some((c) => c.textContent === 'Ada')`);
       check('ui: table grid renders rows', gridHasAda === true);
       await shot('05-table-light');
+      // A write from elsewhere (another tab, an agent) reloads the schema tree and the open table's rows.
+      {
+        const visibleCells = () => js(`[...document.querySelectorAll('[role=gridcell]')].filter((c) => c.offsetParent !== null).map((c) => c.textContent)`) as Promise<string[]>;
+        const tableRows = () => js(`[...document.querySelectorAll('aside [role=button]')].map((r) => r.textContent.trim().split(/\\s+/)[0])`) as Promise<string[]>;
+        await run('db.query.run', { connectionId: sqlite.id, query: 'CREATE TABLE smoke_live (id INTEGER PRIMARY KEY)' }, ws.id);
+        await run('db.query.run', { connectionId: sqlite.id, query: "UPDATE users SET name = 'Ada Lovelace' WHERE name = 'Ada'" }, ws.id);
+        await wait(1000);
+        const created = { tables: await tableRows(), cells: await visibleCells() };
+        await run('db.query.run', { connectionId: sqlite.id, query: 'DROP TABLE smoke_live' }, ws.id);
+        await run('db.query.run', { connectionId: sqlite.id, query: "UPDATE users SET name = 'Ada' WHERE name = 'Ada Lovelace'" }, ws.id);
+        await wait(1000);
+        const dropped = { tables: await tableRows(), cells: await visibleCells() };
+        check(
+          'ui: a write reloads the table list and the open rows',
+          created.tables.includes('smoke_live') && created.cells.includes('Ada Lovelace') && !dropped.tables.includes('smoke_live') && dropped.cells.includes('Ada') && !dropped.cells.includes('Ada Lovelace'),
+          { created, dropped },
+        );
+      }
       // The WHERE filter completes the table's columns: Enter picks one while the list is open, then applies the filter.
       const typeText = (text: string) => {
         for (const ch of text) win.webContents.sendInputEvent({ type: 'char', keyCode: ch });
@@ -2246,6 +2275,22 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await wait(800);
       const hashRendered = await js(`[...document.querySelectorAll('[role=gridcell]')].some((c) => c.textContent === 'Ada')`);
       check('ui: redis hash rendered', hashRendered === true);
+      // A write from elsewhere rescans the keys and reloads the open key.
+      {
+        const keyNames = () => js(`[...document.querySelectorAll('button')].map((b) => b.textContent.trim()).filter((t) => /^(string|hash|list|set|zset|stream)/.test(t))`) as Promise<string[]>;
+        const cells = () => js(`[...document.querySelectorAll('[role=gridcell]')].map((c) => c.textContent)`) as Promise<string[]>;
+        await run('db.query.run', { connectionId: redis.id, query: 'SET smoke:live 1\nHSET user:1 name Grace' }, ws.id);
+        await wait(1000);
+        const written = { keys: await keyNames(), cells: await cells() };
+        await run('db.query.run', { connectionId: redis.id, query: 'DEL smoke:live\nHSET user:1 name Ada' }, ws.id);
+        await wait(1000);
+        const restored = { keys: await keyNames(), cells: await cells() };
+        check(
+          'ui: a redis write rescans the keys and reloads the open key',
+          written.keys.some((k) => k.endsWith('smoke:live')) && written.cells.includes('Grace') && !restored.keys.some((k) => k.endsWith('smoke:live')) && restored.cells.includes('Ada'),
+          { written, restored },
+        );
+      }
       await shot('08-redis-dark');
 
       // Teleport module: one section per cluster, pinned resources from both, tunnels, kube clusters.

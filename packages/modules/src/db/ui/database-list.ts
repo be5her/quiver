@@ -1,5 +1,5 @@
 import { Component, inject, input } from '@angular/core';
-import type { DbConnectionSummary } from '@quiver/core';
+import { dbDataCollection, type DbConnectionSummary } from '@quiver/core';
 import { Icon, IconButton, Spinner, TreeState, invokeResource } from '@quiver/ui';
 import { ChevronDown, ChevronRight, Terminal } from 'lucide';
 import { DbActions } from './db-actions';
@@ -41,7 +41,7 @@ export class DatabaseList {
 
   protected readonly icons = { ChevronDown, ChevronRight, Terminal };
   protected readonly databases = invokeResource<string[]>('db.schema.databases', () => ({ connectionId: this.connection().id }), {
-    refreshOn: () => [`db-schema:${this.connection().id}`],
+    refreshOn: () => [dbDataCollection(this.connection().id)],
   });
 
   protected isOpen(database: string): boolean {

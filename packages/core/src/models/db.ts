@@ -4,6 +4,14 @@ import { newId, nowIso } from '../ids';
 export const DbKindSchema = z.enum(['mysql', 'sqlite', 'redis']);
 export type DbKind = z.infer<typeof DbKindSchema>;
 
+/**
+ * The `store.changed` collection the host announces after a query that can write runs on a
+ * connection: its tables, rows or keys may have changed, so views of them reload.
+ */
+export function dbDataCollection(connectionId: string): string {
+  return `db-data:${connectionId}`;
+}
+
 export const DB_KIND_LABELS: Record<DbKind, string> = { mysql: 'MySQL', sqlite: 'SQLite', redis: 'Redis' };
 
 export function defaultPort(kind: DbKind): number {

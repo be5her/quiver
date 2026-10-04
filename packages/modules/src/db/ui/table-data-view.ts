@@ -1,5 +1,5 @@
 import { Component, booleanAttribute, computed, input, signal } from '@angular/core';
-import type { DbTableRows } from '@quiver/core';
+import { dbDataCollection, type DbTableRows } from '@quiver/core';
 import { CodeEditor, Icon, IconButton, Spinner, invokeResource, type SQLNamespace } from '@quiver/ui';
 import { ChevronLeft, ChevronRight, RefreshCw } from 'lucide';
 import { DbError } from './db-error';
@@ -37,7 +37,7 @@ export class TableDataView {
     orderBy: this.sort()?.column ?? null,
     direction: this.sort()?.direction,
     where: this.applied() || null,
-  }));
+  }), { refreshOn: () => [dbDataCollection(this.connectionId())] });
   protected readonly range = computed(() => {
     const data = this.rows.value();
     if (!data) return '';

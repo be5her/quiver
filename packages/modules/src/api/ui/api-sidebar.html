@@ -48,7 +48,7 @@
   </q-section-header>
   @if (historyOpen()) {
     @for (entry of history.value() ?? []; track entry.id) {
-      <button type="button" class="w-full text-left px-3 py-1 hover:bg-elevated flex items-center gap-2 min-w-0" [title]="entry.at + '\n' + entry.url" (click)="replay(entry)">
+      <button type="button" class="w-full text-left px-3 py-1 hover:bg-elevated flex items-center gap-2 min-w-0" [title]="entry.at + '\n' + entry.url" data-testid="api-history-entry" (click)="replay(entry)">
         <span class="text-[10px] font-bold w-10 shrink-0" [class]="methodColors[entry.method]">{{ entry.method }}</span>
         <span class="truncate text-xs text-fg flex-1">{{ shortUrl(entry.url) }}</span>
         <span class="text-[10px] font-mono shrink-0" [class]="entry.status ? statusColor(entry.status) : 'text-danger'">{{ entry.status ?? 'ERR' }}</span>

@@ -5,6 +5,7 @@ import {
   QuiverError,
   SavedQueryDraftSchema,
   SavedQuerySchema,
+  dbDataCollection,
   defineCommand,
   defineModule,
   newDbConnection,
@@ -254,6 +255,9 @@ const queryRun = defineCommand({
         await w.store.appendLog(HISTORY_LOG, entry);
         ctx.host.emit('store.changed', { workspaceId: w.id, collection: HISTORY_LOG });
       }
+      // Classified as for agents; a failed script may still have run its first statements.
+      const wrote = connection.kind === 'redis' ? !redisScriptIsReadOnly(input.query) : !scriptIsReadOnly(input.query);
+      if (wrote) ctx.host.emit('store.changed', { workspaceId: w.id, collection: dbDataCollection(connection.id) });
     }
   },
 });

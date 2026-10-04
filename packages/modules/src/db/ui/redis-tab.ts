@@ -1,6 +1,6 @@
 import { Component, computed, effect, inject, input, signal, untracked } from '@angular/core';
-import { toErrorPayload, type ErrorPayload, type RedisKeyInfo, type RedisScanResult } from '@quiver/core';
-import { Button, HostBridge, Icon, IconButton, Input, Spinner, type Tab, type TabComponent } from '@quiver/ui';
+import { dbDataCollection, toErrorPayload, type ErrorPayload, type RedisKeyInfo, type RedisScanResult } from '@quiver/core';
+import { Button, HostBridge, Icon, IconButton, Input, Spinner, injectHostEvent, type Tab, type TabComponent } from '@quiver/ui';
 import { Search } from 'lucide';
 import { DbError } from './db-error';
 import { formatCount, formatTtl } from './db-format';
@@ -38,6 +38,8 @@ export class RedisTab implements TabComponent {
       this.connectionId();
       untracked(() => void this.scan(true));
     });
+    // A write from a query tab, an agent or the key detail: scan the same pattern again.
+    injectHostEvent('store.changed', (p) => p.workspaceId === this.scope() && p.collection === dbDataCollection(this.connectionId()) && void this.scan(true));
   }
 
   protected typed(event: Event): void {

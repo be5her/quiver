@@ -1,5 +1,5 @@
 import { Component, computed, inject, input, signal } from '@angular/core';
-import type { DbColumn, DbConnectionSummary, DbTableDetail } from '@quiver/core';
+import { dbDataCollection, type DbColumn, type DbConnectionSummary, type DbTableDetail } from '@quiver/core';
 import { Badge, Button, CodeEditor, Segment, Segmented, Spinner, invokeResource, type SQLNamespace, type Tab, type TabComponent } from '@quiver/ui';
 import { Terminal } from 'lucide';
 import { DbActions } from './db-actions';
@@ -44,7 +44,7 @@ export class TableTab implements TabComponent {
   protected readonly view = signal<View>('data');
   // The columns feed both the Structure view and the WHERE filter's autocompletion.
   protected readonly detail = invokeResource<DbTableDetail>('db.schema.table', () => ({ connectionId: this.connectionId(), table: this.table(), database: this.database() }), {
-    refreshOn: () => [`db-schema:${this.connectionId()}`],
+    refreshOn: () => [dbDataCollection(this.connectionId())],
   });
   private readonly connections = invokeResource<DbConnectionSummary[]>('db.connection.list', () => ({}), { refreshOn: ['db-connections'] });
   protected readonly sqlite = computed(() => this.connections.value()?.find((c) => c.id === this.connectionId())?.kind === 'sqlite');

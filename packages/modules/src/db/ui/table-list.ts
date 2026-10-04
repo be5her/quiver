@@ -1,5 +1,5 @@
 import { Component, inject, input } from '@angular/core';
-import type { DbTable } from '@quiver/core';
+import { dbDataCollection, type DbTable } from '@quiver/core';
 import { Icon, IconButton, Spinner, invokeResource } from '@quiver/ui';
 import { Eye, RefreshCw, Table2, Terminal } from 'lucide';
 import { DbActions } from './db-actions';
@@ -22,7 +22,7 @@ export class TableList {
 
   protected readonly icons = { Eye, RefreshCw, Table2, Terminal };
   protected readonly tables = invokeResource<DbTable[]>('db.schema.tables', () => ({ connectionId: this.connectionId(), database: this.database() }), {
-    refreshOn: () => [`db-schema:${this.connectionId()}`],
+    refreshOn: () => [dbDataCollection(this.connectionId())],
   });
 
   protected queryTable(event: MouseEvent, table: DbTable): void {

@@ -1,5 +1,5 @@
 import { Component, computed, inject, input, output } from '@angular/core';
-import type { RedisKeyDetail as KeyDetail } from '@quiver/core';
+import { dbDataCollection, type RedisKeyDetail as KeyDetail } from '@quiver/core';
 import { CodeEditor, Dialogs, HostBridge, Icon, IconButton, Spinner, Toasts, invokeResource } from '@quiver/ui';
 import { Copy, RefreshCw, Trash2 } from 'lucide';
 import { DbError } from './db-error';
@@ -36,7 +36,9 @@ export class RedisKeyDetail {
   protected readonly icons = { Copy, RefreshCw, Trash2 };
   protected readonly formatTtl = formatTtl;
   protected readonly formatCount = formatCount;
-  protected readonly detail = invokeResource<KeyDetail>('db.redis.key', () => ({ connectionId: this.connectionId(), key: this.keyName(), limit: 500 }));
+  protected readonly detail = invokeResource<KeyDetail>('db.redis.key', () => ({ connectionId: this.connectionId(), key: this.keyName(), limit: 500 }), {
+    refreshOn: () => [dbDataCollection(this.connectionId())],
+  });
   /** Collections as rows of a two-column grid; null for strings and types that are not previewed. */
   protected readonly grid = computed(() => {
     const detail = this.detail.value();
