@@ -1,5 +1,6 @@
 /* The renderer compiles with the Angular compiler, which needs TypeScript 6.0 (installed for this workspace only); */
 /* the main process, the preload and the packages keep the root TypeScript and tsconfig.node.json. */
+/* This file holds the shared options; tsconfig.app.json lists the files, and the reference points editors to it. */
 /* Angular compiler options: https://angular.dev/reference/configs/angular-compiler-options */
 {
   "compileOnSave": false,
@@ -25,5 +26,6 @@
     "strictInputAccessModifiers": true,
     "strictTemplates": true
   },
-  "files": []
+  "files": [],
+  "references": [{ "path": "./tsconfig.app.json" }]
 }
