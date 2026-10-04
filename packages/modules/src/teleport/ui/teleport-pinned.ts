@@ -3,7 +3,7 @@ import { clusterLabel, sameProxy, type DbConnectionSummary, type TeleportPin, ty
 import { Badge, Icon, IconButton, SectionHeader, Spinner, Toasts } from '@quiver/ui';
 import { Boxes, Check, Database, PinOff, Square } from 'lucide';
 import { TeleportActions } from './teleport-actions';
-import { PROTOCOL_COLORS, connectionFor, isUsable } from './teleport-display';
+import { PROTOCOL_COLORS, connectionFor, isTerminalKube, isUsable } from './teleport-display';
 import { TeleportViewState } from './teleport-view-state';
 
 /** A pin with what the cluster sections know about it. */
@@ -40,11 +40,9 @@ export class TeleportPinned {
   protected readonly rows = computed<PinRow[]>(() => {
     const status = this.status();
     const dbs = this.view.dbs();
-    const kubes = this.view.kubes();
     return status.pins.map((pin) => {
       const cluster = status.clusters.find((c) => sameProxy(c.proxy, pin.proxy));
       const db = pin.kind === 'db' ? Object.entries(dbs).find(([p]) => sameProxy(p, pin.proxy))?.[1]?.find((d) => d.name === pin.name) : undefined;
-      const kube = pin.kind === 'kube' ? Object.entries(kubes).find(([p]) => sameProxy(p, pin.proxy))?.[1]?.find((k) => k.name === pin.name) : undefined;
       const tunnel = status.tunnels.find((t) => t.kind === 'teleport' && t.target === pin.name && sameProxy(t.proxy, pin.proxy));
       return {
         key: `${pin.kind}:${pin.proxy}:${pin.name}`,
@@ -53,7 +51,7 @@ export class TeleportPinned {
         usable: isUsable(cluster),
         protocol: db?.protocol ?? null,
         allowedUsers: db?.allowedUsers,
-        kubeActive: Boolean(kube?.selected),
+        kubeActive: pin.kind === 'kube' && isTerminalKube(cluster, pin.name),
         tunnel: tunnel ? { port: tunnel.port, dbUser: tunnel.dbUser ?? '' } : null,
         connection: pin.kind === 'db' ? connectionFor(this.connections(), pin.proxy, pin.name) : undefined,
       };

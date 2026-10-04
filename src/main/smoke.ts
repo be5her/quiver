@@ -2270,6 +2270,53 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(300);
       await shot('10-teleport-light');
+      // The pinned row's tick follows the terminal's kubectl context even while its cluster's section is collapsed
+      // (and its kube list not loaded), e.g. when it changes from a terminal or an agent.
+      const secondHeader = `document.querySelector('[data-testid=teleport-cluster][data-proxy="${fakeTsh.proxies.second}"] > [role=button]')`;
+      await js(`${secondHeader}?.click()`);
+      await wait(300);
+      const collapsedKubes = await js(`[...document.querySelectorAll('[data-testid=teleport-kube]')].map((r) => r.textContent.trim().split(/\\s+/)[0])`);
+      await run('teleport.kube.login', { proxy: fakeTsh.proxies.second, cluster: 'eu-eks' }, null);
+      await wait(1500);
+      const pinnedActive = await js(
+        `[...document.querySelectorAll('[data-testid=teleport-pin]')].map((r) => [r.textContent.includes('eu-eks') ? 'eu-eks' : r.textContent.includes('smoke-redis') ? 'smoke-redis' : 'other', Boolean(r.querySelector('[aria-label=active]'))])`,
+      );
+      check(
+        'ui: the pinned kube cluster the terminal points at is ticked, its cluster collapsed',
+        Array.isArray(collapsedKubes) && !collapsedKubes.includes('eu-eks') && Array.isArray(pinnedActive) && pinnedActive.some((r: [string, boolean]) => r[0] === 'eu-eks' && r[1]) && pinnedActive.every((r: [string, boolean]) => r[0] === 'eu-eks' || !r[1]),
+        { collapsedKubes, pinnedActive },
+      );
+      await js(`${secondHeader}?.click()`);
+      await wait(800);
+      // Switching the terminal to another kube cluster of the same Teleport cluster moves the tick and the "terminal" mark.
+      await js(
+        `(() => { const row = [...document.querySelectorAll('[data-testid=teleport-kube]')].find((r) => r.textContent.includes('dev-eks')); row?.querySelector('button[aria-label="Pin"]')?.click(); })()`,
+      );
+      await wait(1000);
+      const tickOf = (name: string) => js(`Boolean([...document.querySelectorAll('[data-testid=teleport-pin]')].find((r) => r.textContent.includes('${name}'))?.querySelector('[aria-label=active]'))`);
+      const devTickedBefore = await tickOf('dev-eks');
+      await js(
+        `(() => { const row = [...document.querySelectorAll('[data-testid=teleport-kube]')].find((r) => r.textContent.includes('prod-eks')); row?.querySelector('button[aria-label^="Set as kubectl context"]')?.click(); })()`,
+      );
+      await wait(300);
+      await js(`[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Set terminal context')?.click()`);
+      await wait(1500);
+      const switched = {
+        devTickedBefore,
+        devTickedAfter: await tickOf('dev-eks'),
+        euTicked: await tickOf('eu-eks'),
+        terminalRows: await js(`[...document.querySelectorAll('[data-testid=teleport-kube]')].filter((r) => r.textContent.includes('terminal')).map((r) => r.textContent.replace('terminal', '').trim())`),
+      };
+      check(
+        'ui: switching the terminal to another kube cluster clears the old tick',
+        switched.devTickedBefore === true && switched.devTickedAfter === false && switched.euTicked === true && JSON.stringify(switched.terminalRows) === JSON.stringify(['prod-eks', 'eu-eks']),
+        switched,
+      );
+      await shot('10b-teleport-kube-context');
+      await js(
+        `(() => { const row = [...document.querySelectorAll('[data-testid=teleport-pin]')].find((r) => r.textContent.includes('dev-eks')); row?.querySelector('button[aria-label="Unpin"]')?.click(); })()`,
+      );
+      await wait(1000);
       const clickedUnpin = await js(
         `(() => { const row = [...document.querySelectorAll('[data-testid=teleport-pin]')].find((r) => r.textContent.includes('second-mysql')); const btn = row && row.querySelector('button[aria-label="Unpin"]'); if (btn) btn.click(); return Boolean(btn); })()`,
       );

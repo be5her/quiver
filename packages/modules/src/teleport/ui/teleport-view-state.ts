@@ -1,19 +1,17 @@
 import { DestroyRef, Service, inject, signal, untracked, type Signal } from '@angular/core';
-import type { TeleportDatabase, TeleportKubeCluster } from '@quiver/core';
+import type { TeleportDatabase } from '@quiver/core';
 
 /**
  * What the Teleport sidebar keeps across switching modules: which clusters are collapsed, and the
- * resource lists the cluster sections loaded, so the Pinned section can show protocol and state.
+ * database lists the cluster sections loaded, so the Pinned section can show each one's protocol.
  */
 @Service()
 export class TeleportViewState {
   private readonly collapsedState = signal<Record<string, boolean>>({});
   private readonly dbState = signal<Record<string, TeleportDatabase[]>>({});
-  private readonly kubeState = signal<Record<string, TeleportKubeCluster[]>>({});
 
   readonly collapsed = this.collapsedState.asReadonly();
   readonly dbs = this.dbState.asReadonly();
-  readonly kubes = this.kubeState.asReadonly();
 
   toggle(proxy: string): void {
     this.collapsedState.update((collapsed) => ({ ...collapsed, [proxy]: !collapsed[proxy] }));
@@ -21,10 +19,6 @@ export class TeleportViewState {
 
   setDbs(proxy: string, dbs: TeleportDatabase[]): void {
     if (untracked(this.dbState)[proxy] !== dbs) this.dbState.update((all) => ({ ...all, [proxy]: dbs }));
-  }
-
-  setKubes(proxy: string, kubes: TeleportKubeCluster[]): void {
-    if (untracked(this.kubeState)[proxy] !== kubes) this.kubeState.update((all) => ({ ...all, [proxy]: kubes }));
   }
 }
 

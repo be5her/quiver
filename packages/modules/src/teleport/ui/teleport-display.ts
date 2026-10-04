@@ -26,6 +26,15 @@ export function isUsable(cluster: TeleportClusterStatus | undefined): boolean {
   return cluster?.state === 'logged-in' || cluster?.state === 'expiring';
 }
 
+/**
+ * Whether kubectl in the user's terminals points at this Kubernetes cluster. Read from the cluster's
+ * `tsh status`, which the host refreshes after every login and `tsh kube login`, rather than from the
+ * cached `tsh kube ls` list, which only loads while the cluster's section is open.
+ */
+export function isTerminalKube(cluster: TeleportClusterStatus | undefined, name: string): boolean {
+  return isUsable(cluster) && cluster?.kubeCluster === name;
+}
+
 /** The workspace's connection that goes through the Teleport tunnel to this database, if any. */
 export function connectionFor(connections: DbConnectionSummary[] | undefined, proxy: string, database: string): DbConnectionSummary | undefined {
   return connections?.find((c) => c.access.type === 'teleport' && c.access.database === database && (sameProxy(c.access.proxy, proxy) || c.access.proxy === ''));
