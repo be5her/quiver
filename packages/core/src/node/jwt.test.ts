@@ -33,7 +33,7 @@ describe('verifyJwt', () => {
   it('checks HMAC tokens with the secret, raw or base64', () => {
     for (const [alg, hash] of [['HS256', 'sha256'], ['HS384', 'sha384'], ['HS512', 'sha512']]) {
       const signed = token({ alg }, hmac(hash, 'shh'));
-      expect(verifyJwt(signed, 'shh')).toEqual({ algorithm: alg, signatureValid: true, keyFormat: 'secret', kid: null });
+      expect(verifyJwt(signed, 'shh')).toEqual({ valid: true, problems: [], algorithm: alg, signatureValid: true, keyFormat: 'secret', kid: null });
       expect(verifyJwt(signed, 'nope').signatureValid).toBe(false);
     }
     const binary = Buffer.from([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]);
@@ -74,13 +74,13 @@ describe('verifyJwt', () => {
   });
 
   it('reads certificates, JWKs and JWK sets', () => {
-    expect(verifyJwt(CERTIFICATE_TOKEN, CERTIFICATE)).toEqual({ algorithm: 'ES256', signatureValid: true, keyFormat: 'certificate', kid: null });
+    expect(verifyJwt(CERTIFICATE_TOKEN, CERTIFICATE)).toEqual({ valid: true, problems: [], algorithm: 'ES256', signatureValid: true, keyFormat: 'certificate', kid: null });
 
     const rs = token({ alg: 'RS256', kid: 'two' }, (data) => sign('sha256', data, rsa.privateKey));
     const jwk = { ...rsa.publicKey.export({ format: 'jwk' }), kid: 'two' };
     const other = { ...otherRsa.publicKey.export({ format: 'jwk' }), kid: 'one' };
-    expect(verifyJwt(rs, JSON.stringify(jwk))).toEqual({ algorithm: 'RS256', signatureValid: true, keyFormat: 'JWK', kid: 'two' });
-    expect(verifyJwt(rs, JSON.stringify({ keys: [other, jwk] }))).toEqual({ algorithm: 'RS256', signatureValid: true, keyFormat: 'JWK set', kid: 'two' });
+    expect(verifyJwt(rs, JSON.stringify(jwk))).toEqual({ valid: true, problems: [], algorithm: 'RS256', signatureValid: true, keyFormat: 'JWK', kid: 'two' });
+    expect(verifyJwt(rs, JSON.stringify({ keys: [other, jwk] }))).toEqual({ valid: true, problems: [], algorithm: 'RS256', signatureValid: true, keyFormat: 'JWK set', kid: 'two' });
     expect(() => verifyJwt(rs, JSON.stringify({ keys: [other] }))).toThrow('No key in the JWK set has kid "two"');
 
     // Without a kid every key of the set is tried.
@@ -119,8 +119,70 @@ describe('verifyJwt', () => {
   it('reports a tampered payload as an invalid signature', () => {
     const signed = token({ alg: 'RS256' }, (data) => sign('sha256', data, rsa.privateKey));
     const [header, , signature] = signed.split('.');
-    expect(verifyJwt(`${header}.${segment({ sub: 'mallory' })}.${signature}`, pem(rsa.publicKey)).signatureValid).toBe(false);
-    expect(verifyJwt(`Bearer ${signed}`, pem(rsa.publicKey)).signatureValid).toBe(true);
+    expect(verifyJwt(`${header}.${segment({ sub: 'mallory' })}.${signature}`, pem(rsa.publicKey))).toMatchObject({
+      valid: false,
+      signatureValid: false,
+      problems: ['the signature does not match the key'],
+    });
+  });
+
+  it('takes the token alone or as an Authorization header value', () => {
+    const signed = token({ alg: 'RS256' }, (data) => sign('sha256', data, rsa.privateKey));
+    for (const pasted of [`Bearer ${signed}`, `jwt ${signed}`, `  JWT   ${signed}  `, `Authorization: jwt ${signed}`, `authorization: Bearer ${signed}`]) {
+      expect(verifyJwt(pasted, pem(rsa.publicKey)).valid).toBe(true);
+    }
+  });
+
+  it('checks expiry, not-before and the issuer like a server', () => {
+    const now = Date.UTC(2026, 9, 8, 12, 0, 0);
+    const at = (seconds: number) => Math.floor(now / 1000) + seconds;
+    const signedWith = (payload: Record<string, unknown>) => token({ alg: 'RS256' }, (data) => sign('sha256', data, rsa.privateKey), payload);
+    const key = pem(rsa.publicKey);
+
+    const live = signedWith({ iss: 'authservice', nbf: at(-60), exp: at(300) });
+    expect(verifyJwt(live, key, { now, issuer: 'authservice' })).toMatchObject({ valid: true, problems: [] });
+    expect(verifyJwt(live, key, { now, issuer: 'other' })).toMatchObject({ valid: false, signatureValid: true, problems: ['issuer is "authservice", expected "other"'] });
+    expect(verifyJwt(signedWith({}), key, { now, issuer: 'authservice' }).problems).toEqual(['no issuer, expected "authservice"']);
+
+    const expired = signedWith({ exp: at(-10) });
+    expect(verifyJwt(expired, key, { now })).toMatchObject({ valid: false, signatureValid: true, problems: ['expired 10 seconds ago (2026-10-08T11:59:50.000Z)'] });
+    expect(verifyJwt(expired, key, { now, clockSkewSeconds: 30 }).valid).toBe(true);
+    expect(verifyJwt(signedWith({ exp: at(0) }), key, { now }).valid).toBe(false);
+
+    const early = signedWith({ nbf: at(120) });
+    expect(verifyJwt(early, key, { now }).problems).toEqual(['not valid until 2026-10-08T12:02:00.000Z (2 minutes from now)']);
+    expect(verifyJwt(early, key, { now, clockSkewSeconds: 120 }).valid).toBe(true);
+  });
+
+  // A common auth-server contract: RS256 signed by the auth server, checked against JWT_RSA_PUBLIC_KEY,
+  // which is the SubjectPublicKeyInfo PEM base64-encoded once more, sent as "Authorization: jwt <token>".
+  it('validates an auth-server token against its base64-wrapped public key', () => {
+    const now = Date.now();
+    const seconds = Math.floor(now / 1000);
+    const authToken = token({ alg: 'RS256', typ: 'JWT' }, (data) => sign('sha256', data, rsa.privateKey), {
+      sub: 'auth',
+      iss: 'authservice',
+      iat: seconds,
+      nbf: seconds - 60,
+      exp: seconds + 300,
+      data: { user: { id: 27768, name: 'Alice', permissions: ['omstwoapi:checkout:wallet'] } },
+    });
+    const wrapped = Buffer.from(pem(rsa.publicKey)).toString('base64');
+    expect(wrapped.startsWith('LS0tLS1CRUdJTiBQVUJMSUMg')).toBe(true);
+    const pasted = `  ${wrapped.slice(0, 64)}\r\n${wrapped.slice(64)}\n`;
+
+    expect(verifyJwt(`jwt ${authToken}`, pasted, { issuer: 'authservice', clockSkewSeconds: 30 })).toEqual({
+      valid: true,
+      problems: [],
+      algorithm: 'RS256',
+      signatureValid: true,
+      keyFormat: 'base64 PEM',
+      kid: null,
+    });
+    const otherWrapped = Buffer.from(pem(otherRsa.publicKey)).toString('base64');
+    expect(verifyJwt(authToken, otherWrapped)).toMatchObject({ valid: false, signatureValid: false });
+    // Base64 that does not hold a PEM stays a secret, so RS256 refuses it.
+    expect(() => verifyJwt(authToken, Buffer.from('not a pem').toString('base64'))).toThrow("RS256 needs the issuer's public key");
   });
 
   it('refuses keys that do not fit the algorithm', () => {
@@ -128,7 +190,7 @@ describe('verifyJwt', () => {
     const confused = token({ alg: 'HS256' }, hmac('sha256', pem(rsa.publicKey)));
     expect(() => verifyJwt(confused, pem(rsa.publicKey))).toThrow('HS256 is signed with a shared secret, but the key is an RSA key');
     const rs = token({ alg: 'RS256' }, (data) => sign('sha256', data, rsa.privateKey));
-    expect(() => verifyJwt(rs, 'shh')).toThrow("RS256 needs the issuer's public key: a PEM or base64 key, a certificate, a JWK or a JWK set. The text given is none of those");
+    expect(() => verifyJwt(rs, 'shh')).toThrow("RS256 needs the issuer's public key: a PEM (plain or base64-wrapped), a base64 key, a certificate, a JWK or a JWK set. The text given is none of those");
     const p384 = generateKeyPairSync('ec', { namedCurve: 'P-384' });
     expect(() => verifyJwt(token({ alg: 'ES256' }, () => Buffer.alloc(64)), pem(p384.publicKey))).toThrow('ES256 needs an EC P-256 key, but the key is an EC P-384 key');
   });

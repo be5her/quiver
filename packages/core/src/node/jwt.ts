@@ -1,5 +1,6 @@
 import { X509Certificate, constants, createHmac, createPrivateKey, createPublicKey, timingSafeEqual, verify, type KeyObject, type webcrypto } from 'node:crypto';
 import { QuiverError } from '../errors';
+import { relativeTime } from '../time';
 
 type Family = 'hmac' | 'rsa' | 'pss' | 'ec' | 'eddsa';
 
@@ -35,19 +36,76 @@ export const JWT_ALGORITHMS = Object.keys(ALGORITHMS);
 const CURVE_NAMES: Record<string, string> = { prime256v1: 'P-256', secp384r1: 'P-384', secp521r1: 'P-521', secp256k1: 'secp256k1', ed25519: 'Ed25519', ed448: 'Ed448' };
 
 export interface JwtVerification {
+  /** The signature matches, the token is within exp and nbf, and the issuer is the one asked for. */
+  valid: boolean;
+  /** What makes it invalid, in words; empty when valid. */
+  problems: string[];
   algorithm: string;
-  /** The signature matches the key. Expiry and not-before are not part of it. */
+  /** The signature matches the key, whatever the claims say. */
   signatureValid: boolean;
-  /** How the key was read: `secret`, `PEM`, `base64 key`, `certificate`, `JWK` or `JWK set`. */
+  /** How the key was read: `secret`, `PEM`, `base64 PEM`, `base64 key`, `certificate`, `JWK` or `JWK set`. */
   keyFormat: string;
   /** The `kid` of the JWK that was checked, when it has one. */
   kid: string | null;
+}
+
+export interface JwtVerifyOptions {
+  /** The secret is base64, not text. */
+  base64Secret?: boolean;
+  /** Leeway for exp and nbf, as servers allow for clocks that drift. */
+  clockSkewSeconds?: number;
+  /** The `iss` the token must carry. Not checked when unset. */
+  issuer?: string;
+  /** The time to check exp and nbf against, in milliseconds. Defaults to now. */
+  now?: number;
 }
 
 type Key = { kind: 'secret'; secret: Buffer; format: string; kid: string | null } | { kind: 'public'; key: KeyObject; format: string; kid: string | null };
 
 function invalid(message: string): QuiverError {
   return new QuiverError('INVALID_INPUT', message);
+}
+
+/**
+ * The three parts of a token pasted on its own or as an Authorization header value: `Bearer`,
+ * the `jwt` scheme some APIs use, and a leading `Authorization:` are dropped.
+ */
+export function jwtParts(token: string): [header: string, payload: string, signature: string] {
+  const parts = token
+    .trim()
+    .replace(/^authorization:\s*/i, '')
+    .replace(/^(bearer|jwt)\s+/i, '')
+    .trim()
+    .split('.');
+  if (parts.length !== 3) throw invalid('A JWT has three dot-separated parts');
+  return parts as [string, string, string];
+}
+
+function decodePart(part: string, name: string): Record<string, unknown> {
+  try {
+    const value: unknown = JSON.parse(Buffer.from(part, 'base64url').toString('utf8'));
+    if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>;
+  } catch {
+    // Reported below.
+  }
+  throw invalid(`The JWT ${name} is not base64url-encoded JSON`);
+}
+
+/** Why the claims make the token invalid at `now`: expired, not yet valid, another issuer. */
+function claimProblems(payload: Record<string, unknown>, options: JwtVerifyOptions): string[] {
+  const now = options.now ?? Date.now();
+  const skew = (options.clockSkewSeconds ?? 0) * 1000;
+  const problems: string[] = [];
+  if (typeof payload.exp === 'number' && now >= payload.exp * 1000 + skew) {
+    problems.push(`expired ${relativeTime(payload.exp * 1000 - now)} (${new Date(payload.exp * 1000).toISOString()})`);
+  }
+  if (typeof payload.nbf === 'number' && now < payload.nbf * 1000 - skew) {
+    problems.push(`not valid until ${new Date(payload.nbf * 1000).toISOString()} (${relativeTime(payload.nbf * 1000 - now)})`);
+  }
+  if (options.issuer !== undefined && payload.iss !== options.issuer) {
+    problems.push(typeof payload.iss === 'string' ? `issuer is "${payload.iss}", expected "${options.issuer}"` : `no issuer, expected "${options.issuer}"`);
+  }
+  return problems;
 }
 
 function fromJwk(jwk: Record<string, unknown>, format: string): Key {
@@ -96,14 +154,26 @@ function readDer(text: string): { key: KeyObject; certificate: boolean } | null 
   return null;
 }
 
-/** A secret, a PEM or base64 DER key or certificate, a JWK, or a JWK set, as the keys it holds. */
+/**
+ * The PEM inside a base64-wrapped PEM, the form an environment variable often carries a key in
+ * (`LS0tLS1CRUdJTi…` is "-----BEGIN"), or null when the text is not one.
+ */
+function unwrapPem(text: string): string | null {
+  const body = text.replace(/\s+/g, '');
+  if (!/^LS0tLS1/.test(body)) return null;
+  const decoded = Buffer.from(body, 'base64').toString('utf8').trim();
+  return decoded.startsWith('-----BEGIN') ? decoded : null;
+}
+
+/** A secret, a PEM (plain or base64-wrapped) or base64 DER key or certificate, a JWK, or a JWK set, as the keys it holds. */
 function readKeys(text: string, base64Secret: boolean): Key[] {
   const trimmed = text.trim();
   if (!trimmed) throw invalid('Give a secret or a public key to verify against');
-  if (trimmed.startsWith('-----BEGIN')) {
-    const read = readDer(trimmed);
+  const pem = trimmed.startsWith('-----BEGIN') ? trimmed : unwrapPem(trimmed);
+  if (pem) {
+    const read = readDer(pem);
     if (!read) throw invalid('Cannot read the PEM key: what is between the BEGIN and END lines is not a public key, certificate or private key');
-    return [{ kind: 'public', key: read.key, format: read.certificate ? 'certificate' : 'PEM', kid: null }];
+    return [{ kind: 'public', key: read.key, format: read.certificate ? 'certificate' : pem === trimmed ? 'PEM' : 'base64 PEM', kid: null }];
   }
   if (trimmed.startsWith('{')) {
     let json: Record<string, unknown>;
@@ -134,7 +204,7 @@ function keyName(key: Key): string {
 function mismatch(alg: string, spec: Algorithm, key: Key): string | null {
   if (spec.family === 'hmac') return key.kind === 'secret' ? null : `${alg} is signed with a shared secret, but the key is ${keyName(key)}`;
   if (key.kind === 'secret') {
-    return `${alg} needs the issuer's public key: a PEM or base64 key, a certificate, a JWK or a JWK set. The text given is none of those, so it was read as a shared secret`;
+    return `${alg} needs the issuer's public key: a PEM (plain or base64-wrapped), a base64 key, a certificate, a JWK or a JWK set. The text given is none of those, so it was read as a shared secret`;
   }
   const type = key.key.asymmetricKeyType;
   const ok =
@@ -173,20 +243,17 @@ function signatureMatches(spec: Algorithm, key: Key, data: Buffer, signature: Bu
 }
 
 /**
- * Checks a JWT's signature. The key is an HMAC secret (raw, or base64 with `base64Secret`), a PEM
- * public key, private key or certificate, a JWK, or a JWK set (the entry with the token's `kid`,
- * or each one in turn when the token has none). Throws for a token or key it cannot check; a
- * signature that does not match is `signatureValid: false`.
+ * Validates a JWT the way a server does: the signature, then exp and nbf (with `clockSkewSeconds`
+ * of leeway), then `iss` when `issuer` is given. The key is an HMAC secret (raw, or base64 with
+ * `base64Secret`), a public key, private key or certificate (PEM, base64-wrapped PEM or bare base64
+ * DER), a JWK, or a JWK set (the entry with the token's `kid`, or each one in turn when the token
+ * has none). Throws for a token or key it cannot check; a token that fails a check comes back with
+ * `valid: false` and the reasons in `problems`.
  */
-export function verifyJwt(token: string, keyText: string, options: { base64Secret?: boolean } = {}): JwtVerification {
-  const parts = token.trim().replace(/^bearer\s+/i, '').split('.');
-  if (parts.length !== 3) throw invalid('A JWT has three dot-separated parts');
-  let header: Record<string, unknown>;
-  try {
-    header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8')) as Record<string, unknown>;
-  } catch {
-    throw invalid('The JWT header is not base64url-encoded JSON');
-  }
+export function verifyJwt(token: string, keyText: string, options: JwtVerifyOptions = {}): JwtVerification {
+  const parts = jwtParts(token);
+  const header = decodePart(parts[0], 'header');
+  const payload = decodePart(parts[1], 'payload');
   const alg = typeof header.alg === 'string' ? header.alg : '';
   if (alg.toLowerCase() === 'none') throw invalid('The token is unsigned (alg "none"), so there is no signature to verify');
   const spec = ALGORITHMS[alg];
@@ -204,5 +271,6 @@ export function verifyJwt(token: string, keyText: string, options: { base64Secre
   const signature = Buffer.from(parts[2], 'base64url');
   const match = usable.find((k) => signatureMatches(spec, k, data, signature));
   const checked = match ?? usable[0];
-  return { algorithm: alg, signatureValid: Boolean(match), keyFormat: checked.format, kid: checked.kid };
+  const problems = [...(match ? [] : ['the signature does not match the key']), ...claimProblems(payload, options)];
+  return { valid: problems.length === 0, problems, algorithm: alg, signatureValid: Boolean(match), keyFormat: checked.format, kid: checked.kid };
 }

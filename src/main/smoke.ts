@@ -554,6 +554,26 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         { bare, mislabelled },
       );
     }
+    // An auth server's token as an API behind it receives it: RS256, "Authorization: jwt <token>", checked against
+    // JWT_RSA_PUBLIC_KEY (the public key PEM base64-encoded once more), issuer pinned, 30 s clock skew.
+    const authServer = (() => {
+      const pair = generateKeyPairSync('rsa', { modulusLength: 2048 });
+      const now = Math.floor(Date.now() / 1000);
+      const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+      const data = `${part({ alg: 'RS256', typ: 'JWT' })}.${part({ sub: 'auth', iss: 'authservice', iat: now, nbf: now - 60, exp: now + 300, data: { user: { id: 27768, name: 'Alice' } } })}`;
+      const pem = pair.publicKey.export({ type: 'spki', format: 'pem' }).toString();
+      return { token: `${data}.${sign('sha256', Buffer.from(data), pair.privateKey).toString('base64url')}`, key: Buffer.from(pem).toString('base64') };
+    })();
+    {
+      type Validated = { valid: boolean; problems: string[]; keyFormat: string; signatureValid: boolean };
+      const accepted = await run<Validated>('tools.jwt.verify', { token: `jwt ${authServer.token}`, key: authServer.key, issuer: 'authservice', clockSkewSeconds: 30 }, null);
+      const otherIssuer = await run<Validated>('tools.jwt.verify', { token: authServer.token, key: authServer.key, issuer: 'someone-else' }, null);
+      check(
+        'tools.jwt.verify: an auth-server token is valid against its base64-wrapped public key, and invalid for another issuer',
+        accepted.valid && accepted.keyFormat === 'base64 PEM' && !otherIssuer.valid && otherIssuer.signatureValid && otherIssuer.problems.join() === 'issuer is "authservice", expected "someone-else"',
+        { accepted, otherIssuer },
+      );
+    }
 
 
     // ---------- databases: SQLite through node:sqlite ----------
@@ -2363,8 +2383,10 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         await js(`(() => { const btn = [...document.querySelectorAll('aside button')].find((b) => b.textContent.includes('verify its signature')); if (btn) btn.click(); })()`);
         await wait(500);
         const pane = `[...document.querySelectorAll('[data-tab-type="tools.tool"]')].find((el) => !el.classList.contains('hidden'))`;
-        const typeInto = (editor: string, text: string) =>
-          js(`(() => { const c = ${pane}?.querySelector('${editor} .cm-content'); if (!c) return false; c.focus(); document.execCommand('insertText', false, ${JSON.stringify(text)}); return true; })()`);
+        const typeInto = (editor: string, text: string, replace = false) =>
+          js(
+            `(() => { const c = ${pane}?.querySelector('${editor} .cm-content'); if (!c) return false; c.focus(); ${replace ? "document.execCommand('selectAll');" : ''} document.execCommand('insertText', false, ${JSON.stringify(text)}); return true; })()`,
+          );
         const summary = () => js(`${pane}?.querySelector('[data-testid=tool-summary]')?.textContent.trim() ?? null`);
         const typedToken = await typeInto(':scope', jwtToken);
         await wait(500);
@@ -2378,8 +2400,31 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         const mismatched = await summary();
         check(
           'ui: the JWT tab decodes the token, then verifies it once a secret is given',
-          clickedTools === true && typedToken === true && typeof decoded.output === 'string' && decoded.output.includes('1234567890') && decoded.summary === null && verified === 'Signature verified (HS256, secret)' && mismatched === 'Signature does not match (HS256, secret)',
+          clickedTools === true &&
+            typedToken === true &&
+            typeof decoded.output === 'string' &&
+            decoded.output.includes('1234567890') &&
+            decoded.summary === null &&
+            verified === 'Valid: signature verified (HS256, secret)' &&
+            mismatched === 'Invalid (HS256, secret): the signature does not match the key',
           { decoded, verified, mismatched },
+        );
+        // The auth-server case: "jwt <token>" pasted with the base64-wrapped public key and the issuer pinned.
+        await typeInto(':scope', `jwt ${authServer.token}`, true);
+        await typeInto('[data-testid=tool-second-input]', authServer.key, true);
+        await js(`(() => { const el = ${pane}?.querySelector('[data-testid=tool-option-issuer]'); el.value = 'authservice'; el.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+        await wait(600);
+        const authValid = await summary();
+        await shot('08c-jwt-auth-server-dark');
+        await js(`(() => { const el = ${pane}?.querySelector('[data-testid=tool-option-issuer]'); el.value = 'someone-else'; el.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+        await wait(600);
+        const authWrongIssuer = await summary();
+        check(
+          'ui: the JWT tab validates an auth-server token against its base64-wrapped key and pinned issuer',
+          typeof authValid === 'string' &&
+            /^Valid: signature verified \(RS256, base64 PEM\), expires \d+ minutes from now$/.test(authValid) &&
+            authWrongIssuer === 'Invalid (RS256, base64 PEM): issuer is "authservice", expected "someone-else"',
+          { authValid, authWrongIssuer },
         );
         await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
         await wait(200);

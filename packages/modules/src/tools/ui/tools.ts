@@ -1,11 +1,14 @@
+import { relativeTime } from '@quiver/core';
 import type { CodeLanguage } from '@quiver/ui';
 
 export interface ToolOption {
   key: string;
   label: string;
-  type: 'select' | 'boolean' | 'number';
+  type: 'select' | 'boolean' | 'number' | 'text';
   choices?: { value: string; label: string }[];
   default: string | boolean | number;
+  /** Text only: shown while empty. An empty text option is left out of the call. */
+  placeholder?: string;
 }
 
 export interface ToolSecondInput {
@@ -41,6 +44,17 @@ export interface ToolDescriptor {
   live?: boolean;
 }
 
+/** The JWT tab's verdict once a key is given: valid and when it expires, or what is wrong. */
+function jwtSummary(result: Record<string, unknown>): ToolSummary | null {
+  if (typeof result['valid'] !== 'boolean') return null;
+  const how = `${result['algorithm']}, ${result['keyFormat']}${result['kid'] ? ` "${result['kid']}"` : ''}`;
+  if (!result['valid']) return { ok: false, text: `Invalid (${how}): ${(result['problems'] as string[]).join('; ')}` };
+  const expiresAt = typeof result['expiresAt'] === 'string' ? Date.parse(result['expiresAt']) : null;
+  const left = expiresAt !== null ? expiresAt - Date.now() : null;
+  const expiry = left === null ? '' : left > 0 ? `, expires ${relativeTime(left)}` : `, expired ${relativeTime(left)} but within the clock skew`;
+  return { ok: true, text: `Valid: signature verified (${how})${expiry}` };
+}
+
 export const TOOLS: ToolDescriptor[] = [
   {
     id: 'json-format',
@@ -67,15 +81,16 @@ export const TOOLS: ToolDescriptor[] = [
     placeholder: 'eyJhbGciOi...',
     secondInput: {
       key: 'key',
-      label: 'Verify the signature with',
-      placeholder: 'A shared secret (HS256/384/512), or a PEM public key, certificate, JWK or JWK set (RS, PS, ES, EdDSA)',
+      label: 'Validate with',
+      placeholder: 'A shared secret (HS256/384/512), or a public key or certificate (RS, PS, ES, EdDSA): PEM, base64-wrapped PEM, base64, JWK or JWK set',
       commandId: 'tools.jwt.verify',
     },
-    options: [{ key: 'base64Secret', label: 'Secret is base64', type: 'boolean', default: false }],
-    summary: (result) =>
-      typeof result['signatureValid'] === 'boolean'
-        ? { ok: result['signatureValid'], text: `${result['signatureValid'] ? 'Signature verified' : 'Signature does not match'} (${result['algorithm']}, ${result['keyFormat']}${result['kid'] ? ` "${result['kid']}"` : ''})` }
-        : null,
+    options: [
+      { key: 'base64Secret', label: 'Secret is base64', type: 'boolean', default: false },
+      { key: 'clockSkewSeconds', label: 'Clock skew (s)', type: 'number', default: 0 },
+      { key: 'issuer', label: 'Issuer', type: 'text', default: '', placeholder: 'any' },
+    ],
+    summary: jwtSummary,
     live: true,
   },
   {
@@ -134,7 +149,9 @@ export function coerce(values: Record<string, string | boolean | number>, option
   for (const opt of options) {
     const v = values[opt.key];
     if (opt.key === 'indent') out[opt.key] = Number(v);
-    else out[opt.key] = v;
+    else if (opt.type === 'text') {
+      if (String(v).trim()) out[opt.key] = String(v).trim();
+    } else out[opt.key] = v;
   }
   return out;
 }

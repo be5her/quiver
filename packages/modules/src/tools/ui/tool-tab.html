@@ -15,9 +15,13 @@
               }
             </select>
           }
+          @case ('text') {
+            {{ opt.label }}
+            <input type="text" class="h-6 w-32 rounded border border-edge bg-surface px-1.5 text-xs text-fg placeholder:text-muted/70" spellcheck="false" [value]="valueOf(opt)" [placeholder]="opt.placeholder ?? ''" [attr.data-testid]="'tool-option-' + opt.key" (input)="setOption(opt, text($event))" />
+          }
           @default {
             {{ opt.label }}
-            <input type="number" class="h-6 w-16 rounded border border-edge bg-surface px-1 text-xs text-fg" [value]="valueOf(opt)" (input)="setOption(opt, number($event))" />
+            <input type="number" class="h-6 w-16 rounded border border-edge bg-surface px-1 text-xs text-fg" [value]="valueOf(opt)" [attr.data-testid]="'tool-option-' + opt.key" (input)="setOption(opt, number($event))" />
           }
         }
       </label>
