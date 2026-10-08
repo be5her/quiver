@@ -53,6 +53,8 @@ npm install
 npm run dev
 ```
 
+Node 22.22.3 or later is needed (on Node 24, 24.15 or later), the minimum of the Angular CLI that builds the renderer.
+
 | Script                 | What it does                                                                                                      |
 | ---------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `npm test`             | Unit tests for the core engine (vitest).                                                                          |
@@ -65,13 +67,13 @@ npm run dev
 ## Layout
 
 ```
-packages/core      Engine: command registry, models, variable resolution, file store. No Electron or React.
-packages/ui        Host contract for the renderer: stores, IPC client, shared components.
-packages/modules   One folder per feature. `main.ts` (Node side), `ui/` (React side) and `README.md` per module.
+packages/core      Engine: command registry, models, variable resolution, file store. No Electron or UI framework.
+packages/ui        Host contract for the renderer: state services, IPC client, shared Angular components.
+packages/modules   One folder per feature. `main.ts` (Node side), `ui/` (Angular side) and `README.md` per module.
 packages/mcp       Adapts the command registry to an MCP server.
 src/main           Electron main process: host wiring, IPC, window, smoke test.
 src/preload        The only bridge between renderer and main (three functions).
-src/renderer       The shell: title bar, activity bar, sidebar, tabs, status bar, palette, settings.
+src/renderer       The Angular app and the shell: title bar, activity bar, sidebar, tabs, status bar, palette, settings.
 ```
 
 A feature is a set of commands (`defineCommand` with a zod input schema, validated on every call and turned into the MCP tool schema for free) plus UI. Commands are the only way the UI talks to the host, so anything you add is reachable from the palette, from MCP and from a future CLI without extra work. [CLAUDE.md](CLAUDE.md) walks through adding a module and the conventions.

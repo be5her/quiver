@@ -1,0 +1,47 @@
+@if (!files().length) {
+  <q-empty-state title="Nothing to compare with" hint="Add another env file, for example .env.example, to see which keys are missing here." />
+} @else {
+  <div class="flex flex-col h-full min-h-0" data-testid="env-compare">
+    <div class="flex items-end gap-2 px-3 py-2 border-b border-edge shrink-0">
+      <div>
+        <label qLabel>Compare {{ content().name }} with</label>
+        <select qSelect class="h-7 text-xs font-mono" data-testid="env-compare-select" (change)="pick($event)">
+          @for (f of files(); track f.path) {
+            <option [value]="f.path" [selected]="f.path === chosen()">{{ f.path }}</option>
+          }
+        </select>
+      </div>
+      <div class="flex-1"></div>
+      @if (diff.value(); as d) {
+        @if (d.missing.length > 0) {
+          <button qButton size="sm" variant="primary" [icon]="plus" [loading]="busy() === '*'" data-testid="env-compare-add-all" (click)="add()">Add all {{ d.missing.length }} missing</button>
+        }
+      }
+    </div>
+    <div class="flex-1 min-h-0 overflow-auto p-3 flex flex-col gap-4 text-sm">
+      @if (diff.isLoading() && !diff.value()) {
+        <svg qSpinner></svg>
+      }
+      @if (diff.error(); as error) {
+        <p class="text-xs text-danger">{{ error.message }}</p>
+      }
+      @if (diff.value(); as d) {
+        <section
+          qEnvKeyList
+          [title]="'Missing here (' + d.missing.length + ')'"
+          [hint]="'Defined in ' + d.against + ' but not in ' + content().name + '.'"
+          [keys]="d.missing"
+          tone="danger"
+          [addable]="true"
+          [busy]="busy()"
+          data-testid="env-compare-missing"
+          (add)="add([$event])"
+        ></section>
+        <section qEnvKeyList [title]="'Empty here (' + d.empty.length + ')'" hint="Present in both, but without a value in this file." [keys]="d.empty" tone="warning" data-testid="env-compare-empty"></section>
+        <section qEnvKeyList [title]="'Only here (' + d.extra.length + ')'" [hint]="'Not in ' + d.against + '. Maybe the example is out of date.'" [keys]="d.extra" data-testid="env-compare-extra"></section>
+        <section qEnvKeyList [title]="'Different values (' + d.different.length + ')'" hint="Present in both with different values (expected for placeholders)." [keys]="d.different" data-testid="env-compare-different"></section>
+        <p class="text-xs text-muted">{{ d.same.length }} keys have the same value in both files.</p>
+      }
+    </div>
+  </div>
+}

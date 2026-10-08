@@ -1,0 +1,103 @@
+@let f = field();
+@switch (layout()) {
+  @case ('resource') {
+    <q-kube-field-box [label]="f.label" [error]="error()">
+      <select qSelect class="w-48" [attr.data-testid]="testId()" (change)="picked($event)">
+        @if (!value()) {
+          <option value="" selected>Pick a type</option>
+        }
+        @for (t of resourceTypes; track t) {
+          <option [value]="t" [selected]="t === value()">{{ t }}</option>
+        }
+      </select>
+    </q-kube-field-box>
+  }
+  @case ('verb') {
+    <q-kube-field-box [label]="f.label" [error]="error()">
+      <select qSelect class="w-36" [attr.data-testid]="testId()" (change)="pickedVerb($event)">
+        @for (v of verbs; track v) {
+          <option [value]="v" [selected]="v === (value() ?? 'get')">{{ v }}</option>
+        }
+      </select>
+    </q-kube-field-box>
+  }
+  @case ('output') {
+    <q-kube-field-box [label]="f.label" [error]="error()">
+      <select qSelect class="w-28" [attr.data-testid]="testId()" (change)="picked($event)">
+        <option value="" [selected]="!value()">table</option>
+        @for (o of outputs; track o) {
+          <option [value]="o" [selected]="o === value()">{{ o }}</option>
+        }
+      </select>
+    </q-kube-field-box>
+  }
+  @case ('namespace') {
+    <q-kube-field-box [label]="f.label" [error]="error()" [warn]="unknownNamespace()">
+      <fieldset class="contents" [disabled]="!!values()['allNamespaces']">
+        <input qInput class="w-44" [class]="inputClass()" [value]="text()" [attr.list]="listId()" placeholder="default" [attr.aria-invalid]="!!error()" [attr.data-testid]="testId()" (input)="typed($event)" />
+      </fieldset>
+      <datalist [id]="listId()">
+        @for (n of lookups().namespaces(); track n) {
+          <option [value]="n"></option>
+        }
+      </datalist>
+      <span fieldWarning
+        >Not a namespace on this cluster.@if (suggestion(); as suggestion) {<ng-container> </ng-container
+          ><button type="button" class="underline hover:text-fg" data-testid="kube-namespace-suggestion" (click)="useSuggestion(suggestion)">Use {{ suggestion }}?</button>}</span
+      >
+    </q-kube-field-box>
+  }
+  @case ('names') {
+    <q-kube-field-box [label]="f.label" [error]="error()">
+      <input
+        qInput
+        class="w-60"
+        [class]="inputClass()"
+        [value]="text()"
+        [attr.list]="listId()"
+        [placeholder]="f.kind === 'pod' ? 'pod name' : 'name'"
+        [attr.aria-invalid]="!!error()"
+        [attr.data-testid]="testId()"
+        (input)="typed($event)"
+      />
+      <datalist [id]="listId()">
+        @for (n of names(); track n) {
+          <option [value]="n"></option>
+        }
+      </datalist>
+    </q-kube-field-box>
+  }
+  @case ('container') {
+    <q-kube-field-box [label]="f.label" [error]="error()">
+      <select qSelect class="w-40" [attr.data-testid]="testId()" (change)="picked($event)">
+        <option value="" [selected]="!value()">(default)</option>
+        @for (c of containers(); track c) {
+          <option [value]="c" [selected]="c === value()">{{ c }}</option>
+        }
+      </select>
+    </q-kube-field-box>
+  }
+  @case ('selector') {
+    <q-kube-field-box [label]="f.label" [error]="error()">
+      <input qInput class="w-48" [class]="inputClass()" [value]="text()" placeholder="app=api" [attr.aria-invalid]="!!error()" [attr.data-testid]="testId()" (input)="typed($event)" />
+    </q-kube-field-box>
+  }
+  @case ('tail') {
+    <q-kube-field-box [label]="f.label" [error]="error()">
+      <input qInput class="w-24" [class]="inputClass()" [value]="text()" [placeholder]="tailPlaceholder" inputmode="numeric" [attr.aria-invalid]="!!error()" [attr.data-testid]="testId()" (input)="typed($event)" />
+    </q-kube-field-box>
+  }
+  @case ('since') {
+    <q-kube-field-box [label]="f.label" [error]="error()">
+      <input qInput class="w-20" [class]="inputClass()" [value]="text()" placeholder="15m" [attr.aria-invalid]="!!error()" [attr.data-testid]="testId()" (input)="typed($event)" />
+    </q-kube-field-box>
+  }
+  @default {
+    <q-kube-field-box label=" " [error]="error()">
+      <label class="flex items-center gap-1.5 h-8 text-xs cursor-pointer select-none"
+        ><input qCheckbox [checked]="!!value()" [attr.data-testid]="testId()" (change)="ticked($event)" />{{ f.label }}</label
+      >
+    </q-kube-field-box>
+  }
+}
+

@@ -3,7 +3,7 @@
 @source '../../../packages/modules/src';
 @custom-variant dark (&:where(.dark, .dark *));
 
-/* Default palette (Slate & Mint). applyTheme overrides these with the palette chosen in Settings. */
+/* Default palette (Slate & Mint). The Theme service overrides these with the palette chosen in Settings. */
 :root {
   --canvas: #eef1f3;
   --surface: #e6eaec;
@@ -55,9 +55,13 @@
 
 html,
 body,
-#root {
+q-root {
   height: 100%;
   margin: 0;
+}
+
+q-root {
+  display: block;
 }
 
 body {
@@ -87,52 +91,4 @@ option {
 
 ::selection {
   background: color-mix(in srgb, var(--accent) 30%, transparent);
-}
-
-/* cmdk palette */
-[cmdk-root] {
-  width: 100%;
-}
-[cmdk-input] {
-  width: 100%;
-  height: 44px;
-  padding: 0 14px;
-  background: transparent;
-  border: 0;
-  border-bottom: 1px solid var(--edge);
-  outline: none;
-  font-size: 14px;
-  color: var(--fg);
-}
-[cmdk-list] {
-  max-height: 360px;
-  overflow: auto;
-  padding: 6px;
-}
-[cmdk-group-heading] {
-  padding: 8px 8px 4px;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--muted);
-}
-[cmdk-item] {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 7px 10px;
-  border-radius: 6px;
-  font-size: 13px;
-  cursor: pointer;
-  color: var(--fg);
-}
-[cmdk-item][data-selected='true'] {
-  background: var(--elevated);
-}
-[cmdk-empty] {
-  padding: 16px;
-  font-size: 13px;
-  color: var(--muted);
-  text-align: center;
 }

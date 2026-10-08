@@ -1,0 +1,34 @@
+<div class="flex items-center gap-2 px-3 h-9 border-b border-edge shrink-0 text-xs">
+  <span class="text-muted shrink-0">WHERE</span>
+  <div class="flex-1 min-w-0 max-w-xl" data-testid="db-table-where">
+    <q-code-editor
+      [(value)]="where"
+      singleLine
+      language="sql"
+      [sqlDialect]="sqlite() ? 'sqlite' : 'mysql'"
+      [sqlSchema]="schema()"
+      [sqlDefaultTable]="table()"
+      placeholder="id > 100 AND status = 'active'  (Enter to apply)"
+      class="h-7"
+      (run)="applyFilter()"
+    />
+  </div>
+  <div class="flex-1"></div>
+  @if (rows.isLoading()) {
+    <svg qSpinner class="size-3.5"></svg>
+  } @else if (rows.value()) {
+    <span class="text-muted">{{ range() }}</span>
+  }
+  <button qIconButton label="Previous page" size="sm" [disabled]="offset() === 0" (click)="previousPage()"><svg [qIcon]="icons.ChevronLeft" class="size-3.5"></svg></button>
+  <button qIconButton label="Next page" size="sm" [disabled]="!hasNext()" (click)="nextPage()"><svg [qIcon]="icons.ChevronRight" class="size-3.5"></svg></button>
+  <button qIconButton label="Refresh" size="sm" (click)="rows.reload()"><svg [qIcon]="icons.RefreshCw" class="size-3.5"></svg></button>
+</div>
+<div class="flex-1 min-h-0">
+  @if (rows.error(); as error) {
+    <q-db-error [error]="error" (retry)="rows.reload()" />
+  } @else if (rows.value(); as data) {
+    <q-result-grid [columns]="data.columns" [rows]="data.rows" [sort]="sort()" sortable [emptyMessage]="applied() ? 'No rows match the filter' : 'Table is empty'" (sortBy)="sortBy($event)" />
+  } @else {
+    <div class="flex items-center justify-center h-full"><svg qSpinner></svg></div>
+  }
+</div>

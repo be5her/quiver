@@ -12,4 +12,4 @@ Listing, saving servers and routes, starting, reading captured requests, `mock_r
 
 ## Verified by
 
-The smoke starts real listeners: routes, templates, delays, forwarding to an upstream, replay, and a webhook receiver that survives a workspace reopen.
+The smoke starts real listeners: routes, templates, delays, forwarding to an upstream, replay, and a webhook receiver that survives a workspace reopen. In the UI it checks the server rows, the route list and editor, the live request list and its detail, turning a captured request into an unsaved route (and deleting it again), and that a settings toggle marks the server unsaved until it is undone.

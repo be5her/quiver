@@ -1,0 +1,76 @@
+@let all = items.value();
+<div class="flex-1 min-w-0 flex flex-col min-h-0">
+  <div class="flex items-center gap-1 px-2 h-9 border-b border-edge shrink-0">
+    <input qInput [value]="filter()" (input)="typed($event)" placeholder="Filter by method or text" class="h-7 text-xs" />
+    <select qSelect [value]="direction()" class="h-7 text-xs w-24" title="Direction" (change)="setDirection($event)">
+      <option value="">All</option>
+      <option value="out">Sent</option>
+      <option value="in">Received</option>
+      <option value="system">Events</option>
+    </select>
+    @if (canLog()) {
+      <select qSelect class="h-7 text-xs w-32" title="Ask the server for log messages at this level and above" (change)="setLevel($event)">
+        <option value="">Log level…</option>
+        @for (l of levels; track l) {
+          <option [value]="l">{{ l }}</option>
+        }
+      </select>
+    }
+    @if (!follow()) {
+      <button qIconButton label="Jump to latest" size="sm" (click)="follow.set(true)"><svg [qIcon]="icons.ArrowDownToLine" class="size-3.5"></svg></button>
+    }
+    <button qIconButton label="Refresh" size="sm" (click)="items.reload()"><svg [qIcon]="icons.RefreshCw" class="size-3.5"></svg></button>
+    <button qIconButton label="Clear log" size="sm" [disabled]="!all?.length" (click)="clear()"><svg [qIcon]="icons.Trash2" class="size-3.5"></svg></button>
+  </div>
+  <div #list class="flex-1 overflow-y-auto" data-testid="mcp-log-list" (scroll)="scrolled()">
+    @for (row of rows(); track row.entry.id) {
+      @let m = row.entry;
+      <button
+        type="button"
+        class="w-full text-left px-2 py-1 border-b border-edge/60 hover:bg-elevated flex items-center gap-2 min-w-0"
+        [class.bg-elevated]="m.id === selectedId()"
+        data-testid="mcp-log-entry"
+        [attr.data-direction]="m.direction"
+        [attr.data-kind]="m.kind"
+        (click)="pick(m.id)"
+      >
+        <span class="w-4 shrink-0 flex justify-center">
+          @if (m.direction === 'in') {
+            <svg [qIcon]="icons.ArrowDown" class="size-3.5 text-sky-600 dark:text-sky-400" aria-label="received"></svg>
+          } @else if (m.direction === 'out') {
+            <svg [qIcon]="icons.ArrowUp" class="size-3.5 text-amber-600 dark:text-amber-400" aria-label="sent"></svg>
+          } @else {
+            <svg [qIcon]="icons.Info" class="size-3.5" [class]="m.kind === 'error' ? 'text-danger' : 'text-muted'" [attr.aria-label]="m.kind"></svg>
+          }
+        </span>
+        <span qBadge class="shrink-0" [class]="badgeClass(m)">{{ m.kind }}</span>
+        @if (m.method) {
+          <span class="font-mono text-xs shrink-0 max-w-48 truncate">{{ m.method }}</span>
+        }
+        @if (m.requestId !== null) {
+          <span class="text-[10px] text-muted shrink-0 font-mono">#{{ m.requestId }}</span>
+        }
+        <span class="truncate flex-1 text-xs font-mono" [class]="textClass(m)">{{ row.text }}@if (!row.text) {<span class="text-muted">(empty)</span>}</span>
+        @if (m.durationMs !== null) {
+          <span class="text-[10px] text-muted shrink-0">{{ formatMs(m.durationMs) }}</span>
+        }
+        @if (m.direction !== 'system' && m.size > 0) {
+          <span class="text-[10px] text-muted shrink-0">{{ formatBytes(m.size) }}</span>
+        }
+        <span class="text-[10px] text-muted shrink-0">{{ time(m.at) }}</span>
+      </button>
+    }
+    @if (all && all.length === 0) {
+      <p class="px-3 py-3 text-xs text-muted">{{ server().status === 'connected' ? 'Every request, response and notification lands here.' : 'Nothing yet. Connect to see the traffic.' }}</p>
+    }
+    @if (all && all.length > 0 && rows().length === 0) {
+      <p class="px-3 py-3 text-xs text-muted">No entry matches the filter.</p>
+    }
+  </div>
+  <q-mcp-raw-request [server]="server()" />
+</div>
+@if (selected(); as entry) {
+  <div class="w-[26rem] border-l border-edge flex flex-col min-h-0 shrink-0">
+    <q-mcp-log-detail [entry]="entry" />
+  </div>
+}

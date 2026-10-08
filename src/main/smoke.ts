@@ -1917,6 +1917,17 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(300);
       await shot('03-request-light');
+      // The sidebar's history follows each send without leaving the module.
+      {
+        const historyTitles = () => js(`[...document.querySelectorAll('[data-testid=api-history-entry]')].map((b) => b.title)`) as Promise<string[]>;
+        if (!(await historyTitles()).length) await js(`[...document.querySelectorAll('aside button')].find((b) => b.textContent.trim() === 'History')?.click()`);
+        await wait(300);
+        const before = await historyTitles();
+        await js(`[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Send')?.click()`);
+        await wait(1500);
+        const after = await historyTitles();
+        check('ui: a send shows up in the history right away', before.length > 0 && after.length > 0 && after[0] !== before[0] && after.slice(1).includes(before[0]), { before: before.slice(0, 2), after: after.slice(0, 2) });
+      }
 
       // Import from curl: the dialog says which shell it will read the paste as, and the shell can be picked.
       {
@@ -2071,12 +2082,12 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         `(() => { const s = document.querySelector('[data-testid=variable-card-target]'); return s ? { target: s.value, options: [...s.options].map((o) => o.textContent), focused: document.activeElement?.getAttribute('data-testid') } : null; })()`,
       ) as { target: string; options: string[]; focused: string } | null;
       await js(
-        `(() => { const s = document.querySelector('[data-testid=variable-card-target]'); const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set; set.call(s, 'global'); s.dispatchEvent(new Event('change', { bubbles: true })); })()`,
+        `(() => { const s = document.querySelector('[data-testid=variable-card-target]'); const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set; set.call(s, 'global'); s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); })()`,
       );
       await wait(100);
       const secretDisabledForGlobal = await js(`document.querySelector('[data-testid=variable-card-secret]')?.disabled`);
       await js(
-        `(() => { const s = document.querySelector('[data-testid=variable-card-target]'); const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set; set.call(s, ${JSON.stringify(env.id)}); s.dispatchEvent(new Event('change', { bubbles: true })); })()`,
+        `(() => { const s = document.querySelector('[data-testid=variable-card-target]'); const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set; set.call(s, ${JSON.stringify(env.id)}); s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); })()`,
       );
       await wait(100);
       await js(`document.querySelector('[data-testid=variable-card-secret]')?.click()`);
@@ -2179,6 +2190,24 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       const gridHasAda = await js(`[...document.querySelectorAll('[role=gridcell]')].some((c) => c.textContent === 'Ada')`);
       check('ui: table grid renders rows', gridHasAda === true);
       await shot('05-table-light');
+      // A write from elsewhere (another tab, an agent) reloads the schema tree and the open table's rows.
+      {
+        const visibleCells = () => js(`[...document.querySelectorAll('[role=gridcell]')].filter((c) => c.offsetParent !== null).map((c) => c.textContent)`) as Promise<string[]>;
+        const tableRows = () => js(`[...document.querySelectorAll('aside [role=button]')].map((r) => r.textContent.trim().split(/\\s+/)[0])`) as Promise<string[]>;
+        await run('db.query.run', { connectionId: sqlite.id, query: 'CREATE TABLE smoke_live (id INTEGER PRIMARY KEY)' }, ws.id);
+        await run('db.query.run', { connectionId: sqlite.id, query: "UPDATE users SET name = 'Ada Lovelace' WHERE name = 'Ada'" }, ws.id);
+        await wait(1000);
+        const created = { tables: await tableRows(), cells: await visibleCells() };
+        await run('db.query.run', { connectionId: sqlite.id, query: 'DROP TABLE smoke_live' }, ws.id);
+        await run('db.query.run', { connectionId: sqlite.id, query: "UPDATE users SET name = 'Ada' WHERE name = 'Ada Lovelace'" }, ws.id);
+        await wait(1000);
+        const dropped = { tables: await tableRows(), cells: await visibleCells() };
+        check(
+          'ui: a write reloads the table list and the open rows',
+          created.tables.includes('smoke_live') && created.cells.includes('Ada Lovelace') && !dropped.tables.includes('smoke_live') && dropped.cells.includes('Ada') && !dropped.cells.includes('Ada Lovelace'),
+          { created, dropped },
+        );
+      }
       // The WHERE filter completes the table's columns: Enter picks one while the list is open, then applies the filter.
       const typeText = (text: string) => {
         for (const ch of text) win.webContents.sendInputEvent({ type: 'char', keyCode: ch });
@@ -2246,6 +2275,22 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await wait(800);
       const hashRendered = await js(`[...document.querySelectorAll('[role=gridcell]')].some((c) => c.textContent === 'Ada')`);
       check('ui: redis hash rendered', hashRendered === true);
+      // A write from elsewhere rescans the keys and reloads the open key.
+      {
+        const keyNames = () => js(`[...document.querySelectorAll('button')].map((b) => b.textContent.trim()).filter((t) => /^(string|hash|list|set|zset|stream)/.test(t))`) as Promise<string[]>;
+        const cells = () => js(`[...document.querySelectorAll('[role=gridcell]')].map((c) => c.textContent)`) as Promise<string[]>;
+        await run('db.query.run', { connectionId: redis.id, query: 'SET smoke:live 1\nHSET user:1 name Grace' }, ws.id);
+        await wait(1000);
+        const written = { keys: await keyNames(), cells: await cells() };
+        await run('db.query.run', { connectionId: redis.id, query: 'DEL smoke:live\nHSET user:1 name Ada' }, ws.id);
+        await wait(1000);
+        const restored = { keys: await keyNames(), cells: await cells() };
+        check(
+          'ui: a redis write rescans the keys and reloads the open key',
+          written.keys.some((k) => k.endsWith('smoke:live')) && written.cells.includes('Grace') && !restored.keys.some((k) => k.endsWith('smoke:live')) && restored.cells.includes('Ada'),
+          { written, restored },
+        );
+      }
       await shot('08-redis-dark');
 
       // Teleport module: one section per cluster, pinned resources from both, tunnels, kube clusters.
@@ -2270,6 +2315,53 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(300);
       await shot('10-teleport-light');
+      // The pinned row's tick follows the terminal's kubectl context even while its cluster's section is collapsed
+      // (and its kube list not loaded), e.g. when it changes from a terminal or an agent.
+      const secondHeader = `document.querySelector('[data-testid=teleport-cluster][data-proxy="${fakeTsh.proxies.second}"] > [role=button]')`;
+      await js(`${secondHeader}?.click()`);
+      await wait(300);
+      const collapsedKubes = await js(`[...document.querySelectorAll('[data-testid=teleport-kube]')].map((r) => r.textContent.trim().split(/\\s+/)[0])`);
+      await run('teleport.kube.login', { proxy: fakeTsh.proxies.second, cluster: 'eu-eks' }, null);
+      await wait(1500);
+      const pinnedActive = await js(
+        `[...document.querySelectorAll('[data-testid=teleport-pin]')].map((r) => [r.textContent.includes('eu-eks') ? 'eu-eks' : r.textContent.includes('smoke-redis') ? 'smoke-redis' : 'other', Boolean(r.querySelector('[aria-label=active]'))])`,
+      );
+      check(
+        'ui: the pinned kube cluster the terminal points at is ticked, its cluster collapsed',
+        Array.isArray(collapsedKubes) && !collapsedKubes.includes('eu-eks') && Array.isArray(pinnedActive) && pinnedActive.some((r: [string, boolean]) => r[0] === 'eu-eks' && r[1]) && pinnedActive.every((r: [string, boolean]) => r[0] === 'eu-eks' || !r[1]),
+        { collapsedKubes, pinnedActive },
+      );
+      await js(`${secondHeader}?.click()`);
+      await wait(800);
+      // Switching the terminal to another kube cluster of the same Teleport cluster moves the tick and the "terminal" mark.
+      await js(
+        `(() => { const row = [...document.querySelectorAll('[data-testid=teleport-kube]')].find((r) => r.textContent.includes('dev-eks')); row?.querySelector('button[aria-label="Pin"]')?.click(); })()`,
+      );
+      await wait(1000);
+      const tickOf = (name: string) => js(`Boolean([...document.querySelectorAll('[data-testid=teleport-pin]')].find((r) => r.textContent.includes('${name}'))?.querySelector('[aria-label=active]'))`);
+      const devTickedBefore = await tickOf('dev-eks');
+      await js(
+        `(() => { const row = [...document.querySelectorAll('[data-testid=teleport-kube]')].find((r) => r.textContent.includes('prod-eks')); row?.querySelector('button[aria-label^="Set as kubectl context"]')?.click(); })()`,
+      );
+      await wait(300);
+      await js(`[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Set terminal context')?.click()`);
+      await wait(1500);
+      const switched = {
+        devTickedBefore,
+        devTickedAfter: await tickOf('dev-eks'),
+        euTicked: await tickOf('eu-eks'),
+        terminalRows: await js(`[...document.querySelectorAll('[data-testid=teleport-kube]')].filter((r) => r.textContent.includes('terminal')).map((r) => r.textContent.replace('terminal', '').trim())`),
+      };
+      check(
+        'ui: switching the terminal to another kube cluster clears the old tick',
+        switched.devTickedBefore === true && switched.devTickedAfter === false && switched.euTicked === true && JSON.stringify(switched.terminalRows) === JSON.stringify(['prod-eks', 'eu-eks']),
+        switched,
+      );
+      await shot('10b-teleport-kube-context');
+      await js(
+        `(() => { const row = [...document.querySelectorAll('[data-testid=teleport-pin]')].find((r) => r.textContent.includes('dev-eks')); row?.querySelector('button[aria-label="Unpin"]')?.click(); })()`,
+      );
+      await wait(1000);
       const clickedUnpin = await js(
         `(() => { const row = [...document.querySelectorAll('[data-testid=teleport-pin]')].find((r) => r.textContent.includes('second-mysql')); const btn = row && row.querySelector('button[aria-label="Unpin"]'); if (btn) btn.click(); return Boolean(btn); })()`,
       );
@@ -2307,14 +2399,15 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         await wait(1500);
         const viewCluster = await js(`document.querySelector('[data-testid=kube-query]')?.getAttribute('data-cluster') ?? null`);
         check('ui: query view is for the clicked cluster', viewCluster === 'prod-eks', viewCluster);
-        // React-controlled inputs need the native setter plus an input/change event.
+        // Set the value as a user would: the native setter, then the events a browser fires (a select fires input, then change).
         const setField = (testid: string, value: string) =>
           js(`(() => {
             const el = document.querySelector('[data-testid=${testid}]');
             if (!el) return false;
             const proto = el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
             Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, ${JSON.stringify(value)});
-            el.dispatchEvent(new Event(el instanceof HTMLSelectElement ? 'change' : 'input', { bubbles: true }));
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            if (el instanceof HTMLSelectElement) el.dispatchEvent(new Event('change', { bubbles: true }));
             return true;
           })()`);
         const text = (testid: string) => js(`document.querySelector('[data-testid=${testid}]')?.textContent ?? null`);
@@ -2476,6 +2569,37 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(200);
 
+      // A captured request becomes an unsaved route; deleting it again leaves nothing to save. Same for a settings toggle.
+      const mockSaveLabel = () => js(`document.querySelector('[data-testid=mock-server-tab] button[title="Ctrl+S"]')?.textContent.trim() ?? ''`);
+      const clickMockTab = (label: string) =>
+        js(`(() => { const btn = [...document.querySelectorAll('[data-testid=mock-server-tab] [role=tab]')].find((b) => b.textContent.startsWith(${JSON.stringify(label)})); if (btn) btn.click(); return Boolean(btn); })()`);
+      await js(`[...document.querySelectorAll('[data-testid=mock-request-detail] button')].find((b) => b.textContent.trim() === 'Route')?.click()`);
+      await wait(500);
+      const fromRequest = {
+        view: await js(`document.querySelector('[data-testid=mock-server-tab] [role=tab][aria-selected=true]')?.textContent ?? ''`),
+        path: await js(`document.querySelector('[data-testid=mock-route-path]')?.value ?? null`),
+        save: await mockSaveLabel(),
+      };
+      check('ui: a captured request turns into a selected, unsaved route', fromRequest.view === 'Routes (6)' && fromRequest.path === '/echo' && fromRequest.save === 'Save*', fromRequest);
+      await js(`document.querySelector('[data-testid=mock-route-editor] [aria-label="Delete route"]')?.click()`);
+      await wait(300);
+      const afterDelete = { routes: await js(`document.querySelectorAll('[data-testid=mock-route-item]').length`), save: await mockSaveLabel() };
+      check('ui: deleting the new route leaves the server unchanged', afterDelete.routes === 5 && afterDelete.save === 'Save', afterDelete);
+      await clickMockTab('Settings');
+      await wait(400);
+      const toggleCors = () => js(`[...document.querySelectorAll('[data-testid=mock-server-tab] label')].find((l) => l.textContent.includes('Allow browser calls'))?.querySelector('input')?.click()`);
+      const settingsPort = await js(`document.querySelector('[data-testid=mock-port]')?.value ?? null`);
+      await toggleCors();
+      await wait(200);
+      const corsToggled = await mockSaveLabel();
+      await toggleCors();
+      await wait(200);
+      const corsRestored = await mockSaveLabel();
+      check('ui: settings show the port and a toggle marks the server unsaved until undone', settingsPort === String(mock.port) && corsToggled === 'Save*' && corsRestored === 'Save', { settingsPort, corsToggled, corsRestored });
+      await shot('14b-mock-settings-light');
+      await clickMockTab('Routes');
+      await wait(200);
+
       // Realtime module: connection rows, live message log, composer.
       const clickedRealtime = await js(
         `(() => { const btn = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.title || '') === 'Realtime'); if (btn) btn.click(); return Boolean(btn); })()`,
@@ -2527,6 +2651,36 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await wait(300);
       await shot('16-realtime-dark');
       await js(`document.documentElement.classList.remove('dark')`);
+      await wait(200);
+
+      // The composed message is kept as an unsaved saved message; deleting it again leaves nothing to save.
+      const rtSaveLabel = () => js(`document.querySelector('[data-testid=realtime-connection-tab] button[title="Ctrl+S"]')?.textContent.trim() ?? ''`);
+      const savedItems = () => js(`[...document.querySelectorAll('[data-testid=realtime-connection-tab] .w-56 .overflow-y-auto button')].map((b) => b.textContent.trim())`);
+      await js(`[...document.querySelectorAll('[data-testid=realtime-composer] button')].find((b) => b.textContent.trim() === 'Save message')?.click()`);
+      await wait(400);
+      const kept = {
+        view: await js(`document.querySelector('[data-testid=realtime-connection-tab] [role=tab][aria-selected=true]')?.textContent ?? ''`),
+        items: await savedItems(),
+        firstName: await js(`document.querySelector('[data-testid=realtime-connection-tab] .w-56.border-r + div input')?.value ?? null`),
+        save: await rtSaveLabel(),
+      };
+      check(
+        'ui: a composed message joins the saved messages, unsaved, with the first one open',
+        kept.view === 'Saved (2)' && JSON.stringify(kept.items) === JSON.stringify(['ping', 'Message 2']) && kept.firstName === 'ping' && kept.save === 'Save*',
+        kept,
+      );
+      await js(`[...document.querySelectorAll('[data-testid=realtime-connection-tab] .w-56 .overflow-y-auto button')].find((b) => b.textContent.trim() === 'Message 2')?.click()`);
+      await wait(300);
+      const keptBody = await js(`document.querySelector('[data-testid=realtime-connection-tab] .cm-content')?.textContent ?? ''`);
+      await js(`document.querySelector('[data-testid=realtime-connection-tab] [aria-label="Delete message"]')?.click()`);
+      await wait(300);
+      const afterRemove = { items: await savedItems(), save: await rtSaveLabel() };
+      check(
+        'ui: deleting the kept message leaves the connection unchanged',
+        typeof keptBody === 'string' && keptBody.includes('from the ui') && Array.isArray(afterRemove.items) && afterRemove.items.length === 1 && afterRemove.save === 'Save',
+        { keptBody, ...afterRemove },
+      );
+      await js(`[...document.querySelectorAll('[data-testid=realtime-connection-tab] [role=tab]')].find((b) => b.textContent.startsWith('Messages'))?.click()`);
       await wait(200);
 
       // GraphQL: request row label, body editor with schema status, docs explorer.
@@ -2674,6 +2828,72 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(200);
 
+      // Resources, a resource template, a prompt and the handshake info, driven from the same tab.
+      const clickMcpView = (label: string) =>
+        js(
+          `(() => { const pane = [...document.querySelectorAll('[data-tab-type="mcp.server"]')].find((el) => !el.classList.contains('hidden')); const btn = pane && [...pane.querySelectorAll('[role=tab]')].find((b) => b.textContent.startsWith(${JSON.stringify(label)})); if (btn) btn.click(); return Boolean(btn); })()`,
+        );
+      const typeInto = (selector: string, value: string) =>
+        js(
+          `(() => { const input = document.querySelector(${JSON.stringify(selector)}); if (!input) return false; const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; setter.call(input, ${JSON.stringify(value)}); input.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`,
+        );
+      await clickMcpView('Resources');
+      await wait(800);
+      const resourceRows = await js(`[...document.querySelectorAll('[data-testid=mcp-resource], [data-testid=mcp-resource-template]')].map((r) => r.getAttribute('data-testid') + ':' + r.textContent)`);
+      await js(`document.querySelector('[data-testid=mcp-resource]')?.click()`);
+      await wait(800);
+      const resourceRead = await js(`document.querySelector('[data-testid=mcp-resource-result]')?.textContent ?? ''`);
+      check(
+        'ui: resources and templates listed, and picking a resource reads it',
+        Array.isArray(resourceRows) &&
+          resourceRows.some((r: string) => r.startsWith('mcp-resource:') && r.includes('Greeting') && r.includes('smoke://greeting')) &&
+          resourceRows.some((r: string) => r.startsWith('mcp-resource-template:') && r.includes('(template)') && r.includes('smoke://users/{id}')) &&
+          typeof resourceRead === 'string' &&
+          resourceRead.includes('1 part') &&
+          resourceRead.includes('hello, inspector'),
+        { resourceRows, resourceRead: String(resourceRead).slice(0, 160) },
+      );
+      await js(`document.querySelector('[data-testid=mcp-resource-template]')?.click()`);
+      await wait(300);
+      const typedVariable = await typeInto('[data-testid=mcp-template-variable]', '7');
+      await wait(100);
+      await js(`document.querySelector('[data-testid=mcp-resource-read]')?.click()`);
+      await wait(800);
+      const templateRead = await js(`document.querySelector('[data-testid=mcp-resource-result]')?.textContent ?? ''`);
+      check(
+        'ui: a template expands its variables into the uri it reads',
+        typedVariable === true && typeof templateRead === 'string' && templateRead.includes('smoke://users/7') && templateRead.includes('"user 7"'),
+        String(templateRead).slice(0, 200),
+      );
+      await shot('21e-mcp-resources-light');
+      await clickMcpView('Prompts');
+      await wait(800);
+      await js(`[...document.querySelectorAll('[data-testid=mcp-prompt]')].find((p) => p.textContent.includes('summarize'))?.click()`);
+      await wait(300);
+      const promptArgs = await js(`document.querySelectorAll('[data-testid=mcp-prompt-argument]').length`);
+      await typeInto('[data-testid=mcp-prompt-argument]', 'signals');
+      await wait(100);
+      await js(`document.querySelector('[data-testid=mcp-prompt-get]')?.click()`);
+      await wait(800);
+      const promptResult = await js(`document.querySelector('[data-testid=mcp-prompt-result]')?.textContent ?? ''`);
+      check(
+        'ui: a prompt renders with its arguments into messages',
+        promptArgs === 2 && typeof promptResult === 'string' && promptResult.includes('1 message') && promptResult.includes('Summary of signals') && promptResult.includes('Summarize signals'),
+        { promptArgs, promptResult: String(promptResult).slice(0, 200) },
+      );
+      await clickMcpView('Info');
+      await wait(300);
+      const info = await js(
+        `[document.querySelector('[data-testid=mcp-info]')?.textContent ?? '', document.querySelector('[data-testid=mcp-capabilities]')?.textContent ?? '', document.querySelector('[data-testid=mcp-instructions]')?.textContent ?? '']`,
+      );
+      check(
+        'ui: info shows the server, its capabilities and its instructions',
+        Array.isArray(info) && info[0].includes('smoke-http 1.2.3') && info[1].includes('logging') && info[1].includes('tools') && info[2] === 'Use echo to test the connection.',
+        Array.isArray(info) ? info.map((t: string) => t.slice(0, 160)) : info,
+      );
+      await clickMcpView('Tools');
+      await wait(200);
+
       // Call recorder: opened from the inspector's sidebar, started in the UI, lists two agents' calls as they arrive, then ends.
       const clickedRecorderRow = await js(`(() => { const row = document.querySelector('[data-testid=mcp-recorder-row]'); if (row) row.click(); return Boolean(row); })()`);
       await wait(500);
@@ -2808,6 +3028,49 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(200);
 
+      // Text view: masked while secrets are hidden, the raw text once revealed, saved as a whole; History lists what Quiver kept.
+      const clickEnvView = (label: string) =>
+        js(
+          `(() => { const pane = [...document.querySelectorAll('[data-tab-type="env.file"]')].find((el) => !el.classList.contains('hidden')); const btn = pane && [...pane.querySelectorAll('[role=tab]')].find((b) => b.textContent.startsWith(${JSON.stringify(label)})); if (btn) btn.click(); return Boolean(btn); })()`,
+        );
+      const envLabels = () =>
+        js(
+          `[document.querySelector('[data-testid=env-save]')?.textContent.trim() ?? '', [...document.querySelectorAll('[data-tab-type="env.file"] [role=tab]')].find((b) => b.textContent.startsWith('Text'))?.textContent ?? ''].join('|')`,
+        );
+      await js(`document.querySelector('[data-testid=env-reveal]')?.click()`);
+      await clickEnvView('Text');
+      await wait(400);
+      const maskedTextView = await js(`document.querySelector('[data-testid=env-text-masked] .cm-content')?.textContent ?? ''`);
+      await js(`document.querySelector('[data-testid=env-reveal]')?.click()`);
+      await wait(300);
+      const envBefore = await fs.readFile(path.join(envRoot, '.env'), 'utf8');
+      const typedText = await js(
+        `(() => { const content = document.querySelector('[data-testid=env-text] .cm-content'); if (!content) return false; content.focus(); document.execCommand('selectAll'); return document.execCommand('insertText', false, ${JSON.stringify(`${envBefore}FROM_TEXT=1\n`)}); })()`,
+      );
+      await wait(200);
+      const dirtyLabels = await envLabels();
+      await js(`document.querySelector('[data-testid=env-save]')?.click()`);
+      await wait(1200);
+      const envAfter = await fs.readFile(path.join(envRoot, '.env'), 'utf8');
+      const savedLabels = await envLabels();
+      check(
+        'ui: the text view masks secrets until revealed, then edits and saves the whole file',
+        typeof maskedTextView === 'string' &&
+          maskedTextView.includes('DB_PASSWORD="••••••••" # keep') &&
+          !maskedTextView.includes('p@ss word') &&
+          typedText === true &&
+          dirtyLabels === 'Save*|Text*' &&
+          envAfter === `${envBefore}FROM_TEXT=1\n` &&
+          savedLabels === 'Save|Text',
+        { maskedTextView: String(maskedTextView).slice(0, 120), dirtyLabels, savedLabels, tail: envAfter.split('\n').slice(-3) },
+      );
+      await clickEnvView('History');
+      await wait(800);
+      const backupRows = await js(`[...document.querySelectorAll('[data-testid=env-backup]')].map((r) => r.textContent)`);
+      check('ui: history lists the backups kept before each change', Array.isArray(backupRows) && backupRows.length >= 3 && backupRows.every((t: string) => t.includes('Restore')), backupRows);
+      await clickEnvView('Keys');
+      await wait(200);
+
       // Status bar: the environment picker is a themed menu above the bar, not a native select.
       const pickerLabel = await js(`document.querySelector('[data-testid=env-picker]')?.textContent ?? null`);
       check('ui: status bar names the active environment', pickerLabel === 'local', pickerLabel);
@@ -2901,8 +3164,27 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       const orderAfterEsc = await tabTitles();
       check('ui: Escape cancels a tab drag and keeps the order', markerBeforeEsc && JSON.stringify(orderAfterEsc) === JSON.stringify(expectedOrder) && (await js(`Boolean(document.querySelector('[data-testid=tab-drop-marker]'))`)) === false, orderAfterEsc);
 
+      // A middle click closes the tab under the pointer; the scrollable strip must not start the browser's autoscroll instead.
+      const middleTabs = await tabTitles();
+      const middleTarget = (await js(
+        `(() => { const strip = document.querySelector('[role=tablist]').getBoundingClientRect(); const tabs = [...document.querySelectorAll('[data-testid=tab]')]; const t = tabs.reverse().find((t) => { const r = t.getBoundingClientRect(); return r.left >= strip.left && r.right <= strip.right; }); if (!t) return null; const r = t.getBoundingClientRect(); return { title: t.getAttribute('data-title'), x: Math.round(r.left + 24), y: Math.round(r.top + r.height / 2) }; })()`,
+      )) as { title: string; x: number; y: number } | null;
+      if (middleTabs.length >= 4 && middleTarget) {
+        win.webContents.sendInputEvent({ type: 'mouseMove', x: middleTarget.x, y: middleTarget.y });
+        win.webContents.sendInputEvent({ type: 'mouseDown', x: middleTarget.x, y: middleTarget.y, button: 'middle', clickCount: 1 });
+        await wait(50);
+        win.webContents.sendInputEvent({ type: 'mouseUp', x: middleTarget.x, y: middleTarget.y, button: 'middle', clickCount: 1 });
+      }
+      await wait(400);
+      const afterMiddle = await tabTitles();
+      check(
+        'ui: middle-clicking a tab closes it',
+        middleTabs.length >= 4 && middleTarget !== null && afterMiddle.length === middleTabs.length - 1 && !afterMiddle.includes(middleTarget.title),
+        { middleTabs, middleTarget, afterMiddle },
+      );
+
       const tabsBefore = await tabTitles();
-      const secondTab = `[data-testid=tab][data-title=${JSON.stringify(tabsBefore[1] ?? '')}]`;
+      const secondTab =`[data-testid=tab][data-title=${JSON.stringify(tabsBefore[1] ?? '')}]`;
       const openedTabMenu = await rightClick(secondTab);
       await wait(200);
       const tabMenu = await menuLabels();

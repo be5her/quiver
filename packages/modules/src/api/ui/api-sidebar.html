@@ -1,0 +1,58 @@
+<q-section-header title="Collections">
+  <button qIconButton label="New request" size="sm" (click)="api.createRequest()"><svg [qIcon]="icons.Plus" class="size-3.5"></svg></button>
+  <button qIconButton label="New GraphQL request" size="sm" (click)="api.createGraphqlRequest()"><svg [qIcon]="icons.Braces" class="size-3.5"></svg></button>
+  <button qIconButton label="New collection" size="sm" (click)="api.newCollection(null)"><svg [qIcon]="icons.FolderPlus" class="size-3.5"></svg></button>
+  <button qIconButton label="Import from curl" size="sm" (click)="api.importCurl()"><svg [qIcon]="icons.Import" class="size-3.5"></svg></button>
+</q-section-header>
+<q-api-collection-tree [collections]="collections.value() ?? []" [requests]="requests.value() ?? []" />
+@if (empty()) {
+  <p class="px-3 py-2 text-xs text-muted">No requests yet. Create one or import a curl command.</p>
+}
+
+<div class="mt-3">
+  <q-section-header>
+    <button sectionTitle type="button" class="flex items-center gap-1" (click)="toggleEnvironments()">
+      <svg [qIcon]="envOpen() ? icons.ChevronDown : icons.ChevronRight" class="size-3"></svg> Environments
+    </button>
+    <button qIconButton label="New environment" size="sm" (click)="api.createEnvironment()"><svg [qIcon]="icons.Plus" class="size-3.5"></svg></button>
+  </q-section-header>
+  @if (envOpen()) {
+    @for (env of environments.value() ?? []; track env.id) {
+      <div qApiRow [label]="env.name" (click)="api.openEnvironmentTab(env)" (keydown.enter)="api.openEnvironmentTab(env)">
+        <button
+          rowPrefix
+          type="button"
+          [title]="activeId() === env.id ? 'Active environment' : 'Activate'"
+          class="size-4 rounded-full border flex items-center justify-center"
+          [class]="activeId() === env.id ? 'border-accent bg-accent text-accent-fg' : 'border-edge text-transparent hover:text-muted'"
+          (click)="toggleActive($event, env)"
+        >
+          <svg [qIcon]="icons.Check" class="size-3"></svg>
+        </button>
+        <button qIconButton label="Delete environment" size="sm" (click)="deleteEnvironment($event, env)"><svg [qIcon]="icons.Trash2" class="size-3.5"></svg></button>
+      </div>
+    } @empty {
+      <p class="px-3 py-1 text-xs text-muted">No environments. Variables like {{ baseUrlSyntax }} come from here.</p>
+    }
+  }
+</div>
+
+<div class="mt-3">
+  <q-section-header>
+    <button sectionTitle type="button" class="flex items-center gap-1" (click)="toggleHistory()">
+      <svg [qIcon]="historyOpen() ? icons.ChevronDown : icons.ChevronRight" class="size-3"></svg> History
+    </button>
+    @if (history.value()?.length) {
+      <button qIconButton label="Clear history" size="sm" (click)="api.clearHistory()"><svg [qIcon]="icons.Trash2" class="size-3.5"></svg></button>
+    }
+  </q-section-header>
+  @if (historyOpen()) {
+    @for (entry of history.value() ?? []; track entry.id) {
+      <button type="button" class="w-full text-left px-3 py-1 hover:bg-elevated flex items-center gap-2 min-w-0" [title]="entry.at + '\n' + entry.url" data-testid="api-history-entry" (click)="replay(entry)">
+        <span class="text-[10px] font-bold w-10 shrink-0" [class]="methodColors[entry.method]">{{ entry.method }}</span>
+        <span class="truncate text-xs text-fg flex-1">{{ shortUrl(entry.url) }}</span>
+        <span class="text-[10px] font-mono shrink-0" [class]="entry.status ? statusColor(entry.status) : 'text-danger'">{{ entry.status ?? 'ERR' }}</span>
+      </button>
+    }
+  }
+</div>

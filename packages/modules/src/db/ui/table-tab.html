@@ -1,0 +1,78 @@
+<div class="flex items-center gap-2 px-3 py-1.5 border-b border-edge shrink-0">
+  <span class="text-sm font-medium truncate">@if (database()) {<span class="text-muted">{{ database() }}.</span>}{{ table() }}</span>
+  <div class="flex-1"></div>
+  <button qButton size="sm" variant="ghost" [icon]="queryIcon" (click)="openQuery()">Query</button>
+</div>
+<q-segmented [(value)]="view" class="px-3 shrink-0">
+  <button qSegment="data">Data</button>
+  <button qSegment="structure">Structure</button>
+</q-segmented>
+<div class="flex-1 min-h-0">
+  @if (view() === 'data') {
+    <q-table-data-view [connectionId]="connectionId()" [table]="table()" [database]="database()" [schema]="schema()" [sqlite]="sqlite()" />
+  } @else {
+    @if (detail.error(); as error) {
+      <q-db-error [error]="error" (retry)="detail.reload()" />
+    } @else if (detail.value(); as d) {
+      <div class="h-full overflow-auto p-3 flex flex-col gap-4 text-sm">
+        <section>
+          <h3 class="text-[11px] font-semibold uppercase tracking-wide text-muted mb-1">Columns</h3>
+          <table class="w-full text-xs border border-edge rounded-md overflow-hidden">
+            <thead class="bg-elevated text-muted">
+              <tr>
+                <th class="text-left px-2 py-1 font-medium">Name</th>
+                <th class="text-left px-2 py-1 font-medium">Type</th>
+                <th class="text-left px-2 py-1 font-medium">Null</th>
+                <th class="text-left px-2 py-1 font-medium">Key</th>
+                <th class="text-left px-2 py-1 font-medium">Default</th>
+                <th class="text-left px-2 py-1 font-medium">Extra</th>
+              </tr>
+            </thead>
+            <tbody>
+              @for (c of d.columns; track c.name) {
+                <tr class="border-t border-edge">
+                  <td class="px-2 py-1 font-mono">{{ c.name }}</td>
+                  <td class="px-2 py-1 font-mono text-muted">{{ c.type }}</td>
+                  <td class="px-2 py-1">{{ c.nullable ? 'yes' : 'no' }}</td>
+                  <td class="px-2 py-1">
+                    @if (c.key) {
+                      <span qBadge [class]="c.key === 'PRI' ? 'text-accent' : ''">{{ c.key }}</span>
+                    }
+                  </td>
+                  <td class="px-2 py-1 font-mono text-muted">{{ c.default ?? '' }}</td>
+                  <td class="px-2 py-1 text-muted">{{ c.extra ?? '' }}</td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </section>
+        @if (d.indexes.length) {
+          <section>
+            <h3 class="text-[11px] font-semibold uppercase tracking-wide text-muted mb-1">Indexes</h3>
+            <ul class="text-xs flex flex-col gap-1">
+              @for (i of d.indexes; track i.name) {
+                <li class="flex items-center gap-2">
+                  <span class="font-mono">{{ i.name }}</span>
+                  @if (i.unique) {
+                    <span qBadge>unique</span>
+                  }
+                  <span class="text-muted font-mono">({{ i.columns.join(', ') }})</span>
+                </li>
+              }
+            </ul>
+          </section>
+        }
+        @if (d.ddl) {
+          <section class="flex-1 min-h-40 flex flex-col">
+            <h3 class="text-[11px] font-semibold uppercase tracking-wide text-muted mb-1">Definition</h3>
+            <div class="min-h-40 flex-1">
+              <q-code-editor [value]="d.ddl" language="sql" readonly wrap />
+            </div>
+          </section>
+        }
+      </div>
+    } @else {
+      <div class="flex items-center justify-center h-full"><svg qSpinner></svg></div>
+    }
+  }
+</div>

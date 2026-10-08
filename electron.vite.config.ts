@@ -1,6 +1,3 @@
-import { resolve } from 'node:path';
-import tailwindcss from '@tailwindcss/vite';
-import react from '@vitejs/plugin-react';
 import { defineConfig } from 'electron-vite';
 
 /**
@@ -11,6 +8,10 @@ const externalRuntimeDeps = ['undici', 'zod', 'mysql2', /^mysql2\//, 'ioredis', 
 /** Dev-only: the smoke test's fake WebSocket server. Loaded lazily, never shipped. */
 const externalDevDeps = ['ws'];
 
+/**
+ * Builds the main process and the preload script. The renderer is an Angular application with its
+ * own build (src/renderer, `ng build` into out/renderer); `npm run dev` points Electron at its dev server.
+ */
 export default defineConfig({
   main: {
     build: {
@@ -20,12 +21,4 @@ export default defineConfig({
     },
   },
   preload: {},
-  renderer: {
-    plugins: [react(), tailwindcss()],
-    resolve: {
-      alias: {
-        '@': resolve(__dirname, 'src/renderer/src'),
-      },
-    },
-  },
 });

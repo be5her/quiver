@@ -1,0 +1,72 @@
+<div class="flex items-center gap-2 px-3 h-9 border-b border-edge shrink-0 text-xs">
+  @if (running(); as running) {
+    <span class="flex items-center gap-1.5 text-muted" data-testid="kube-status" data-state="running"><svg qSpinner class="size-3.5"></svg> {{ running.streaming ? 'Following…' : 'Running…' }}</span>
+  } @else if (hasResult() && !error()) {
+    <span class="flex items-center gap-2" data-testid="kube-status" data-state="done" [attr.data-exit]="exitCode() ?? ''">
+      <span qBadge [class]="exitClass()">exit {{ exitCode() ?? '–' }}</span>
+      @if (durationMs() !== undefined) {
+        <span class="text-muted">{{ formatDuration(durationMs()!) }}</span>
+      }
+      <span class="text-muted">{{ lines().length }} line{{ lines().length === 1 ? '' : 's' }}</span>
+      @if (truncated()) {
+        <span class="text-warning">output capped</span>
+      }
+    </span>
+  } @else {
+    <span class="text-muted">Output</span>
+  }
+  @if (ran() && !running()) {
+    <button
+      type="button"
+      class="flex items-center gap-0.5 text-muted hover:text-fg"
+      [attr.aria-expanded]="showCommand()"
+      title="The exact command that ran"
+      data-testid="kube-ran-toggle"
+      (click)="showCommand.set(!showCommand())"
+    ><svg [qIcon]="showCommand() ? icons.ChevronDown : icons.ChevronRight" class="size-3.5"></svg>Command</button>
+  }
+  <div class="flex-1"></div>
+  @if (running()?.streaming) {
+    <label class="flex items-center gap-1 text-muted cursor-pointer select-none"><input qCheckbox [checked]="follow()" (change)="follow.set(checked($event))" /> Scroll to end</label>
+  }
+  <div class="relative">
+    <svg [qIcon]="icons.Search" class="size-3.5 text-muted absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none"></svg>
+    <input qInput [value]="search()" placeholder="Search output" class="h-7 w-48 pl-7 text-xs" data-testid="kube-search" (input)="typed($event)" />
+  </div>
+  @if (term()) {
+    <span class="text-muted tabular-nums" data-testid="kube-matches">{{ matches() }} match{{ matches() === 1 ? '' : 'es' }}</span>
+    <label class="flex items-center gap-1 text-muted cursor-pointer select-none"><input qCheckbox [checked]="onlyMatches()" (change)="onlyMatches.set(checked($event))" /> Only matches</label>
+    <button qIconButton label="Clear search" size="sm" (click)="search.set('')"><svg [qIcon]="icons.X" class="size-3.5"></svg></button>
+  }
+  <button qIconButton label="Copy output" size="sm" [disabled]="!lines().length" (click)="copyOutput()"><svg [qIcon]="icons.Copy" class="size-3.5"></svg></button>
+</div>
+@if (error(); as error) {
+  <div class="p-2 shrink-0"><q-db-error [error]="error" (retry)="retry.emit()" /></div>
+}
+@if (ran(); as ran) {
+  @if (showCommand() && !running()) {
+    <div class="flex items-start gap-1 pl-3 pr-2 py-1.5 border-b border-edge shrink-0">
+      <div class="flex-1 min-w-0 text-[11px] font-mono text-muted break-all select-all" data-testid="kube-ran">
+        @if (ran.setup) {
+          <div>{{ ran.setup }}</div>
+        }
+        <div>{{ ran.command }}</div>
+      </div>
+      <button qIconButton label="Copy command" size="sm" (click)="copyCommand(ran.command)"><svg [qIcon]="icons.Copy" class="size-3"></svg></button>
+    </div>
+  }
+}
+<div #scroller class="flex-1 min-h-0 overflow-auto bg-canvas" data-testid="kube-output">
+  @if (hasStderr()) {
+    <pre [class]="stderrClass()" data-testid="kube-stderr">{{ stderrText() }}</pre>
+  }
+  @if (shown().length) {
+    @if (plainText(); as text) {
+      <pre class="px-3 py-2 text-xs font-mono leading-5 whitespace-pre">{{ text }}</pre>
+    } @else {
+      <pre class="px-3 py-2 text-xs font-mono leading-5 whitespace-pre">@for (parts of highlighted(); track $index) {@for (part of parts; track $index) {@if (part.match) {<mark class="bg-warning/40 text-fg rounded-sm">{{ part.text }}</mark>} @else {<ng-container>{{ part.text }}</ng-container>}}<ng-container>{{ '\n' }}</ng-container>}</pre>
+    }
+  } @else if (!running() && !hasStderr() && !error()) {
+    <p class="px-3 py-6 text-xs text-muted text-center">{{ hasResult() ? 'No output.' : 'Pick an operation and run it. Output appears here.' }}</p>
+  }
+</div>

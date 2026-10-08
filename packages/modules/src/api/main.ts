@@ -246,6 +246,7 @@ const requestSend = defineCommand({
         await historyReady.get(w.id);
         // The log is a plain file: credentials typed into the request, and secrets the URL resolved to, are masked before they reach it.
         await w.store.appendLog(HISTORY_LOG, redactHistoryEntry(entry, secrets));
+        ctx.host.emit('store.changed', { workspaceId: w.id, collection: HISTORY_LOG });
       }
     }
   },
@@ -501,7 +502,7 @@ const historyClear = defineCommand({
   handler: async (_i, ctx) => {
     await historyReady.get(ws(ctx).id);
     await ws(ctx).store.clearLog(HISTORY_LOG);
-    ctx.host.emit('store.changed', { workspaceId: ws(ctx).id, collection: 'history' });
+    ctx.host.emit('store.changed', { workspaceId: ws(ctx).id, collection: HISTORY_LOG });
     return { cleared: true };
   },
 });

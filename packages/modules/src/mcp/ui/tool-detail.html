@@ -1,0 +1,74 @@
+@let t = tool();
+<div class="flex flex-col gap-1 px-3 py-2 border-b border-edge shrink-0">
+  <div class="flex items-center gap-2 flex-wrap">
+    <span class="font-mono text-sm font-medium">{{ t.name }}</span>
+    @if (t.title) {
+      <span class="text-xs text-muted">{{ t.title }}</span>
+    }
+    @for (a of annotations(); track a) {
+      <span qBadge [class]="annotationClass(a)">{{ a }}</span>
+    }
+    <div class="flex-1"></div>
+    <button qButton size="sm" [variant]="showSchema() ? 'secondary' : 'ghost'" (click)="showSchema.set(!showSchema())">Schema</button>
+  </div>
+  @if (t.description) {
+    <p class="text-xs text-muted whitespace-pre-wrap">{{ t.description }}</p>
+  }
+</div>
+<div class="flex-1 min-h-0 overflow-y-auto flex flex-col gap-3 p-3">
+  @if (showSchema()) {
+    <section class="flex flex-col gap-1">
+      <span class="text-[11px] font-medium text-muted">Input schema</span>
+      <div class="border border-edge rounded-md"><q-mcp-text-block [text]="inputSchema()" mime="application/json" /></div>
+      @if (outputSchema(); as schema) {
+        <span class="text-[11px] font-medium text-muted mt-1">Output schema</span>
+        <div class="border border-edge rounded-md"><q-mcp-text-block [text]="schema" mime="application/json" /></div>
+      }
+    </section>
+  }
+  <section class="flex flex-col gap-1">
+    <div class="flex items-center gap-2">
+      <span class="text-[11px] font-medium text-muted">Arguments (JSON)</span>
+      <div class="flex-1"></div>
+      <button qButton size="sm" variant="primary" [icon]="icons.Play" [loading]="busy()" title="Ctrl+Enter" data-testid="mcp-tool-call" (click)="call.emit()">Call</button>
+    </div>
+    <div class="border border-edge rounded-md" [class]="hasArgs() ? 'h-36' : 'h-16'" data-testid="mcp-tool-args">
+      <q-code-editor [(value)]="args" language="json" fill placeholder="{}" (run)="call.emit()" />
+    </div>
+  </section>
+  @if (state(); as s) {
+    <section class="flex flex-col gap-1" data-testid="mcp-tool-result">
+      <div class="flex items-center gap-2 text-[11px] text-muted">
+        <span class="font-medium">Result</span>
+        @if (s.outcome) {
+          <span>{{ formatMs(s.outcome.durationMs) }}</span>
+        }
+        @if (s.outcome?.result.isError) {
+          <span qBadge class="text-danger">isError</span>
+        }
+        @if (s.outcome?.result.structuredContent) {
+          <span qBadge>structured</span>
+        }
+        <span>{{ at() }}</span>
+        <div class="flex-1"></div>
+        @if (s.outcome) {
+          <button qButton size="sm" variant="ghost" [icon]="icons.Copy" (click)="copyResult()">Copy</button>
+        }
+      </div>
+      @if (s.error) {
+        <p class="text-xs text-danger whitespace-pre-wrap rounded-md border border-danger/40 bg-danger/5 px-2 py-1.5">{{ s.error }}</p>
+      }
+      @if (s.outcome; as outcome) {
+        <div class="rounded-md border p-2 flex flex-col gap-2" [class]="outcome.result.isError ? 'border-danger/40 bg-danger/5' : 'border-edge'">
+          <q-mcp-content-blocks [content]="outcome.result.content" />
+          @if (structured(); as text) {
+            <div class="flex flex-col gap-1">
+              <span class="text-[11px] font-medium text-muted">structuredContent</span>
+              <q-mcp-text-block [text]="text" mime="application/json" />
+            </div>
+          }
+        </div>
+      }
+    </section>
+  }
+</div>

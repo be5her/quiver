@@ -1,0 +1,75 @@
+@if (server().status !== 'connected') {
+  <q-empty-state title="Not connected" hint="Connect to list the resources of this server." />
+} @else {
+  <div class="flex h-full min-h-0">
+    <div class="w-72 border-r border-edge flex flex-col min-h-0 shrink-0">
+      <div class="flex items-center gap-1 px-2 h-9 border-b border-edge shrink-0">
+        <input qInput [value]="filter()" (input)="typed($event)" placeholder="Filter resources" class="h-7 text-xs" />
+        <button qButton size="sm" variant="ghost" [icon]="icons.RefreshCw" title="Ask the server for its resources again" (click)="refresh()"></button>
+      </div>
+      <div class="flex-1 overflow-y-auto">
+        @if (lists.isLoading() && !lists.value()) {
+          <div class="px-3 py-2"><svg qSpinner></svg></div>
+        }
+        @for (r of shownResources(); track r.uri) {
+          <button
+            type="button"
+            class="w-full text-left px-3 py-1.5 border-b border-edge/60 hover:bg-elevated flex items-start gap-2 min-w-0"
+            [class.bg-elevated]="isSelectedResource(r.uri)"
+            data-testid="mcp-resource"
+            (click)="selection.set({ kind: 'resource', uri: r.uri })"
+          >
+            <svg [qIcon]="icons.FileText" class="size-3.5 text-muted shrink-0 mt-0.5"></svg>
+            <span class="flex flex-col min-w-0 flex-1">
+              <span class="text-xs truncate">{{ r.title ?? r.name }}</span>
+              <span class="font-mono text-[11px] text-muted truncate">{{ r.uri }}</span>
+            </span>
+          </button>
+        }
+        @for (t of shownTemplates(); track t.uriTemplate) {
+          <button
+            type="button"
+            class="w-full text-left px-3 py-1.5 border-b border-edge/60 hover:bg-elevated flex items-start gap-2 min-w-0"
+            [class.bg-elevated]="isSelectedTemplate(t.uriTemplate)"
+            data-testid="mcp-resource-template"
+            (click)="selection.set({ kind: 'template', uriTemplate: t.uriTemplate })"
+          >
+            <svg [qIcon]="icons.BookOpen" class="size-3.5 text-muted shrink-0 mt-0.5"></svg>
+            <span class="flex flex-col min-w-0 flex-1">
+              <span class="text-xs truncate">{{ t.title ?? t.name }} <span class="text-muted">(template)</span></span>
+              <span class="font-mono text-[11px] text-muted truncate">{{ t.uriTemplate }}</span>
+            </span>
+          </button>
+        }
+        @if (lists.value() && resources().length === 0 && templates().length === 0) {
+          <p class="px-3 py-3 text-xs text-muted">This server has no resources.</p>
+        }
+      </div>
+    </div>
+    <div class="flex-1 min-w-0 min-h-0 overflow-y-auto">
+      @if (selectedTemplate(); as template) {
+        <q-mcp-template-reader [template]="template" [busy]="busy()" [read]="read()" (readUri)="readUri($event)" />
+      } @else if (selectedResource(); as resource) {
+        <div class="flex flex-col gap-2 p-3">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="text-sm font-medium">{{ resource.title ?? resource.name }}</span>
+            @if (resource.mimeType) {
+              <span qBadge>{{ resource.mimeType }}</span>
+            }
+            @if (resource.size !== undefined) {
+              <span qBadge>{{ resource.size }} bytes</span>
+            }
+            <div class="flex-1"></div>
+            <button qButton size="sm" variant="ghost" [icon]="icons.RefreshCw" [loading]="busy()" (click)="readUri(resource.uri)">Read again</button>
+          </div>
+          @if (resource.description) {
+            <p class="text-xs text-muted">{{ resource.description }}</p>
+          }
+          <q-mcp-read-result [read]="resourceRead()" [busy]="busy()" />
+        </div>
+      } @else {
+        <q-empty-state title="Pick a resource" hint="Resources are read as soon as you pick them; templates take their variables first." />
+      }
+    </div>
+  </div>
+}

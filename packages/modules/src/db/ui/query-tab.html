@@ -1,0 +1,82 @@
+<div class="flex items-center gap-2 px-3 py-2 border-b border-edge shrink-0">
+  @if (kind(); as kind) {
+    <svg [qKindIcon]="kind" class="size-4"></svg>
+  }
+  <select qSelect class="h-7 text-xs max-w-56" (change)="pickConnection($event)">
+    @for (c of connections.value() ?? []; track c.id) {
+      <option [value]="c.id" [selected]="c.id === connectionId()">{{ c.name }}</option>
+    } @empty {
+      <option value="">No connections</option>
+    }
+  </select>
+  @if (kind() === 'mysql') {
+    <select qSelect class="h-7 text-xs max-w-48" title="Database" (change)="pickDatabase($event)">
+      <option value="" [selected]="!database()">{{ connection()?.database ? connection()!.database + ' (default)' : 'Pick a database' }}</option>
+      @for (db of databases.value() ?? []; track db) {
+        <option [value]="db" [selected]="db === database()">{{ db }}</option>
+      }
+    </select>
+  }
+  <button qButton variant="primary" size="sm" [icon]="icons.Play" [loading]="running()" [disabled]="!connectionId()" title="Ctrl+Enter runs the selection or everything" (click)="run()">Run</button>
+  <select qSelect class="h-7 text-xs" title="Row limit per result" (change)="pickMaxRows($event)">
+    @for (n of maxRowsOptions; track n) {
+      <option [value]="n" [selected]="n === maxRows()">{{ n }} rows</option>
+    }
+  </select>
+  <div class="flex-1"></div>
+  @if (saved(); as saved) {
+    <span class="text-xs text-muted truncate max-w-48">{{ saved.name }}</span>
+  }
+  <button qButton size="sm" [variant]="dirty() || !saved() ? 'secondary' : 'ghost'" [icon]="icons.Save" title="Ctrl+S" (click)="save()">{{ saved() ? 'Save' + (dirty() ? '*' : '') : 'Save as…' }}</button>
+</div>
+
+<div class="flex flex-col flex-1 min-h-0">
+  <div class="basis-[42%] min-h-[120px] p-2 border-b border-edge">
+    <q-code-editor
+      [(value)]="text"
+      [language]="kind() === 'redis' ? 'text' : 'sql'"
+      [sqlDialect]="kind() === 'sqlite' ? 'sqlite' : 'mysql'"
+      [sqlSchema]="sqlSchema()"
+      [placeholder]="placeholder()"
+      autofocus
+      (run)="run()"
+    />
+  </div>
+
+  <div class="flex-1 min-h-0 flex flex-col">
+    <div class="flex items-center gap-2 px-3 h-8 border-b border-edge shrink-0 text-xs text-muted">
+      @if (resultTabs().length > 1) {
+        <q-segmented [(value)]="activeResult" class="border-b-0 -ml-3">
+          @for (r of resultTabs(); track r.value) {
+            <button [qSegment]="r.value">{{ r.label }}</button>
+          }
+        </q-segmented>
+      }
+      @if (summary() && !error()) {
+        <span>{{ summary() }}</span>
+      }
+      @if (error(); as error) {
+        <span class="text-danger truncate">{{ error.message }}</span>
+      }
+      <div class="flex-1"></div>
+      @if (current(); as current) {
+        @if (current.kind === 'rows' && current.rows.length > 0) {
+          @if (current.truncated) {
+            <span qBadge class="text-warning">first {{ current.rowCount.toLocaleString() }} rows</span>
+          }
+          <button qIconButton label="Copy as JSON" size="sm" (click)="copyRows('json')"><span class="text-[10px] font-mono">{{ jsonIcon }}</span></button>
+          <button qIconButton label="Copy as CSV" size="sm" (click)="copyRows('csv')"><svg [qIcon]="icons.Copy" class="size-3.5"></svg></button>
+        }
+      }
+    </div>
+    <div class="flex-1 min-h-0">
+      @if (error(); as error) {
+        <q-db-error [error]="error" (retry)="run()" />
+      } @else if (!results()) {
+        <div class="h-full flex items-center justify-center text-xs text-muted">{{ running() ? 'Running…' : 'Results appear here.' }}</div>
+      } @else if (current(); as current) {
+        <q-query-result-view [result]="current" />
+      }
+    </div>
+  </div>
+</div>

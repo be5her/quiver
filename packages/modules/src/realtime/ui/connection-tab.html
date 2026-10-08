@@ -1,0 +1,68 @@
+@if (loadError(); as error) {
+  <div class="p-4 text-sm text-danger">{{ error }}</div>
+} @else if (summary.value(); as summary) {
+  @let d = draft();
+  <div class="flex flex-col h-full min-h-0" data-testid="realtime-connection-tab">
+    <div class="flex items-center gap-2 px-3 py-2 border-b border-edge shrink-0">
+      <div class="w-56 shrink-0">
+        <input qInput [formField]="connectionForm.name" class="font-medium" aria-label="Connection name" />
+      </div>
+      <span class="text-[10px] font-bold shrink-0" [class]="kind()">{{ isWs() ? 'WS' : 'SSE' }}</span>
+      <span class="size-2 rounded-full shrink-0" [class]="dot()"></span>
+      <span class="text-xs text-muted shrink-0" data-testid="realtime-status">{{ statusLabel[summary.status] }}{{ summary.protocol ? ' · ' + summary.protocol : '' }}{{ summary.lastEventId !== null ? ' · last id ' + summary.lastEventId : '' }}</span>
+      @if (summary.error) {
+        <span class="text-xs text-danger truncate min-w-0" [title]="summary.error" data-testid="realtime-error">{{ summary.error }}</span>
+      }
+      <div class="flex-1 min-w-4"></div>
+      <button qButton size="sm" [variant]="dirty() ? 'secondary' : 'ghost'" [icon]="icons.Save" title="Ctrl+S" (click)="saveAndSay()">Save{{ dirty() ? '*' : '' }}</button>
+    </div>
+    <div class="flex items-center gap-2 px-3 py-2 shrink-0">
+      <q-variable-input
+        [formField]="connectionForm.url"
+        [placeholder]="urlPlaceholder()"
+        inputClass="font-mono"
+        [autofocus]="!d.url"
+        testId="realtime-url"
+        (keydown)="urlKey($event)"
+      />
+      <button qButton [variant]="open() ? 'secondary' : 'primary'" [icon]="open() ? icons.Unplug : icons.Plug" [loading]="busy()" data-testid="realtime-toggle" (click)="toggle()">{{ open() ? 'Disconnect' : 'Connect' }}</button>
+    </div>
+    <q-segmented [(value)]="view" class="shrink-0 px-1">
+      <button qSegment="messages">Messages ({{ summary.messageCount }})</button>
+      <button qSegment="headers">Headers ({{ enabledHeaders() }})</button>
+      <button qSegment="auth">{{ d.auth.type === 'none' ? 'Auth' : 'Auth (' + d.auth.type + ')' }}</button>
+      @if (isWs()) {
+        <button qSegment="saved">Saved ({{ d.messages.length }})</button>
+      }
+      <button qSegment="settings">Settings</button>
+    </q-segmented>
+    <div class="flex-1 min-h-0">
+      @switch (view()) {
+        @case ('messages') {
+          <q-realtime-messages-view [connection]="summary" [savedMessages]="d.messages" (saveMessage)="saveMessage($event)" />
+        }
+        @case ('headers') {
+          <div class="p-2 overflow-y-auto h-full">
+            <q-key-value-editor [formField]="connectionForm.headers" keyPlaceholder="Header" />
+            <p class="text-[11px] text-muted px-1 mt-2">{{ isWs() ? 'Sent with the handshake request.' : 'Sent with the stream request; Accept and Cache-Control are set for you.' }}</p>
+          </div>
+        }
+        @case ('auth') {
+          <div class="p-3 overflow-y-auto h-full">
+            <q-auth-editor [formField]="connectionForm.auth" />
+          </div>
+        }
+        @case ('saved') {
+          @if (isWs()) {
+            <q-realtime-saved-messages [formField]="connectionForm.messages" [connectionId]="d.id" [connected]="summary.status === 'open'" />
+          }
+        }
+        @case ('settings') {
+          <q-realtime-settings-view [form]="connectionForm" (remove)="realtime.deleteConnection(summary)" />
+        }
+      }
+    </div>
+  </div>
+} @else {
+  <div class="flex items-center justify-center h-full"><svg qSpinner></svg></div>
+}
