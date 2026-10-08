@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { generateKeyPairSync } from 'node:crypto';
+import { generateKeyPairSync, sign } from 'node:crypto';
 import { promises as fs, writeSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createServer as createTcpServer } from 'node:net';
@@ -540,6 +540,18 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         'tools.jwt.verify: the secret verifies, another does not, a public key is refused for HS256',
         verified.signatureValid && verified.algorithm === 'HS256' && verified.keyFormat === 'secret' && verified.payload.sub === '1234567890' && !forged.signatureValid && !confused.ok && /shared secret/.test(confused.error.message),
         { verified, forged, confused },
+      );
+      // Electron's BoringSSL reads the key: bare base64 (Keycloak's realm key) and a PKCS#1 key under the "PUBLIC KEY" label both verify.
+      const rsa = generateKeyPairSync('rsa', { modulusLength: 2048 });
+      const data = `${Buffer.from('{"alg":"RS256"}').toString('base64url')}.${Buffer.from('{"sub":"ada"}').toString('base64url')}`;
+      const rsToken = `${data}.${sign('sha256', Buffer.from(data), rsa.privateKey).toString('base64url')}`;
+      const der = (type: 'spki' | 'pkcs1') => rsa.publicKey.export({ type, format: 'der' }).toString('base64');
+      const bare = await run<Verified>('tools.jwt.verify', { token: rsToken, key: der('spki') }, null);
+      const mislabelled = await run<Verified>('tools.jwt.verify', { token: rsToken, key: `-----BEGIN PUBLIC KEY-----\n${der('pkcs1')}\n-----END PUBLIC KEY-----` }, null);
+      check(
+        'tools.jwt.verify: a bare base64 key and a PKCS#1 key labelled PUBLIC KEY verify RS256',
+        bare.signatureValid && bare.keyFormat === 'base64 key' && mislabelled.signatureValid && mislabelled.keyFormat === 'PEM',
+        { bare, mislabelled },
       );
     }
 

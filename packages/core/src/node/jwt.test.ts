@@ -92,6 +92,30 @@ describe('verifyJwt', () => {
     expect(verifyJwt(hs, JSON.stringify({ kty: 'oct', k: Buffer.from('shh').toString('base64url') }))).toMatchObject({ signatureValid: true, keyFormat: 'JWK' });
   });
 
+  it('reads a key by its bytes, whatever its PEM label, with or without the PEM lines', () => {
+    const rs = token({ alg: 'RS256' }, (data) => sign('sha256', data, rsa.privateKey));
+    const spki = rsa.publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+    const pkcs1 = rsa.publicKey.export({ type: 'pkcs1', format: 'der' }).toString('base64');
+    const certificate = CERTIFICATE.replace(/-----[^-]+-----/g, '').replace(/\s+/g, '');
+    const asPublicKey = (body: string) => `-----BEGIN PUBLIC KEY-----\n${body}\n-----END PUBLIC KEY-----`;
+
+    // Keycloak's realm public key, and a JWK's x5c entry.
+    expect(verifyJwt(rs, spki)).toMatchObject({ signatureValid: true, keyFormat: 'base64 key' });
+    expect(verifyJwt(CERTIFICATE_TOKEN, certificate)).toMatchObject({ signatureValid: true, keyFormat: 'certificate' });
+    // Those two wrapped under the wrong label.
+    expect(verifyJwt(rs, asPublicKey(pkcs1))).toMatchObject({ signatureValid: true, keyFormat: 'PEM' });
+    expect(verifyJwt(CERTIFICATE_TOKEN, asPublicKey(certificate))).toMatchObject({ signatureValid: true, keyFormat: 'certificate' });
+    // A PEM copied out of a JSON or .env value, and one squashed onto a line.
+    expect(verifyJwt(rs, pem(rsa.publicKey).trim().replace(/\n/g, '\\n')).signatureValid).toBe(true);
+    expect(verifyJwt(rs, pem(rsa.publicKey).trim().replace(/\n/g, ' ')).signatureValid).toBe(true);
+    // A private key gives its public half.
+    expect(verifyJwt(rs, rsa.privateKey.export({ type: 'pkcs1', format: 'der' }).toString('base64')).signatureValid).toBe(true);
+
+    // Text that only looks like base64 is still a secret.
+    const hs = token({ alg: 'HS256' }, hmac('sha256', 'MySecret'));
+    expect(verifyJwt(hs, 'MySecret')).toMatchObject({ signatureValid: true, keyFormat: 'secret' });
+  });
+
   it('reports a tampered payload as an invalid signature', () => {
     const signed = token({ alg: 'RS256' }, (data) => sign('sha256', data, rsa.privateKey));
     const [header, , signature] = signed.split('.');
@@ -104,7 +128,7 @@ describe('verifyJwt', () => {
     const confused = token({ alg: 'HS256' }, hmac('sha256', pem(rsa.publicKey)));
     expect(() => verifyJwt(confused, pem(rsa.publicKey))).toThrow('HS256 is signed with a shared secret, but the key is an RSA key');
     const rs = token({ alg: 'RS256' }, (data) => sign('sha256', data, rsa.privateKey));
-    expect(() => verifyJwt(rs, 'shh')).toThrow('RS256 needs a public key');
+    expect(() => verifyJwt(rs, 'shh')).toThrow("RS256 needs the issuer's public key: a PEM or base64 key, a certificate, a JWK or a JWK set. The text given is none of those");
     const p384 = generateKeyPairSync('ec', { namedCurve: 'P-384' });
     expect(() => verifyJwt(token({ alg: 'ES256' }, () => Buffer.alloc(64)), pem(p384.publicKey))).toThrow('ES256 needs an EC P-256 key, but the key is an EC P-384 key');
   });

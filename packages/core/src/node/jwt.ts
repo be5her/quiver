@@ -1,4 +1,4 @@
-import { X509Certificate, constants, createHmac, createPublicKey, timingSafeEqual, verify, type KeyObject, type webcrypto } from 'node:crypto';
+import { X509Certificate, constants, createHmac, createPrivateKey, createPublicKey, timingSafeEqual, verify, type KeyObject, type webcrypto } from 'node:crypto';
 import { QuiverError } from '../errors';
 
 type Family = 'hmac' | 'rsa' | 'pss' | 'ec' | 'eddsa';
@@ -38,7 +38,7 @@ export interface JwtVerification {
   algorithm: string;
   /** The signature matches the key. Expiry and not-before are not part of it. */
   signatureValid: boolean;
-  /** How the key was read: `secret`, `PEM`, `certificate`, `JWK` or `JWK set`. */
+  /** How the key was read: `secret`, `PEM`, `base64 key`, `certificate`, `JWK` or `JWK set`. */
   keyFormat: string;
   /** The `kid` of the JWK that was checked, when it has one. */
   kid: string | null;
@@ -63,17 +63,47 @@ function fromJwk(jwk: Record<string, unknown>, format: string): Key {
   }
 }
 
-/** A secret, a PEM key or certificate, a JWK, or a JWK set, as the keys it holds. */
+/** Each way DER can hold a key, tried in turn: whatever the PEM label says, the bytes decide. */
+const DER_READERS: [certificate: boolean, read: (der: Buffer) => KeyObject][] = [
+  [false, (der) => createPublicKey({ key: der, format: 'der', type: 'spki' })],
+  [false, (der) => createPublicKey({ key: der, format: 'der', type: 'pkcs1' })],
+  [true, (der) => new X509Certificate(der).publicKey],
+  [false, (der) => createPublicKey(createPrivateKey({ key: der, format: 'der', type: 'pkcs8' }))],
+  [false, (der) => createPublicKey(createPrivateKey({ key: der, format: 'der', type: 'pkcs1' }))],
+  [false, (der) => createPublicKey(createPrivateKey({ key: der, format: 'der', type: 'sec1' }))],
+];
+
+/**
+ * A key or certificate as base64 DER, with or without PEM lines around it, or null when the text
+ * is not one. Reading the bytes rather than the label accepts an `x5c` certificate or a PKCS#1 key
+ * pasted under "BEGIN PUBLIC KEY", and line breaks kept as `\n` by a JSON or .env value.
+ */
+function readDer(text: string): { key: KeyObject; certificate: boolean } | null {
+  const body = text
+    .replace(/-----(BEGIN|END)[^-]*-----/g, '')
+    .replace(/\\r|\\n/g, '')
+    .replace(/\s+/g, '');
+  // DER starts with a SEQUENCE (0x30), which is "M" in base64.
+  if (!/^M[A-Za-z0-9+/]+={0,2}$/.test(body)) return null;
+  const der = Buffer.from(body, 'base64');
+  for (const [certificate, read] of DER_READERS) {
+    try {
+      return { key: read(der), certificate };
+    } catch {
+      // Not this kind; try the next.
+    }
+  }
+  return null;
+}
+
+/** A secret, a PEM or base64 DER key or certificate, a JWK, or a JWK set, as the keys it holds. */
 function readKeys(text: string, base64Secret: boolean): Key[] {
   const trimmed = text.trim();
   if (!trimmed) throw invalid('Give a secret or a public key to verify against');
   if (trimmed.startsWith('-----BEGIN')) {
-    try {
-      if (trimmed.startsWith('-----BEGIN CERTIFICATE')) return [{ kind: 'public', key: new X509Certificate(trimmed).publicKey, format: 'certificate', kid: null }];
-      return [{ kind: 'public', key: createPublicKey(trimmed), format: 'PEM', kid: null }];
-    } catch (err) {
-      throw invalid(`Cannot read the PEM key: ${(err as Error).message}`);
-    }
+    const read = readDer(trimmed);
+    if (!read) throw invalid('Cannot read the PEM key: what is between the BEGIN and END lines is not a public key, certificate or private key');
+    return [{ kind: 'public', key: read.key, format: read.certificate ? 'certificate' : 'PEM', kid: null }];
   }
   if (trimmed.startsWith('{')) {
     let json: Record<string, unknown>;
@@ -86,6 +116,9 @@ function readKeys(text: string, base64Secret: boolean): Key[] {
     if (typeof json.kty === 'string') return [fromJwk(json, 'JWK')];
     throw invalid('A JWK needs "kty", a JWK set needs "keys"');
   }
+  // Bare base64 DER, like Keycloak's realm public key or a JWK's x5c entry.
+  const read = readDer(trimmed);
+  if (read) return [{ kind: 'public', key: read.key, format: read.certificate ? 'certificate' : 'base64 key', kid: null }];
   return [{ kind: 'secret', secret: base64Secret ? Buffer.from(trimmed, 'base64') : Buffer.from(trimmed, 'utf8'), format: 'secret', kid: null }];
 }
 
@@ -100,7 +133,9 @@ function keyName(key: Key): string {
 /** Why the key cannot check this algorithm, or null when it can. Refusing a public key for HS* stops the classic algorithm confusion. */
 function mismatch(alg: string, spec: Algorithm, key: Key): string | null {
   if (spec.family === 'hmac') return key.kind === 'secret' ? null : `${alg} is signed with a shared secret, but the key is ${keyName(key)}`;
-  if (key.kind === 'secret') return `${alg} needs a public key (PEM, certificate or JWK), not a shared secret`;
+  if (key.kind === 'secret') {
+    return `${alg} needs the issuer's public key: a PEM or base64 key, a certificate, a JWK or a JWK set. The text given is none of those, so it was read as a shared secret`;
+  }
   const type = key.key.asymmetricKeyType;
   const ok =
     spec.family === 'rsa'
