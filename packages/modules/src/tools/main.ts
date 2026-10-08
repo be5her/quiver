@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { QuiverError, defineCommand, defineModule } from '@quiver/core';
+import { QuiverError, defineCommand, defineModule, relativeTime } from '@quiver/core';
+import { JWT_ALGORITHMS, jwtParts, verifyJwt } from '@quiver/core/node';
 import { z } from 'zod';
 
 function parseJson(text: string): unknown {
@@ -90,28 +91,47 @@ function decodeSegment(segment: string): unknown {
   return parseJson(json);
 }
 
+function decodeJwt(token: string) {
+  const parts = jwtParts(token);
+  const header = decodeSegment(parts[0]) as Record<string, unknown>;
+  const payload = decodeSegment(parts[1]) as Record<string, unknown>;
+  const toDate = (v: unknown) => (typeof v === 'number' ? new Date(v * 1000).toISOString() : null);
+  const exp = typeof payload.exp === 'number' ? payload.exp : null;
+  return {
+    header,
+    payload,
+    signature: parts[2],
+    issuedAt: toDate(payload.iat),
+    notBefore: toDate(payload.nbf),
+    expiresAt: toDate(exp),
+    isExpired: exp !== null ? exp * 1000 < Date.now() : null,
+  };
+}
+
 const jwtDecode = defineCommand({
   id: 'tools.jwt.decode',
   title: 'Decode JWT',
-  description: 'Decodes a JSON Web Token without verifying it. Reports expiry.',
+  description: 'Decodes a JSON Web Token without verifying it. Reports expiry. Takes the token alone or an Authorization header value (Bearer or jwt scheme).',
   scope: 'global',
   input: z.object({ token: z.string() }),
-  handler: async ({ token }) => {
-    const parts = token.trim().replace(/^bearer\s+/i, '').split('.');
-    if (parts.length !== 3) throw new QuiverError('INVALID_INPUT', 'A JWT has three dot-separated parts');
-    const header = decodeSegment(parts[0]) as Record<string, unknown>;
-    const payload = decodeSegment(parts[1]) as Record<string, unknown>;
-    const toDate = (v: unknown) => (typeof v === 'number' ? new Date(v * 1000).toISOString() : null);
-    const exp = typeof payload.exp === 'number' ? payload.exp : null;
-    return {
-      header,
-      payload,
-      signature: parts[2],
-      issuedAt: toDate(payload.iat),
-      notBefore: toDate(payload.nbf),
-      expiresAt: toDate(exp),
-      isExpired: exp !== null ? exp * 1000 < Date.now() : null,
-    };
+  handler: async ({ token }) => decodeJwt(token),
+});
+
+const jwtVerify = defineCommand({
+  id: 'tools.jwt.verify',
+  title: 'Verify JWT',
+  description: `Validates a JSON Web Token and decodes it: the signature, then exp and nbf (allowing clockSkewSeconds), then iss when issuer is given. valid is the verdict and problems says what failed; signatureValid is the signature alone. The key is the shared secret for HS256/384/512 (base64 with base64Secret), or for RS, PS, ES and EdDSA a public key, private key or certificate as PEM, base64-wrapped PEM, bare base64 DER, JWK or JWK set (picked by kid). Supported: ${JWT_ALGORITHMS.join(', ')}.`,
+  scope: 'global',
+  input: z.object({
+    token: z.string(),
+    key: z.string(),
+    base64Secret: z.boolean().default(false),
+    clockSkewSeconds: z.number().int().min(0).max(86400).default(0),
+    issuer: z.string().optional(),
+  }),
+  handler: async ({ token, key, base64Secret, clockSkewSeconds, issuer }) => {
+    const decoded = decodeJwt(token);
+    return { ...verifyJwt(token, key, { base64Secret, clockSkewSeconds, issuer: issuer?.trim() || undefined }), ...decoded };
   },
 });
 
@@ -159,32 +179,13 @@ const timestampConvert = defineCommand({
       unixMs: date.getTime(),
       utc: date.toUTCString(),
       local: date.toString(),
-      relative: relative(diff),
+      relative: relativeTime(diff),
       dayOfWeek: date.toLocaleDateString('en-US', { weekday: 'long' }),
     };
   },
 });
 
-function relative(diffMs: number): string {
-  const abs = Math.abs(diffMs);
-  const units: [string, number][] = [
-    ['year', 365 * 24 * 3600e3],
-    ['month', 30 * 24 * 3600e3],
-    ['day', 24 * 3600e3],
-    ['hour', 3600e3],
-    ['minute', 60e3],
-    ['second', 1e3],
-  ];
-  for (const [name, size] of units) {
-    if (abs >= size) {
-      const n = Math.round(abs / size);
-      return `${n} ${name}${n === 1 ? '' : 's'} ${diffMs < 0 ? 'ago' : 'from now'}`;
-    }
-  }
-  return 'now';
-}
-
 export const toolsModule = defineModule({
   id: 'tools',
-  commands: [jsonFormat, jsonMinify, base64Encode, base64Decode, urlEncode, urlDecode, jwtDecode, uuidGenerate, hashDigest, timestampConvert],
+  commands: [jsonFormat, jsonMinify, base64Encode, base64Decode, urlEncode, urlDecode, jwtDecode, jwtVerify, uuidGenerate, hashDigest, timestampConvert],
 });

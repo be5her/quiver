@@ -1,11 +1,28 @@
+import { relativeTime } from '@quiver/core';
 import type { CodeLanguage } from '@quiver/ui';
 
 export interface ToolOption {
   key: string;
   label: string;
-  type: 'select' | 'boolean' | 'number';
+  type: 'select' | 'boolean' | 'number' | 'text';
   choices?: { value: string; label: string }[];
   default: string | boolean | number;
+  /** Text only: shown while empty. An empty text option is left out of the call. */
+  placeholder?: string;
+}
+
+export interface ToolSecondInput {
+  /** Name of the field on `commandId`. */
+  key: 'key';
+  label: string;
+  placeholder?: string;
+  /** Runs instead of the tool's command while this input holds text. */
+  commandId: string;
+}
+
+export interface ToolSummary {
+  ok: boolean;
+  text: string;
 }
 
 export interface ToolDescriptor {
@@ -19,8 +36,23 @@ export interface ToolDescriptor {
   outputLanguage?: CodeLanguage;
   placeholder?: string;
   options?: ToolOption[];
+  /** An optional second input under the first. */
+  secondInput?: ToolSecondInput;
+  /** A one-line verdict over the output, read from the command's result. */
+  summary?: (result: Record<string, unknown>) => ToolSummary | null;
   /** Run on every keystroke instead of on demand. */
   live?: boolean;
+}
+
+/** The JWT tab's verdict once a key is given: valid and when it expires, or what is wrong. */
+function jwtSummary(result: Record<string, unknown>): ToolSummary | null {
+  if (typeof result['valid'] !== 'boolean') return null;
+  const how = `${result['algorithm']}, ${result['keyFormat']}${result['kid'] ? ` "${result['kid']}"` : ''}`;
+  if (!result['valid']) return { ok: false, text: `Invalid (${how}): ${(result['problems'] as string[]).join('; ')}` };
+  const expiresAt = typeof result['expiresAt'] === 'string' ? Date.parse(result['expiresAt']) : null;
+  const left = expiresAt !== null ? expiresAt - Date.now() : null;
+  const expiry = left === null ? '' : left > 0 ? `, expires ${relativeTime(left)}` : `, expired ${relativeTime(left)} but within the clock skew`;
+  return { ok: true, text: `Valid: signature verified (${how})${expiry}` };
 }
 
 export const TOOLS: ToolDescriptor[] = [
@@ -39,7 +71,28 @@ export const TOOLS: ToolDescriptor[] = [
     ],
     live: true,
   },
-  { id: 'jwt', title: 'JWT decode', description: 'Inspect a token and its expiry.', commandId: 'tools.jwt.decode', inputKey: 'token', outputLanguage: 'json', placeholder: 'eyJhbGciOi...', live: true },
+  {
+    id: 'jwt',
+    title: 'JWT',
+    description: 'Decode a token, check its expiry, verify its signature.',
+    commandId: 'tools.jwt.decode',
+    inputKey: 'token',
+    outputLanguage: 'json',
+    placeholder: 'eyJhbGciOi...',
+    secondInput: {
+      key: 'key',
+      label: 'Validate with',
+      placeholder: 'A shared secret (HS256/384/512), or a public key or certificate (RS, PS, ES, EdDSA): PEM, base64-wrapped PEM, base64, JWK or JWK set',
+      commandId: 'tools.jwt.verify',
+    },
+    options: [
+      { key: 'base64Secret', label: 'Secret is base64', type: 'boolean', default: false },
+      { key: 'clockSkewSeconds', label: 'Clock skew (s)', type: 'number', default: 0 },
+      { key: 'issuer', label: 'Issuer', type: 'text', default: '', placeholder: 'any' },
+    ],
+    summary: jwtSummary,
+    live: true,
+  },
   {
     id: 'base64-encode',
     title: 'Base64 encode',
@@ -96,7 +149,9 @@ export function coerce(values: Record<string, string | boolean | number>, option
   for (const opt of options) {
     const v = values[opt.key];
     if (opt.key === 'indent') out[opt.key] = Number(v);
-    else out[opt.key] = v;
+    else if (opt.type === 'text') {
+      if (String(v).trim()) out[opt.key] = String(v).trim();
+    } else out[opt.key] = v;
   }
   return out;
 }
