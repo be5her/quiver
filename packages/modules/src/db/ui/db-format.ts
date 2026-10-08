@@ -1,4 +1,4 @@
-import type { DbKind } from '@quiver/core';
+import { prettyJson, type DbKind } from '@quiver/core';
 import { Database, HardDrive, Zap } from 'lucide';
 import type { IconNode } from '@quiver/ui';
 
@@ -30,10 +30,10 @@ export function formatCell(value: unknown): string {
   }
 }
 
-/** Multi-line, pretty version for the detail strip and copy buttons. */
+/** Multi-line, pretty version for the detail strip and copy buttons. Text holding a JSON object or array is pretty-printed too. */
 export function formatCellFull(value: unknown): string {
   if (value === null || value === undefined) return 'NULL';
-  if (typeof value === 'string') return value;
+  if (typeof value === 'string') return prettyJson(value) ?? value;
   if (typeof value === 'object' && value !== null && '$bytes' in value) return formatCell(value);
   try {
     return JSON.stringify(value, null, 2);

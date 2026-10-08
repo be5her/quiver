@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { QuiverError, defineCommand, defineModule } from '@quiver/core';
+import { JWT_ALGORITHMS, verifyJwt } from '@quiver/core/node';
 import { z } from 'zod';
 
 function parseJson(text: string): unknown {
@@ -90,28 +91,42 @@ function decodeSegment(segment: string): unknown {
   return parseJson(json);
 }
 
+function decodeJwt(token: string) {
+  const parts = token.trim().replace(/^bearer\s+/i, '').split('.');
+  if (parts.length !== 3) throw new QuiverError('INVALID_INPUT', 'A JWT has three dot-separated parts');
+  const header = decodeSegment(parts[0]) as Record<string, unknown>;
+  const payload = decodeSegment(parts[1]) as Record<string, unknown>;
+  const toDate = (v: unknown) => (typeof v === 'number' ? new Date(v * 1000).toISOString() : null);
+  const exp = typeof payload.exp === 'number' ? payload.exp : null;
+  return {
+    header,
+    payload,
+    signature: parts[2],
+    issuedAt: toDate(payload.iat),
+    notBefore: toDate(payload.nbf),
+    expiresAt: toDate(exp),
+    isExpired: exp !== null ? exp * 1000 < Date.now() : null,
+  };
+}
+
 const jwtDecode = defineCommand({
   id: 'tools.jwt.decode',
   title: 'Decode JWT',
   description: 'Decodes a JSON Web Token without verifying it. Reports expiry.',
   scope: 'global',
   input: z.object({ token: z.string() }),
-  handler: async ({ token }) => {
-    const parts = token.trim().replace(/^bearer\s+/i, '').split('.');
-    if (parts.length !== 3) throw new QuiverError('INVALID_INPUT', 'A JWT has three dot-separated parts');
-    const header = decodeSegment(parts[0]) as Record<string, unknown>;
-    const payload = decodeSegment(parts[1]) as Record<string, unknown>;
-    const toDate = (v: unknown) => (typeof v === 'number' ? new Date(v * 1000).toISOString() : null);
-    const exp = typeof payload.exp === 'number' ? payload.exp : null;
-    return {
-      header,
-      payload,
-      signature: parts[2],
-      issuedAt: toDate(payload.iat),
-      notBefore: toDate(payload.nbf),
-      expiresAt: toDate(exp),
-      isExpired: exp !== null ? exp * 1000 < Date.now() : null,
-    };
+  handler: async ({ token }) => decodeJwt(token),
+});
+
+const jwtVerify = defineCommand({
+  id: 'tools.jwt.verify',
+  title: 'Verify JWT',
+  description: `Checks a JSON Web Token's signature and decodes it. The key is the shared secret for HS256/384/512 (base64 with base64Secret), or a PEM public key, certificate, JWK or JWK set (picked by kid) for RS, PS, ES and EdDSA. signatureValid covers the signature only; expiry is reported as isExpired. Supported: ${JWT_ALGORITHMS.join(', ')}.`,
+  scope: 'global',
+  input: z.object({ token: z.string(), key: z.string(), base64Secret: z.boolean().default(false) }),
+  handler: async ({ token, key, base64Secret }) => {
+    const decoded = decodeJwt(token);
+    return { ...verifyJwt(token, key, { base64Secret }), ...decoded };
   },
 });
 
@@ -186,5 +201,5 @@ function relative(diffMs: number): string {
 
 export const toolsModule = defineModule({
   id: 'tools',
-  commands: [jsonFormat, jsonMinify, base64Encode, base64Decode, urlEncode, urlDecode, jwtDecode, uuidGenerate, hashDigest, timestampConvert],
+  commands: [jsonFormat, jsonMinify, base64Encode, base64Decode, urlEncode, urlDecode, jwtDecode, jwtVerify, uuidGenerate, hashDigest, timestampConvert],
 });

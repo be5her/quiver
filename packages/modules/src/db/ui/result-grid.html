@@ -51,7 +51,7 @@
 @if (selected(); as cell) {
   <div class="shrink-0 border-t border-edge bg-surface flex items-start gap-2 px-2 py-1 max-h-32">
     <span class="text-[10px] uppercase tracking-wide text-muted shrink-0 pt-1">{{ columns()[cell.col]?.name }} · row {{ cell.row + 1 }}</span>
-    <pre class="flex-1 min-w-0 overflow-auto text-xs font-mono whitespace-pre-wrap break-all max-h-28">{{ selectedText() }}</pre>
+    <pre class="flex-1 min-w-0 overflow-auto text-xs font-mono whitespace-pre-wrap break-all max-h-28" data-testid="db-cell-detail">{{ selectedText() }}</pre>
     <button qIconButton label="Copy value" size="sm" (click)="copySelected()"><svg [qIcon]="icons.Copy" class="size-3.5"></svg></button>
   </div>
 }

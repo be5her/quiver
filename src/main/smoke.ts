@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { generateKeyPairSync } from 'node:crypto';
 import { promises as fs, writeSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createServer as createTcpServer } from 'node:net';
@@ -526,12 +527,21 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     const missing = await host.invoke('api.request.send', { request: { ...saved, url: '{{nope}}/x' } }, { caller: 'ui', workspaceId: ws.id });
     check('unresolved variable is reported', !missing.ok && missing.error.code === 'UNRESOLVED_VARIABLES');
 
-    const jwt = await run<{ payload: { sub: string } }>(
-      'tools.jwt.decode',
-      { token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c' },
-      null,
-    );
+    const jwtToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c';
+    const jwt = await run<{ payload: { sub: string } }>('tools.jwt.decode', { token: jwtToken }, null);
     check('tools.jwt.decode', jwt.payload.sub === '1234567890');
+    {
+      type Verified = { signatureValid: boolean; algorithm: string; keyFormat: string; payload: { sub: string } };
+      const verified = await run<Verified>('tools.jwt.verify', { token: jwtToken, key: 'your-256-bit-secret' }, null);
+      const forged = await run<Verified>('tools.jwt.verify', { token: jwtToken, key: 'not-the-secret' }, null);
+      const publicPem = generateKeyPairSync('ec', { namedCurve: 'P-256' }).publicKey.export({ type: 'spki', format: 'pem' }).toString();
+      const confused = await host.invoke('tools.jwt.verify', { token: jwtToken, key: publicPem }, { caller: 'mcp', workspaceId: null });
+      check(
+        'tools.jwt.verify: the secret verifies, another does not, a public key is refused for HS256',
+        verified.signatureValid && verified.algorithm === 'HS256' && verified.keyFormat === 'secret' && verified.payload.sub === '1234567890' && !forged.signatureValid && !confused.ok && /shared secret/.test(confused.error.message),
+        { verified, forged, confused },
+      );
+    }
 
 
     // ---------- databases: SQLite through node:sqlite ----------
@@ -2208,6 +2218,47 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
           { created, dropped },
         );
       }
+      // A long table list gets a filter (Enter opens the first match, Escape clears it), and a cell holding JSON text shows it formatted.
+      {
+        const sidebarTables = async () =>
+          ((await js(`[...document.querySelectorAll('aside [role=button]')].map((r) => r.textContent.trim().split(/\\s+/)[0])`)) as string[]).filter((name) => name === 'users' || name.startsWith('smoke_'));
+        const filterInput = `document.querySelector('[data-testid=db-table-filter]')`;
+        const fillers = Array.from({ length: 10 }, (_, i) => `smoke_filter_${String(i).padStart(2, '0')}`);
+        await run(
+          'db.query.run',
+          {
+            connectionId: sqlite.id,
+            query: [...fillers.map((t) => `CREATE TABLE ${t} (id INTEGER PRIMARY KEY);`), 'CREATE TABLE smoke_json (id INTEGER PRIMARY KEY, doc TEXT);', `INSERT INTO smoke_json (doc) VALUES ('{"id":12345678901234567890,"tags":["a","b"]}');`].join('\n'),
+          },
+          ws.id,
+        );
+        await wait(1000);
+        const placeholder = await js(`${filterInput}?.placeholder ?? null`);
+        await js(`(() => { const el = ${filterInput}; el.value = 'JSON'; el.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+        await wait(200);
+        const matching = await sidebarTables();
+        await shot('05a-table-filter-light');
+        await js(`${filterInput}.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`);
+        await wait(1200);
+        const clickedJson = await js(`(() => { const cell = [...document.querySelectorAll('[role=gridcell]')].find((c) => c.offsetParent !== null && c.textContent.startsWith('{"id"')); if (cell) cell.click(); return Boolean(cell); })()`);
+        await wait(200);
+        const detail = await js(`[...document.querySelectorAll('[data-testid=db-cell-detail]')].find((p) => p.offsetParent !== null)?.textContent ?? null`);
+        await shot('05a-table-json-cell-light');
+        await js(`${filterInput}.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+        await wait(200);
+        const cleared = await sidebarTables();
+        check(
+          'ui: a long table list filters by name and Enter opens the first match',
+          placeholder === 'Filter 12 tables' && matching.join() === 'smoke_json' && clickedJson === true && cleared.includes('users') && cleared.includes('smoke_filter_09'),
+          { placeholder, matching, clickedJson, cleared },
+        );
+        check('ui: a cell holding JSON text shows it formatted, numbers as written', detail === '{\n  "id": 12345678901234567890,\n  "tags": [\n    "a",\n    "b"\n  ]\n}', detail);
+        await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+        await run('db.query.run', { connectionId: sqlite.id, query: [...fillers, 'smoke_json'].map((t) => `DROP TABLE ${t};`).join('\n') }, ws.id);
+        await wait(1000);
+        const filterGone = await js(`!${filterInput}`);
+        check('ui: the filter goes away once the list is short again', filterGone === true && (await sidebarTables()).join() === 'users', filterGone);
+      }
       // The WHERE filter completes the table's columns: Enter picks one while the list is open, then applies the filter.
       const typeText = (text: string) => {
         for (const ch of text) win.webContents.sendInputEvent({ type: 'char', keyCode: ch });
@@ -2292,6 +2343,35 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         );
       }
       await shot('08-redis-dark');
+
+      // Tools: the JWT tab decodes the token as it is pasted and verifies it once a key is given.
+      {
+        const clickedTools = await js(`(() => { const btn = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.title || '') === 'Tools'); if (btn) btn.click(); return Boolean(btn); })()`);
+        await wait(300);
+        await js(`(() => { const btn = [...document.querySelectorAll('aside button')].find((b) => b.textContent.includes('verify its signature')); if (btn) btn.click(); })()`);
+        await wait(500);
+        const pane = `[...document.querySelectorAll('[data-tab-type="tools.tool"]')].find((el) => !el.classList.contains('hidden'))`;
+        const typeInto = (editor: string, text: string) =>
+          js(`(() => { const c = ${pane}?.querySelector('${editor} .cm-content'); if (!c) return false; c.focus(); document.execCommand('insertText', false, ${JSON.stringify(text)}); return true; })()`);
+        const summary = () => js(`${pane}?.querySelector('[data-testid=tool-summary]')?.textContent.trim() ?? null`);
+        const typedToken = await typeInto(':scope', jwtToken);
+        await wait(500);
+        const decoded = { output: await js(`[...(${pane}?.querySelectorAll('.cm-content') ?? [])].at(-1)?.textContent ?? ''`), summary: await summary() };
+        await typeInto('[data-testid=tool-second-input]', 'your-256-bit-secret');
+        await wait(500);
+        const verified = await summary();
+        await shot('08b-jwt-verify-dark');
+        await typeInto('[data-testid=tool-second-input]', '!');
+        await wait(500);
+        const mismatched = await summary();
+        check(
+          'ui: the JWT tab decodes the token, then verifies it once a secret is given',
+          clickedTools === true && typedToken === true && typeof decoded.output === 'string' && decoded.output.includes('1234567890') && decoded.summary === null && verified === 'Signature verified (HS256, secret)' && mismatched === 'Signature does not match (HS256, secret)',
+          { decoded, verified, mismatched },
+        );
+        await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+        await wait(200);
+      }
 
       // Teleport module: one section per cluster, pinned resources from both, tunnels, kube clusters.
       const clickedTeleport = await js(

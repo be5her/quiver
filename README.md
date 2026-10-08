@@ -28,7 +28,7 @@ Each feature is a module with its own README that goes into the details: what it
 | MCP inspector | Connect to any MCP server, browse and call its tools, resources and prompts, and watch the JSON-RPC traffic. Record what agents call on Quiver's own server. | [packages/modules/src/mcp](packages/modules/src/mcp/README.md) |
 | Env files | Every `.env` of the project in one place: masked secrets, edits that keep the file's formatting, compare with the example, profiles, history. | [packages/modules/src/env](packages/modules/src/env/README.md) |
 | Todo | A plain list for the day, per workspace and per machine. | [packages/modules/src/todo](packages/modules/src/todo/README.md) |
-| Tools | JSON format, JWT decode, base64, URL encode, hash, UUID, timestamp. | [packages/modules/src/tools](packages/modules/src/tools/README.md) |
+| Tools | JSON format, JWT decode and signature check, base64, URL encode, hash, UUID, timestamp. | [packages/modules/src/tools](packages/modules/src/tools/README.md) |
 
 Around the modules, the shell gives you a workspace model (several folders open at once, per-workspace tabs restored on return and after a restart, tabs, workspaces and the activity bar arranged by dragging), a command palette (`Ctrl+K`), light and dark themes in six brand palettes, and the MCP server below. [src/renderer/README.md](src/renderer/README.md) describes the shell, [packages/core/README.md](packages/core/README.md) the engine and where everything is stored.
 

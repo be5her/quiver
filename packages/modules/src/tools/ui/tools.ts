@@ -8,6 +8,20 @@ export interface ToolOption {
   default: string | boolean | number;
 }
 
+export interface ToolSecondInput {
+  /** Name of the field on `commandId`. */
+  key: 'key';
+  label: string;
+  placeholder?: string;
+  /** Runs instead of the tool's command while this input holds text. */
+  commandId: string;
+}
+
+export interface ToolSummary {
+  ok: boolean;
+  text: string;
+}
+
 export interface ToolDescriptor {
   id: string;
   title: string;
@@ -19,6 +33,10 @@ export interface ToolDescriptor {
   outputLanguage?: CodeLanguage;
   placeholder?: string;
   options?: ToolOption[];
+  /** An optional second input under the first. */
+  secondInput?: ToolSecondInput;
+  /** A one-line verdict over the output, read from the command's result. */
+  summary?: (result: Record<string, unknown>) => ToolSummary | null;
   /** Run on every keystroke instead of on demand. */
   live?: boolean;
 }
@@ -39,7 +57,27 @@ export const TOOLS: ToolDescriptor[] = [
     ],
     live: true,
   },
-  { id: 'jwt', title: 'JWT decode', description: 'Inspect a token and its expiry.', commandId: 'tools.jwt.decode', inputKey: 'token', outputLanguage: 'json', placeholder: 'eyJhbGciOi...', live: true },
+  {
+    id: 'jwt',
+    title: 'JWT',
+    description: 'Decode a token, check its expiry, verify its signature.',
+    commandId: 'tools.jwt.decode',
+    inputKey: 'token',
+    outputLanguage: 'json',
+    placeholder: 'eyJhbGciOi...',
+    secondInput: {
+      key: 'key',
+      label: 'Verify the signature with',
+      placeholder: 'A shared secret (HS256/384/512), or a PEM public key, certificate, JWK or JWK set (RS, PS, ES, EdDSA)',
+      commandId: 'tools.jwt.verify',
+    },
+    options: [{ key: 'base64Secret', label: 'Secret is base64', type: 'boolean', default: false }],
+    summary: (result) =>
+      typeof result['signatureValid'] === 'boolean'
+        ? { ok: result['signatureValid'], text: `${result['signatureValid'] ? 'Signature verified' : 'Signature does not match'} (${result['algorithm']}, ${result['keyFormat']}${result['kid'] ? ` "${result['kid']}"` : ''})` }
+        : null,
+    live: true,
+  },
   {
     id: 'base64-encode',
     title: 'Base64 encode',
