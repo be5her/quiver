@@ -120,7 +120,7 @@ const jwtDecode = defineCommand({
 const jwtVerify = defineCommand({
   id: 'tools.jwt.verify',
   title: 'Verify JWT',
-  description: `Validates a JSON Web Token and decodes it: the signature, then exp and nbf (allowing clockSkewSeconds), then iss when issuer is given. valid is the verdict and problems says what failed; signatureValid is the signature alone. The key is the shared secret for HS256/384/512 (base64 with base64Secret), or for RS, PS, ES and EdDSA a public key, private key or certificate as PEM, base64-wrapped PEM, bare base64 DER, JWK or JWK set (picked by kid). Supported: ${JWT_ALGORITHMS.join(', ')}.`,
+  description: `Validates a JSON Web Token and decodes it: the signature, then exp and nbf (allowing clockSkewSeconds), then iss and aud when issuer and audience are given (aud may be a string or an array). valid is the verdict and problems says what failed; signatureValid is the signature alone. The key is the shared secret for HS256/384/512 (base64 with base64Secret), or for RS, PS, ES and EdDSA a public key, private key or certificate as PEM, base64-wrapped PEM, bare base64 DER, JWK or JWK set (picked by kid). Supported: ${JWT_ALGORITHMS.join(', ')}.`,
   scope: 'global',
   input: z.object({
     token: z.string(),
@@ -128,10 +128,11 @@ const jwtVerify = defineCommand({
     base64Secret: z.boolean().default(false),
     clockSkewSeconds: z.number().int().min(0).max(86400).default(0),
     issuer: z.string().optional(),
+    audience: z.string().optional(),
   }),
-  handler: async ({ token, key, base64Secret, clockSkewSeconds, issuer }) => {
+  handler: async ({ token, key, base64Secret, clockSkewSeconds, issuer, audience }) => {
     const decoded = decodeJwt(token);
-    return { ...verifyJwt(token, key, { base64Secret, clockSkewSeconds, issuer: issuer?.trim() || undefined }), ...decoded };
+    return { ...verifyJwt(token, key, { base64Secret, clockSkewSeconds, issuer: issuer?.trim() || undefined, audience: audience?.trim() || undefined }), ...decoded };
   },
 });
 

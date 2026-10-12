@@ -568,10 +568,17 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       type Validated = { valid: boolean; problems: string[]; keyFormat: string; signatureValid: boolean };
       const accepted = await run<Validated>('tools.jwt.verify', { token: `jwt ${authServer.token}`, key: authServer.key, issuer: 'authservice', clockSkewSeconds: 30 }, null);
       const otherIssuer = await run<Validated>('tools.jwt.verify', { token: authServer.token, key: authServer.key, issuer: 'someone-else' }, null);
+      const audienceAsked = await run<Validated>('tools.jwt.verify', { token: authServer.token, key: authServer.key, audience: 'checkout' }, null);
       check(
-        'tools.jwt.verify: an auth-server token is valid against its base64-wrapped public key, and invalid for another issuer',
-        accepted.valid && accepted.keyFormat === 'base64 PEM' && !otherIssuer.valid && otherIssuer.signatureValid && otherIssuer.problems.join() === 'issuer is "authservice", expected "someone-else"',
-        { accepted, otherIssuer },
+        'tools.jwt.verify: an auth-server token is valid against its base64-wrapped public key, and invalid for another issuer or a required audience',
+        accepted.valid &&
+          accepted.keyFormat === 'base64 PEM' &&
+          !otherIssuer.valid &&
+          otherIssuer.signatureValid &&
+          otherIssuer.problems.join() === 'issuer is "authservice", expected "someone-else"' &&
+          !audienceAsked.valid &&
+          audienceAsked.problems.join() === 'no audience, expected "checkout"',
+        { accepted, otherIssuer, audienceAsked },
       );
     }
 
@@ -2412,19 +2419,26 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         // The auth-server case: "jwt <token>" pasted with the base64-wrapped public key and the issuer pinned.
         await typeInto(':scope', `jwt ${authServer.token}`, true);
         await typeInto('[data-testid=tool-second-input]', authServer.key, true);
-        await js(`(() => { const el = ${pane}?.querySelector('[data-testid=tool-option-issuer]'); el.value = 'authservice'; el.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+        const setOption = (key: string, value: string) =>
+          js(`(() => { const el = ${pane}?.querySelector('[data-testid=tool-option-${key}]'); el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+        await setOption('issuer', 'authservice');
         await wait(600);
         const authValid = await summary();
         await shot('08c-jwt-auth-server-dark');
-        await js(`(() => { const el = ${pane}?.querySelector('[data-testid=tool-option-issuer]'); el.value = 'someone-else'; el.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+        await setOption('issuer', 'someone-else');
         await wait(600);
         const authWrongIssuer = await summary();
+        await setOption('issuer', 'authservice');
+        await setOption('audience', 'checkout');
+        await wait(600);
+        const authNoAudience = await summary();
         check(
-          'ui: the JWT tab validates an auth-server token against its base64-wrapped key and pinned issuer',
+          'ui: the JWT tab validates an auth-server token against its base64-wrapped key, pinned issuer and audience',
           typeof authValid === 'string' &&
             /^Valid: signature verified \(RS256, base64 PEM\), expires \d+ minutes from now$/.test(authValid) &&
-            authWrongIssuer === 'Invalid (RS256, base64 PEM): issuer is "authservice", expected "someone-else"',
-          { authValid, authWrongIssuer },
+            authWrongIssuer === 'Invalid (RS256, base64 PEM): issuer is "authservice", expected "someone-else"' &&
+            authNoAudience === 'Invalid (RS256, base64 PEM): no audience, expected "checkout"',
+          { authValid, authWrongIssuer, authNoAudience },
         );
         await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
         await wait(200);

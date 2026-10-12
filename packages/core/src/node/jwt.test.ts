@@ -154,6 +154,19 @@ describe('verifyJwt', () => {
     expect(verifyJwt(early, key, { now, clockSkewSeconds: 120 }).valid).toBe(true);
   });
 
+  it('checks the audience, as a string or one of an array', () => {
+    const signedWith = (payload: Record<string, unknown>) => token({ alg: 'RS256' }, (data) => sign('sha256', data, rsa.privateKey), payload);
+    const key = pem(rsa.publicKey);
+
+    expect(verifyJwt(signedWith({ aud: 'checkout' }), key, { audience: 'checkout' }).valid).toBe(true);
+    expect(verifyJwt(signedWith({ aud: ['portal', 'checkout'] }), key, { audience: 'checkout' }).valid).toBe(true);
+    expect(verifyJwt(signedWith({ aud: 'portal' }), key, { audience: 'checkout' })).toMatchObject({ valid: false, signatureValid: true, problems: ['audience is "portal", expected "checkout"'] });
+    expect(verifyJwt(signedWith({ aud: ['portal', 'admin'] }), key, { audience: 'checkout' }).problems).toEqual(['audience is "portal", "admin", expected "checkout"']);
+    expect(verifyJwt(signedWith({}), key, { audience: 'checkout' }).problems).toEqual(['no audience, expected "checkout"']);
+    // Unset, any audience (or none) passes.
+    expect(verifyJwt(signedWith({ aud: 'portal' }), key).valid).toBe(true);
+  });
+
   // A common auth-server contract: RS256 signed by the auth server, checked against JWT_RSA_PUBLIC_KEY,
   // which is the SubjectPublicKeyInfo PEM base64-encoded once more, sent as "Authorization: jwt <token>".
   it('validates an auth-server token against its base64-wrapped public key', () => {

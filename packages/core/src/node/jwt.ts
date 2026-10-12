@@ -36,7 +36,7 @@ export const JWT_ALGORITHMS = Object.keys(ALGORITHMS);
 const CURVE_NAMES: Record<string, string> = { prime256v1: 'P-256', secp384r1: 'P-384', secp521r1: 'P-521', secp256k1: 'secp256k1', ed25519: 'Ed25519', ed448: 'Ed448' };
 
 export interface JwtVerification {
-  /** The signature matches, the token is within exp and nbf, and the issuer is the one asked for. */
+  /** The signature matches, the token is within exp and nbf, and the issuer and audience are the ones asked for. */
   valid: boolean;
   /** What makes it invalid, in words; empty when valid. */
   problems: string[];
@@ -56,6 +56,8 @@ export interface JwtVerifyOptions {
   clockSkewSeconds?: number;
   /** The `iss` the token must carry. Not checked when unset. */
   issuer?: string;
+  /** An audience the token's `aud` must name (a string, or one of an array). Not checked when unset. */
+  audience?: string;
   /** The time to check exp and nbf against, in milliseconds. Defaults to now. */
   now?: number;
 }
@@ -91,7 +93,7 @@ function decodePart(part: string, name: string): Record<string, unknown> {
   throw invalid(`The JWT ${name} is not base64url-encoded JSON`);
 }
 
-/** Why the claims make the token invalid at `now`: expired, not yet valid, another issuer. */
+/** Why the claims make the token invalid at `now`: expired, not yet valid, another issuer or audience. */
 function claimProblems(payload: Record<string, unknown>, options: JwtVerifyOptions): string[] {
   const now = options.now ?? Date.now();
   const skew = (options.clockSkewSeconds ?? 0) * 1000;
@@ -104,6 +106,12 @@ function claimProblems(payload: Record<string, unknown>, options: JwtVerifyOptio
   }
   if (options.issuer !== undefined && payload.iss !== options.issuer) {
     problems.push(typeof payload.iss === 'string' ? `issuer is "${payload.iss}", expected "${options.issuer}"` : `no issuer, expected "${options.issuer}"`);
+  }
+  if (options.audience !== undefined) {
+    const audiences = Array.isArray(payload.aud) ? payload.aud : payload.aud === undefined ? [] : [payload.aud];
+    if (!audiences.includes(options.audience)) {
+      problems.push(audiences.length ? `audience is ${audiences.map((a) => JSON.stringify(a)).join(', ')}, expected "${options.audience}"` : `no audience, expected "${options.audience}"`);
+    }
   }
   return problems;
 }
@@ -244,7 +252,7 @@ function signatureMatches(spec: Algorithm, key: Key, data: Buffer, signature: Bu
 
 /**
  * Validates a JWT the way a server does: the signature, then exp and nbf (with `clockSkewSeconds`
- * of leeway), then `iss` when `issuer` is given. The key is an HMAC secret (raw, or base64 with
+ * of leeway), then `iss` and `aud` when `issuer` and `audience` are given. The key is an HMAC secret (raw, or base64 with
  * `base64Secret`), a public key, private key or certificate (PEM, base64-wrapped PEM or bare base64
  * DER), a JWK, or a JWK set (the entry with the token's `kid`, or each one in turn when the token
  * has none). Throws for a token or key it cannot check; a token that fails a check comes back with

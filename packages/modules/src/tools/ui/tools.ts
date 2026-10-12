@@ -89,6 +89,7 @@ export const TOOLS: ToolDescriptor[] = [
       { key: 'base64Secret', label: 'Secret is base64', type: 'boolean', default: false },
       { key: 'clockSkewSeconds', label: 'Clock skew (s)', type: 'number', default: 0 },
       { key: 'issuer', label: 'Issuer', type: 'text', default: '', placeholder: 'any' },
+      { key: 'audience', label: 'Audience', type: 'text', default: '', placeholder: 'any' },
     ],
     summary: jwtSummary,
     live: true,
