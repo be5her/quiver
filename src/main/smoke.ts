@@ -3466,7 +3466,8 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         `(() => { const btn = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.title || '') === 'Env files'); if (btn) btn.click(); return Boolean(btn); })()`,
       );
       check('ui: env files module button', clickedEnvModule === true);
-      await wait(1200);
+      // The list waits on git status for every file; give it time rather than a fixed pause.
+      await until(async () => Number(await js(`document.querySelectorAll('[data-testid=env-file]').length`)) >= 7, 10_000);
       const envRows = await js(`[...document.querySelectorAll('[data-testid=env-file]')].map((r) => [r.getAttribute('data-path'), r.getAttribute('data-kind'), r.getAttribute('data-warning')])`);
       check(
         'ui: env file rows show every file with its kind and git warning',
