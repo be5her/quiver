@@ -1,4 +1,4 @@
-import { logLevelTone, type LogLevelTone, type LogsSession } from '@quiver/core';
+import { logLevelTone, prettyJson, type LogLevelTone, type LogsSession } from '@quiver/core';
 import type { CodeLanguage } from '@quiver/ui';
 
 const TONE_TEXT: Record<LogLevelTone, string> = {
@@ -61,16 +61,10 @@ export function dayTime(iso: string): string {
   return `${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}, ${clockTime(iso)}`;
 }
 
-/** A message for the detail pane: indented when it is JSON, as it is otherwise. */
+/** A message for the detail pane: indented when it is JSON, with its numbers as written (a 64-bit id is not rounded), as it is otherwise. */
 export function formatMessage(text: string): { text: string; language: CodeLanguage } {
-  if (/^\s*[[{]/.test(text)) {
-    try {
-      return { text: JSON.stringify(JSON.parse(text), null, 2), language: 'json' };
-    } catch {
-      // Not JSON after all.
-    }
-  }
-  return { text, language: 'text' };
+  const json = prettyJson(text);
+  return json === null ? { text, language: 'text' } : { text: json, language: 'json' };
 }
 
 /** One line for the list: whitespace runs folded, long messages cut. */
