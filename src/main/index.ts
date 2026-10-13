@@ -8,6 +8,7 @@ import { registerIpc } from './ipc';
 import { runSmokeTest } from './smoke';
 import { runUpdateSmoke } from './smoke-update';
 import { Updater } from './updater';
+import { ElectronWebSessions } from './web-sessions';
 import { createMainWindow } from './window';
 
 process.env.QUIVER_VERSION = app.getVersion();
@@ -96,6 +97,8 @@ async function main(): Promise<void> {
     pickSavePath,
     revealFolder: process.env.QUIVER_SMOKE ? undefined : revealFolder,
     updates,
+    // The smoke signs in against a local fake that needs no hands, so its window stays hidden.
+    web: new ElectronWebSessions({ show: !process.env.QUIVER_SMOKE }),
   });
   registerIpc(host);
   await host.start();

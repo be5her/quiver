@@ -20,6 +20,7 @@ export * from './models/mcp';
 export * from './models/mcp-recording';
 export * from './models/env';
 export * from './models/todo';
+export * from './models/logs';
 export * from './sql';
 export * from './palettes';
 export { defaultGlobalConfig, DEFAULT_MCP_PORT } from './defaults';

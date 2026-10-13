@@ -17,6 +17,7 @@ import {
   type SecretsApi,
   type UpdateState,
   type UpdatesApi,
+  type WebSessionsApi,
   type WorkspaceApi,
 } from '@quiver/core';
 import { GlobalStore, WorkspaceManager, workspaceIdFor, type WorkspaceSession } from '@quiver/core/node';
@@ -37,6 +38,8 @@ export interface HostOptions {
   revealFolder?(folder: string): Promise<void>;
   /** In-app updates; absent in development and smoke runs. */
   updates?: UpdatesApi;
+  /** Browser sessions for web sign-ins (Grafana). */
+  web?: WebSessionsApi;
 }
 
 export interface InvokeOptions {
@@ -88,6 +91,7 @@ export class Host {
         pickFolder: opts.pickFolder,
       },
       secrets: opts.secrets,
+      web: opts.web,
       emit: (event, payload) => this.emit(event, payload),
       dialogs: opts.pickFile ? { pickFile: opts.pickFile } : undefined,
     };
