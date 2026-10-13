@@ -1,8 +1,8 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
-import { QuiverError, qualifiedName, quoteIdentifier, splitStatements, type DbColumn, type DbConnection, type DbIndex, type DbQueryResult, type DbTable, type DbTableDetail, type DbTableRows } from '@quiver/core';
-import { emptyResult, normalizeValue, type Driver, type RunOptions, type TableRowsOptions } from './types';
+import { QuiverError, qualifiedName, quoteIdentifier, splitStatements, type DbColumn, type DbConnection, type DbForeignKey, type DbIndex, type DbQueryResult, type DbTable, type DbTableColumns, type DbTableDetail, type DbTableRows } from '@quiver/core';
+import { columnsEntry, emptyResult, normalizeValue, type Driver, type RunOptions, type TableRowsOptions } from './types';
 
 interface ColumnMeta {
   name: string;
@@ -110,7 +110,48 @@ export class SqliteDriver implements Driver {
     }));
     const master = schema ? `${schema}sqlite_master` : 'sqlite_master';
     const ddl = this.all(`SELECT sql FROM ${master} WHERE name = ?`, name)[0]?.sql;
-    return { name, database: database ?? 'main', columns, indexes, ddl: ddl ? String(ddl) : null };
+    const primaryKey = info
+      .filter((r) => Number(r.pk) > 0)
+      .sort((a, b) => Number(a.pk) - Number(b.pk))
+      .map((r) => String(r.name));
+    const dbName = database ?? 'main';
+    const foreignKeys = this.foreignKeysOf(name, schema, dbName);
+    const referencedBy: DbForeignKey[] = [];
+    for (const other of await this.tables(database)) {
+      if (other.type !== 'table') continue;
+      referencedBy.push(...this.foreignKeysOf(other.name, schema, dbName).filter((k) => k.refTable === name));
+    }
+    return { name, database: dbName, columns, primaryKey, indexes, foreignKeys, referencedBy, ddl: ddl ? String(ddl) : null };
+  }
+
+  /** `PRAGMA foreign_key_list`, grouped by key id; the referenced table is in the same file. */
+  private foreignKeysOf(table: string, schema: string, dbName: string): DbForeignKey[] {
+    const keys = new Map<number, DbForeignKey>();
+    let rows: Record<string, unknown>[];
+    try {
+      rows = this.all(`PRAGMA ${schema}foreign_key_list(${quoteIdentifier('sqlite', table)})`);
+    } catch {
+      return [];
+    }
+    for (const r of rows) {
+      const id = Number(r.id);
+      const key = keys.get(id) ?? { name: `fk_${table}_${id}`, database: dbName, table, columns: [], refDatabase: dbName, refTable: String(r.table), refColumns: [] };
+      key.columns.push(String(r.from));
+      key.refColumns.push(r.to === null || r.to === undefined ? 'rowid' : String(r.to));
+      keys.set(id, key);
+    }
+    return [...keys.values()];
+  }
+
+  async columns(database?: string | null): Promise<DbTableColumns[]> {
+    const schema = database && database !== 'main' ? `${quoteIdentifier('sqlite', database)}.` : '';
+    return (await this.tables(database)).map((t) =>
+      columnsEntry(
+        t.name,
+        t.type,
+        this.all(`PRAGMA ${schema}table_info(${quoteIdentifier('sqlite', t.name)})`).map((r) => ({ name: String(r.name), type: String(r.type ?? '') })),
+      ),
+    );
   }
 
   async run(query: string, options: RunOptions): Promise<DbQueryResult[]> {

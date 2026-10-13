@@ -9,17 +9,22 @@ import { promisify } from 'node:util';
 import type { BrowserWindow } from 'electron';
 import { buildSchema, graphql as executeGraphql } from 'graphql';
 import type { WebSocket as WsSocket } from 'ws';
-import { DEFAULT_PALETTE, REDACTED, capabilityLabels, contentText, expandUriTemplate, resolvePalette, skeletonFromSchema } from '@quiver/core';
+import { DEFAULT_PALETTE, REDACTED, capabilityLabels, contentText, expandUriTemplate, parseConnectionUrl, resolvePalette, skeletonFromSchema } from '@quiver/core';
 import type {
   ApiRequest,
   ApiResponse,
   GraphqlSchemaDoc,
   DbConnectionSummary,
+  DbExportResult,
+  DbSchemaMatch,
+  DbTableApplyResult,
+  DbTableColumns,
   DbConnectionTest,
   DbHistoryEntry,
   DbQueryResult,
   DbTable,
   DbTableDetail,
+  RedisInfo,
   DbTableRows,
   EnvBackup,
   EnvDiff,
@@ -629,6 +634,96 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     const savedQueries = await run<SavedQuery[]>('db.query.list', {}, ws.id);
     check('db: saved queries', savedQueries.some((q) => q.id === savedQuery.id && q.name === 'all users'));
 
+    // Foreign keys in both directions, the columns overview and the schema search.
+    await run(
+      'db.query.run',
+      { connectionId: sqlite.id, query: `CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), total REAL); INSERT INTO orders (user_id, total) VALUES (1, 9.5), (2, 20);`, record: false },
+      ws.id,
+    );
+    const ordersDetail = await run<DbTableDetail>('db.schema.table', { connectionId: sqlite.id, table: 'orders' }, ws.id);
+    const usersDetail = await run<DbTableDetail>('db.schema.table', { connectionId: sqlite.id, table: 'users' }, ws.id);
+    check(
+      'db: schema.table reports the primary key and foreign keys both ways',
+      ordersDetail.primaryKey.join() === 'id' &&
+        ordersDetail.foreignKeys.length === 1 &&
+        ordersDetail.foreignKeys[0].columns.join() === 'user_id' &&
+        ordersDetail.foreignKeys[0].refTable === 'users' &&
+        ordersDetail.foreignKeys[0].refColumns.join() === 'id' &&
+        usersDetail.referencedBy.some((k) => k.table === 'orders' && k.columns.join() === 'user_id'),
+      { orders: ordersDetail.foreignKeys, users: usersDetail.referencedBy },
+    );
+    const overview = await run<DbTableColumns[]>('db.schema.columns', { connectionId: sqlite.id }, ws.id);
+    check('db: schema.columns lists every table with its columns', overview.find((t) => t.name === 'users')?.columns.map((c) => c.name).join() === 'id,name,email' && overview.some((t) => t.name === 'orders'), overview);
+    const found = await run<{ matches: DbSchemaMatch[]; errors: unknown[] }>('db.schema.search', { query: 'mail' }, ws.id);
+    check('db: schema.search finds columns across connections', found.matches.some((m) => m.table === 'users' && m.column === 'email' && m.connectionId === sqlite.id) && found.errors.length === 0, found);
+
+    // Row edits: a preview, then insert, update and delete in one transaction, and a rollback when a key matches two rows.
+    const preview = await run<DbTableApplyResult>(
+      'db.table.apply',
+      { connectionId: sqlite.id, table: 'users', preview: true, edits: [{ kind: 'update', key: { id: 1 }, values: { name: 'Ada L.' } }] },
+      ws.id,
+    );
+    check('db: table.apply preview returns the statements without running them', !preview.applied && preview.statements.join() === `UPDATE "users" SET "name" = 'Ada L.' WHERE "id" = 1`, preview);
+    const applied = await run<DbTableApplyResult>(
+      'db.table.apply',
+      {
+        connectionId: sqlite.id,
+        table: 'users',
+        edits: [
+          { kind: 'insert', values: { name: 'Grace', email: 'grace@example.com' } },
+          { kind: 'update', key: { id: 2 }, values: { name: 'Linus T.' } },
+          { kind: 'insert', values: { name: 'Temp', email: 'temp@example.com' } },
+        ],
+      },
+      ws.id,
+    );
+    const afterApply = await run<DbTableRows>('db.table.rows', { connectionId: sqlite.id, table: 'users', orderBy: 'id' }, ws.id);
+    const tempId = afterApply.rows.find((r) => r[1] === 'Temp')?.[0];
+    const rowsRemoved = await run<DbTableApplyResult>('db.table.apply', { connectionId: sqlite.id, table: 'users', edits: [{ kind: 'delete', key: { id: tempId } }, { kind: 'update', key: { id: 2 }, values: { name: 'Linus' } }] }, ws.id);
+    const afterRemove = await run<DbTableRows>('db.table.rows', { connectionId: sqlite.id, table: 'users', orderBy: 'id' }, ws.id);
+    check(
+      'db: table.apply inserts, updates and deletes by key',
+      applied.applied && applied.affectedRows === 3 && afterApply.rows.length === 4 && afterApply.rows[1][1] === 'Linus T.' && rowsRemoved.affectedRows === 2 && afterRemove.rows.length === 3 && afterRemove.rows[1][1] === 'Linus' && afterRemove.rows[2][1] === 'Grace',
+      { applied, afterApply: afterApply.rows, rowsRemoved, afterRemove: afterRemove.rows },
+    );
+    await run('db.query.run', { connectionId: sqlite.id, query: "INSERT INTO users (name, email) VALUES ('Dup', 'dup1@example.com'), ('Dup', 'dup2@example.com')", record: false }, ws.id);
+    const conflict = await host.invoke('db.table.apply', { connectionId: sqlite.id, table: 'users', edits: [{ kind: 'update', key: { name: 'Dup' }, values: { name: 'Dup2' } }] }, { caller: 'ui', workspaceId: ws.id });
+    const dupRows = await run<DbTableRows>('db.table.rows', { connectionId: sqlite.id, table: 'users', where: "name = 'Dup'" }, ws.id);
+    check('db: table.apply rolls back when a key matches two rows', !conflict.ok && conflict.error.code === 'CONFLICT' && dupRows.rows.length === 2, conflict.ok ? 'ok?' : conflict.error.message);
+    await run('db.query.run', { connectionId: sqlite.id, query: "DELETE FROM users WHERE name = 'Dup'", record: false }, ws.id);
+
+    // Export: every format as text, and a file in the workspace.
+    const csv = await run<DbExportResult>('db.export', { connectionId: sqlite.id, format: 'csv', table: 'users', orderBy: 'id' }, ws.id);
+    const md = await run<DbExportResult>('db.export', { connectionId: sqlite.id, format: 'markdown', query: 'SELECT id, name FROM users ORDER BY id' }, ws.id);
+    const inserts = await run<DbExportResult>('db.export', { connectionId: sqlite.id, format: 'sql', table: 'users', where: 'id = 1' }, ws.id);
+    const jsonFile = await run<DbExportResult>('db.export', { connectionId: sqlite.id, format: 'json', table: 'users', orderBy: 'id', path: 'exports/users' }, ws.id);
+    const exportedUsers = JSON.parse(await fs.readFile(path.join(folder, 'exports', 'users.json'), 'utf8')) as { name: string }[];
+    check(
+      'db: export renders csv, markdown and INSERTs, and writes a json file',
+      csv.text?.split('\n')[0] === 'id,name,email' &&
+        csv.rows === 3 &&
+        md.text?.startsWith('| id | name |\n| --- | --- |\n| 1 | Ada |') === true &&
+        inserts.text === `INSERT INTO "users" ("id", "name", "email") VALUES (1, 'Ada', 'ada@example.com');` &&
+        jsonFile.path?.endsWith('users.json') === true &&
+        jsonFile.text === null &&
+        exportedUsers.map((r) => r.name).join() === 'Ada,Linus,Grace',
+      { csv: csv.text, md: md.text, inserts: inserts.text, jsonFile, exportedUsers },
+    );
+
+    // History filters, a transaction that is rolled back, and cancel on an engine that cannot be interrupted.
+    const historyHits = await run<DbHistoryEntry[]>('db.history.list', { search: 'grace', limit: 50 }, ws.id);
+    const historyFailed = await run<DbHistoryEntry[]>('db.history.list', { ok: false, limit: 50 }, ws.id);
+    check('db: history.list searches text and filters by outcome', historyHits.length > 0 && historyHits.every((e) => /grace/i.test(e.text)) && historyFailed.length > 0 && historyFailed.every((e) => !e.ok), { hits: historyHits.length, failed: historyFailed.length });
+    const begun = await run<{ inTransaction: boolean }>('db.transaction', { connectionId: sqlite.id, action: 'begin' }, ws.id);
+    await run('db.query.run', { connectionId: sqlite.id, query: "INSERT INTO users (name, email) VALUES ('Rolled', 'rolled@example.com')", record: false }, ws.id);
+    const during = (await run<(DbConnectionSummary & { inTransaction: boolean })[]>('db.connection.list', {}, ws.id)).find((c) => c.id === sqlite.id);
+    const rolledBack = await run<{ inTransaction: boolean }>('db.transaction', { connectionId: sqlite.id, action: 'rollback' }, ws.id);
+    const afterRollback = await run<DbTableRows>('db.table.rows', { connectionId: sqlite.id, table: 'users', where: "name = 'Rolled'" }, ws.id);
+    check('db: a transaction can be begun and rolled back', begun.inTransaction && during?.inTransaction === true && !rolledBack.inTransaction && afterRollback.rows.length === 0, { begun, during: during?.inTransaction, rolledBack, left: afterRollback.rows.length });
+    const cancel = await run<{ supported: boolean; cancelled: boolean }>('db.query.cancel', { connectionId: sqlite.id }, ws.id);
+    check('db: query.cancel says when the engine cannot be interrupted', cancel.supported === false && cancel.cancelled === false, cancel);
+    await run('db.query.run', { connectionId: sqlite.id, query: "DELETE FROM users WHERE name = 'Grace'; DROP TABLE orders", record: false }, ws.id);
+
     // ---------- databases: Redis through the fake RESP server ----------
     const redis = await run<DbConnectionSummary>(
       'db.connection.save',
@@ -658,6 +753,15 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     check('db: redis zset pairs', zset.type === 'zset' && JSON.stringify(zset.value) === '[["linus",7],["ada",10]]', zset.value);
     const redisCmds = await run<DbQueryResult[]>('db.query.run', { connectionId: redis.id, query: 'SET smoke "hello world"\nGET smoke\nLRANGE queue 0 -1' }, ws.id);
     check('db: redis console commands', redisCmds.length === 3 && redisCmds[1].value === 'hello world' && Array.isArray(redisCmds[2].value) && redisCmds[2].value.length === 3, redisCmds.map((r) => r.value));
+    const redisInfo = await run<RedisInfo>('db.redis.info', { connectionId: redis.id }, ws.id);
+    check('db: redis.info boils INFO and DBSIZE down', redisInfo.version === '7.2.0-fake' && redisInfo.connectedClients === 3 && redisInfo.hitRate === 0.9 && (redisInfo.keys ?? 0) >= 6 && redisInfo.uptimeSeconds === 4242, redisInfo);
+    const exact = await run<DbQueryResult[]>('db.redis.command', { connectionId: redis.id, commands: [['SET', 'smoke:multi', 'line one\nline "two"', 'EX', '120'], ['GET', 'smoke:multi'], ['TTL', 'smoke:multi']] }, ws.id);
+    check('db: redis.command passes arguments exactly, line breaks and quotes included', exact[1].value === 'line one\nline "two"' && Number(exact[2].value) > 100, exact.map((r) => r.value));
+    await fs.writeFile(path.join(folder, '.env'), `REDIS_HOST=127.0.0.1\n`, 'utf8');
+    const templated = await run<DbConnectionSummary>('db.connection.save', { connection: { kind: 'redis', name: 'templated redis', host: '{{REDIS_HOST}}', port: fakeRedis.port }, password: 'hunter2' }, ws.id);
+    const templatedTest = await run<DbConnectionTest>('db.connection.test', { id: templated.id }, ws.id);
+    check('db: {{variables}} in a connection resolve from the workspace .env', templatedTest.ok && templated.host === '{{REDIS_HOST}}', { host: templated.host, version: templatedTest.serverVersion });
+    await run('db.connection.delete', { id: templated.id }, ws.id);
 
     // ---------- teleport: fake tsh driving status, login, db/kube listing, pins and tunnels across two clusters ----------
     interface ConnectOut {
@@ -1224,6 +1328,47 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       }
     } else {
       console.log('SKIP db: mysql (set QUIVER_SMOKE_MYSQL=mysql://user:pass@host:port/db to run)');
+    }
+
+    // Optional: a live PostgreSQL server, e.g. QUIVER_SMOKE_POSTGRES=postgres://postgres:secret@127.0.0.1:5432/postgres
+    if (process.env.QUIVER_SMOKE_POSTGRES) {
+      const parsed = parseConnectionUrl(process.env.QUIVER_SMOKE_POSTGRES);
+      check('db: postgres url parses', parsed?.connection.kind === 'postgres', parsed);
+      const pg = await run<DbConnectionSummary>('db.connection.save', { connection: { ...parsed!.connection, name: 'smoke postgres' }, password: parsed!.password ?? undefined }, ws.id);
+      const pgTest = await run<DbConnectionTest>('db.connection.test', { id: pg.id }, ws.id);
+      check('db: postgres connects', pgTest.ok && pgTest.serverVersion.startsWith('PostgreSQL'), pgTest.serverVersion);
+      const schemas = await run<string[]>('db.schema.databases', { connectionId: pg.id }, ws.id);
+      check('db: postgres schemas, public first', schemas[0] === 'public', schemas);
+      const table = `quiver_smoke_${Date.now().toString(36)}`;
+      await run('db.query.run', { connectionId: pg.id, query: `CREATE TABLE ${table} (id serial PRIMARY KEY, name text NOT NULL, big bigint, at timestamptz DEFAULT now()); CREATE TABLE ${table}_child (id serial PRIMARY KEY, parent_id int REFERENCES ${table}(id));`, record: false }, ws.id);
+      try {
+        const applied = await run<DbTableApplyResult>('db.table.apply', { connectionId: pg.id, table, edits: [{ kind: 'insert', values: { name: 'Ada', big: '12345678901234567890' } }, { kind: 'insert', values: { name: 'Linus' } }] }, ws.id);
+        const rows = await run<DbTableRows>('db.table.rows', { connectionId: pg.id, table, orderBy: 'id' }, ws.id);
+        const pgDetail = await run<DbTableDetail>('db.schema.table', { connectionId: pg.id, table }, ws.id);
+        const selected = await run<DbQueryResult[]>('db.query.run', { connectionId: pg.id, query: `SELECT id, name, big FROM ${table} ORDER BY id; UPDATE ${table} SET name = 'Ada L' WHERE id = 1` }, ws.id);
+        check(
+          'db: postgres rows, bigints as text, keys, foreign keys and affected counts',
+          applied.affectedRows === 2 &&
+            rows.rows.length === 2 &&
+            rows.rows[0][2] === '12345678901234567890' &&
+            pgDetail.primaryKey.join() === 'id' &&
+            pgDetail.referencedBy.some((k) => k.table === `${table}_child`) &&
+            Boolean(pgDetail.ddl?.includes('PRIMARY KEY')) &&
+            selected[0].kind === 'rows' &&
+            selected[1].kind === 'affected' &&
+            selected[1].affectedRows === 1,
+          { applied, rows: rows.rows, detail: pgDetail, selected },
+        );
+        const pgColumns = await run<DbTableColumns[]>('db.schema.columns', { connectionId: pg.id }, ws.id);
+        check('db: postgres columns overview', pgColumns.find((t) => t.name === table)?.columns.map((c) => c.name).join() === 'id,name,big,at', pgColumns.find((t) => t.name === table));
+        const pgCancel = await run<{ supported: boolean; cancelled: boolean }>('db.query.cancel', { connectionId: pg.id }, ws.id);
+        check('db: postgres cancel is supported', pgCancel.supported === true, pgCancel);
+      } finally {
+        await run('db.query.run', { connectionId: pg.id, query: `DROP TABLE ${table}_child; DROP TABLE ${table}`, record: false }, ws.id);
+        await run('db.connection.delete', { id: pg.id }, ws.id);
+      }
+    } else {
+      console.log('SKIP db: postgres (set QUIVER_SMOKE_POSTGRES=postgres://user:pass@host:port/db to run)');
     }
 
     // ---------- MCP inspector: project config import, stdio, Streamable HTTP and SSE servers, tools, resources, prompts, log ----------
@@ -2453,6 +2598,70 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await wait(200);
       const whereAfter = await js(`[...document.querySelectorAll('[data-testid=db-table-where] .cm-line')].map((l) => l.textContent)`);
       check('ui: the WHERE filter stays one line', Array.isArray(whereAfter) && whereAfter.length === 1 && whereAfter[0] === "email = 'linus@example.com' AND id > 0", whereAfter);
+      // The grid edits in place: double-click, type, Enter, then Apply runs the UPDATE and the row comes back changed.
+      {
+        const nameCell = `[...document.querySelectorAll('[role=gridcell]')].find((c) => c.offsetParent !== null && c.textContent.trim() === 'Linus')`;
+        const dblClicked = await js(`(() => { const c = ${nameCell}; if (!c) return false; c.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })); return true; })()`);
+        await wait(200);
+        const typed = await js(
+          `(() => { const el = document.querySelector('[data-testid=db-cell-editor]'); if (!el) return false; const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(el, 'Linus T'); el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return true; })()`,
+        );
+        await wait(200);
+        const pending = await js(`document.querySelector('[data-testid=db-pending]')?.textContent.trim() ?? null`);
+        const changedCells = await js(`[...document.querySelectorAll('[role=gridcell][data-changed]')].filter((c) => c.offsetParent !== null).map((c) => c.textContent.trim())`);
+        await shot('05c-table-pending-edit-light');
+        await js(`document.querySelector('[data-testid=db-apply]')?.click()`);
+        await wait(1500);
+        const afterApply = await js(`[...document.querySelectorAll('[role=gridcell]')].filter((c) => c.offsetParent !== null).map((c) => c.textContent.trim())`);
+        const stored = await run<DbTableRows>('db.table.rows', { connectionId: sqlite.id, table: 'users', where: "name = 'Linus T'" }, ws.id);
+        check(
+          'ui: a cell edited in the grid is applied by key and read back',
+          dblClicked === true && typed === true && pending === '1 pending' && Array.isArray(changedCells) && changedCells.join() === 'Linus T' && Array.isArray(afterApply) && afterApply.includes('Linus T') && stored.rows.length === 1 && !(await js(`Boolean(document.querySelector('[data-testid=db-pending]'))`)),
+          { dblClicked, typed, pending, changedCells, afterApply, stored: stored.rows },
+        );
+        await run('db.query.run', { connectionId: sqlite.id, query: "UPDATE users SET name = 'Linus' WHERE name = 'Linus T'", record: false }, ws.id);
+        await wait(800);
+      }
+      // Right-click offers the row actions; the detail strip opens the transposed row; the export menu lists the formats.
+      {
+        const nameCell = `[...document.querySelectorAll('[role=gridcell]')].find((c) => c.offsetParent !== null && c.textContent.trim() === 'Linus')`;
+        await js(`(() => { const c = ${nameCell}; if (c) c.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 320, clientY: 320 })); })()`);
+        await wait(200);
+        const menuItems = (await js(`[...document.querySelectorAll('[data-testid=context-menu] button')].map((b) => b.textContent.trim())`)) as string[];
+        await shot('05d-table-context-menu-light');
+        await js(`document.querySelector('[data-testid=context-menu]')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+        await wait(100);
+        await js(`(() => { const c = ${nameCell}; if (c) c.click(); })()`);
+        await wait(100);
+        await js(`[...document.querySelectorAll('button[aria-label="Show row detail"]')].find((b) => b.offsetParent !== null)?.click()`);
+        await wait(200);
+        const detailText = await js(`document.querySelector('[data-testid=db-row-detail]')?.textContent ?? null`);
+        await shot('05e-table-row-detail-light');
+        await js(`[...document.querySelectorAll('button[aria-label="Hide row detail"]')].find((b) => b.offsetParent !== null)?.click()`);
+        await js(`[...document.querySelectorAll('[data-testid=db-export]')].find((b) => b.offsetParent !== null)?.click()`);
+        await wait(200);
+        const exportItems = (await js(`[...document.querySelectorAll('[role=menuitem]')].map((b) => b.textContent.trim())`)) as string[];
+        await js(`document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))`);
+        await wait(100);
+        check(
+          'ui: the grid has a context menu, a row detail panel and an export menu',
+          Array.isArray(menuItems) && menuItems.some((t) => t.startsWith('Filter by name')) && menuItems.some((t) => t.startsWith('Edit cell')) && menuItems.includes('Delete row') && typeof detailText === 'string' && detailText.includes('email') && detailText.includes('linus@example.com') && exportItems.includes('CSV') && exportItems.includes('INSERT statements…'),
+          { menuItems, detailText, exportItems },
+        );
+      }
+      // The history tab lists every run and searches it.
+      {
+        await js(`document.querySelector('[data-testid=db-history-open]')?.click()`);
+        await wait(800);
+        const all = await js(`document.querySelectorAll('[data-testid=db-history-entry]').length`);
+        await js(`(() => { const el = document.querySelector('[data-testid=db-history-search]'); const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(el, 'nope'); el.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+        await wait(800);
+        const searched = (await js(`[...document.querySelectorAll('[data-testid=db-history-entry]')].map((e) => e.title)`)) as string[];
+        await shot('05f-history-tab-light');
+        check('ui: the history tab lists runs and filters them by text', typeof all === 'number' && all > 3 && searched.length > 0 && searched.every((t) => t.includes('nope')), { all, searched });
+        await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+        await wait(300);
+      }
       const clickedQuery = await js(
         `(() => { const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Query'); if (btn) btn.click(); return Boolean(btn); })()`,
       );
@@ -2498,6 +2707,32 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
           written.keys.some((k) => k.endsWith('smoke:live')) && written.cells.includes('Grace') && !restored.keys.some((k) => k.endsWith('smoke:live')) && restored.cells.includes('Ada'),
           { written, restored },
         );
+      }
+      // The key browser shows the server's vitals, creates a key from a dialog and sets its expiry.
+      {
+        const vitals = await js(`document.querySelector('[data-testid=db-redis-info]')?.textContent ?? null`);
+        await js(`document.querySelector('[data-testid=db-redis-new-key]')?.click()`);
+        await wait(300);
+        const dialogFilled = await js(
+          `(() => { const el = document.querySelector('form input'); if (!el) return false; const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(el, 'smoke:new'); el.dispatchEvent(new Event('input', { bubbles: true })); const btn = [...document.querySelectorAll('form button')].find((b) => b.textContent.trim() === 'Create'); if (btn) btn.click(); return Boolean(btn); })()`,
+        );
+        await wait(1200);
+        const created = await js(`document.querySelector('[data-testid=db-redis-key-name]')?.textContent.trim() ?? null`);
+        await js(`document.querySelector('[data-testid=db-redis-ttl]')?.click()`);
+        await wait(300);
+        await js(
+          `(() => { const el = document.querySelector('form input'); if (!el) return; const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(el, '120'); el.dispatchEvent(new Event('input', { bubbles: true })); [...document.querySelectorAll('form button')].find((b) => b.textContent.trim() === 'Set')?.click(); })()`,
+        );
+        await wait(1000);
+        const ttlShown = await js(`document.querySelector('[data-testid=db-redis-ttl-value]')?.textContent ?? null`);
+        await shot('08a-redis-new-key-dark');
+        check(
+          'ui: the key browser shows vitals, creates a key and sets its TTL',
+          typeof vitals === 'string' && vitals.includes('7.2.0-fake') && vitals.includes('3 clients') && dialogFilled === true && created === 'smoke:new' && typeof ttlShown === 'string' && /TTL: (1m|2m)/.test(ttlShown),
+          { vitals, dialogFilled, created, ttlShown },
+        );
+        await run('db.redis.command', { connectionId: redis.id, commands: [['DEL', 'smoke:new']] }, ws.id);
+        await wait(500);
       }
       await shot('08-redis-dark');
 

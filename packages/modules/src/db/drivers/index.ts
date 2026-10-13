@@ -1,5 +1,6 @@
 import type { DbConnection } from '@quiver/core';
 import { MySqlDriver } from './mysql';
+import { PostgresDriver } from './postgres';
 import { RedisDriver } from './redis';
 import { SqliteDriver } from './sqlite';
 import type { Driver } from './types';
@@ -12,6 +13,8 @@ export function createDriver(connection: DbConnection, password: string, workspa
   switch (connection.kind) {
     case 'mysql':
       return new MySqlDriver(connection, password);
+    case 'postgres':
+      return new PostgresDriver(connection, password);
     case 'sqlite':
       return new SqliteDriver(connection, workspacePath);
     case 'redis':

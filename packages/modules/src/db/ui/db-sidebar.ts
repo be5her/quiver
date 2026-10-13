@@ -1,14 +1,14 @@
 import { Component, computed, inject } from '@angular/core';
-import type { DbConnectionSummary, DbHistoryEntry, SavedQuery } from '@quiver/core';
+import type { DbHistoryEntry, SavedQuery } from '@quiver/core';
 import { Icon, IconButton, SectionHeader, Spinner, Toasts, TreeState, invokeResource } from '@quiver/ui';
-import { ChevronDown, ChevronRight, Pencil, Plus, Terminal, Trash2 } from 'lucide';
+import { ChevronDown, ChevronRight, Clock, Pencil, Plus, Search, Terminal, Trash2 } from 'lucide';
 import { ConnectionNode } from './connection-node';
-import { DbActions } from './db-actions';
+import { DbActions, type DbConnectionRow } from './db-actions';
 import { firstLine } from './db-format';
 import { DbRow } from './db-row';
 import { NewConnectionMenu } from './new-connection-menu';
 
-/** Connections with their schema, saved queries and the query history. */
+/** Connections with their schema, saved queries and the latest queries; the history tab has the rest. */
 @Component({
   selector: 'q-db-sidebar',
   imports: [ConnectionNode, DbRow, Icon, IconButton, NewConnectionMenu, SectionHeader, Spinner],
@@ -20,11 +20,11 @@ export class DbSidebar {
   private readonly toasts = inject(Toasts);
   protected readonly db = inject(DbActions);
 
-  protected readonly icons = { ChevronDown, ChevronRight, Pencil, Plus, Terminal, Trash2 };
+  protected readonly icons = { ChevronDown, ChevronRight, Clock, Pencil, Plus, Search, Terminal, Trash2 };
   protected readonly firstLine = firstLine;
-  protected readonly connections = invokeResource<DbConnectionSummary[]>('db.connection.list', () => ({}), { refreshOn: ['db-connections'] });
+  protected readonly connections = invokeResource<DbConnectionRow[]>('db.connection.list', () => ({}), { refreshOn: ['db-connections'] });
   protected readonly queries = invokeResource<SavedQuery[]>('db.query.list', () => ({}), { refreshOn: ['db-queries'] });
-  protected readonly history = invokeResource<DbHistoryEntry[]>('db.history.list', () => ({ limit: 30 }), { refreshOn: ['db-history'] });
+  protected readonly history = invokeResource<DbHistoryEntry[]>('db.history.list', () => ({ limit: 5 }), { refreshOn: ['db-history'] });
   protected readonly queriesOpen = computed(() => this.tree.isExpanded('db/section/queries', true));
   protected readonly historyOpen = computed(() => this.tree.isExpanded('db/section/history'));
 

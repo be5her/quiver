@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyStatement, parseRedisCommands, redisCommandIsReadOnly, scriptIsReadOnly, splitStatements, stripComments } from './sql';
+import { buildTableEdits, classifyStatement, coerceCellInput, isSelectLike, parseRedisCommands, redisCommandIsReadOnly, scriptIsReadOnly, splitStatementRanges, splitStatements, sqlLiteral, statementAt, stripComments, wrapForPage } from './sql';
 
 describe('splitStatements', () => {
   it('splits on semicolons outside strings and comments', () => {
@@ -80,5 +80,82 @@ describe('redis', () => {
     expect(redisCommandIsReadOnly(['FLUSHALL'])).toBe(false);
     expect(redisCommandIsReadOnly(['CLIENT', 'LIST'])).toBe(true);
     expect(redisCommandIsReadOnly(['CLIENT', 'KILL', 'x'])).toBe(false);
+  });
+});
+
+describe('splitStatementRanges and statementAt', () => {
+  const script = `SELECT 1;
+
+  -- second
+  SELECT 'a;b';
+INSERT INTO t VALUES (1)`;
+  it('reports where each statement sits', () => {
+    const ranges = splitStatementRanges(script);
+    expect(ranges.map((r) => r.text)).toEqual(['SELECT 1', `-- second
+  SELECT 'a;b'`, 'INSERT INTO t VALUES (1)']);
+    for (const r of ranges) expect(script.slice(r.from, r.to)).toBe(r.text);
+  });
+  it('picks the statement under the cursor, or the one before the whitespace the cursor is in', () => {
+    expect(statementAt(script, 3)?.text).toBe('SELECT 1');
+    expect(statementAt(script, 10)?.text).toBe('SELECT 1');
+    expect(statementAt(script, script.indexOf("'a;b'"))?.text).toContain("SELECT 'a;b'");
+    expect(statementAt(script, script.length)?.text).toBe('INSERT INTO t VALUES (1)');
+    expect(statementAt('   ', 1)).toBeNull();
+  });
+});
+
+describe('sqlLiteral and buildTableEdits', () => {
+  it('quotes per dialect', () => {
+    expect(sqlLiteral('mysql', "it's a \\ path")).toBe("'it''s a \\\\ path'");
+    expect(sqlLiteral('postgres', "it's")).toBe("'it''s'");
+    expect(sqlLiteral('sqlite', null)).toBe('NULL');
+    expect(sqlLiteral('sqlite', true)).toBe('1');
+    expect(sqlLiteral('postgres', false)).toBe('FALSE');
+    expect(sqlLiteral('mysql', 12)).toBe('12');
+    expect(sqlLiteral('mysql', { a: 1 })).toBe(`'{"a":1}'`);
+    expect(sqlLiteral('mysql', { $bytes: 2, hex: 'abcd' })).toBe("X'abcd'");
+    expect(sqlLiteral('mysql', { $bytes: 200, hex: 'ab' })).toBe('NULL');
+  });
+  it('builds insert, update and delete statements with the key in the WHERE clause', () => {
+    const statements = buildTableEdits('mysql', 'users', 'app', [
+      { kind: 'insert', values: { name: 'Ada', age: 36 } },
+      { kind: 'update', key: { id: 1 }, values: { name: "O'Hara", nick: null } },
+      { kind: 'update', key: { id: 2 }, values: {} },
+      { kind: 'delete', key: { id: 3, tenant: null } },
+      { kind: 'insert', values: {} },
+    ]);
+    expect(statements).toEqual([
+      "INSERT INTO `app`.`users` (`name`, `age`) VALUES ('Ada', 36)",
+      "UPDATE `app`.`users` SET `name` = 'O''Hara', `nick` = NULL WHERE `id` = 1",
+      'DELETE FROM `app`.`users` WHERE `id` = 3 AND `tenant` IS NULL',
+      'INSERT INTO `app`.`users` () VALUES ()',
+    ]);
+    expect(buildTableEdits('sqlite', 't', null, [{ kind: 'insert', values: {} }])).toEqual(['INSERT INTO "t" DEFAULT VALUES']);
+  });
+  it('refuses an edit without a key', () => {
+    expect(() => buildTableEdits('sqlite', 't', null, [{ kind: 'delete', key: {} }])).toThrow(/no primary key/);
+  });
+});
+
+describe('coerceCellInput', () => {
+  it('turns typed text into the column type', () => {
+    expect(coerceCellInput('42', 'int(11)')).toBe(42);
+    expect(coerceCellInput('12345678901234567890', 'bigint')).toBe('12345678901234567890');
+    expect(coerceCellInput('abc', 'int')).toBe('abc');
+    expect(coerceCellInput('true', 'boolean')).toBe(true);
+    expect(coerceCellInput('0', 'bool')).toBe(false);
+    expect(coerceCellInput('42', 'varchar(10)')).toBe('42');
+  });
+});
+
+describe('wrapForPage and isSelectLike', () => {
+  it('wraps a select as a page', () => {
+    expect(wrapForPage('SELECT * FROM t ORDER BY id; -- x', 500, 500)).toBe('SELECT * FROM (SELECT * FROM t ORDER BY id) AS q LIMIT 500 OFFSET 500');
+  });
+  it('tells selects from the rest', () => {
+    expect(isSelectLike('SELECT 1')).toBe(true);
+    expect(isSelectLike('WITH x AS (SELECT 1) SELECT * FROM x')).toBe(true);
+    expect(isSelectLike('SHOW TABLES')).toBe(false);
+    expect(isSelectLike('UPDATE t SET a = 1')).toBe(false);
   });
 });

@@ -5,7 +5,7 @@
       [(value)]="where"
       singleLine
       language="sql"
-      [sqlDialect]="sqlite() ? 'sqlite' : 'mysql'"
+      [sqlDialect]="kind()"
       [sqlSchema]="schema()"
       [sqlDefaultTable]="table()"
       placeholder="id > 100 AND status = 'active'  (Enter to apply)"
@@ -22,12 +22,56 @@
   <button qIconButton label="Previous page" size="sm" [disabled]="offset() === 0" (click)="previousPage()"><svg [qIcon]="icons.ChevronLeft" class="size-3.5"></svg></button>
   <button qIconButton label="Next page" size="sm" [disabled]="!hasNext()" (click)="nextPage()"><svg [qIcon]="icons.ChevronRight" class="size-3.5"></svg></button>
   <button qIconButton label="Refresh" size="sm" (click)="rows.reload()"><svg [qIcon]="icons.RefreshCw" class="size-3.5"></svg></button>
+  @if (rows.value(); as data) {
+    <q-db-export-menu [connectionId]="connectionId()" [kind]="kind()" [columns]="data.columns" [rows]="allRows()" [table]="table()" [database]="database()" [source]="exportSource()" />
+  }
 </div>
+@if (editable() || readOnlyReason()) {
+  <div class="flex items-center gap-2 px-3 h-8 border-b border-edge shrink-0 text-xs bg-surface" data-testid="db-edit-bar">
+    @if (readOnlyReason(); as reason) {
+      <span class="text-muted">{{ reason }}</span>
+    } @else {
+      <button qButton size="sm" variant="ghost" [icon]="icons.Plus" data-testid="db-add-row" (click)="addRow()">Row</button>
+      @if (pendingCount() > 0) {
+        <span class="text-warning font-medium" data-testid="db-pending">{{ pendingCount() }} pending</span>
+        <button qButton size="sm" variant="ghost" [icon]="icons.Code" [class]="showSql() ? 'text-accent' : ''" (click)="showSql.set(!showSql())">SQL</button>
+        <div class="flex-1"></div>
+        <button qButton size="sm" variant="ghost" [icon]="icons.Undo2" (click)="discard()">Discard</button>
+        <button qButton size="sm" variant="primary" [icon]="icons.Check" [loading]="applying()" data-testid="db-apply" (click)="apply()">Apply</button>
+      } @else {
+        <span class="text-muted">Double-click a cell to edit it; right-click for more.</span>
+      }
+    }
+  </div>
+}
+@if (showSql() && pendingCount() > 0) {
+  <div class="shrink-0 border-b border-edge p-2 h-32" data-testid="db-pending-sql">
+    <q-code-editor [value]="sqlText()" language="sql" [sqlDialect]="kind()" readonly wrap />
+  </div>
+}
 <div class="flex-1 min-h-0">
   @if (rows.error(); as error) {
     <q-db-error [error]="error" (retry)="rows.reload()" />
   } @else if (rows.value(); as data) {
-    <q-result-grid [columns]="data.columns" [rows]="data.rows" [sort]="sort()" sortable [emptyMessage]="applied() ? 'No rows match the filter' : 'Table is empty'" (sortBy)="sortBy($event)" />
+    <q-result-grid
+      [columns]="data.columns"
+      [rows]="allRows()"
+      [sort]="sort()"
+      sortable
+      filterable
+      [editable]="editable()"
+      [sqlKind]="kind()"
+      [foreignKeys]="foreignKeys()"
+      [changes]="gridChanges()"
+      [deleted]="gridDeleted()"
+      [insertedFrom]="insertedFrom()"
+      [emptyMessage]="applied() ? 'No rows match the filter' : 'Table is empty'"
+      (sortBy)="sortBy($event)"
+      (cellEdit)="cellEdit($event)"
+      (toggleDelete)="toggleDelete($event)"
+      (filterBy)="filterBy($event)"
+      (follow)="follow($event)"
+    />
   } @else {
     <div class="flex items-center justify-center h-full"><svg qSpinner></svg></div>
   }

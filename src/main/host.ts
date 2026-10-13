@@ -417,6 +417,22 @@ export class Host {
         },
       }),
       defineCommand({
+        id: 'app.pickSavePath',
+        title: 'Pick a path to save to',
+        description: 'Opens the native save dialog and returns the chosen path, which may not exist yet.',
+        scope: 'global',
+        hidden: true,
+        input: z.object({
+          title: z.string().optional(),
+          filters: z.array(z.object({ name: z.string(), extensions: z.array(z.string()) })).optional(),
+          defaultPath: z.string().optional(),
+        }),
+        handler: async (input, ctx) => {
+          if (ctx.caller !== 'ui' || !this.opts.pickSavePath) throw new QuiverError('INVALID_INPUT', 'The save dialog is only available from the UI');
+          return { path: (await this.opts.pickSavePath(input)) ?? null };
+        },
+      }),
+      defineCommand({
         id: 'app.info',
         title: 'App info',
         description: 'Version, platform and MCP server status.',

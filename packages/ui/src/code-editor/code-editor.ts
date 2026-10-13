@@ -51,6 +51,8 @@ export class CodeEditor implements FormValueControl<string> {
   readonly autofocus = input(false, { transform: booleanAttribute });
   /** Mod+Enter inside the editor, and Enter when `singleLine`. */
   readonly run = output<void>();
+  /** Mod+Shift+Enter inside the editor: run the statement under the cursor. */
+  readonly runCurrent = output<void>();
   readonly touch = output<void>();
 
   protected readonly filled = computed(() => this.fill() && !this.singleLine());
@@ -83,6 +85,7 @@ export class CodeEditor implements FormValueControl<string> {
       variables: this.variables(),
       hover: this.hover,
       run: () => this.run.emit(),
+      runCurrent: () => this.runCurrent.emit(),
     }),
   ]);
 
@@ -114,6 +117,11 @@ export class CodeEditor implements FormValueControl<string> {
   focus(options?: FocusOptions): void {
     if (options?.preventScroll) this.view?.contentDOM.focus(options);
     else this.view?.focus();
+  }
+
+  /** Offset of the cursor (the main selection's head) in the document. */
+  cursorOffset(): number {
+    return this.view?.state.selection.main.head ?? 0;
   }
 
   /** Text inside the current selection, or an empty string. */

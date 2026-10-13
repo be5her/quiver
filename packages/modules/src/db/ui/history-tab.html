@@ -1,0 +1,54 @@
+<div class="flex items-center gap-2 px-3 py-2 border-b border-edge shrink-0">
+  <div class="relative flex-1 max-w-md">
+    <svg [qIcon]="icons.Search" class="size-3.5 text-muted absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none"></svg>
+    <input qInput class="h-7 pl-7 text-xs" placeholder="Search queries" aria-label="Search history" data-testid="db-history-search" [value]="search()" (input)="typed($event)" qAutofocus />
+  </div>
+  <select qSelect class="h-7 text-xs max-w-48" aria-label="Connection" (change)="pickConnection($event)">
+    <option value="" [selected]="!connectionId()">All connections</option>
+    @for (c of connections.value() ?? []; track c.id) {
+      <option [value]="c.id" [selected]="c.id === connectionId()">{{ c.name }}</option>
+    }
+  </select>
+  <select qSelect class="h-7 text-xs" aria-label="Outcome" (change)="pickOutcome($event)">
+    <option value="all" [selected]="outcome() === 'all'">All outcomes</option>
+    <option value="ok" [selected]="outcome() === 'ok'">Succeeded</option>
+    <option value="failed" [selected]="outcome() === 'failed'">Failed</option>
+  </select>
+  <div class="flex-1"></div>
+  @if (entries.isLoading()) {
+    <svg qSpinner class="size-3.5"></svg>
+  } @else {
+    <span class="text-xs text-muted">{{ count() }}</span>
+  }
+  <button qButton size="sm" variant="ghost" [icon]="icons.Trash2" [disabled]="!entries.value()?.length" (click)="db.clearHistory()">Clear</button>
+</div>
+<div class="flex-1 min-h-0 overflow-auto">
+  @for (entry of entries.value() ?? []; track entry.id) {
+    <div
+      role="button"
+      tabindex="0"
+      class="group flex items-start gap-3 px-3 py-2 border-b border-edge/60 hover:bg-elevated cursor-pointer min-w-0"
+      data-testid="db-history-entry"
+      [title]="entry.text"
+      (click)="open(entry)"
+      (keydown.enter)="open(entry)"
+    >
+      <span class="mt-1.5 size-1.5 rounded-full shrink-0" [class]="entry.ok ? 'bg-success' : 'bg-danger'"></span>
+      <div class="flex-1 min-w-0">
+        <div class="font-mono text-xs text-fg truncate">{{ firstLine(entry.text, 160) }}</div>
+        <div class="text-[11px] text-muted truncate mt-0.5">
+          <span>{{ entry.connectionName }}</span>@if (entry.database) {<span> · {{ entry.database }}</span>}<span> · {{ formatAgo(entry.at) }}</span><span> · {{ formatDuration(entry.durationMs) }}</span><span [class]="entry.ok ? '' : 'text-danger'"> · {{ outcomeOf(entry) }}</span>
+        </div>
+      </div>
+      <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 shrink-0">
+        <button qIconButton label="Open in a query tab" size="sm" (click)="open(entry)"><svg [qIcon]="icons.Play" class="size-3.5"></svg></button>
+        <button qIconButton label="Save as query" size="sm" (click)="save($event, entry)"><svg [qIcon]="icons.Save" class="size-3.5"></svg></button>
+        <button qIconButton label="Copy" size="sm" (click)="copy($event, entry)"><svg [qIcon]="icons.Copy" class="size-3.5"></svg></button>
+      </div>
+    </div>
+  } @empty {
+    @if (!entries.isLoading()) {
+      <q-empty-state title="No queries yet" [hint]="search() || connectionId() || outcome() !== 'all' ? 'Nothing matches these filters.' : 'Every query run from a tab or by an agent is listed here.'" />
+    }
+  }
+</div>

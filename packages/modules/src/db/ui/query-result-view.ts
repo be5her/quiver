@@ -1,5 +1,5 @@
 import { Component, computed, input } from '@angular/core';
-import type { DbQueryResult } from '@quiver/core';
+import type { DbQueryResult, SqlKind } from '@quiver/core';
 import { formatCount } from './db-format';
 import { ResultGrid } from './result-grid';
 
@@ -15,7 +15,7 @@ const VALUE_COLUMNS = [
   template: `
     @switch (result().kind) {
       @case ('rows') {
-        <q-result-grid [columns]="rowColumns()" [rows]="rowValues()" emptyMessage="Empty result set" />
+        <q-result-grid [columns]="rowColumns()" [rows]="rowValues()" [sqlKind]="sqlKind()" emptyMessage="Empty result set" />
       }
       @case ('affected') {
         <div class="p-3 text-sm">
@@ -38,6 +38,7 @@ const VALUE_COLUMNS = [
 })
 export class QueryResultView {
   readonly result = input.required<DbQueryResult>();
+  readonly sqlKind = input<SqlKind | null>(null);
 
   protected readonly valueColumns = VALUE_COLUMNS;
   protected readonly rowColumns = computed(() => {

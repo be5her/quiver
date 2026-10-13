@@ -5,6 +5,7 @@ import {
   DbKindSchema,
   defaultPort,
   newDbConnection,
+  parseConnectionUrl,
   toErrorPayload,
   type DbAccess,
   type DbConnection,
@@ -12,8 +13,9 @@ import {
   type DbConnectionTest,
   type DbKind,
 } from '@quiver/core';
-import { AppState, Autofocus, Button, Checkbox, HostBridge, Input, Label, Select, Spinner, TabsState, Toasts, type Tab, type TabComponent } from '@quiver/ui';
-import { FolderOpen, PlugZap, Save } from 'lucide';
+import { AppState, Autofocus, Badge, Button, Checkbox, HostBridge, Icon, Input, Label, Select, Spinner, TabsState, Toasts, VariableInput, type Tab, type TabComponent } from '@quiver/ui';
+import { ChevronDown, ChevronRight, FolderOpen, Link2, PlugZap, Save } from 'lucide';
+import { ApiVariables } from '../../api/ui/api-variables';
 import { KindIcon } from './kind-icon';
 import { TeleportAccessFields, type TeleportAccess } from './teleport-access-fields';
 
@@ -42,12 +44,14 @@ function relativeToWorkspace(file: string, workspacePath: string): string {
 }
 
 /**
- * A MySQL, SQLite or Redis connection: where it is, how it is reached (directly, through a Teleport
- * tunnel or a tunnel command), and its credentials. The password is kept encrypted on this machine.
+ * A MySQL, PostgreSQL, SQLite or Redis connection: where it is, how it is reached (directly, or
+ * through a Teleport tunnel or a tunnel command, behind "Access"), its credentials and whether it is
+ * production. A pasted URL fills the form; host, user, database and file take `{{variables}}`.
+ * The password is kept encrypted on this machine.
  */
 @Component({
   selector: 'q-connection-tab',
-  imports: [Autofocus, Button, Checkbox, FormField, Input, KindIcon, Label, Select, Spinner, TeleportAccessFields],
+  imports: [ApiVariables, Autofocus, Badge, Button, Checkbox, FormField, Icon, Input, KindIcon, Label, Select, Spinner, TeleportAccessFields, VariableInput],
   templateUrl: './connection-tab.html',
   host: { class: 'contents', '(keydown)': 'shortcut($event)' },
 })
@@ -60,7 +64,7 @@ export class ConnectionTab implements TabComponent {
   readonly tab = input.required<Tab>();
   readonly scope = input.required<string>();
 
-  protected readonly icons = { FolderOpen, PlugZap, Save };
+  protected readonly icons = { ChevronDown, ChevronRight, FolderOpen, Link2, PlugZap, Save };
   protected readonly kinds = DbKindSchema.options;
   protected readonly kindLabels = DB_KIND_LABELS;
   protected readonly accessTypes = Object.keys(ACCESS_LABELS) as AccessType[];
@@ -92,6 +96,10 @@ export class ConnectionTab implements TabComponent {
   protected readonly secretForm = form(this.secret, (p) => disabled(p.password, ({ valueOf }) => valueOf(p.clearPassword)));
   protected readonly testing = signal(false);
   protected readonly testResult = signal<{ ok: boolean; message: string } | null>(null);
+  /** The URL box at the top; it empties itself once it filled the form. */
+  protected readonly url = signal('');
+  /** The Access section is folded while the connection is direct. */
+  protected readonly accessOpen = linkedSignal<DbConnection | null, boolean>({ source: this.saved, computation: (saved, previous) => (saved ? saved.access.type !== 'direct' : (previous?.value ?? false)) });
   protected readonly dirty = computed(() => {
     if (!this.loaded()) return false;
     if (this.isNew()) return true;
@@ -106,15 +114,44 @@ export class ConnectionTab implements TabComponent {
     const access = this.connection().access;
     return access.type === 'command' ? access : null;
   });
+  protected readonly accessSummary = computed(() => {
+    const access = this.connection().access;
+    if (access.type === 'teleport') return `Teleport tunnel: ${access.database || 'pick a database'} as ${access.dbUser || '…'}`;
+    if (access.type === 'command') return `Tunnel command: ${access.command || '…'}`;
+    return 'Direct';
+  });
   protected readonly portPlaceholder = computed(() => String(defaultPort(this.connection().kind)));
   protected readonly passwordPlaceholder = computed(() => (this.hasPassword() && !this.secret().clearPassword ? '•••••••• (stored, leave blank to keep)' : 'optional'));
   protected readonly portSyntax = '{port}';
+  protected readonly urlPlaceholder = computed(() => {
+    switch (this.connection().kind) {
+      case 'postgres':
+        return 'Paste a URL to fill the form: postgres://user:password@host:5432/db?sslmode=require';
+      case 'redis':
+        return 'Paste a URL to fill the form: redis://:password@host:6379/0';
+      case 'sqlite':
+        return 'Paste a path to fill the form: data/app.db';
+      default:
+        return 'Paste a URL to fill the form: mysql://user:password@host:3306/db';
+    }
+  });
 
   constructor() {
     effect(() => {
       const dirty = this.dirty();
       const tab = this.tab();
       if (tab.dirty !== dirty) untracked(() => this.tabs.updateTab(this.scope(), tab.id, { dirty }));
+    });
+    // A draft opened "from URL" starts filled in; the URL leaves the tab data once used.
+    effect(() => {
+      const tab = this.tab();
+      const url = tab.data?.['url'];
+      if (!this.isNew() || typeof url !== 'string' || !url) return;
+      untracked(() => {
+        this.applyUrl(url, false);
+        const { url: _url, ...data } = tab.data ?? {};
+        this.tabs.updateTab(this.scope(), tab.id, { data });
+      });
     });
   }
 
@@ -142,12 +179,12 @@ export class ConnectionTab implements TabComponent {
     const conn = this.connection();
     if (type === conn.access.type) return;
     if (type === 'direct') this.patch({ access: { type: 'direct' } });
-    else if (type === 'teleport') this.patch({ access: { type: 'teleport', proxy: '', database: '', dbUser: conn.user }, host: '127.0.0.1', port: 0, user: conn.kind === 'mysql' ? conn.user : '' });
+    else if (type === 'teleport') this.patch({ access: { type: 'teleport', proxy: '', database: '', dbUser: conn.user }, host: '127.0.0.1', port: 0, user: conn.kind === 'redis' ? '' : conn.user });
     else this.patch({ access: { type: 'command', command: '' }, host: '127.0.0.1', port: 0 });
   }
 
   protected setTeleportAccess(access: TeleportAccess): void {
-    this.patch({ access, user: this.connection().kind === 'mysql' ? access.dbUser : '' });
+    this.patch({ access, user: this.connection().kind === 'redis' ? '' : access.dbUser });
   }
 
   protected setCommand(event: Event): void {
@@ -160,6 +197,32 @@ export class ConnectionTab implements TabComponent {
 
   protected setDbIndex(event: Event): void {
     this.patch({ dbIndex: Math.max(0, Number((event.target as HTMLInputElement).value) || 0) });
+  }
+
+  protected urlTyped(event: Event): void {
+    const text = (event.target as HTMLInputElement).value;
+    this.url.set(text);
+    if (parseConnectionUrl(text)) this.applyUrl(text, true);
+  }
+
+  protected urlEntered(): void {
+    const text = this.url();
+    if (!text.trim()) return;
+    if (!this.applyUrl(text, true)) this.toasts.notify('Not a database URL: expected mysql://, postgres://, redis:// or a SQLite file', 'error');
+  }
+
+  /** Fill the form from a URL; the password goes to the secret box. True when the text was one. */
+  private applyUrl(text: string, announce: boolean): boolean {
+    const parsed = parseConnectionUrl(text);
+    if (!parsed) return false;
+    const conn = this.connection();
+    const { kind, name, ...fields } = parsed.connection;
+    this.patch({ ...fields, kind, name: conn.name.trim() ? conn.name : (name ?? conn.name), access: { type: 'direct' } });
+    if (parsed.password) this.secret.update((s) => ({ ...s, password: parsed.password ?? '', clearPassword: false }));
+    if (this.isNew() && kind !== conn.kind) this.tabs.updateTab(this.scope(), this.tab().id, { data: { ...this.tab().data, kind } });
+    this.url.set('');
+    if (announce) this.toasts.notify(`Filled from the ${DB_KIND_LABELS[kind]} URL${parsed.password ? ', password included' : ''}`, 'success');
+    return true;
   }
 
   protected async browseFile(): Promise<void> {

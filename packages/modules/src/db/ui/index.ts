@@ -4,8 +4,10 @@ import { Database } from 'lucide';
 import { ConnectionTab } from './connection-tab';
 import { DbActions } from './db-actions';
 import { DbSidebar } from './db-sidebar';
+import { HistoryTab } from './history-tab';
 import { QueryTab } from './query-tab';
 import { RedisTab } from './redis-tab';
+import { SearchTab } from './search-tab';
 import { TableTab } from './table-tab';
 
 export { DbActions } from './db-actions';
@@ -25,6 +27,8 @@ export const dbModuleUI = defineModuleUI({
     'db.query': QueryTab,
     'db.table': TableTab,
     'db.redis': RedisTab,
+    'db.history': HistoryTab,
+    'db.search': SearchTab,
   },
   actions: () => {
     const db = inject(DbActions);
@@ -33,6 +37,8 @@ export const dbModuleUI = defineModuleUI({
     return [
       { id: 'db.connection.new', title: 'New database connection', group: 'Databases', run: () => db.openNewConnectionTab('mysql'), when: hasWorkspace },
       { id: 'db.query.new', title: 'New query', group: 'Databases', shortcut: 'Ctrl+Shift+Q', run: () => db.newQueryForFirstConnection(), when: hasWorkspace },
+      { id: 'db.schema.search', title: 'Search tables and columns', group: 'Databases', keywords: ['schema', 'find', 'column', 'table'], run: () => db.openSearchTab(), when: hasWorkspace },
+      { id: 'db.history.open', title: 'Query history', group: 'Databases', keywords: ['sql', 'log'], run: () => db.openHistoryTab(), when: hasWorkspace },
     ];
   },
 });

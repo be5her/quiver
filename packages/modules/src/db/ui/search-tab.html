@@ -1,0 +1,46 @@
+<div class="flex items-center gap-2 px-3 py-2 border-b border-edge shrink-0">
+  <div class="relative flex-1 max-w-lg">
+    <svg [qIcon]="icons.Search" class="size-3.5 text-muted absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none"></svg>
+    <input qInput class="h-8 pl-7" placeholder="Table or column name, across every connection" aria-label="Search tables and columns" data-testid="db-search-input" [value]="query()" (input)="typed($event)" qAutofocus />
+  </div>
+  @if (results.isLoading()) {
+    <svg qSpinner class="size-3.5"></svg>
+  } @else if (query().trim()) {
+    <span class="text-xs text-muted">{{ total() }} match{{ total() === 1 ? '' : 'es' }}</span>
+  }
+</div>
+<div class="flex-1 min-h-0 overflow-auto text-sm">
+  @if (results.error(); as error) {
+    <p class="p-3 text-xs text-danger">{{ error.message }}</p>
+  }
+  @for (group of groups(); track group.key) {
+    <div class="px-3 pt-3 pb-1 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-muted">
+      <svg [qKindIcon]="group.kind"></svg>
+      <span class="truncate">{{ group.connectionName }}</span>
+      @if (group.database) {
+        <span class="normal-case tracking-normal font-normal">· {{ group.database }}</span>
+      }
+    </div>
+    @for (m of group.matches; track m.table + '.' + (m.column ?? '')) {
+      <div role="button" tabindex="0" class="flex items-center gap-2 px-3 h-7 hover:bg-elevated cursor-pointer min-w-0" data-testid="db-search-match" (click)="open(m)" (keydown.enter)="open(m)">
+        <svg [qIcon]="m.column ? icons.Columns3 : icons.Table2" class="size-3.5 text-muted shrink-0" [style.margin-left.px]="m.column ? 14 : 0"></svg>
+        @if (m.column) {
+          <span class="font-mono text-xs truncate"><span class="text-muted">{{ m.table }}.</span>{{ m.column }}</span>
+          <span class="text-[11px] text-muted truncate">{{ m.type }}</span>
+        } @else {
+          <span class="font-mono text-xs truncate">{{ m.table }}</span>
+          <span class="text-[11px] text-muted">{{ m.type }}</span>
+        }
+      </div>
+    }
+  } @empty {
+    @if (!results.isLoading() && query().trim() && !results.error()) {
+      <q-empty-state title="No tables or columns match" hint="The search covers each SQL connection's default database; pick a database in the tree for the rest." />
+    } @else if (!query().trim()) {
+      <q-empty-state title="Search the schema" hint="Type part of a table or column name. Every MySQL, PostgreSQL and SQLite connection of this workspace is searched." />
+    }
+  }
+  @for (e of results.value()?.errors ?? []; track e.connectionId) {
+    <p class="px-3 py-1 text-[11px] text-danger truncate" [title]="e.message">{{ e.connectionName }}: {{ e.message }}</p>
+  }
+</div>

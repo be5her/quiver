@@ -1,9 +1,11 @@
-import { prettyJson, type DbKind } from '@quiver/core';
-import { Database, HardDrive, Zap } from 'lucide';
+import { type DbKind } from '@quiver/core';
+import { Cylinder, Database, HardDrive, Zap } from 'lucide';
 import type { IconNode } from '@quiver/ui';
 
-export const KIND_ICONS: Record<DbKind, IconNode> = { mysql: Database, sqlite: HardDrive, redis: Zap };
-export const KIND_COLORS: Record<DbKind, string> = { mysql: 'text-sky-500', sqlite: 'text-emerald-500', redis: 'text-rose-500' };
+export { csvEscape, formatCell, formatCellFull, rowsToCsv, rowsToJson, rowsToInsert, rowsToMarkdown } from '@quiver/core';
+
+export const KIND_ICONS: Record<DbKind, IconNode> = { mysql: Database, postgres: Cylinder, sqlite: HardDrive, redis: Zap };
+export const KIND_COLORS: Record<DbKind, string> = { mysql: 'text-sky-500', postgres: 'text-indigo-500', sqlite: 'text-emerald-500', redis: 'text-rose-500' };
 
 export const REDIS_TYPE_COLORS: Record<string, string> = {
   string: 'bg-sky-500/15 text-sky-600 dark:text-sky-300',
@@ -13,52 +15,6 @@ export const REDIS_TYPE_COLORS: Record<string, string> = {
   zset: 'bg-rose-500/15 text-rose-600 dark:text-rose-300',
   stream: 'bg-cyan-500/15 text-cyan-600 dark:text-cyan-300',
 };
-
-/** Render any cell value as a single line of text. */
-export function formatCell(value: unknown): string {
-  if (value === null || value === undefined) return 'NULL';
-  if (typeof value === 'string') return value;
-  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') return String(value);
-  if (typeof value === 'object' && value !== null && '$bytes' in value) {
-    const bytes = value as { $bytes: number; hex: string };
-    return `0x${bytes.hex}${bytes.$bytes > 64 ? '…' : ''} (${bytes.$bytes} bytes)`;
-  }
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
-
-/** Multi-line, pretty version for the detail strip and copy buttons. Text holding a JSON object or array is pretty-printed too. */
-export function formatCellFull(value: unknown): string {
-  if (value === null || value === undefined) return 'NULL';
-  if (typeof value === 'string') return prettyJson(value) ?? value;
-  if (typeof value === 'object' && value !== null && '$bytes' in value) return formatCell(value);
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
-export function csvEscape(text: string): string {
-  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-}
-
-export function rowsToCsv(columns: { name: string }[], rows: unknown[][]): string {
-  const head = columns.map((c) => csvEscape(c.name)).join(',');
-  const body = rows.map((r) => r.map((v) => (v === null || v === undefined ? '' : csvEscape(formatCell(v)))).join(','));
-  return [head, ...body].join('\n');
-}
-
-export function rowsToJson(columns: { name: string }[], rows: unknown[][]): string {
-  return JSON.stringify(
-    rows.map((r) => Object.fromEntries(columns.map((c, i) => [c.name, r[i] ?? null]))),
-    null,
-    2,
-  );
-}
 
 export function formatDuration(ms: number): string {
   if (ms < 1) return '<1 ms';
@@ -77,6 +33,26 @@ export function formatTtl(ttl: number): string {
   if (ttl < 3600) return `${Math.floor(ttl / 60)}m ${ttl % 60}s`;
   if (ttl < 86400) return `${Math.floor(ttl / 3600)}h ${Math.floor((ttl % 3600) / 60)}m`;
   return `${Math.floor(ttl / 86400)}d ${Math.floor((ttl % 86400) / 3600)}h`;
+}
+
+/** Seconds as a short "3d 4h" / "12m" uptime. */
+export function formatUptime(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+  return `${Math.floor(seconds / 86400)}d ${Math.floor((seconds % 86400) / 3600)}h`;
+}
+
+/** An ISO time as "just now", "5 min ago", "2 h ago", "3 d ago" or the date. */
+export function formatAgo(iso: string, now = Date.now()): string {
+  const at = Date.parse(iso);
+  if (Number.isNaN(at)) return iso;
+  const seconds = Math.max(0, Math.round((now - at) / 1000));
+  if (seconds < 45) return 'just now';
+  if (seconds < 3600) return `${Math.round(seconds / 60)} min ago`;
+  if (seconds < 86400) return `${Math.round(seconds / 3600)} h ago`;
+  if (seconds < 7 * 86400) return `${Math.round(seconds / 86400)} d ago`;
+  return new Date(at).toLocaleDateString();
 }
 
 export function firstLine(text: string, max = 48): string {

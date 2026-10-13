@@ -4,7 +4,7 @@ type Value = { type: 'string'; value: string } | { type: 'hash'; value: Map<stri
 
 /**
  * A tiny in-process RESP server that speaks enough Redis for the smoke test:
- * connection handshake, SCAN/TYPE/TTL, strings, hashes, lists, sets, sorted sets, DEL.
+ * connection handshake, INFO, SCAN/TYPE/TTL, strings, hashes, lists, sets, sorted sets, expiry, rename and DEL.
  * It exists so the Redis driver is exercised end to end without a Redis binary.
  */
 export function startFakeRedis(): Promise<{ port: number; close(): Promise<void> }> {
@@ -42,7 +42,27 @@ export function startFakeRedis(): Promise<{ port: number; close(): Promise<void>
     const entry = key ? data.get(key) : undefined;
     switch (cmd) {
       case 'INFO':
-        return enc.bulk('# Server\r\nredis_version:7.2.0-fake\r\nloading:0\r\n');
+        return enc.bulk(
+          [
+            '# Server',
+            'redis_version:7.2.0-fake',
+            'redis_mode:standalone',
+            'uptime_in_seconds:4242',
+            '# Clients',
+            'connected_clients:3',
+            '# Memory',
+            'used_memory:1048576',
+            'used_memory_human:1.00M',
+            'maxmemory_human:0B',
+            '# Stats',
+            'instantaneous_ops_per_sec:12',
+            'keyspace_hits:90',
+            'keyspace_misses:10',
+            '# Replication',
+            'role:master',
+            '',
+          ].join('\r\n'),
+        );
       case 'PING':
         return enc.simple('PONG');
       case 'SELECT':
@@ -73,10 +93,97 @@ export function startFakeRedis(): Promise<{ port: number; close(): Promise<void>
         return entry?.type === 'string' ? enc.bulk(entry.value) : enc.bulk(null);
       case 'STRLEN':
         return enc.int(entry?.type === 'string' ? entry.value.length : 0);
-      case 'SET':
+      case 'SET': {
+        const options = argv.slice(3).map((a) => a.toUpperCase());
         data.set(key, { type: 'string', value: argv[2] });
-        expires.delete(key);
+        const ex = options.indexOf('EX');
+        if (ex >= 0) expires.set(key, Date.now() + Number(argv[4 + ex]) * 1000);
+        else if (!options.includes('KEEPTTL')) expires.delete(key);
         return enc.simple('OK');
+      }
+      case 'EXPIRE':
+        if (!data.has(key)) return enc.int(0);
+        expires.set(key, Date.now() + Number(argv[2]) * 1000);
+        return enc.int(1);
+      case 'PERSIST':
+        return enc.int(expires.delete(key) ? 1 : 0);
+      case 'RENAME': {
+        if (!entry) return enc.error('no such key');
+        data.delete(key);
+        data.set(argv[2], entry);
+        const at = expires.get(key);
+        expires.delete(key);
+        if (at !== undefined) expires.set(argv[2], at);
+        return enc.simple('OK');
+      }
+      case 'HGET':
+        return enc.bulk(entry?.type === 'hash' ? (entry.value.get(argv[2]) ?? null) : null);
+      case 'HDEL': {
+        if (entry?.type !== 'hash') return enc.int(0);
+        let n = 0;
+        for (const f of argv.slice(2)) if (entry.value.delete(f)) n++;
+        return enc.int(n);
+      }
+      case 'SADD': {
+        const set = entry?.type === 'set' ? entry : { type: 'set' as const, value: new Set<string>() };
+        let n = 0;
+        for (const m of argv.slice(2)) {
+          if (!set.value.has(m)) n++;
+          set.value.add(m);
+        }
+        data.set(key, set);
+        return enc.int(n);
+      }
+      case 'SREM': {
+        if (entry?.type !== 'set') return enc.int(0);
+        let n = 0;
+        for (const m of argv.slice(2)) if (entry.value.delete(m)) n++;
+        return enc.int(n);
+      }
+      case 'ZADD': {
+        const zset = entry?.type === 'zset' ? entry : { type: 'zset' as const, value: new Map<string, number>() };
+        let n = 0;
+        for (let i = 2; i + 1 < argv.length; i += 2) {
+          if (!zset.value.has(argv[i + 1])) n++;
+          zset.value.set(argv[i + 1], Number(argv[i]));
+        }
+        data.set(key, zset);
+        return enc.int(n);
+      }
+      case 'ZREM': {
+        if (entry?.type !== 'zset') return enc.int(0);
+        let n = 0;
+        for (const m of argv.slice(2)) if (entry.value.delete(m)) n++;
+        return enc.int(n);
+      }
+      case 'RPUSH':
+      case 'LPUSH': {
+        const list = entry?.type === 'list' ? entry : { type: 'list' as const, value: [] as string[] };
+        if (cmd === 'RPUSH') list.value.push(...argv.slice(2));
+        else list.value.unshift(...argv.slice(2).reverse());
+        data.set(key, list);
+        return enc.int(list.value.length);
+      }
+      case 'LSET': {
+        if (entry?.type !== 'list') return enc.error('no such key');
+        const index = Number(argv[2]);
+        const at = index < 0 ? entry.value.length + index : index;
+        if (at < 0 || at >= entry.value.length) return enc.error('index out of range');
+        entry.value[at] = argv[3];
+        return enc.simple('OK');
+      }
+      case 'LREM': {
+        if (entry?.type !== 'list') return enc.int(0);
+        const count = Number(argv[2]);
+        let n = 0;
+        const keep: string[] = [];
+        for (const v of count < 0 ? [...entry.value].reverse() : entry.value) {
+          if (v === argv[3] && (count === 0 || n < Math.abs(count))) n++;
+          else keep.push(v);
+        }
+        entry.value = count < 0 ? keep.reverse() : keep;
+        return enc.int(n);
+      }
       case 'DEL': {
         let n = 0;
         for (const k of argv.slice(1)) if (data.delete(k)) n++;
