@@ -4,6 +4,7 @@ import { Badge, Button, CodeEditor, Segment, Segmented, Spinner, invokeResource,
 import { Terminal } from 'lucide';
 import { DbActions, type DbConnectionRow } from './db-actions';
 import { DbError } from './db-error';
+import { KindIcon } from './kind-icon';
 import { TableDataView } from './table-data-view';
 
 type View = 'data' | 'structure';
@@ -25,7 +26,7 @@ function filterSchema(table: string, columns: DbColumn[] | undefined, kind: SqlK
 /** A table: its rows, or its columns, keys, indexes and definition. */
 @Component({
   selector: 'q-table-tab',
-  imports: [Badge, Button, CodeEditor, DbError, Segment, Segmented, Spinner, TableDataView],
+  imports: [Badge, Button, CodeEditor, DbError, KindIcon, Segment, Segmented, Spinner, TableDataView],
   templateUrl: './table-tab.html',
   host: { class: 'flex flex-col h-full min-h-0' },
 })

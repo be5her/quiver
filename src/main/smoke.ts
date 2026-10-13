@@ -2501,6 +2501,8 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await wait(1200);
       const gridHasAda = await js(`[...document.querySelectorAll('[role=gridcell]')].some((c) => c.textContent === 'Ada')`);
       check('ui: table grid renders rows', gridHasAda === true);
+      const tableHeader = await js(`[...document.querySelectorAll('[data-testid=db-table-connection]')].find((el) => el.offsetParent !== null)?.textContent.trim() ?? null`);
+      check('ui: a table tab names the connection it belongs to', typeof tableHeader === 'string' && tableHeader.includes('smoke sqlite'), tableHeader);
       await shot('05-table-light');
       // A write from elsewhere (another tab, an agent) reloads the schema tree and the open table's rows.
       {
