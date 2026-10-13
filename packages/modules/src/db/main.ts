@@ -234,11 +234,14 @@ const schemaColumns = defineCommand({
 
 const SEARCH_LIMIT = 200;
 
+/** Schemas every MySQL server has; nobody searches them for their own tables. */
+const MYSQL_SYSTEM_SCHEMAS = new Set(['information_schema', 'mysql', 'performance_schema', 'sys']);
+
 const schemaSearch = defineCommand({
   id: 'db.schema.search',
   title: 'Search tables and columns',
   description:
-    'Finds tables and columns whose name contains the text, across every SQL connection of the workspace (each connection default database, or SQLite main) or one connection. Connections that cannot be reached are reported under errors, not thrown.',
+    'Finds tables and columns whose name contains the text, across every database of every SQL connection of the workspace (MySQL system schemas left out) or one connection. Connections that cannot be reached are reported under errors, not thrown.',
   scope: 'workspace',
   input: z.object({ query: z.string().min(1), connectionId: z.string().optional(), limit: z.number().int().min(1).max(1000).default(SEARCH_LIMIT) }),
   handler: async ({ query, connectionId, limit }, ctx): Promise<{ matches: DbSchemaMatch[]; errors: { connectionId: string; connectionName: string; message: string }[] }> => {
@@ -247,14 +250,17 @@ const schemaSearch = defineCommand({
     const matches: DbSchemaMatch[] = [];
     const errors: { connectionId: string; connectionName: string; message: string }[] = [];
     for (const conn of connections) {
-      if (conn.kind === 'mysql' && !conn.database) continue;
       try {
-        const database = conn.kind === 'sqlite' ? 'main' : conn.kind === 'postgres' ? 'public' : conn.database;
-        const tables = await withDriver(ctx, conn.id, (d) => d.columns(database));
-        for (const t of tables) {
-          if (t.name.toLowerCase().includes(needle)) matches.push({ connectionId: conn.id, connectionName: conn.name, kind: conn.kind, database, table: t.name, column: null, type: t.type });
-          for (const c of t.columns) {
-            if (c.name.toLowerCase().includes(needle)) matches.push({ connectionId: conn.id, connectionName: conn.name, kind: conn.kind, database, table: t.name, column: c.name, type: c.type });
+        // Every database of the connection: MySQL schemas (minus the server's own), PostgreSQL schemas, SQLite's attached databases.
+        const databases = (await withDriver(ctx, conn.id, (d) => d.databases())).filter((name) => conn.kind !== 'mysql' || !MYSQL_SYSTEM_SCHEMAS.has(name.toLowerCase()));
+        for (const database of databases.length ? databases : [null]) {
+          const tables = await withDriver(ctx, conn.id, (d) => d.columns(database));
+          for (const t of tables) {
+            if (t.name.toLowerCase().includes(needle)) matches.push({ connectionId: conn.id, connectionName: conn.name, kind: conn.kind, database, table: t.name, column: null, type: t.type });
+            for (const c of t.columns) {
+              if (c.name.toLowerCase().includes(needle)) matches.push({ connectionId: conn.id, connectionName: conn.name, kind: conn.kind, database, table: t.name, column: c.name, type: c.type });
+            }
+            if (matches.length >= limit) break;
           }
           if (matches.length >= limit) break;
         }

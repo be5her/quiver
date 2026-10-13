@@ -36,7 +36,7 @@ Views follow writes made anywhere (a query tab, the grid, the console, an agent)
 
 ## History and search
 
-The sidebar keeps the last five runs; **Show all** (and the palette's "Query history") opens the history tab: full text search, a connection and an outcome filter, time, duration and row count, and each entry opens in a query tab, becomes a saved query or is copied. "Search tables and columns" (palette, the sidebar's magnifier, a connection's menu) opens the schema search: every SQL connection's default database is searched as you type, hits are grouped by connection and a hit opens its table.
+The sidebar keeps the last five runs; **Show all** (and the palette's "Query history") opens the history tab: full text search, a connection and an outcome filter, time, duration and row count, and each entry opens in a query tab, becomes a saved query or is copied. "Search tables and columns" (palette, the sidebar's magnifier, a connection's menu) opens the schema search: every database of every SQL connection (MySQL's own schemas left out) is searched as you type, hits are grouped by connection and database, and a hit opens its table.
 
 ## Redis
 

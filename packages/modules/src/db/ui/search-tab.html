@@ -35,9 +35,9 @@
     }
   } @empty {
     @if (!results.isLoading() && query().trim() && !results.error()) {
-      <q-empty-state title="No tables or columns match" hint="The search covers each SQL connection's default database; pick a database in the tree for the rest." />
+      <q-empty-state title="No tables or columns match" hint="Every database of every SQL connection was searched by name." />
     } @else if (!query().trim()) {
-      <q-empty-state title="Search the schema" hint="Type part of a table or column name. Every MySQL, PostgreSQL and SQLite connection of this workspace is searched." />
+      <q-empty-state title="Search the schema" hint="Type part of a table or column name. Every database of every MySQL, PostgreSQL and SQLite connection of this workspace is searched." />
     }
   }
   @for (e of results.value()?.errors ?? []; track e.connectionId) {
