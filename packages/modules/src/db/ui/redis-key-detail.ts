@@ -1,21 +1,11 @@
 import { Component, computed, inject, input, output } from '@angular/core';
-import { dbDataCollection, type RedisKeyDetail as KeyDetail } from '@quiver/core';
+import { dbDataCollection, prettyJson, type RedisKeyDetail as KeyDetail } from '@quiver/core';
 import { CodeEditor, Dialogs, HostBridge, Icon, IconButton, Spinner, Toasts, invokeResource } from '@quiver/ui';
 import { Copy, RefreshCw, Trash2 } from 'lucide';
 import { DbError } from './db-error';
 import { formatCount, formatTtl, redisQuote } from './db-format';
 import { RedisTypeBadge } from './redis-type-badge';
 import { ResultGrid } from './result-grid';
-
-function tryPrettyJson(text: string): string | null {
-  const trimmed = text.trim();
-  if (!/^[[{]/.test(trimmed)) return null;
-  try {
-    return JSON.stringify(JSON.parse(trimmed), null, 2);
-  } catch {
-    return null;
-  }
-}
 
 /** One key: type, TTL and size, then its value as a grid (hash, list, set, zset, stream) or text. */
 @Component({
@@ -62,7 +52,7 @@ export class RedisKeyDetail {
     const detail = this.detail.value();
     if (!detail || detail.type !== 'string') return null;
     const text = String(detail.value ?? '');
-    const json = tryPrettyJson(text);
+    const json = prettyJson(text);
     return { text: json ?? text, language: json ? ('json' as const) : ('text' as const) };
   });
   protected readonly raw = computed(() => {

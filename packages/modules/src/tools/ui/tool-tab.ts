@@ -1,7 +1,7 @@
 import { Component, computed, effect, inject, input, linkedSignal, signal, untracked } from '@angular/core';
 import { toErrorPayload } from '@quiver/core';
 import { Button, Checkbox, CodeEditor, HostBridge, Select, type Tab, type TabComponent } from '@quiver/ui';
-import { TOOLS, coerce, type ToolOption } from './tools';
+import { TOOLS, coerce, type ToolOption, type ToolSummary } from './tools';
 
 type OptionValue = string | boolean | number;
 
@@ -20,9 +20,11 @@ export class ToolTab implements TabComponent {
 
   protected readonly tool = computed(() => TOOLS.find((t) => t.id === this.tab().data?.['id']));
   protected readonly input = signal('');
+  protected readonly second = signal('');
   protected readonly options = linkedSignal<Record<string, OptionValue>>(() => Object.fromEntries((this.tool()?.options ?? []).map((o) => [o.key, o.default])));
   protected readonly output = signal('');
   protected readonly error = signal<string | null>(null);
+  protected readonly summary = signal<ToolSummary | null>(null);
   protected readonly running = signal(false);
   protected readonly outputLanguage = computed(() => {
     const output = this.output();
@@ -30,9 +32,10 @@ export class ToolTab implements TabComponent {
   });
 
   constructor() {
-    // Live tools run shortly after every change to the input or the options.
+    // Live tools run shortly after every change to the inputs or the options.
     effect((onCleanup) => {
       this.input();
+      this.second();
       this.options();
       if (!untracked(this.tool)?.live) return;
       const timer = setTimeout(() => void this.run(), 150);
@@ -71,17 +74,22 @@ export class ToolTab implements TabComponent {
     if (tool.inputKey && !input.trim()) {
       this.output.set('');
       this.error.set(null);
+      this.summary.set(null);
       return;
     }
+    const second = tool.secondInput && this.second().trim() ? tool.secondInput : null;
     this.running.set(true);
     try {
       const payload: Record<string, unknown> = { ...coerce(this.options(), tool.options ?? []) };
       if (tool.inputKey) payload[tool.inputKey] = input;
-      const result = await this.host.invoke<{ text?: string } | Record<string, unknown>>(tool.commandId, payload, null);
+      if (second) payload[second.key] = this.second();
+      const result = await this.host.invoke<{ text?: string } | Record<string, unknown>>(second?.commandId ?? tool.commandId, payload, null);
       this.output.set(typeof result === 'object' && result && 'text' in result && typeof result.text === 'string' ? result.text : JSON.stringify(result, null, 2));
+      this.summary.set(tool.summary && typeof result === 'object' && result ? tool.summary(result as Record<string, unknown>) : null);
       this.error.set(null);
     } catch (err) {
       this.error.set(toErrorPayload(err).message);
+      this.summary.set(null);
     } finally {
       this.running.set(false);
     }

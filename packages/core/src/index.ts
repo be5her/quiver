@@ -10,6 +10,8 @@ export * from './redact';
 export * from './curl';
 export * from './command-score';
 export * from './shell';
+export * from './json';
+export * from './time';
 export * from './models/api';
 export * from './models/db';
 export * from './models/teleport';
