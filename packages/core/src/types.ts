@@ -110,6 +110,31 @@ export interface WorkspaceApi extends WorkspaceInfo {
   setState<T>(key: string, value: T): Promise<void>;
 }
 
+export interface WebResponse {
+  status: number;
+  headers: Record<string, string>;
+  text: string;
+}
+
+/**
+ * Persistent browser sessions, one cookie jar per partition, kept by the host per machine (never in
+ * the project). A sign-in happens in a window the user drives; requests then carry its cookies, and
+ * cookies the answers set are kept.
+ */
+export interface WebSessionsApi {
+  /**
+   * Open a window on `url` in the partition and resolve true once `done` holds for a page that
+   * finished loading, or false when the user closes the window first. A second call for the same
+   * partition focuses the open window and shares its outcome.
+   */
+  signIn(options: { partition: string; url: string; title: string; done(url: string): boolean | Promise<boolean> }): Promise<boolean>;
+  fetch(partition: string, url: string, init?: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number }): Promise<WebResponse>;
+  /** A cookie the partition holds for `url`, or null. */
+  cookie(partition: string, url: string, name: string): Promise<string | null>;
+  /** Forget everything the partition stored: cookies, storage and cache. */
+  clear(partition: string): Promise<void>;
+}
+
 export interface SecretsApi {
   readonly available: boolean;
   encrypt(plain: string): string;
@@ -138,6 +163,8 @@ export interface HostApi {
     pickFolder?(): Promise<string | undefined>;
   };
   secrets: SecretsApi;
+  /** Browser sessions for services that sign in through a web page. Present when the host has windows. */
+  web?: WebSessionsApi;
   /** Broadcast an event to every UI surface. */
   emit<E extends HostEventName>(event: E, payload: HostEvents[E]): void;
 }
@@ -253,6 +280,8 @@ export interface HostEvents {
   'mcp.changed': { workspaceId: string; serverId: string; reason: 'status' | 'servers' | 'lists' | 'log' };
   /** Env files: a dotenv file or .gitignore changed on disk (from Quiver or outside), or a backup was taken. */
   'env.changed': { workspaceId: string; reason: 'files'; path?: string };
+  /** Logs: a Grafana sign-in started, finished or ended (`session`, for every connection on that address), or the query history grew. */
+  'logs.changed': { reason: 'session' | 'history'; grafanaUrl?: string; workspaceId?: string };
   /** The workspace's todo list changed. */
   'todo.changed': { workspaceId: string };
   /** The in-app updater moved: checking, a version found, download progress, downloaded, or an error. */

@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { BrowserWindow, app, shell } from 'electron';
 
 /** Windows and macOS take the window icon from the executable and the bundle; Linux and dev runs need it here. */
-const iconPath = app.isPackaged ? join(process.resourcesPath, 'icon.png') : join(app.getAppPath(), 'resources', 'icon.png');
+export const iconPath = app.isPackaged ? join(process.resourcesPath, 'icon.png') : join(app.getAppPath(), 'resources', 'icon.png');
 
 export function createMainWindow(options: { show?: boolean } = {}): BrowserWindow {
   const win = new BrowserWindow({

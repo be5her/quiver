@@ -15,9 +15,13 @@
               }
             </select>
           }
+          @case ('text') {
+            {{ opt.label }}
+            <input type="text" class="h-6 w-32 rounded border border-edge bg-surface px-1.5 text-xs text-fg placeholder:text-muted/70" spellcheck="false" [value]="valueOf(opt)" [placeholder]="opt.placeholder ?? ''" [attr.data-testid]="'tool-option-' + opt.key" (input)="setOption(opt, text($event))" />
+          }
           @default {
             {{ opt.label }}
-            <input type="number" class="h-6 w-16 rounded border border-edge bg-surface px-1 text-xs text-fg" [value]="valueOf(opt)" (input)="setOption(opt, number($event))" />
+            <input type="number" class="h-6 w-16 rounded border border-edge bg-surface px-1 text-xs text-fg" [value]="valueOf(opt)" [attr.data-testid]="'tool-option-' + opt.key" (input)="setOption(opt, number($event))" />
           }
         }
       </label>
@@ -29,13 +33,29 @@
   </div>
   <div class="flex-1 min-h-0 grid gap-2 p-2" [class]="tool.inputKey ? 'grid-cols-2' : 'grid-cols-1'">
     @if (tool.inputKey) {
-      <q-code-editor [(value)]="input" [language]="tool.inputLanguage ?? 'text'" [placeholder]="tool.placeholder ?? ''" wrap />
+      <div class="flex flex-col min-h-0 gap-2">
+        <div class="flex-[3] min-h-0">
+          <q-code-editor [(value)]="input" [language]="tool.inputLanguage ?? 'text'" [placeholder]="tool.placeholder ?? ''" wrap />
+        </div>
+        @if (tool.secondInput; as secondInput) {
+          <div class="flex-[2] min-h-0 flex flex-col gap-1">
+            <span class="text-xs text-muted px-1">{{ secondInput.label }}</span>
+            <div class="flex-1 min-h-0" data-testid="tool-second-input">
+              <q-code-editor [(value)]="second" [placeholder]="secondInput.placeholder ?? ''" wrap />
+            </div>
+          </div>
+        }
+      </div>
     }
     <div class="flex flex-col min-h-0 gap-1">
       @if (error(); as error) {
         <div class="text-xs text-danger px-1">{{ error }}</div>
+      } @else if (summary(); as summary) {
+        <div class="text-xs px-1 font-medium" [class]="summary.ok ? 'text-success' : 'text-danger'" data-testid="tool-summary">{{ summary.text }}</div>
       }
-      <q-code-editor [value]="output()" readonly [language]="outputLanguage()" placeholder="Output" wrap />
+      <div class="flex-1 min-h-0">
+        <q-code-editor [value]="output()" readonly [language]="outputLanguage()" placeholder="Output" wrap />
+      </div>
     </div>
   </div>
 } @else {
