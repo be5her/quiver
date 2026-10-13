@@ -12,7 +12,7 @@ A connection is one JSON file under `.quiver/logs-connections/`: a name, the Gra
 
 **Querying.** Every query goes through Grafana's `/api/ds/query` with the data source's uid, the way Explore runs it. Grafana's data source proxy is not used, because it skips the plugin and so the data source's tenant headers (`AccountID`, `ProjectID`). As a result your Grafana permissions and the data source's tenant and auth apply as they do in the browser. Filters are exact matches (`app:="api"`, `!level:="Debug"` to leave one out), ANDed in front of the query's filter part. That part is put in parentheses so an `or` in it cannot swallow them, and the pipes stay at the end. The entries come back newest first with nanosecond order. `level` (or `severity`, `log.level`, `lvl`) becomes the entry's level. The other fields are listed beside the message, except `_stream_id`. Pipe results (`| stats …`, `| field_values …`) come back as entries whose fields are the columns. The histogram is a `hits` query over the filter part, in about 60 buckets. The field picker runs `| field_names`, and value counts run `| stats by (<field>) count() hits | sort by (hits desc) | limit N`, all within the range.
 
-**The view.** The query line takes LogsQL, and Enter runs it. The range is the last 5 minutes to 7 days, and the limit is 100 to 5000 entries. Each run resolves the range once, so the entries, the histogram and the chips describe the same span. Level chips count each level with the other filters applied and toggle that level. "+ Filter" lists the fields in range, then a field's most common values with counts, and keeps or leaves out the one you pick. Clicking an entry shows its message (indented when it is JSON) and its fields, each with keep and leave-out buttons. Chips flip between keeping and leaving out when clicked. Follow asks for entries newer than the newest one on screen every 5 seconds and puts them on top, keeping up to 5000. The query, filters, range and limit are kept in the tab, so they come back with it. Each query is recorded in the workspace history under `.quiver/local` with its filters, range and count or error.
+**The view.** The query line takes LogsQL, and Enter runs it. The range is the last 5 minutes to 7 days, and the limit is 100 to 5000 entries. Each run resolves the range once, so the entries, the histogram and the chips describe the same span. Level chips count each level with the other filters applied and toggle that level. "+ Filter" lists the fields in range, then a field's most common values with counts, and keeps or leaves out the one you pick. Clicking an entry shows its message (indented when it is JSON) and its fields, each with keep and leave-out buttons. Chips flip between keeping and leaving out when clicked. Follow asks every 5 seconds for entries newer than the newest one on screen and puts them on top, keeping up to 5000. It looks five minutes past this machine's clock, so a server whose clock runs ahead still shows up, and an entry stamped in the future does not end the next poll's range before it starts. The query, filters, range and limit are kept in the tab, so they come back with it. Each query is recorded in the workspace history under `.quiver/local` with its filters, range and count or error.
 
 ## Agents
 
@@ -32,7 +32,7 @@ Signing in is not a tool: it needs a person at the window, so `logs.signin` is h
 
 ## Verified by
 
-The smoke runs a fake Grafana. Its login page sends the window on through a stand-in identity provider and back with a session cookie, without anyone clicking. It requires token renewals, answers `/api/user` and the data sources, and answers `/api/ds/query` with VictoriaLogs-shaped frames. Those frames support exact filters, free text, `field_names`, `stats by` counts and `hits` buckets, and come back oldest first.
+The smoke runs a fake Grafana. Its login page sends the window on through a stand-in identity provider and back with a session cookie, without anyone clicking. It requires token renewals, answers `/api/user` and the data sources, and answers `/api/ds/query` with VictoriaLogs-shaped frames. Those frames support exact filters, free text, `field_names`, `stats by` counts and `hits` buckets, and come back oldest first. The smoke can add an entry while it runs, such as one stamped two minutes ahead of the clock, as a server whose clock runs ahead would stamp it.
 
 The host-level checks cover:
 - sign-in and a second sign-in that opens no window
@@ -49,5 +49,6 @@ In the UI, the checks cover:
 - level chips and the histogram total
 - a level chip narrowing the entries
 - the entry detail and leaving out one of its values
+- follow mode picking up the entry stamped ahead of the clock and staying on past it
 - the filter picker's fields, values and counts
 - the settings view

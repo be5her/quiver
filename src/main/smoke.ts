@@ -3578,6 +3578,23 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         await wait(300);
       }
       await until(async () => (await logsEntries()).length === 5, 4000);
+
+      // Follow mode: an entry arrives stamped two minutes ahead of this clock, as a server whose clock runs ahead would stamp it. The first poll must fetch it, and the next poll must not fail on it.
+      fakeGrafana.add({ at: Date.now() + 120_000, msg: 'heartbeat from a server whose clock runs ahead', fields: { _stream_id: 's-api', app: 'api', level: 'Information' } });
+      await js(`document.querySelector('[data-testid=logs-follow]').click()`);
+      await until(async () => (await logsEntries()).length === 6, 6000);
+      const followed = await logsEntries();
+      await wait(5600);
+      const stillFollowing = await js(
+        `({ label: document.querySelector('[data-testid=logs-follow]')?.textContent.trim(), error: Boolean(document.querySelector('[data-testid=logs-error]')), count: document.querySelectorAll('[data-testid=logs-entry]').length })`,
+      );
+      check(
+        'ui: logs: follow mode picks up an entry stamped ahead of this clock and keeps following past it',
+        followed[0]!.includes('clock runs ahead') && JSON.stringify(stillFollowing) === JSON.stringify({ label: 'Following', error: false, count: 6 }),
+        { followed, stillFollowing },
+      );
+      await js(`document.querySelector('[data-testid=logs-follow]').click()`);
+      await wait(200);
       await js(`document.querySelector('[data-testid=logs-add-filter]').click()`);
       await until(async () => (await js(`document.querySelectorAll('[data-testid=logs-filter-field]').length`)) === 3, 4000);
       const pickerFields = await js(`[...document.querySelectorAll('[data-testid=logs-filter-field]')].map((r) => r.getAttribute('data-field'))`);

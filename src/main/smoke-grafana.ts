@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto';
 
 interface Entry {
   at: number;
+  /** Nanoseconds past `at`, stable per entry the way VictoriaLogs keeps them, so an entry has one id across queries. */
+  nanos: number;
   msg: string;
   fields: Record<string, string>;
 }
@@ -13,6 +15,8 @@ export interface FakeGrafana {
   seen: { exprs: { expr: string; queryType: string; maxLines?: number }[]; logins: number; rotations: number; logouts: number };
   /** Make every live token due for renewal, as Grafana does every few minutes. */
   expireTokens(): void;
+  /** Add an entry while running, such as one stamped ahead of this machine's clock by a server whose clock runs ahead. */
+  add(entry: Omit<Entry, 'nanos'>): void;
   close(): Promise<void>;
 }
 
@@ -29,13 +33,15 @@ export async function startFakeGrafana(): Promise<FakeGrafana> {
   const tokens = new Map<string, { renewBy: number }>();
   const seen: FakeGrafana['seen'] = { exprs: [], logins: 0, rotations: 0, logouts: 0 };
   const start = Date.now();
-  const entries: Entry[] = [
-    { at: start - 60_000, msg: 'GET /health 200', fields: { _stream_id: 's-api', app: 'api', level: 'Information' } },
-    { at: start - 50_000, msg: 'payment failed: card declined', fields: { _stream_id: 's-api', app: 'api', level: 'Error', 'error.code': 'E42' } },
-    { at: start - 40_000, msg: '{"event":"order.created","id":7,"items":[1,2]}', fields: { _stream_id: 's-worker', app: 'worker', level: 'Information' } },
-    { at: start - 30_000, msg: 'retrying publish', fields: { _stream_id: 's-worker', app: 'worker', level: 'Warning' } },
-    { at: start - 20_000, msg: 'cache miss', fields: { _stream_id: 's-api', app: 'api', level: 'Debug' } },
-  ];
+  const entries: Entry[] = [];
+  const add = (entry: Omit<Entry, 'nanos'>) => {
+    entries.push({ ...entry, nanos: entries.length * 7 });
+  };
+  add({ at: start - 60_000, msg: 'GET /health 200', fields: { _stream_id: 's-api', app: 'api', level: 'Information' } });
+  add({ at: start - 50_000, msg: 'payment failed: card declined', fields: { _stream_id: 's-api', app: 'api', level: 'Error', 'error.code': 'E42' } });
+  add({ at: start - 40_000, msg: '{"event":"order.created","id":7,"items":[1,2]}', fields: { _stream_id: 's-worker', app: 'worker', level: 'Information' } });
+  add({ at: start - 30_000, msg: 'retrying publish', fields: { _stream_id: 's-worker', app: 'worker', level: 'Warning' } });
+  add({ at: start - 20_000, msg: 'cache miss', fields: { _stream_id: 's-api', app: 'api', level: 'Debug' } });
 
   const nowS = () => Math.floor(Date.now() / 1000);
   const cookieOf = (req: IncomingMessage, name: string) =>
@@ -76,9 +82,9 @@ export async function startFakeGrafana(): Promise<FakeGrafana> {
     return (e: Entry) => exact.every((f) => ((e.fields[f.field] ?? '') === f.value) !== f.exclude) && words.every((w) => e.msg.toLowerCase().includes(w.toLowerCase()));
   };
 
-  const logsFrame = (rows: { at: number; line: string; labels: Record<string, string> }[]) => ({
+  const logsFrame = (rows: { at: number; nanos?: number; line: string; labels: Record<string, string> }[]) => ({
     schema: { refId: 'A', fields: [{ name: 'Time', type: 'time' }, { name: 'Line', type: 'string' }, { name: 'labels', type: 'other' }] },
-    data: { values: [rows.map((r) => r.at), rows.map((r) => r.line), rows.map((r) => r.labels)], nanos: [rows.map((_r, i) => i * 7), null, null] },
+    data: { values: [rows.map((r) => r.at), rows.map((r) => r.line), rows.map((r) => r.labels)], nanos: [rows.map((r) => r.nanos ?? 0), null, null] },
   });
 
   const dsQuery = (body: { from: string; to: string; queries: { expr: string; queryType: string; maxLines?: number; step?: string; datasource: { uid: string } }[] }) => {
@@ -113,7 +119,7 @@ export async function startFakeGrafana(): Promise<FakeGrafana> {
       return { status: 200, body: { results: { A: { frames: [logsFrame(rows)] } } } };
     }
     // Unsorted, oldest first, the way a raw query can come back.
-    const rows = hit.slice(0, q.maxLines ?? 1000).map((e) => ({ at: e.at, line: e.msg, labels: e.fields }));
+    const rows = hit.slice(0, q.maxLines ?? 1000).map((e) => ({ at: e.at, nanos: e.nanos, line: e.msg, labels: e.fields }));
     return { status: 200, body: { results: { A: { frames: [logsFrame(rows)] } } } };
   };
 
@@ -198,6 +204,7 @@ export async function startFakeGrafana(): Promise<FakeGrafana> {
   return {
     url: `http://127.0.0.1:${port}`,
     seen,
+    add,
     expireTokens: () => {
       for (const state of tokens.values()) state.renewBy = nowS() - 1;
     },

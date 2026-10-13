@@ -5,6 +5,7 @@ import {
   composeLogsQuery,
   describeLogsConnection,
   logLevelTone,
+  logsFollowRange,
   toErrorPayload,
   type ErrorPayload,
   type LogEntry,
@@ -280,15 +281,18 @@ export class LogsConnectionTab implements TabComponent {
     this.following = null;
   }
 
-  /** Ask for what arrived since the newest entry on screen and put it on top. */
+  /**
+   * Ask for what arrived since the newest entry on screen and put it on top. The poll looks a little
+   * past this machine's clock, so a writer whose clock runs ahead neither hides its entries nor ends
+   * the range before it starts once one of them is on screen.
+   */
   private async poll(): Promise<void> {
     const scope = this.applied();
     if (!scope || this.polling || this.running()) return;
     this.polling = true;
     try {
-      const newest = this.entries()[0];
-      const from = newest ? newest.ns.slice(0, -6) : scope.from;
-      const out = await this.host.invoke<LogsQueryResult>('logs.query', { ...scope, from, to: String(Date.now()), limit: this.limit() });
+      const { from, to } = logsFollowRange(this.entries()[0]?.ns ?? null, scope.from);
+      const out = await this.host.invoke<LogsQueryResult>('logs.query', { ...scope, from, to, limit: this.limit() });
       if (this.applied() !== scope || !this.follow()) return;
       const known = new Set(this.entries().map((e) => e.id));
       const fresh = out.entries.filter((e) => !known.has(e.id));

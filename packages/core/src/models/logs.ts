@@ -236,6 +236,21 @@ export function logsHitsStep(fromMs: number, toMs: number, buckets = 60): number
   return steps.find((s) => s >= want) ?? steps[steps.length - 1]!;
 }
 
+/** How far ahead of this machine's clock a log writer's clock may run before a followed view misses its entries. */
+export const LOGS_CLOCK_SKEW_MS = 5 * 60_000;
+
+/**
+ * The range a followed view polls: from the newest entry on screen (or `from` before there is one)
+ * to a little past now and past that entry. A writer whose clock runs ahead of this machine's stamps
+ * entries later than now; the look-ahead still fetches them, and the end stays after the start,
+ * which the host would otherwise refuse.
+ */
+export function logsFollowRange(newestNs: string | null, from: string, now: number = Date.now()): { from: string; to: string } {
+  const start = newestNs ? (BigInt(newestNs) / 1_000_000n).toString() : from;
+  const startMs = Number(start);
+  return { from: start, to: String((Number.isFinite(startMs) ? Math.max(now, startMs) : now) + LOGS_CLOCK_SKEW_MS) };
+}
+
 // ---------- Grafana data frames ----------
 
 /** The parts of a Grafana data frame (`/api/ds/query`) the module reads. */

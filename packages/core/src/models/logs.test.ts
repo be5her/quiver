@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  LOGS_CLOCK_SKEW_MS,
   LogsConnectionDraftSchema,
   cleanGrafanaError,
   composeLogsQuery,
@@ -8,6 +9,7 @@ import {
   logLevelTone,
   logsFieldName,
   logsFilterExpr,
+  logsFollowRange,
   logsHitsStep,
   newLogsConnection,
   normalizeGrafanaUrl,
@@ -99,6 +101,15 @@ describe('time', () => {
     expect(logsHitsStep(0, 3_600_000)).toBe(60_000);
     expect(logsHitsStep(0, 7 * 86_400_000)).toBe(10_800_000);
     expect(logsHitsStep(0, 365 * 86_400_000)).toBe(86_400_000);
+  });
+
+  it('follows from the newest entry to a little past now, even when that entry is ahead of this clock', () => {
+    expect(logsFollowRange(null, String(now - 60_000), now)).toEqual({ from: String(now - 60_000), to: String(now + LOGS_CLOCK_SKEW_MS) });
+    expect(logsFollowRange(`${now - 5_000}000250`, '0', now)).toEqual({ from: String(now - 5_000), to: String(now + LOGS_CLOCK_SKEW_MS) });
+    // A writer whose clock runs 30 s ahead: the poll still ends after it starts.
+    const ahead = now + 30_000;
+    expect(logsFollowRange(`${ahead}000000`, '0', now)).toEqual({ from: String(ahead), to: String(ahead + LOGS_CLOCK_SKEW_MS) });
+    expect(logsFollowRange(null, 'now-15m', now)).toEqual({ from: 'now-15m', to: String(now + LOGS_CLOCK_SKEW_MS) });
   });
 });
 
