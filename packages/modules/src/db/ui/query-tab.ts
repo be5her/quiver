@@ -1,13 +1,27 @@
 import { Component, computed, effect, inject, input, signal, untracked, viewChild, type OnInit } from '@angular/core';
-import { toErrorPayload, type DbConnectionSummary, type DbQueryResult, type DbTable, type ErrorPayload, type SavedQuery } from '@quiver/core';
+import {
+  DB_QUERY_CANCELLED,
+  findVariableSpans,
+  isDynamicVariable,
+  isSelectLike,
+  redisScriptIsReadOnly,
+  resolveTemplate,
+  scriptIsReadOnly,
+  statementAt,
+  toErrorPayload,
+  wrapForPage,
+  type DbQueryResult,
+  type DbTableColumns,
+  type ErrorPayload,
+  type SavedQuery,
+  type SqlKind,
+} from '@quiver/core';
 import {
   Badge,
   Button,
   CodeEditor,
   Dialogs,
   HostBridge,
-  Icon,
-  IconButton,
   Segment,
   Segmented,
   Select,
@@ -17,10 +31,14 @@ import {
   type SQLNamespace,
   type Tab,
   type TabComponent,
+  type VariableScope,
 } from '@quiver/ui';
-import { Copy, Play, Save } from 'lucide';
+import { Check, CircleStop, GitBranch, Play, Save, Undo2 } from 'lucide';
+import { ApiVariables } from '../../api/ui/api-variables';
+import { DbActions, type DbConnectionRow } from './db-actions';
 import { DbError } from './db-error';
-import { firstLine, formatCount, formatDuration, rowsToCsv, rowsToJson } from './db-format';
+import { ExportMenu, type ExportSource } from './export-menu';
+import { firstLine, formatCount, formatDuration } from './db-format';
 import { KindIcon } from './kind-icon';
 import { QueryResultView } from './query-result-view';
 
@@ -44,13 +62,32 @@ function summarize(results: DbQueryResult[] | null): string | null {
   return `${results.length} statements · ${formatDuration(total)}`;
 }
 
+/** Completion namespace from the columns overview: tables with their columns and types. */
+function completionSchema(tables: DbTableColumns[] | undefined, kind: SqlKind): SQLNamespace | undefined {
+  if (!tables) return undefined;
+  const quote = kind === 'mysql' ? '`' : '"';
+  return Object.fromEntries(
+    tables.map((t) => [
+      t.name,
+      t.columns.map((c) => ({
+        label: c.name,
+        type: 'property',
+        detail: c.type,
+        apply: /^[A-Za-z_][A-Za-z0-9_]*$/.test(c.name) ? undefined : `${quote}${c.name.replace(new RegExp(quote, 'g'), quote + quote)}${quote}`,
+      })),
+    ]),
+  );
+}
+
 /**
  * A SQL (or Redis console) editor on a connection, with its results. Ctrl+Enter runs the selection or
- * everything; Ctrl+S saves it with the project. The text is kept in the tab, so it survives restarts.
+ * everything, Ctrl+Shift+Enter the statement under the cursor; Ctrl+S saves it with the project.
+ * `{{parameters}}` resolve from the API variables, the rest are asked for on each run and remembered.
+ * The text is kept in the tab, so it survives restarts.
  */
 @Component({
   selector: 'q-query-tab',
-  imports: [Badge, Button, CodeEditor, DbError, Icon, IconButton, KindIcon, QueryResultView, Segment, Segmented, Select],
+  imports: [ApiVariables, Badge, Button, CodeEditor, DbError, ExportMenu, KindIcon, QueryResultView, Segment, Segmented, Select],
   templateUrl: './query-tab.html',
   host: { class: 'flex flex-col h-full min-h-0', '(keydown)': 'shortcut($event)' },
 })
@@ -59,36 +96,46 @@ export class QueryTab implements TabComponent, OnInit {
   private readonly tabs = inject(TabsState);
   private readonly toasts = inject(Toasts);
   private readonly dialogs = inject(Dialogs);
+  private readonly db = inject(DbActions);
   private readonly editor = viewChild(CodeEditor);
 
   readonly tab = input.required<Tab>();
   readonly scope = input.required<string>();
 
-  protected readonly icons = { Copy, Play, Save };
+  protected readonly icons = { Check, CircleStop, GitBranch, Play, Save, Undo2 };
   protected readonly maxRowsOptions = MAX_ROWS_OPTIONS;
-  protected readonly jsonIcon = '{}';
   protected readonly text = signal('');
   protected readonly connectionId = signal<string | null>(null);
   protected readonly database = signal<string | null>(null);
   protected readonly saved = signal<SavedQuery | null>(null);
   protected readonly maxRows = signal(500);
   protected readonly running = signal(false);
+  protected readonly cancelling = signal(false);
+  protected readonly loadingMore = signal(false);
   protected readonly results = signal<DbQueryResult[] | null>(null);
   protected readonly error = signal<ErrorPayload | null>(null);
   protected readonly activeResult = signal('0');
+  /** The last values given to `{{parameters}}`, offered again on the next run. */
+  protected readonly params = signal<Record<string, string>>({});
+  /** The query text as it last ran (parameters resolved), for "save all rows". */
+  private readonly lastRun = signal<string | null>(null);
   private queryId: string | undefined;
 
-  protected readonly connections = invokeResource<DbConnectionSummary[]>('db.connection.list', () => ({}), { refreshOn: ['db-connections'] });
+  protected readonly connections = invokeResource<DbConnectionRow[]>('db.connection.list', () => ({}), { refreshOn: ['db-connections'] });
   protected readonly connection = computed(() => this.connections.value()?.find((c) => c.id === this.connectionId()) ?? null);
   protected readonly kind = computed(() => this.connection()?.kind ?? null);
-  protected readonly databases = invokeResource<string[]>('db.schema.databases', () => ({ connectionId: this.connectionId() }), { enabled: () => this.kind() === 'mysql' });
-  private readonly tables = invokeResource<DbTable[]>('db.schema.tables', () => ({ connectionId: this.connectionId(), database: this.database() }), {
-    enabled: () => (this.kind() === 'mysql' ? Boolean(this.database() || this.connection()?.database) : this.kind() === 'sqlite'),
+  protected readonly sqlKind = computed<SqlKind | null>(() => {
+    const kind = this.kind();
+    return kind && kind !== 'redis' ? kind : null;
   });
-  protected readonly sqlSchema = computed<SQLNamespace | undefined>(() => {
-    const tables = this.tables.value();
-    return tables ? Object.fromEntries(tables.map((t) => [t.name, []])) : undefined;
+  protected readonly hasSchemas = computed(() => this.kind() === 'mysql' || this.kind() === 'postgres');
+  protected readonly databases = invokeResource<string[]>('db.schema.databases', () => ({ connectionId: this.connectionId() }), { enabled: () => this.hasSchemas() });
+  private readonly columns = invokeResource<DbTableColumns[]>('db.schema.columns', () => ({ connectionId: this.connectionId(), database: this.database() }), {
+    enabled: () => (this.kind() === 'mysql' ? Boolean(this.database() || this.connection()?.database) : this.sqlKind() !== null),
+    refreshOn: () => (this.connectionId() ? [`db-data:${this.connectionId()}`] : []),
   });
+  private readonly variables = invokeResource<VariableScope>('api.variables.list', () => ({}), { refreshOn: ['environments'], refreshOnState: ['api.activeEnvironment'], refreshOnEvents: ['config.changed'] });
+  protected readonly sqlSchema = computed<SQLNamespace | undefined>(() => completionSchema(this.columns.value(), this.sqlKind() ?? 'mysql'));
   protected readonly dirty = computed(() => {
     const saved = this.saved();
     return saved ? this.text() !== saved.text || (this.connectionId() ?? null) !== saved.connectionId || (this.database() ?? null) !== saved.database : false;
@@ -96,11 +143,23 @@ export class QueryTab implements TabComponent, OnInit {
   protected readonly current = computed(() => this.results()?.[Number(this.activeResult())] ?? null);
   protected readonly summary = computed(() => summarize(this.results()));
   protected readonly resultTabs = computed(() => (this.results() ?? []).map((r, i) => ({ value: String(i), label: `${i + 1}: ${resultLabel(r)}` })));
+  /** A truncated SELECT can fetch its next page. */
+  protected readonly canLoadMore = computed(() => {
+    const r = this.current();
+    return Boolean(r && r.kind === 'rows' && r.truncated && this.sqlKind() && isSelectLike(r.statement));
+  });
+  protected readonly canCancel = computed(() => this.running() && (this.kind() === 'mysql' || this.kind() === 'postgres'));
+  protected readonly inTransaction = computed(() => Boolean(this.connection()?.inTransaction));
+  protected readonly exportSource = computed<ExportSource | null>(() => {
+    const query = this.lastRun();
+    return query && this.sqlKind() ? { query, database: this.database() } : null;
+  });
   protected readonly placeholder = computed(() =>
     this.kind() === 'redis'
       ? 'One command per line, e.g.\nSCAN 0 MATCH user:* COUNT 100\nHGETALL user:1'
-      : 'SELECT * FROM table_name LIMIT 100;\n\nCtrl+Enter runs the selection, or everything when nothing is selected.',
+      : 'SELECT * FROM table_name WHERE id = {{id}} LIMIT 100;\n\nCtrl+Enter runs the selection, or everything when nothing is selected; Ctrl+Shift+Enter runs the statement under the cursor.',
   );
+  protected readonly editorDialect = computed<SqlKind | 'standard'>(() => this.sqlKind() ?? 'standard');
 
   constructor() {
     // Fall back to the first connection so a fresh tab is immediately runnable.
@@ -108,10 +167,9 @@ export class QueryTab implements TabComponent, OnInit {
       const first = this.connections.value()?.[0];
       if (!this.connectionId() && first) this.connectionId.set(first.id);
     });
-
     // Keep the editor's state in the tab (debounced), so it is restored with the workspace.
     effect((onCleanup) => {
-      const state = { queryId: this.queryId, connectionId: this.connectionId(), database: this.database(), text: this.text() };
+      const state = { queryId: this.queryId, connectionId: this.connectionId(), database: this.database(), text: this.text(), params: this.params() };
       const timer = setTimeout(() => {
         const tab = untracked(this.tab);
         const next = { ...tab.data, id: tab.data?.['id'], ...state };
@@ -119,13 +177,11 @@ export class QueryTab implements TabComponent, OnInit {
       }, 300);
       onCleanup(() => clearTimeout(timer));
     });
-
     effect(() => {
       const dirty = this.dirty();
       const tab = this.tab();
       if (tab.dirty !== dirty) untracked(() => this.tabs.updateTab(this.scope(), tab.id, { dirty }));
     });
-
     // An unsaved query is named after its first line.
     effect(() => {
       if (this.saved()) return;
@@ -141,6 +197,7 @@ export class QueryTab implements TabComponent, OnInit {
     this.text.set(typeof data['text'] === 'string' ? data['text'] : '');
     this.connectionId.set(typeof data['connectionId'] === 'string' ? data['connectionId'] : null);
     this.database.set(typeof data['database'] === 'string' ? data['database'] : null);
+    if (data['params'] && typeof data['params'] === 'object') this.params.set(data['params'] as Record<string, string>);
     if (this.queryId) void this.loadSaved(this.queryId, data);
   }
 
@@ -153,6 +210,7 @@ export class QueryTab implements TabComponent, OnInit {
 
   protected pickConnection(event: Event): void {
     this.connectionId.set((event.target as HTMLSelectElement).value || null);
+    this.database.set(null);
   }
 
   protected pickDatabase(event: Event): void {
@@ -163,21 +221,106 @@ export class QueryTab implements TabComponent, OnInit {
     this.maxRows.set(Number((event.target as HTMLSelectElement).value));
   }
 
-  protected async run(): Promise<void> {
+  /** The selection, everything, or (for `current`) the statement under the cursor. */
+  private textToRun(mode: 'all' | 'current'): string {
+    const editor = this.editor();
+    if (mode === 'current') return statementAt(this.text(), editor?.cursorOffset() ?? 0)?.text ?? '';
+    return (editor?.selectedText() || this.text()).trim();
+  }
+
+  /** Fill `{{parameters}}` from the API variables; ask for the rest, offering the last values. Null when the user cancels. */
+  private async resolveParameters(query: string): Promise<string | null> {
+    const names = [...new Set(findVariableSpans(query).map((s) => s.name))];
+    if (!names.length) return query;
+    const known: Record<string, string> = {};
+    for (const v of this.variables.value()?.variables ?? []) if (v.value !== null) known[v.name] = v.value;
+    const params = { ...this.params() };
+    for (const name of names) {
+      if (name in known || isDynamicVariable(name)) continue;
+      const value = await this.dialogs.prompt({ title: `Value for {{${name}}}`, label: name, defaultValue: params[name] ?? '', confirmLabel: 'Run' });
+      if (value === null) return null;
+      params[name] = value;
+    }
+    this.params.set(params);
+    return resolveTemplate(query, { ...known, ...params });
+  }
+
+  protected async run(mode: 'all' | 'current' = 'all'): Promise<void> {
     const connectionId = this.connectionId();
-    if (!connectionId || this.running()) return;
-    const query = (this.editor()?.selectedText() || this.text()).trim();
-    if (!query) return;
+    const connection = this.connection();
+    if (!connectionId || !connection || this.running()) return;
+    const raw = this.textToRun(mode);
+    if (!raw) return;
+    const query = await this.resolveParameters(raw);
+    if (query === null) return;
+    const writes = connection.kind === 'redis' ? !redisScriptIsReadOnly(query) : !scriptIsReadOnly(query);
+    if (writes && !(await this.db.confirmWrite(connection, `The script "${firstLine(query, 60)}" can change data.`))) return;
     this.running.set(true);
     this.error.set(null);
     try {
       const out = await this.host.invoke<DbQueryResult[]>('db.query.run', { connectionId, query, database: this.database() || undefined, maxRows: this.maxRows() });
       this.results.set(out);
+      this.lastRun.set(query);
       this.activeResult.set(String(Math.max(0, out.length - 1)));
     } catch (err) {
-      this.error.set(toErrorPayload(err));
+      const payload = toErrorPayload(err);
+      if (payload.code === DB_QUERY_CANCELLED) this.toasts.notify('Query cancelled', 'info');
+      else this.error.set(payload);
     } finally {
       this.running.set(false);
+      this.cancelling.set(false);
+    }
+  }
+
+  protected async cancel(): Promise<void> {
+    const connectionId = this.connectionId();
+    if (!connectionId || !this.running() || this.cancelling()) return;
+    this.cancelling.set(true);
+    try {
+      const { supported, cancelled } = await this.host.invoke<{ supported: boolean; cancelled: boolean }>('db.query.cancel', { connectionId });
+      if (!supported) this.toasts.notify('This database cannot interrupt a running statement', 'info');
+      else if (!cancelled) this.toasts.notify('Nothing was running any more', 'info');
+    } catch (err) {
+      this.toasts.error(err);
+      this.cancelling.set(false);
+    }
+  }
+
+  /** Fetch the next page of a truncated SELECT by wrapping it as a subquery with LIMIT and OFFSET. */
+  protected async loadMore(): Promise<void> {
+    const index = Number(this.activeResult());
+    const current = this.results()?.[index];
+    const connectionId = this.connectionId();
+    if (!current || current.kind !== 'rows' || !connectionId || this.loadingMore()) return;
+    this.loadingMore.set(true);
+    try {
+      const limit = this.maxRows();
+      const [page] = await this.host.invoke<DbQueryResult[]>('db.query.run', {
+        connectionId,
+        query: wrapForPage(current.statement, limit, current.rows.length),
+        database: this.database() || undefined,
+        maxRows: limit,
+        record: false,
+      });
+      const rows = [...current.rows, ...(page?.rows ?? [])];
+      const merged: DbQueryResult = { ...current, rows, rowCount: rows.length, truncated: Boolean(page && page.rows.length >= limit), durationMs: current.durationMs + (page?.durationMs ?? 0) };
+      this.results.update((all) => (all ? all.map((r, i) => (i === index ? merged : r)) : all));
+    } catch (err) {
+      this.toasts.error(err);
+    } finally {
+      this.loadingMore.set(false);
+    }
+  }
+
+  protected async transaction(action: 'begin' | 'commit' | 'rollback'): Promise<void> {
+    const connection = this.connection();
+    if (!connection) return;
+    if (action === 'commit' && !(await this.db.confirmWrite(connection, 'Committing makes every change of the transaction permanent.'))) return;
+    try {
+      await this.host.invoke('db.transaction', { connectionId: connection.id, action });
+      this.toasts.notify(action === 'begin' ? `Transaction started on ${connection.name}; every tab on it is inside until commit or rollback` : action === 'commit' ? 'Committed' : 'Rolled back', action === 'rollback' ? 'info' : 'success');
+    } catch (err) {
+      this.toasts.error(err);
     }
   }
 
@@ -201,13 +344,6 @@ export class QueryTab implements TabComponent, OnInit {
     } catch (err) {
       this.toasts.error(err);
     }
-  }
-
-  protected copyRows(format: 'json' | 'csv'): void {
-    const current = this.current();
-    if (current?.kind !== 'rows') return;
-    const text = format === 'json' ? rowsToJson(current.columns, current.rows) : rowsToCsv(current.columns, current.rows);
-    void navigator.clipboard.writeText(text).then(() => this.toasts.notify(`Copied ${format.toUpperCase()}`, 'success'));
   }
 
   /** A saved query loads once; the tab's own text then wins, so unsaved edits survive restarts. */

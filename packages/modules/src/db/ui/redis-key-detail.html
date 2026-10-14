@@ -4,17 +4,29 @@
   <div class="flex flex-col h-full min-h-0">
     <div class="flex items-center gap-2 px-3 h-10 border-b border-edge shrink-0 min-w-0">
       <span [qRedisType]="d.type"></span>
-      <span class="font-mono text-sm truncate" [title]="keyName()">{{ keyName() }}</span>
+      <span class="font-mono text-sm truncate" [title]="keyName()" data-testid="db-redis-key-name">{{ keyName() }}</span>
       <div class="flex-1"></div>
-      @if (detail.isLoading()) {
+      @if (detail.isLoading() || busy()) {
         <svg qSpinner class="size-3.5"></svg>
       }
+      @if (d.type === 'string') {
+        @if (editing()) {
+          <button qButton size="sm" variant="primary" [icon]="icons.Check" [loading]="busy()" data-testid="db-redis-save" (click)="saveString()">Save</button>
+          <button qButton size="sm" variant="ghost" [icon]="icons.X" (click)="cancelEdit()">Cancel</button>
+        } @else {
+          <button qButton size="sm" variant="ghost" [icon]="icons.Pencil" data-testid="db-redis-edit" (click)="startEdit()">Edit</button>
+        }
+      } @else if (editableCollection()) {
+        <button qButton size="sm" variant="ghost" [icon]="icons.Plus" data-testid="db-redis-add" (click)="addItem()">Add</button>
+      }
+      <button qIconButton label="Set expiry" size="sm" data-testid="db-redis-ttl" (click)="setTtl()"><svg [qIcon]="icons.Timer" class="size-3.5"></svg></button>
+      <button qIconButton label="Rename key" size="sm" (click)="rename()"><svg [qIcon]="icons.TextCursorInput" class="size-3.5"></svg></button>
       <button qIconButton label="Copy value" size="sm" (click)="copyValue()"><svg [qIcon]="icons.Copy" class="size-3.5"></svg></button>
       <button qIconButton label="Refresh" size="sm" (click)="detail.reload()"><svg [qIcon]="icons.RefreshCw" class="size-3.5"></svg></button>
       <button qIconButton label="Delete key" size="sm" class="hover:text-danger" (click)="remove()"><svg [qIcon]="icons.Trash2" class="size-3.5"></svg></button>
     </div>
     <div class="flex items-center gap-4 px-3 h-7 border-b border-edge shrink-0 text-[11px] text-muted">
-      <span>TTL: {{ formatTtl(d.ttl) }}</span>
+      <span data-testid="db-redis-ttl-value">TTL: {{ formatTtl(d.ttl) }}</span>
       @if (d.length !== null) {
         <span>{{ d.type === 'string' ? 'length' : 'items' }}: {{ formatCount(d.length) }}</span>
       }
@@ -27,13 +39,20 @@
       @if (d.truncated) {
         <span class="text-warning">showing first {{ shownCount() }}</span>
       }
+      @if (editableCollection()) {
+        <span class="ml-auto">Double-click a value to edit it; right-click to remove it.</span>
+      }
     </div>
     <div class="flex-1 min-h-0">
       @if (grid(); as grid) {
-        <q-result-grid [columns]="grid.columns" [rows]="grid.rows" emptyMessage="(empty)" />
+        <q-result-grid [columns]="grid.columns" [rows]="grid.rows" [editable]="editableCollection()" emptyMessage="(empty)" (cellEdit)="cellEdit($event)" (toggleDelete)="removeItem($event)" />
       } @else if (text(); as text) {
         <div class="p-2 h-full">
-          <q-code-editor [value]="text.text" [language]="text.language" readonly wrap />
+          @if (editing()) {
+            <q-code-editor [(value)]="draft" [language]="text.language" wrap autofocus />
+          } @else {
+            <q-code-editor [value]="text.text" [language]="text.language" readonly wrap />
+          }
         </div>
       } @else {
         <pre class="p-3 text-xs font-mono whitespace-pre-wrap break-all overflow-auto h-full">{{ raw() }}</pre>

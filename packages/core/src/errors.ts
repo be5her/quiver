@@ -10,6 +10,10 @@ export type QuiverErrorCode =
   | 'TELEPORT_LOGIN_REQUIRED'
   /** A service reached through a web sign-in (Grafana) has no live session on this machine; the UI offers "Sign in". */
   | 'SIGN_IN_REQUIRED'
+  /** A database statement was stopped with db.query.cancel. */
+  | 'QUERY_CANCELLED'
+  /** A row edit matched a number of rows other than one; the transaction was rolled back. */
+  | 'CONFLICT'
   | 'INTERNAL';
 
 export interface ErrorPayload {

@@ -5,10 +5,17 @@
       @if (scanning()) {
         <svg qSpinner class="size-3.5"></svg>
       } @else {
-        <svg [qIcon]="searchIcon" class="size-3.5"></svg>
+        <svg [qIcon]="icons.Search" class="size-3.5"></svg>
       }
     </button>
+    <button qIconButton label="New key" size="sm" data-testid="db-redis-new-key" (click)="newKey()"><svg [qIcon]="icons.Plus" class="size-3.5"></svg></button>
   </div>
+  @if (vitals().length) {
+    <div class="px-2 py-1 border-b border-edge text-[10px] text-muted leading-4 flex items-center gap-1 min-w-0" data-testid="db-redis-info">
+      <span class="truncate" [title]="vitals().join(' · ')">{{ vitals().join(' · ') }}</span>
+      <button qIconButton label="Refresh server info" size="sm" class="ml-auto shrink-0" (click)="info.reload()"><svg [qIcon]="icons.RefreshCw" class="size-3"></svg></button>
+    </div>
+  }
   <div class="flex-1 min-h-0 overflow-auto">
     @if (scanError(); as error) {
       <q-db-error [error]="error" compact (retry)="scan(true)" />
@@ -41,7 +48,7 @@
 </div>
 <div class="flex-1 min-w-0 min-h-0">
   @if (selected(); as key) {
-    <q-redis-key-detail [connectionId]="connectionId()" [keyName]="key" (deleted)="removeKey(key)" />
+    <q-redis-key-detail [connectionId]="connectionId()" [keyName]="key" (deleted)="removeKey(key)" (renamed)="renamedKey($event)" />
   } @else {
     <div class="h-full flex items-center justify-center text-xs text-muted">Select a key to inspect it.</div>
   }

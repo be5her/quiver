@@ -1,7 +1,7 @@
-import { QuiverError, qualifiedName, quoteIdentifier, splitStatements, type DbColumn, type DbConnection, type DbIndex, type DbQueryResult, type DbTable, type DbTableDetail, type DbTableRows } from '@quiver/core';
+import { DB_QUERY_CANCELLED, QuiverError, qualifiedName, quoteIdentifier, splitStatements, type DbColumn, type DbConnection, type DbForeignKey, type DbIndex, type DbQueryResult, type DbTable, type DbTableColumns, type DbTableDetail, type DbTableRows } from '@quiver/core';
 import { Types } from 'mysql2';
 import { createConnection, type Connection, type FieldPacket } from 'mysql2/promise';
-import { emptyResult, normalizeValue, type Driver, type RunOptions, type TableRowsOptions } from './types';
+import { columnsEntry, emptyResult, normalizeValue, type Driver, type RunOptions, type TableRowsOptions } from './types';
 
 const TYPE_NAMES = Types as unknown as Record<number, string>;
 
@@ -30,8 +30,8 @@ export class MySqlDriver implements Driver {
     this.currentDb = config.database || null;
   }
 
-  async connect(): Promise<void> {
-    const conn = await createConnection({
+  private connectionOptions() {
+    return {
       host: this.config.host,
       port: this.config.port || 3306,
       user: this.config.user || 'root',
@@ -43,7 +43,13 @@ export class MySqlDriver implements Driver {
       supportBigNumbers: true,
       bigNumberStrings: true,
       multipleStatements: false,
-    });
+      // Report matched rows, not changed rows, so an update that keeps a value still counts as one row for db.table.apply.
+      flags: ['+FOUND_ROWS'],
+    };
+  }
+
+  async connect(): Promise<void> {
+    const conn = await createConnection(this.connectionOptions());
     conn.on('error', () => {
       this.dead = true;
     });
@@ -146,7 +152,69 @@ export class MySqlDriver implements Driver {
     } catch {
       ddl = null;
     }
-    return { name, database: db, columns, indexes, ddl };
+    const primaryKey = indexes.find((i) => i.name === 'PRIMARY')?.columns ?? columns.filter((c) => c.key === 'PRI').map((c) => c.name);
+    const [fkRows] = await this.query(
+      `SELECT CONSTRAINT_NAME, TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_SCHEMA, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+       FROM information_schema.KEY_COLUMN_USAGE
+       WHERE REFERENCED_TABLE_NAME IS NOT NULL AND ((TABLE_SCHEMA = ? AND TABLE_NAME = ?) OR (REFERENCED_TABLE_SCHEMA = ? AND REFERENCED_TABLE_NAME = ?))
+       ORDER BY TABLE_SCHEMA, TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION`,
+      [db, name, db, name],
+    );
+    const keys = new Map<string, DbForeignKey>();
+    for (const r of fkRows as unknown[][]) {
+      const id = `${r[1]}.${r[2]}.${r[0]}`;
+      const key = keys.get(id) ?? { name: String(r[0]), database: String(r[1]), table: String(r[2]), columns: [], refDatabase: String(r[4]), refTable: String(r[5]), refColumns: [] };
+      key.columns.push(String(r[3]));
+      key.refColumns.push(String(r[6]));
+      keys.set(id, key);
+    }
+    const all = [...keys.values()];
+    return {
+      name,
+      database: db,
+      columns,
+      primaryKey,
+      indexes,
+      foreignKeys: all.filter((k) => k.database === db && k.table === name),
+      referencedBy: all.filter((k) => k.refDatabase === db && k.refTable === name),
+      ddl,
+    };
+  }
+
+  async columns(database?: string | null): Promise<DbTableColumns[]> {
+    const db = this.schemaFor(database);
+    const [rows] = await this.query(
+      `SELECT c.TABLE_NAME, t.TABLE_TYPE, c.COLUMN_NAME, c.COLUMN_TYPE FROM information_schema.COLUMNS c
+       JOIN information_schema.TABLES t ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
+       WHERE c.TABLE_SCHEMA = ? ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION`,
+      [db],
+    );
+    const out: DbTableColumns[] = [];
+    for (const r of rows as unknown[][]) {
+      const table = String(r[0]);
+      let entry = out[out.length - 1];
+      if (!entry || entry.name !== table) {
+        entry = columnsEntry(table, String(r[1]).toUpperCase().includes('VIEW') ? 'view' : 'table', []);
+        out.push(entry);
+      }
+      entry.columns.push({ name: String(r[2]), type: String(r[3]) });
+    }
+    return out;
+  }
+
+  /** `KILL QUERY` from a second connection; the running statement then fails with ER_QUERY_INTERRUPTED, reported as QUERY_CANCELLED. */
+  async cancel(): Promise<boolean> {
+    const threadId = this.conn?.threadId;
+    if (!threadId || !this.isAlive()) return false;
+    const killer = await createConnection({ ...this.connectionOptions(), database: undefined });
+    try {
+      await killer.query('KILL QUERY ?', [threadId]);
+      return true;
+    } catch (err) {
+      throw wrapError(err);
+    } finally {
+      await killer.end().catch(() => killer.destroy());
+    }
   }
 
   private async useDatabase(database?: string | null): Promise<void> {
@@ -256,5 +324,6 @@ function wrapError(err: unknown): QuiverError {
   if (err instanceof QuiverError) return err;
   const e = err as { code?: string; sqlMessage?: string; message?: string; errno?: number; sqlState?: string };
   const message = e.sqlMessage ?? e.message ?? String(err);
+  if (e.code === 'ER_QUERY_INTERRUPTED' || e.errno === 1317) return new QuiverError(DB_QUERY_CANCELLED, 'The query was cancelled', { code: e.code, errno: e.errno });
   return new QuiverError('REQUEST_FAILED', e.code && !message.includes(e.code) ? `${message} (${e.code})` : message, { code: e.code, errno: e.errno, sqlState: e.sqlState });
 }

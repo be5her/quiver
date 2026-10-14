@@ -1,4 +1,4 @@
-import { QuiverError, parseRedisCommands, type DbConnection, type DbQueryResult, type DbTable, type DbTableDetail, type DbTableRows, type RedisKeyDetail, type RedisKeyInfo, type RedisScanResult } from '@quiver/core';
+import { QuiverError, parseRedisCommands, type DbConnection, type DbQueryResult, type DbTable, type DbTableColumns, type DbTableDetail, type DbTableRows, type RedisInfo, type RedisKeyDetail, type RedisKeyInfo, type RedisScanResult } from '@quiver/core';
 import { Redis } from 'ioredis';
 import { normalizeValue, type RedisDriverApi, type RunOptions, type TableRowsOptions } from './types';
 
@@ -82,6 +82,43 @@ export class RedisDriver implements RedisDriverApi {
     throw new QuiverError('INVALID_INPUT', 'Redis has no tables. Use the key browser or db.redis.keys.');
   }
 
+  async columns(): Promise<DbTableColumns[]> {
+    return [];
+  }
+
+  /** The server's INFO plus DBSIZE, boiled down to what the key browser's strip shows. */
+  async info(): Promise<RedisInfo> {
+    const text = String(await this.call(['INFO']));
+    const fields = new Map<string, string>();
+    for (const line of text.split(/\r?\n/)) {
+      const at = line.indexOf(':');
+      if (at > 0 && !line.startsWith('#')) fields.set(line.slice(0, at), line.slice(at + 1));
+    }
+    const num = (key: string) => (fields.has(key) && fields.get(key) !== '' && Number.isFinite(Number(fields.get(key))) ? Number(fields.get(key)) : null);
+    const str = (key: string) => fields.get(key) ?? null;
+    let keys: number | null = null;
+    try {
+      keys = Number(await this.call(['DBSIZE']));
+    } catch {
+      keys = null;
+    }
+    const hits = num('keyspace_hits');
+    const misses = num('keyspace_misses');
+    return {
+      version: str('redis_version'),
+      mode: str('redis_mode'),
+      uptimeSeconds: num('uptime_in_seconds'),
+      connectedClients: num('connected_clients'),
+      usedMemory: num('used_memory'),
+      usedMemoryHuman: str('used_memory_human'),
+      maxMemoryHuman: str('maxmemory_human'),
+      keys,
+      opsPerSecond: num('instantaneous_ops_per_sec'),
+      hitRate: hits !== null && misses !== null && hits + misses > 0 ? hits / (hits + misses) : null,
+      role: str('role'),
+    };
+  }
+
   async tableRows(_name: string, _options: TableRowsOptions): Promise<DbTableRows> {
     throw new QuiverError('INVALID_INPUT', 'Redis has no tables. Use db.redis.keys and db.redis.key.');
   }
@@ -90,6 +127,11 @@ export class RedisDriver implements RedisDriverApi {
   async run(query: string, _options: RunOptions): Promise<DbQueryResult[]> {
     const commands = parseRedisCommands(query);
     if (!commands.length) throw new QuiverError('INVALID_INPUT', 'Enter a Redis command, e.g. GET mykey');
+    return this.exec(commands);
+  }
+
+  /** Commands as argument lists, so values with spaces, quotes or line breaks need no quoting. */
+  async exec(commands: string[][]): Promise<DbQueryResult[]> {
     const results: DbQueryResult[] = [];
     for (const argv of commands) {
       const started = performance.now();

@@ -3,7 +3,7 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirro
 import { html } from '@codemirror/lang-html';
 import { javascript } from '@codemirror/lang-javascript';
 import { json } from '@codemirror/lang-json';
-import { MySQL, SQLite, StandardSQL, sql, type SQLNamespace } from '@codemirror/lang-sql';
+import { MySQL, PostgreSQL, SQLite, StandardSQL, sql, type SQLNamespace } from '@codemirror/lang-sql';
 import { bracketMatching, defaultHighlightStyle, foldGutter, foldKeymap, indentOnInput, syntaxHighlighting } from '@codemirror/language';
 import { lintKeymap } from '@codemirror/lint';
 import { highlightSelectionMatches, searchKeymap } from '@codemirror/search';
@@ -32,7 +32,7 @@ import type { VariableHover } from '../variables/variable-hover';
 import { lookupVariable, type VariableContext } from '../variables/variables';
 
 export type CodeLanguage = 'json' | 'javascript' | 'html' | 'xml' | 'sql' | 'graphql' | 'text';
-export type SqlDialect = 'mysql' | 'sqlite' | 'standard';
+export type SqlDialect = 'mysql' | 'postgres' | 'sqlite' | 'standard';
 export type { SQLNamespace };
 
 export interface EditorOptions {
@@ -50,6 +50,8 @@ export interface EditorOptions {
   variables: VariableContext | null;
   hover: VariableHover;
   run(): void;
+  /** Mod+Shift+Enter: run only the statement under the cursor. */
+  runCurrent?(): void;
 }
 
 function languageExtension({ language, sqlDialect, sqlSchema, sqlDefaultTable, graphqlSchema }: EditorOptions): Extension[] {
@@ -64,7 +66,7 @@ function languageExtension({ language, sqlDialect, sqlSchema, sqlDefaultTable, g
     case 'xml':
       return [html()];
     case 'sql':
-      return [sql({ dialect: sqlDialect === 'mysql' ? MySQL : sqlDialect === 'sqlite' ? SQLite : StandardSQL, schema: sqlSchema, defaultTable: sqlDefaultTable, upperCaseKeywords: true })];
+      return [sql({ dialect: sqlDialect === 'mysql' ? MySQL : sqlDialect === 'postgres' ? PostgreSQL : sqlDialect === 'sqlite' ? SQLite : StandardSQL, schema: sqlSchema, defaultTable: sqlDefaultTable, upperCaseKeywords: true })];
     default:
       return [];
   }
@@ -183,7 +185,14 @@ export function editorExtensions(options: EditorOptions): Extension[] {
     );
   }
   if (variables && !readOnly) own.push(variableHighlighting(variables, options.hover));
-  own.push(Prec.highest(keymap.of([{ key: 'Mod-Enter', run: () => (options.run(), true) }])));
+  own.push(
+    Prec.highest(
+      keymap.of([
+        { key: 'Mod-Shift-Enter', run: () => ((options.runCurrent ?? options.run)(), true) },
+        { key: 'Mod-Enter', run: () => (options.run(), true) },
+      ]),
+    ),
+  );
 
   return [...(filled ? [fillTheme] : []), scrollerTheme, ...defaults, ...own];
 }

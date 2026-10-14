@@ -7,7 +7,7 @@ import { DbError } from './db-error';
 import { DbRow } from './db-row';
 import { TableList } from './table-list';
 
-/** The databases of a MySQL connection, each expanding to its tables. */
+/** The databases of a MySQL connection, or the schemas of a PostgreSQL one, each expanding to its tables. */
 @Component({
   selector: 'q-db-database-list',
   imports: [DbError, DbRow, Icon, IconButton, Spinner, TableList],
@@ -18,7 +18,7 @@ import { TableList } from './table-list';
       @for (database of list; track database) {
         @let open = isOpen(database);
         <div>
-          <div qDbRow [depth]="1" [label]="database" [bold]="connection().database === database" (click)="toggle(database)" (keydown.enter)="toggle(database)">
+          <div qDbRow [depth]="1" [label]="database" [bold]="isDefault(database)" (click)="toggle(database)" (keydown.enter)="toggle(database)">
             <svg rowPrefix [qIcon]="open ? icons.ChevronDown : icons.ChevronRight" class="size-3.5 text-muted shrink-0"></svg>
             <button qIconButton label="New query on this database" size="sm" (click)="newQuery($event, database)"><svg [qIcon]="icons.Terminal" class="size-3.5"></svg></button>
           </div>
@@ -43,6 +43,12 @@ export class DatabaseList {
   protected readonly databases = invokeResource<string[]>('db.schema.databases', () => ({ connectionId: this.connection().id }), {
     refreshOn: () => [dbDataCollection(this.connection().id)],
   });
+
+  /** The schema queries run in when none is picked. */
+  protected isDefault(database: string): boolean {
+    const conn = this.connection();
+    return conn.kind === 'postgres' ? database === 'public' : conn.database === database;
+  }
 
   protected isOpen(database: string): boolean {
     return this.tree.isExpanded(`db/${this.connection().id}/${database}`);
