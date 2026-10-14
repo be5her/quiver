@@ -35,6 +35,8 @@ export class FileStore implements StoreApi {
   private readonly watchers = new Map<string, FSWatcher>();
   private watching = false;
   private readonly pending = new Map<string, ReturnType<typeof setTimeout>>();
+  /** This store's own writes in flight, per collection. */
+  private readonly writing = new Map<string, number>();
 
   constructor(
     readonly root: string,
@@ -141,6 +143,9 @@ export class FileStore implements StoreApi {
       collection,
       setTimeout(() => {
         this.pending.delete(collection);
+        // One of our own saves is still landing. The watcher can fire on its mkdir before the item
+        // is cached, and reloading then would report the save twice: look again once it is done.
+        if (this.writing.has(collection)) return this.scheduleReload(collection, debounceMs);
         void this.reload(collection).catch(() => {});
       }, debounceMs),
     );
@@ -173,21 +178,37 @@ export class FileStore implements StoreApi {
   async put<T extends Entity>(collection: string, item: T): Promise<T> {
     assertSafe(item.id, 'id');
     const dir = this.collectionDir(collection);
-    await fs.mkdir(dir, { recursive: true });
-    await writeAtomic(path.join(dir, `${item.id}.json`), JSON.stringify(item, null, 2) + '\n');
-    (await this.load(collection)).set(item.id, item);
-    this.onChange(collection);
-    return item;
+    return this.write(collection, async () => {
+      await fs.mkdir(dir, { recursive: true });
+      await writeAtomic(path.join(dir, `${item.id}.json`), JSON.stringify(item, null, 2) + '\n');
+      (await this.load(collection)).set(item.id, item);
+      this.onChange(collection);
+      return item;
+    });
   }
 
   async remove(collection: string, id: string): Promise<boolean> {
     assertSafe(id, 'id');
-    const map = await this.load(collection);
-    if (!map.has(id)) return false;
-    map.delete(id);
-    await fs.rm(path.join(this.collectionDir(collection), `${id}.json`), { force: true });
-    this.onChange(collection);
-    return true;
+    return this.write(collection, async () => {
+      const map = await this.load(collection);
+      if (!map.has(id)) return false;
+      map.delete(id);
+      await fs.rm(path.join(this.collectionDir(collection), `${id}.json`), { force: true });
+      this.onChange(collection);
+      return true;
+    });
+  }
+
+  /** Run one of this store's own writes, so the watcher holds off on that collection until it lands. */
+  private async write<T>(collection: string, run: () => Promise<T>): Promise<T> {
+    this.writing.set(collection, (this.writing.get(collection) ?? 0) + 1);
+    try {
+      return await run();
+    } finally {
+      const left = (this.writing.get(collection) ?? 1) - 1;
+      if (left) this.writing.set(collection, left);
+      else this.writing.delete(collection);
+    }
   }
 
   async readLocal<T>(name: string, fallback: T): Promise<T> {
