@@ -1,0 +1,59 @@
+@let s = server();
+<div
+  role="button"
+  tabindex="0"
+  class="group flex items-center gap-1.5 pr-1 h-7 cursor-pointer hover:bg-elevated min-w-0 pl-2"
+  [title]="title()"
+  data-testid="mock-server"
+  [attr.data-running]="s.running ? 'true' : 'false'"
+  (click)="mock.openServerTab(s)"
+  (keydown.enter)="mock.openServerTab(s)"
+>
+  <button type="button" class="text-muted hover:text-fg shrink-0" [attr.aria-label]="open() ? 'Collapse' : 'Expand'" (click)="toggle($event)">
+    <svg [qIcon]="open() ? icons.ChevronDown : icons.ChevronRight" class="size-3.5"></svg>
+  </button>
+  <span class="size-2 rounded-full shrink-0" [class]="dot()" [attr.aria-label]="s.running ? 'running' : 'stopped'"></span>
+  <span class="truncate flex-1 text-[13px] font-medium">{{ s.name }}</span>
+  <span class="text-[10px] font-mono text-muted shrink-0 group-hover:hidden">:{{ s.port }}</span>
+  @if (s.requestCount > 0) {
+    <span class="text-[10px] rounded-full bg-elevated px-1.5 text-muted shrink-0 group-hover:hidden" [title]="s.requestCount + ' captured requests'">{{ s.requestCount }}</span>
+  }
+  <span class="hidden group-hover:flex items-center">
+    <button qIconButton [label]="s.running ? 'Stop' : 'Start'" size="sm" (click)="startStop($event)"><svg [qIcon]="s.running ? icons.Square : icons.Play" [class]="s.running ? 'size-3' : 'size-3.5'"></svg></button>
+    <button qIconButton label="Edit routes" size="sm" (click)="editRoutes($event)"><svg [qIcon]="icons.Pencil" class="size-3.5"></svg></button>
+    <button qIconButton label="Delete server" size="sm" (click)="remove($event)"><svg [qIcon]="icons.Trash2" class="size-3.5"></svg></button>
+  </span>
+</div>
+@if (open()) {
+  @for (route of s.routes; track route.id) {
+    <div
+      role="button"
+      tabindex="0"
+      class="flex items-center gap-1.5 pr-1 h-7 cursor-pointer hover:bg-elevated min-w-0"
+      [class.opacity-50]="!route.enabled"
+      [style.padding-left.px]="26"
+      [title]="routeTitle(route)"
+      data-testid="mock-route"
+      (click)="mock.openServerTab(s, 'routes', route.id)"
+      (keydown.enter)="mock.openServerTab(s, 'routes', route.id)"
+    >
+      <span class="text-[10px] font-semibold w-11 shrink-0" [class]="methodColors[route.method] ?? 'text-muted'">{{ route.method }}</span>
+      <span class="truncate flex-1 text-[12px] font-mono">{{ route.path || '/' }}</span>
+      <span class="text-[10px] text-muted shrink-0">{{ route.status }}</span>
+    </div>
+  } @empty {
+    <p class="text-[11px] text-muted py-1" [style.padding-left.px]="26">No routes: every request gets the fallback answer.</p>
+  }
+  <div
+    role="button"
+    tabindex="0"
+    class="flex items-center gap-1.5 pr-1 h-7 cursor-pointer hover:bg-elevated min-w-0"
+    [style.padding-left.px]="26"
+    (click)="mock.openServerTab(s, 'requests')"
+    (keydown.enter)="mock.openServerTab(s, 'requests')"
+  >
+    <svg [qIcon]="icons.Inbox" class="size-3.5 text-muted shrink-0"></svg>
+    <span class="truncate flex-1 text-[12px]">Requests</span>
+    <span class="text-[10px] text-muted shrink-0">{{ s.requestCount }}</span>
+  </div>
+}

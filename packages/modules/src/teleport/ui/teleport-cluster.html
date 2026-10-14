@@ -1,0 +1,70 @@
+@let c = cluster();
+<div role="button" tabindex="0" class="group flex items-center gap-1.5 px-2 h-8 hover:bg-elevated cursor-pointer min-w-0" [title]="title()" (click)="toggle()" (keydown.enter)="toggle()">
+  <svg [qIcon]="collapsed() ? icons.ChevronRight : icons.ChevronDown" class="size-3.5 text-muted shrink-0"></svg>
+  <span class="size-2 rounded-full shrink-0" [class]="stateDot[c.state]"></span>
+  <span class="truncate text-[13px] font-medium flex-1">{{ label() }}</span>
+  @if (c.current) {
+    <svg [qIcon]="icons.Terminal" class="size-3 text-muted shrink-0" aria-label="Current tsh profile in your terminal"></svg>
+  }
+  @if (usable() && c.validUntil) {
+    <span class="text-[11px] shrink-0 group-hover:hidden" [class]="c.state === 'expiring' ? 'text-warning' : 'text-muted'">{{ remaining() }}</span>
+  } @else {
+    <span class="text-[11px] text-muted shrink-0 group-hover:hidden">{{ c.state === 'expired' ? 'expired' : 'logged out' }}</span>
+  }
+  <span class="hidden group-hover:flex items-center shrink-0">
+    @if (!loggingIn()) {
+      <button qIconButton [label]="usable() ? 'Log in again (refresh certificate)' : 'Log in'" size="sm" (click)="login($event)"><svg [qIcon]="icons.LogIn" class="size-3.5"></svg></button>
+    }
+    @if (usable()) {
+      <button qIconButton label="Log out" size="sm" (click)="logout($event)"><svg [qIcon]="icons.LogOut" class="size-3.5"></svg></button>
+    }
+    @if (c.configured) {
+      <button qIconButton label="Remove cluster from Quiver" size="sm" (click)="remove($event)"><svg [qIcon]="icons.Trash2" class="size-3.5"></svg></button>
+    }
+  </span>
+</div>
+
+@if (!collapsed()) {
+  <div class="pb-1">
+    <div class="px-3 text-[11px] text-muted truncate" [title]="c.proxy">
+      @if (c.user) {
+        {{ c.user }} <span>&#64;</span> {{ c.proxy }}
+      } @else {
+        {{ c.proxy }}
+      }
+    </div>
+
+    @if (loggingIn()) {
+      <div class="mx-2 mt-1 rounded-md border border-edge bg-canvas p-2 flex flex-col gap-1.5">
+        <div class="flex items-center gap-2 text-xs">
+          <svg qSpinner class="size-3.5"></svg>
+          <span class="flex-1">Waiting for the browser…</span>
+          <button qButton size="sm" variant="ghost" [icon]="icons.X" (click)="cancelLogin()">Cancel</button>
+        </div>
+        @if (status().loginOutput.length) {
+          <q-teleport-login-log [lines]="status().loginOutput" />
+        }
+      </div>
+    } @else if (!usable()) {
+      <div class="px-3 pt-1.5 pb-1 flex items-center gap-2 flex-wrap">
+        <button qButton size="sm" variant="primary" [icon]="icons.LogIn" [loading]="busy() === 'login'" title="tsh login (opens the browser)" (click)="login()">{{ c.state === 'expired' ? 'Log in again' : 'Log in' }}</button>
+        @if (c.state === 'expired' && c.validUntil) {
+          <span class="text-[11px] text-muted">expired {{ expiredAt() }}</span>
+        }
+      </div>
+    }
+    @if (lastLogHere()) {
+      <div class="px-3 pt-1">
+        <button type="button" class="text-[11px] text-muted hover:text-fg underline" (click)="showLog.set(!showLog())">{{ showLog() ? 'Hide' : 'Show' }} last login output</button>
+        @if (showLog()) {
+          <q-teleport-login-log [lines]="status().loginOutput" />
+        }
+      </div>
+    }
+
+    @if (usable()) {
+      <q-teleport-databases [cluster]="c" [status]="status()" [connections]="connections()" />
+      <q-teleport-kubes [cluster]="c" />
+    }
+  </div>
+}

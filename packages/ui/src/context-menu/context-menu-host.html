@@ -1,0 +1,33 @@
+@if (menu(); as m) {
+  <div
+    #panel
+    role="menu"
+    tabindex="-1"
+    class="fixed z-50 min-w-52 max-w-80 rounded-md border border-edge bg-elevated shadow-lg py-1 text-xs select-none outline-none"
+    [style.left.px]="m.x"
+    [style.top.px]="m.y"
+    style="visibility: hidden"
+    data-testid="context-menu"
+    (keydown)="navigate($event)"
+    (contextmenu)="$event.preventDefault()"
+  >
+    @for (entry of m.items; track $index) {
+      @if (asItem(entry); as item) {
+        <button
+          type="button"
+          [attr.role]="item.checked === undefined ? 'menuitem' : 'menuitemcheckbox'"
+          [attr.aria-checked]="item.checked"
+          [disabled]="item.disabled ?? false"
+          class="w-full flex items-center gap-6 py-1.5 text-left outline-none hover:bg-surface focus-visible:bg-surface disabled:opacity-40 disabled:pointer-events-none"
+          [class]="(item.danger ? 'text-danger' : 'text-fg') + (gutter() ? ' pl-1.5 pr-3' : ' px-3')"
+          [attr.data-testid]="item.testId"
+          (click)="choose(item)"
+        >
+          <span class="flex-1 flex items-center gap-1.5 min-w-0">@if (gutter()) {<span class="size-4 shrink-0 flex items-center justify-center">@if (item.checked) {<svg [qIcon]="checkIcon" class="size-3.5"></svg>}</span>}<span class="truncate">{{ item.label }}</span></span>@if (item.shortcut) {<span class="text-[11px] text-muted">{{ item.shortcut }}</span>}
+        </button>
+      } @else {
+        <div role="separator" class="my-1 h-px bg-edge"></div>
+      }
+    }
+  </div>
+}

@@ -1,7 +1,7 @@
-import type { DbKind, DbQueryResult, DbTable, DbTableDetail, DbTableRows, RedisKeyDetail, RedisScanResult } from '@quiver/core';
+import type { DbKind, DbQueryResult, DbTable, DbTableColumns, DbTableDetail, DbTableRows, RedisInfo, RedisKeyDetail, RedisScanResult } from '@quiver/core';
 
 export interface RunOptions {
-  /** MySQL: schema to `USE` before running. SQLite: attached database name for schema queries. */
+  /** MySQL: schema to `USE` before running. PostgreSQL: schema put first on `search_path`. SQLite: attached database name for schema queries. */
   database?: string | null;
   /** Rows kept per result set; extra rows flag `truncated`. */
   maxRows: number;
@@ -27,13 +27,23 @@ export interface Driver {
   databases(): Promise<string[]>;
   tables(database?: string | null): Promise<DbTable[]>;
   table(name: string, database?: string | null): Promise<DbTableDetail>;
+  /** Every table of the database with its columns, in one round trip. */
+  columns(database?: string | null): Promise<DbTableColumns[]>;
   run(query: string, options: RunOptions): Promise<DbQueryResult[]>;
   tableRows(name: string, options: TableRowsOptions): Promise<DbTableRows>;
+  /**
+   * Stop the statement running right now, from a second connection to the same server. Resolves
+   * true when a cancel was sent. Absent when the engine cannot be interrupted (SQLite, Redis).
+   */
+  cancel?(): Promise<boolean>;
 }
 
 export interface RedisDriverApi extends Driver {
   scanKeys(pattern: string, cursor: string, count: number): Promise<RedisScanResult>;
   keyDetail(key: string, limit: number): Promise<RedisKeyDetail>;
+  info(): Promise<RedisInfo>;
+  /** Commands as argument lists; see `run` for the console syntax. */
+  exec(commands: string[][]): Promise<DbQueryResult[]>;
 }
 
 /** Make driver values safe for JSON over IPC and readable in a grid. */
@@ -68,4 +78,9 @@ export function emptyResult(statement: string, durationMs: number): DbQueryResul
     durationMs,
     message: null,
   };
+}
+
+/** The columns of a table as the completion namespace wants them. */
+export function columnsEntry(name: string, type: 'table' | 'view', columns: { name: string; type: string }[]): DbTableColumns {
+  return { name, type, columns };
 }

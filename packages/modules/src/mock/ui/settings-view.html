@@ -1,0 +1,60 @@
+@let s = server();
+@let fb = fallback();
+<section class="grid grid-cols-2 gap-3">
+  <div>
+    <label qLabel>Port</label>
+    <input qInput type="number" min="1" max="65535" [value]="s.port" class="font-mono" data-testid="mock-port" (input)="setPort($event)" />
+  </div>
+  <div>
+    <label qLabel>Listen on</label>
+    <select qSelect [formField]="form().host" class="w-full">
+      <option value="127.0.0.1">This machine only (127.0.0.1)</option>
+      <option value="0.0.0.0">All interfaces (containers, other devices)</option>
+    </select>
+  </div>
+  <label class="flex items-center gap-2 text-sm"><input type="checkbox" qCheckbox [formField]="form().autoStart" /> Start when the workspace opens</label>
+  <label class="flex items-center gap-2 text-sm"><input type="checkbox" qCheckbox [formField]="form().cors" /> Allow browser calls (CORS headers and preflight)</label>
+  <div>
+    <label qLabel>Captured requests to keep</label>
+    <input qInput type="number" min="10" max="5000" [value]="s.logLimit" class="font-mono" (input)="setLogLimit($event)" />
+  </div>
+</section>
+
+<section class="flex flex-col gap-2">
+  <div>
+    <label qLabel>When no route matches</label>
+    <select qSelect [value]="fb.type" class="w-full" data-testid="mock-fallback-type" (change)="setFallbackType($event)">
+      <option value="respond">Answer with a fixed response (404 by default, 200 for a webhook receiver)</option>
+      <option value="forward">Forward to a real server and record the exchange</option>
+    </select>
+  </div>
+  @if (fb.type === 'respond') {
+    <div class="flex items-end gap-2">
+      <div>
+        <label qLabel>Status</label>
+        <input qInput type="number" min="100" max="599" [value]="fb.status" class="w-20 font-mono" (input)="setFallbackStatus($event)" />
+      </div>
+      <p class="text-[11px] text-muted pb-2">Body and headers accept the same templates as routes.</p>
+    </div>
+    <div>
+      <label qLabel>Headers</label>
+      <q-key-value-editor [value]="fb.headers" (valueChange)="setFallbackHeaders($event)" keyPlaceholder="Header" valuePlaceholder="Value" />
+    </div>
+    <div>
+      <label qLabel>Body</label>
+      <div class="border border-edge rounded-md h-40">
+        <q-code-editor [value]="fb.body" (valueChange)="setFallbackBody($event)" [language]="fallbackLanguage()" fill />
+      </div>
+    </div>
+  } @else {
+    <div>
+      <label qLabel>Forward to</label>
+      <input qInput [value]="fb.url" placeholder="http://localhost:3000 or https://api.example.com/v1" class="font-mono" data-testid="mock-forward-url" (input)="setForwardUrl($event)" />
+      <p class="text-[11px] text-muted mt-1">The request path and query are appended. Routes still take precedence, so you can override single endpoints of a real API.</p>
+    </div>
+  }
+</section>
+
+<section class="border-t border-edge pt-3">
+  <button qButton variant="danger" size="sm" [icon]="trash" (click)="remove.emit()">Delete this server</button>
+</section>

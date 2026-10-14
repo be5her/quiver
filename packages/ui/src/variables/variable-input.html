@@ -1,0 +1,22 @@
+<input
+  #field
+  qInput
+  [qAutofocus]="autofocus()"
+  [class]="inputClass()"
+  [type]="type()"
+  [value]="value()"
+  [placeholder]="placeholder()"
+  [readOnly]="readonly()"
+  [disabled]="disabled()"
+  [attr.data-testid]="testId()"
+  [attr.data-variables]="names()"
+  (input)="typed()"
+  (blur)="touch.emit()"
+  (scroll)="sync()"
+  (select)="sync()"
+  (mousemove)="hoverAt($event)"
+  (mouseleave)="leave()"
+/>
+@if (scope()) {
+  <div #layer aria-hidden="true" class="absolute inset-0 flex items-center overflow-hidden whitespace-pre text-transparent pointer-events-none select-none rounded-md"><span class="shrink-0">@for (piece of pieces(); track $index) {@if (piece.name) {<span class="rounded-sm" [class]="piece.known ? 'bg-accent/20' : 'bg-danger/20 shadow-[inset_0_-1.5px_0_var(--danger)]'" [attr.data-var-name]="piece.name">{{ piece.text }}</span>} @else {<ng-container>{{ piece.text }}</ng-container>}}</span></div>
+}

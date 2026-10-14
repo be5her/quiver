@@ -1,0 +1,138 @@
+@if (loadError(); as error) {
+  <div class="p-4 text-sm text-danger">{{ error }}</div>
+} @else if (!loaded()) {
+  <div class="flex items-center justify-center h-full"><svg qSpinner></svg></div>
+} @else {
+  @let conn = connection();
+  <div class="flex flex-col h-full min-h-0">
+    <div class="flex items-center gap-2 px-3 py-2 border-b border-edge shrink-0">
+      <svg [qKindIcon]="conn.kind" class="size-4"></svg>
+      <input qInput [formField]="connectionForm.name" class="w-64 h-7 font-medium" [placeholder]="kindLabels[conn.kind] + ' connection name'" [qAutofocus]="isNew()" />
+      @if (conn.production) {
+        <span qBadge class="text-danger border-danger/40">PROD</span>
+      }
+      <div class="flex-1"></div>
+      <button qButton size="sm" variant="ghost" [icon]="icons.PlugZap" [loading]="testing()" (click)="test()">Test</button>
+      <button qButton size="sm" [variant]="dirty() ? 'primary' : 'ghost'" [icon]="icons.Save" title="Ctrl+S" (click)="save()">Save{{ dirty() ? '*' : '' }}</button>
+    </div>
+    <div class="flex-1 overflow-auto p-4" qApiVariables>
+      <div class="max-w-xl flex flex-col gap-4">
+        <div class="relative">
+          <svg [qIcon]="icons.Link2" class="size-3.5 text-muted absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"></svg>
+          <input qInput class="pl-8 font-mono text-xs" data-testid="db-connection-url" [placeholder]="urlPlaceholder()" [value]="url()" (input)="urlTyped($event)" (keydown.enter)="urlEntered()" />
+        </div>
+        <div>
+          <label qLabel>Type</label>
+          <select qSelect (change)="switchKind($event)">
+            @for (k of kinds; track k) {
+              <option [value]="k" [selected]="k === conn.kind">{{ kindLabels[k] }}</option>
+            }
+          </select>
+        </div>
+        @if (conn.kind === 'sqlite') {
+          <div>
+            <label qLabel>Database file</label>
+            <div class="flex gap-2">
+              <q-variable-input [formField]="connectionForm.file" inputClass="font-mono" placeholder="data/app.db (relative to the project) or an absolute path" />
+              <button qButton variant="secondary" [icon]="icons.FolderOpen" (click)="browseFile()">Browse</button>
+            </div>
+            <p class="text-xs text-muted mt-1">A missing file is created on first connect. Relative paths keep the connection portable for teammates.</p>
+          </div>
+          <label class="flex items-center gap-2 text-sm"><input type="checkbox" qCheckbox [formField]="connectionForm.readOnly" /> Open read-only</label>
+        } @else {
+          @if (conn.access.type === 'direct') {
+            <div class="grid grid-cols-[1fr_120px] gap-2">
+              <div>
+                <label qLabel>Host</label>
+                <q-variable-input [formField]="connectionForm.host" inputClass="font-mono" placeholder="127.0.0.1 or {{ '{{' }}DB_HOST{{ '}}' }}" />
+              </div>
+              <div>
+                <label qLabel>Port</label>
+                <input qInput class="font-mono" type="number" [value]="conn.port || ''" [placeholder]="portPlaceholder()" (input)="setPort($event)" />
+              </div>
+            </div>
+          }
+          @if (conn.access.type !== 'teleport') {
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <label qLabel>{{ conn.kind === 'redis' ? 'Username (ACL, optional)' : 'User' }}</label>
+                <q-variable-input [formField]="connectionForm.user" inputClass="font-mono" [placeholder]="conn.kind === 'redis' ? 'default' : conn.kind === 'postgres' ? 'postgres' : 'root'" />
+              </div>
+              <div>
+                <label qLabel>Password</label>
+                <input qInput type="password" class="font-mono" [formField]="secretForm.password" [placeholder]="passwordPlaceholder()" />
+                @if (hasPassword()) {
+                  <label class="flex items-center gap-1.5 text-[11px] text-muted mt-1"><input type="checkbox" qCheckbox [formField]="secretForm.clearPassword" /> Remove stored password</label>
+                }
+              </div>
+            </div>
+          }
+          @if (conn.kind === 'mysql' || conn.kind === 'postgres') {
+            <div>
+              <label qLabel>{{ conn.kind === 'postgres' ? 'Database' : 'Default database (optional)' }}</label>
+              <q-variable-input [formField]="connectionForm.database" inputClass="font-mono" [placeholder]="conn.kind === 'postgres' ? 'postgres' : 'app'" />
+              @if (conn.kind === 'postgres') {
+                <p class="text-xs text-muted mt-1">The tree lists this database's schemas; queries run with <code class="font-mono">public</code> first on the search path.</p>
+              }
+            </div>
+          }
+          @if (conn.kind === 'redis') {
+            <div class="w-40">
+              <label qLabel>Database index</label>
+              <input qInput class="font-mono" type="number" min="0" [value]="conn.dbIndex" (input)="setDbIndex($event)" />
+            </div>
+          }
+          @if (conn.access.type !== 'teleport') {
+            <label class="flex items-center gap-2 text-sm"><input type="checkbox" qCheckbox [formField]="connectionForm.ssl" /> Use TLS (self-signed certificates are accepted)</label>
+          }
+          <div class="rounded-md border border-edge">
+            <button type="button" class="w-full flex items-center gap-2 px-3 h-8 text-xs text-left hover:bg-elevated" data-testid="db-access-toggle" (click)="accessOpen.set(!accessOpen())">
+              <svg [qIcon]="accessOpen() ? icons.ChevronDown : icons.ChevronRight" class="size-3.5 text-muted"></svg>
+              <span class="font-medium">Access</span>
+              <span class="text-muted truncate">{{ accessSummary() }}</span>
+            </button>
+            @if (accessOpen()) {
+              <div class="px-3 pb-3 flex flex-col gap-3 border-t border-edge pt-3">
+                <div>
+                  <label qLabel>How the server is reached</label>
+                  <select qSelect data-testid="db-access" (change)="switchAccess($event)">
+                    @for (t of accessTypes; track t) {
+                      <option [value]="t" [selected]="t === conn.access.type">{{ accessLabels[t] }}</option>
+                    }
+                  </select>
+                </div>
+                @if (teleportAccess(); as access) {
+                  <q-teleport-access-fields [value]="access" [kind]="conn.kind" (valueChange)="setTeleportAccess($event)" />
+                }
+                @if (commandAccess(); as access) {
+                  <div>
+                    <label qLabel>Tunnel command</label>
+                    <input qInput class="font-mono" [value]="access.command" placeholder="ssh -N -L {port}:db.internal:3306 bastion" (input)="setCommand($event)" />
+                    <p class="text-xs text-muted mt-1">
+                      <code class="font-mono">{{ portSyntax }}</code> is replaced with a free local port. The command runs without a shell, is started before connecting and stopped on
+                      disconnect.
+                    </p>
+                  </div>
+                }
+                @if (conn.access.type === 'direct') {
+                  <p class="text-xs text-muted">The host and port above are dialled directly. Pick a tunnel for servers behind a bastion or Teleport.</p>
+                }
+              </div>
+            }
+          </div>
+        }
+        <label class="flex items-center gap-2 text-sm" title="Writes are confirmed first and the connection's tabs carry a PROD badge; committed with the connection, so every teammate gets the same guard">
+          <input type="checkbox" qCheckbox data-testid="db-production" [formField]="connectionForm.production" /> Production: ask before every write
+        </label>
+        @if (testResult(); as result) {
+          <div [class]="result.ok ? 'text-sm text-success' : 'text-sm text-danger break-words'" role="status">{{ result.message }}</div>
+        }
+        <p class="text-xs text-muted">
+          Connection settings are saved in <code class="font-mono">.quiver/db-connections/</code> and can be committed. The password is encrypted with the OS keychain into
+          <code class="font-mono"> .quiver/local/db-secrets.json</code>, which is gitignored, so each teammate enters their own. Host, user, database and file take
+          <code class="font-mono">{{ '{{' }}variables{{ '}}' }}</code> from the API environment and the project's <code class="font-mono">.env</code>.@if (conn.access.type === 'teleport') {<span> Teleport tunnels authenticate with your tsh certificate, so no password is needed.</span>}
+        </p>
+      </div>
+    </div>
+  </div>
+}

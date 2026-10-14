@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { generateKeyPairSync, sign } from 'node:crypto';
 import { promises as fs, writeSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createServer as createTcpServer } from 'node:net';
@@ -8,17 +9,22 @@ import { promisify } from 'node:util';
 import type { BrowserWindow } from 'electron';
 import { buildSchema, graphql as executeGraphql } from 'graphql';
 import type { WebSocket as WsSocket } from 'ws';
-import { DEFAULT_PALETTE, REDACTED, capabilityLabels, contentText, expandUriTemplate, resolvePalette, skeletonFromSchema } from '@quiver/core';
+import { DEFAULT_PALETTE, REDACTED, capabilityLabels, contentText, expandUriTemplate, parseConnectionUrl, resolvePalette, skeletonFromSchema } from '@quiver/core';
 import type {
   ApiRequest,
   ApiResponse,
   GraphqlSchemaDoc,
   DbConnectionSummary,
+  DbExportResult,
+  DbSchemaMatch,
+  DbTableApplyResult,
+  DbTableColumns,
   DbConnectionTest,
   DbHistoryEntry,
   DbQueryResult,
   DbTable,
   DbTableDetail,
+  RedisInfo,
   DbTableRows,
   EnvBackup,
   EnvDiff,
@@ -31,6 +37,13 @@ import type {
   KubePreview,
   KubeRunResult,
   KubeStreamRead,
+  LogsConnectionSummary,
+  LogsDatasource,
+  LogsFieldCount,
+  LogsHistoryEntry,
+  LogsHits,
+  LogsQueryResult,
+  LogsSession,
   McpConfigFile,
   McpLogEntry,
   McpPrompt,
@@ -65,6 +78,7 @@ import type {
   TodoItem,
 } from '@quiver/core';
 import type { Host } from './host';
+import { startFakeGrafana } from './smoke-grafana';
 import { startFakeMcpHttp, writeFakeMcpStdio } from './smoke-mcp';
 import { startFakeRedis } from './smoke-redis';
 import { writeFakeTsh } from './smoke-tsh';
@@ -246,6 +260,7 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
   const wsPort = (wsHttp.address() as { port: number }).port;
 
   const fakeRedis = await startFakeRedis();
+  const fakeGrafana = await startFakeGrafana();
   const tshDir = await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-smoke-tsh-'));
   const fakeTsh = await writeFakeTsh(tshDir, fakeRedis.port);
   // The fake's stand-in for ~/.kube/config: what kubectl in the user's terminal would use.
@@ -488,15 +503,98 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     const curl = await run<{ command: string }>('api.export.curl', { requestId: imported.id }, ws.id);
     check('curl export resolves variables', curl.command.includes(`http://127.0.0.1:${echoPort}/a?b=c`), curl.command);
 
+    // Chrome's "Copy as cURL (cmd)" escapes with carets; none may reach the saved request or the wire.
+    {
+      const cmdCurl = [
+        `curl ^"http://127.0.0.1:${echoPort}/x?merchantId=376^" ^`,
+        '  -H ^"accept: application/json^" ^',
+        '  -H ^"sec-ch-ua: ^\\^"Chromium^\\^";v=^\\^"154^\\^"^" ^',
+        '  -b ^"session=a%^2Fb^" ^',
+        '  --data-raw ^"null^"',
+      ].join('\r\n');
+      const fromCmd = await run<ApiRequest>('api.import.curl', { command: cmdCurl }, ws.id);
+      const sent = await run<ApiResponse>('api.request.send', { requestId: fromCmd.id }, ws.id);
+      const echoedCmd = JSON.parse(sent.body) as { method: string; headers: Record<string, string>; body: string; url: string };
+      check(
+        'curl import: cmd.exe carets are removed and the request sends as copied',
+        sent.status === 200 &&
+          echoedCmd.method === 'POST' &&
+          echoedCmd.url === '/x?merchantId=376' &&
+          echoedCmd.headers.accept === 'application/json' &&
+          echoedCmd.headers['sec-ch-ua'] === '"Chromium";v="154"' &&
+          echoedCmd.headers.cookie === 'session=a%2Fb' &&
+          echoedCmd.body === 'null',
+        echoedCmd,
+      );
+      const before = (await run<ApiRequest[]>('api.request.list', {}, ws.id)).length;
+      const broken = await host.invoke('api.import.curl', { command: 'curl ^"https://x.test/a ^\r\n  -H ^"a: b^"' }, { caller: 'ui', workspaceId: ws.id });
+      const forced = await host.invoke('api.import.curl', { command: cmdCurl, dialect: 'posix' }, { caller: 'ui', workspaceId: ws.id });
+      const after = (await run<ApiRequest[]>('api.request.list', {}, ws.id)).length;
+      check(
+        'curl import: an unterminated quote or the wrong shell is refused and nothing is saved',
+        !broken.ok && /cmd\.exe: unterminated/.test(broken.error.message) && !forced.ok && /bash\/zsh: .*cmd\.exe/.test(forced.error.message) && after === before,
+        { broken: broken.ok ? 'ok?' : broken.error.message, forced: forced.ok ? 'ok?' : forced.error.message, before, after },
+      );
+      await run('api.request.delete', { id: fromCmd.id }, ws.id);
+    }
+
     const missing = await host.invoke('api.request.send', { request: { ...saved, url: '{{nope}}/x' } }, { caller: 'ui', workspaceId: ws.id });
     check('unresolved variable is reported', !missing.ok && missing.error.code === 'UNRESOLVED_VARIABLES');
 
-    const jwt = await run<{ payload: { sub: string } }>(
-      'tools.jwt.decode',
-      { token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c' },
-      null,
-    );
+    const jwtToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c';
+    const jwt = await run<{ payload: { sub: string } }>('tools.jwt.decode', { token: jwtToken }, null);
     check('tools.jwt.decode', jwt.payload.sub === '1234567890');
+    {
+      type Verified = { signatureValid: boolean; algorithm: string; keyFormat: string; payload: { sub: string } };
+      const verified = await run<Verified>('tools.jwt.verify', { token: jwtToken, key: 'your-256-bit-secret' }, null);
+      const forged = await run<Verified>('tools.jwt.verify', { token: jwtToken, key: 'not-the-secret' }, null);
+      const publicPem = generateKeyPairSync('ec', { namedCurve: 'P-256' }).publicKey.export({ type: 'spki', format: 'pem' }).toString();
+      const confused = await host.invoke('tools.jwt.verify', { token: jwtToken, key: publicPem }, { caller: 'mcp', workspaceId: null });
+      check(
+        'tools.jwt.verify: the secret verifies, another does not, a public key is refused for HS256',
+        verified.signatureValid && verified.algorithm === 'HS256' && verified.keyFormat === 'secret' && verified.payload.sub === '1234567890' && !forged.signatureValid && !confused.ok && /shared secret/.test(confused.error.message),
+        { verified, forged, confused },
+      );
+      // Electron's BoringSSL reads the key: bare base64 (Keycloak's realm key) and a PKCS#1 key under the "PUBLIC KEY" label both verify.
+      const rsa = generateKeyPairSync('rsa', { modulusLength: 2048 });
+      const data = `${Buffer.from('{"alg":"RS256"}').toString('base64url')}.${Buffer.from('{"sub":"ada"}').toString('base64url')}`;
+      const rsToken = `${data}.${sign('sha256', Buffer.from(data), rsa.privateKey).toString('base64url')}`;
+      const der = (type: 'spki' | 'pkcs1') => rsa.publicKey.export({ type, format: 'der' }).toString('base64');
+      const bare = await run<Verified>('tools.jwt.verify', { token: rsToken, key: der('spki') }, null);
+      const mislabelled = await run<Verified>('tools.jwt.verify', { token: rsToken, key: `-----BEGIN PUBLIC KEY-----\n${der('pkcs1')}\n-----END PUBLIC KEY-----` }, null);
+      check(
+        'tools.jwt.verify: a bare base64 key and a PKCS#1 key labelled PUBLIC KEY verify RS256',
+        bare.signatureValid && bare.keyFormat === 'base64 key' && mislabelled.signatureValid && mislabelled.keyFormat === 'PEM',
+        { bare, mislabelled },
+      );
+    }
+    // An auth server's token as an API behind it receives it: RS256, "Authorization: jwt <token>", checked against
+    // JWT_RSA_PUBLIC_KEY (the public key PEM base64-encoded once more), issuer pinned, 30 s clock skew.
+    const authServer = (() => {
+      const pair = generateKeyPairSync('rsa', { modulusLength: 2048 });
+      const now = Math.floor(Date.now() / 1000);
+      const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+      const data = `${part({ alg: 'RS256', typ: 'JWT' })}.${part({ sub: 'auth', iss: 'authservice', iat: now, nbf: now - 60, exp: now + 300, data: { user: { id: 27768, name: 'Alice' } } })}`;
+      const pem = pair.publicKey.export({ type: 'spki', format: 'pem' }).toString();
+      return { token: `${data}.${sign('sha256', Buffer.from(data), pair.privateKey).toString('base64url')}`, key: Buffer.from(pem).toString('base64') };
+    })();
+    {
+      type Validated = { valid: boolean; problems: string[]; keyFormat: string; signatureValid: boolean };
+      const accepted = await run<Validated>('tools.jwt.verify', { token: `jwt ${authServer.token}`, key: authServer.key, issuer: 'authservice', clockSkewSeconds: 30 }, null);
+      const otherIssuer = await run<Validated>('tools.jwt.verify', { token: authServer.token, key: authServer.key, issuer: 'someone-else' }, null);
+      const audienceAsked = await run<Validated>('tools.jwt.verify', { token: authServer.token, key: authServer.key, audience: 'checkout' }, null);
+      check(
+        'tools.jwt.verify: an auth-server token is valid against its base64-wrapped public key, and invalid for another issuer or a required audience',
+        accepted.valid &&
+          accepted.keyFormat === 'base64 PEM' &&
+          !otherIssuer.valid &&
+          otherIssuer.signatureValid &&
+          otherIssuer.problems.join() === 'issuer is "authservice", expected "someone-else"' &&
+          !audienceAsked.valid &&
+          audienceAsked.problems.join() === 'no audience, expected "checkout"',
+        { accepted, otherIssuer, audienceAsked },
+      );
+    }
 
 
     // ---------- databases: SQLite through node:sqlite ----------
@@ -536,6 +634,96 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     const savedQueries = await run<SavedQuery[]>('db.query.list', {}, ws.id);
     check('db: saved queries', savedQueries.some((q) => q.id === savedQuery.id && q.name === 'all users'));
 
+    // Foreign keys in both directions, the columns overview and the schema search.
+    await run(
+      'db.query.run',
+      { connectionId: sqlite.id, query: `CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), total REAL); INSERT INTO orders (user_id, total) VALUES (1, 9.5), (2, 20);`, record: false },
+      ws.id,
+    );
+    const ordersDetail = await run<DbTableDetail>('db.schema.table', { connectionId: sqlite.id, table: 'orders' }, ws.id);
+    const usersDetail = await run<DbTableDetail>('db.schema.table', { connectionId: sqlite.id, table: 'users' }, ws.id);
+    check(
+      'db: schema.table reports the primary key and foreign keys both ways',
+      ordersDetail.primaryKey.join() === 'id' &&
+        ordersDetail.foreignKeys.length === 1 &&
+        ordersDetail.foreignKeys[0].columns.join() === 'user_id' &&
+        ordersDetail.foreignKeys[0].refTable === 'users' &&
+        ordersDetail.foreignKeys[0].refColumns.join() === 'id' &&
+        usersDetail.referencedBy.some((k) => k.table === 'orders' && k.columns.join() === 'user_id'),
+      { orders: ordersDetail.foreignKeys, users: usersDetail.referencedBy },
+    );
+    const overview = await run<DbTableColumns[]>('db.schema.columns', { connectionId: sqlite.id }, ws.id);
+    check('db: schema.columns lists every table with its columns', overview.find((t) => t.name === 'users')?.columns.map((c) => c.name).join() === 'id,name,email' && overview.some((t) => t.name === 'orders'), overview);
+    const found = await run<{ matches: DbSchemaMatch[]; errors: unknown[] }>('db.schema.search', { query: 'mail' }, ws.id);
+    check('db: schema.search finds columns across connections', found.matches.some((m) => m.table === 'users' && m.column === 'email' && m.connectionId === sqlite.id) && found.errors.length === 0, found);
+
+    // Row edits: a preview, then insert, update and delete in one transaction, and a rollback when a key matches two rows.
+    const preview = await run<DbTableApplyResult>(
+      'db.table.apply',
+      { connectionId: sqlite.id, table: 'users', preview: true, edits: [{ kind: 'update', key: { id: 1 }, values: { name: 'Ada L.' } }] },
+      ws.id,
+    );
+    check('db: table.apply preview returns the statements without running them', !preview.applied && preview.statements.join() === `UPDATE "users" SET "name" = 'Ada L.' WHERE "id" = 1`, preview);
+    const applied = await run<DbTableApplyResult>(
+      'db.table.apply',
+      {
+        connectionId: sqlite.id,
+        table: 'users',
+        edits: [
+          { kind: 'insert', values: { name: 'Grace', email: 'grace@example.com' } },
+          { kind: 'update', key: { id: 2 }, values: { name: 'Linus T.' } },
+          { kind: 'insert', values: { name: 'Temp', email: 'temp@example.com' } },
+        ],
+      },
+      ws.id,
+    );
+    const afterApply = await run<DbTableRows>('db.table.rows', { connectionId: sqlite.id, table: 'users', orderBy: 'id' }, ws.id);
+    const tempId = afterApply.rows.find((r) => r[1] === 'Temp')?.[0];
+    const rowsRemoved = await run<DbTableApplyResult>('db.table.apply', { connectionId: sqlite.id, table: 'users', edits: [{ kind: 'delete', key: { id: tempId } }, { kind: 'update', key: { id: 2 }, values: { name: 'Linus' } }] }, ws.id);
+    const afterRemove = await run<DbTableRows>('db.table.rows', { connectionId: sqlite.id, table: 'users', orderBy: 'id' }, ws.id);
+    check(
+      'db: table.apply inserts, updates and deletes by key',
+      applied.applied && applied.affectedRows === 3 && afterApply.rows.length === 4 && afterApply.rows[1][1] === 'Linus T.' && rowsRemoved.affectedRows === 2 && afterRemove.rows.length === 3 && afterRemove.rows[1][1] === 'Linus' && afterRemove.rows[2][1] === 'Grace',
+      { applied, afterApply: afterApply.rows, rowsRemoved, afterRemove: afterRemove.rows },
+    );
+    await run('db.query.run', { connectionId: sqlite.id, query: "INSERT INTO users (name, email) VALUES ('Dup', 'dup1@example.com'), ('Dup', 'dup2@example.com')", record: false }, ws.id);
+    const conflict = await host.invoke('db.table.apply', { connectionId: sqlite.id, table: 'users', edits: [{ kind: 'update', key: { name: 'Dup' }, values: { name: 'Dup2' } }] }, { caller: 'ui', workspaceId: ws.id });
+    const dupRows = await run<DbTableRows>('db.table.rows', { connectionId: sqlite.id, table: 'users', where: "name = 'Dup'" }, ws.id);
+    check('db: table.apply rolls back when a key matches two rows', !conflict.ok && conflict.error.code === 'CONFLICT' && dupRows.rows.length === 2, conflict.ok ? 'ok?' : conflict.error.message);
+    await run('db.query.run', { connectionId: sqlite.id, query: "DELETE FROM users WHERE name = 'Dup'", record: false }, ws.id);
+
+    // Export: every format as text, and a file in the workspace.
+    const csv = await run<DbExportResult>('db.export', { connectionId: sqlite.id, format: 'csv', table: 'users', orderBy: 'id' }, ws.id);
+    const md = await run<DbExportResult>('db.export', { connectionId: sqlite.id, format: 'markdown', query: 'SELECT id, name FROM users ORDER BY id' }, ws.id);
+    const inserts = await run<DbExportResult>('db.export', { connectionId: sqlite.id, format: 'sql', table: 'users', where: 'id = 1' }, ws.id);
+    const jsonFile = await run<DbExportResult>('db.export', { connectionId: sqlite.id, format: 'json', table: 'users', orderBy: 'id', path: 'exports/users' }, ws.id);
+    const exportedUsers = JSON.parse(await fs.readFile(path.join(folder, 'exports', 'users.json'), 'utf8')) as { name: string }[];
+    check(
+      'db: export renders csv, markdown and INSERTs, and writes a json file',
+      csv.text?.split('\n')[0] === 'id,name,email' &&
+        csv.rows === 3 &&
+        md.text?.startsWith('| id | name |\n| --- | --- |\n| 1 | Ada |') === true &&
+        inserts.text === `INSERT INTO "users" ("id", "name", "email") VALUES (1, 'Ada', 'ada@example.com');` &&
+        jsonFile.path?.endsWith('users.json') === true &&
+        jsonFile.text === null &&
+        exportedUsers.map((r) => r.name).join() === 'Ada,Linus,Grace',
+      { csv: csv.text, md: md.text, inserts: inserts.text, jsonFile, exportedUsers },
+    );
+
+    // History filters, a transaction that is rolled back, and cancel on an engine that cannot be interrupted.
+    const historyHits = await run<DbHistoryEntry[]>('db.history.list', { search: 'grace', limit: 50 }, ws.id);
+    const historyFailed = await run<DbHistoryEntry[]>('db.history.list', { ok: false, limit: 50 }, ws.id);
+    check('db: history.list searches text and filters by outcome', historyHits.length > 0 && historyHits.every((e) => /grace/i.test(e.text)) && historyFailed.length > 0 && historyFailed.every((e) => !e.ok), { hits: historyHits.length, failed: historyFailed.length });
+    const begun = await run<{ inTransaction: boolean }>('db.transaction', { connectionId: sqlite.id, action: 'begin' }, ws.id);
+    await run('db.query.run', { connectionId: sqlite.id, query: "INSERT INTO users (name, email) VALUES ('Rolled', 'rolled@example.com')", record: false }, ws.id);
+    const during = (await run<(DbConnectionSummary & { inTransaction: boolean })[]>('db.connection.list', {}, ws.id)).find((c) => c.id === sqlite.id);
+    const rolledBack = await run<{ inTransaction: boolean }>('db.transaction', { connectionId: sqlite.id, action: 'rollback' }, ws.id);
+    const afterRollback = await run<DbTableRows>('db.table.rows', { connectionId: sqlite.id, table: 'users', where: "name = 'Rolled'" }, ws.id);
+    check('db: a transaction can be begun and rolled back', begun.inTransaction && during?.inTransaction === true && !rolledBack.inTransaction && afterRollback.rows.length === 0, { begun, during: during?.inTransaction, rolledBack, left: afterRollback.rows.length });
+    const cancel = await run<{ supported: boolean; cancelled: boolean }>('db.query.cancel', { connectionId: sqlite.id }, ws.id);
+    check('db: query.cancel says when the engine cannot be interrupted', cancel.supported === false && cancel.cancelled === false, cancel);
+    await run('db.query.run', { connectionId: sqlite.id, query: "DELETE FROM users WHERE name = 'Grace'; DROP TABLE orders", record: false }, ws.id);
+
     // ---------- databases: Redis through the fake RESP server ----------
     const redis = await run<DbConnectionSummary>(
       'db.connection.save',
@@ -565,6 +753,15 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     check('db: redis zset pairs', zset.type === 'zset' && JSON.stringify(zset.value) === '[["linus",7],["ada",10]]', zset.value);
     const redisCmds = await run<DbQueryResult[]>('db.query.run', { connectionId: redis.id, query: 'SET smoke "hello world"\nGET smoke\nLRANGE queue 0 -1' }, ws.id);
     check('db: redis console commands', redisCmds.length === 3 && redisCmds[1].value === 'hello world' && Array.isArray(redisCmds[2].value) && redisCmds[2].value.length === 3, redisCmds.map((r) => r.value));
+    const redisInfo = await run<RedisInfo>('db.redis.info', { connectionId: redis.id }, ws.id);
+    check('db: redis.info boils INFO and DBSIZE down', redisInfo.version === '7.2.0-fake' && redisInfo.connectedClients === 3 && redisInfo.hitRate === 0.9 && (redisInfo.keys ?? 0) >= 6 && redisInfo.uptimeSeconds === 4242, redisInfo);
+    const exact = await run<DbQueryResult[]>('db.redis.command', { connectionId: redis.id, commands: [['SET', 'smoke:multi', 'line one\nline "two"', 'EX', '120'], ['GET', 'smoke:multi'], ['TTL', 'smoke:multi']] }, ws.id);
+    check('db: redis.command passes arguments exactly, line breaks and quotes included', exact[1].value === 'line one\nline "two"' && Number(exact[2].value) > 100, exact.map((r) => r.value));
+    await fs.writeFile(path.join(folder, '.env'), `REDIS_HOST=127.0.0.1\n`, 'utf8');
+    const templated = await run<DbConnectionSummary>('db.connection.save', { connection: { kind: 'redis', name: 'templated redis', host: '{{REDIS_HOST}}', port: fakeRedis.port }, password: 'hunter2' }, ws.id);
+    const templatedTest = await run<DbConnectionTest>('db.connection.test', { id: templated.id }, ws.id);
+    check('db: {{variables}} in a connection resolve from the workspace .env', templatedTest.ok && templated.host === '{{REDIS_HOST}}', { host: templated.host, version: templatedTest.serverVersion });
+    await run('db.connection.delete', { id: templated.id }, ws.id);
 
     // ---------- teleport: fake tsh driving status, login, db/kube listing, pins and tunnels across two clusters ----------
     interface ConnectOut {
@@ -1133,6 +1330,47 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       console.log('SKIP db: mysql (set QUIVER_SMOKE_MYSQL=mysql://user:pass@host:port/db to run)');
     }
 
+    // Optional: a live PostgreSQL server, e.g. QUIVER_SMOKE_POSTGRES=postgres://postgres:secret@127.0.0.1:5432/postgres
+    if (process.env.QUIVER_SMOKE_POSTGRES) {
+      const parsed = parseConnectionUrl(process.env.QUIVER_SMOKE_POSTGRES);
+      check('db: postgres url parses', parsed?.connection.kind === 'postgres', parsed);
+      const pg = await run<DbConnectionSummary>('db.connection.save', { connection: { ...parsed!.connection, name: 'smoke postgres' }, password: parsed!.password ?? undefined }, ws.id);
+      const pgTest = await run<DbConnectionTest>('db.connection.test', { id: pg.id }, ws.id);
+      check('db: postgres connects', pgTest.ok && pgTest.serverVersion.startsWith('PostgreSQL'), pgTest.serverVersion);
+      const schemas = await run<string[]>('db.schema.databases', { connectionId: pg.id }, ws.id);
+      check('db: postgres schemas, public first', schemas[0] === 'public', schemas);
+      const table = `quiver_smoke_${Date.now().toString(36)}`;
+      await run('db.query.run', { connectionId: pg.id, query: `CREATE TABLE ${table} (id serial PRIMARY KEY, name text NOT NULL, big bigint, at timestamptz DEFAULT now()); CREATE TABLE ${table}_child (id serial PRIMARY KEY, parent_id int REFERENCES ${table}(id));`, record: false }, ws.id);
+      try {
+        const applied = await run<DbTableApplyResult>('db.table.apply', { connectionId: pg.id, table, edits: [{ kind: 'insert', values: { name: 'Ada', big: '12345678901234567890' } }, { kind: 'insert', values: { name: 'Linus' } }] }, ws.id);
+        const rows = await run<DbTableRows>('db.table.rows', { connectionId: pg.id, table, orderBy: 'id' }, ws.id);
+        const pgDetail = await run<DbTableDetail>('db.schema.table', { connectionId: pg.id, table }, ws.id);
+        const selected = await run<DbQueryResult[]>('db.query.run', { connectionId: pg.id, query: `SELECT id, name, big FROM ${table} ORDER BY id; UPDATE ${table} SET name = 'Ada L' WHERE id = 1` }, ws.id);
+        check(
+          'db: postgres rows, bigints as text, keys, foreign keys and affected counts',
+          applied.affectedRows === 2 &&
+            rows.rows.length === 2 &&
+            rows.rows[0][2] === '12345678901234567890' &&
+            pgDetail.primaryKey.join() === 'id' &&
+            pgDetail.referencedBy.some((k) => k.table === `${table}_child`) &&
+            Boolean(pgDetail.ddl?.includes('PRIMARY KEY')) &&
+            selected[0].kind === 'rows' &&
+            selected[1].kind === 'affected' &&
+            selected[1].affectedRows === 1,
+          { applied, rows: rows.rows, detail: pgDetail, selected },
+        );
+        const pgColumns = await run<DbTableColumns[]>('db.schema.columns', { connectionId: pg.id }, ws.id);
+        check('db: postgres columns overview', pgColumns.find((t) => t.name === table)?.columns.map((c) => c.name).join() === 'id,name,big,at', pgColumns.find((t) => t.name === table));
+        const pgCancel = await run<{ supported: boolean; cancelled: boolean }>('db.query.cancel', { connectionId: pg.id }, ws.id);
+        check('db: postgres cancel is supported', pgCancel.supported === true, pgCancel);
+      } finally {
+        await run('db.query.run', { connectionId: pg.id, query: `DROP TABLE ${table}_child; DROP TABLE ${table}`, record: false }, ws.id);
+        await run('db.connection.delete', { id: pg.id }, ws.id);
+      }
+    } else {
+      console.log('SKIP db: postgres (set QUIVER_SMOKE_POSTGRES=postgres://user:pass@host:port/db to run)');
+    }
+
     // ---------- MCP inspector: project config import, stdio, Streamable HTTP and SSE servers, tools, resources, prompts, log ----------
     const untilStatus = async (id: string, status: McpServerSummary['status'], timeout = 5000): Promise<McpServerSummary> => {
       const deadline = Date.now() + timeout;
@@ -1560,6 +1798,115 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     );
     for (const t of todoAfterClear) await run('todo.remove', { id: t.id }, ws.id);
 
+    // Logs: a VictoriaLogs data source through a fake Grafana that signs in without hands and asks for token renewals.
+    {
+      const fail = async (id: string, input: unknown, caller: 'ui' | 'mcp' = 'ui') => {
+        const out = await host.invoke(id, input, { caller, workspaceId: ws.id });
+        return out.ok ? 'ok' : `${out.error.code}: ${out.error.message}`;
+      };
+      const created = await run<LogsConnectionSummary>('logs.connection.save', { connection: { name: '', grafanaUrl: `${fakeGrafana.url}/?orgId=1` } }, ws.id);
+      const onDisk = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'logs-connections', `${created.id}.json`), 'utf8')) as { grafanaUrl: string };
+      check(
+        'logs: a new connection is committed under .quiver/logs-connections with the address normalised',
+        created.grafanaUrl === fakeGrafana.url && onDisk.grafanaUrl === fakeGrafana.url && created.name === 'Logs' && created.session.state === 'unknown',
+        { grafanaUrl: created.grafanaUrl, name: created.name, session: created.session.state },
+      );
+      const badUrl = await fail('logs.connection.save', { connection: { id: created.id, grafanaUrl: 'ftp://nowhere' } });
+      const noSource = await fail('logs.query', { id: created.id });
+      check('logs: a bad address is refused and a connection without a data source cannot query', badUrl.startsWith('INVALID_INPUT') && noSource.startsWith('INVALID_INPUT') && noSource.includes('no data source'), { badUrl, noSource });
+
+      const signedOut = await run<LogsSession>('logs.session', { id: created.id }, ws.id);
+      const sourcesSignedOut = await fail('logs.datasources', { id: created.id });
+      check('logs: before signing in the session is signed-out and Grafana calls ask for a sign-in', signedOut.state === 'signed-out' && sourcesSignedOut.startsWith('SIGN_IN_REQUIRED'), { signedOut, sourcesSignedOut });
+
+      const signedIn = await run<LogsSession>('logs.signin', { id: created.id }, ws.id);
+      check(
+        'logs: sign-in opens the login page, follows the identity provider back and knows the user',
+        signedIn.state === 'signed-in' && signedIn.user?.email === 'smoke@example.com' && fakeGrafana.seen.logins === 1,
+        { signedIn, logins: fakeGrafana.seen.logins },
+      );
+      const again = await run<LogsSession>('logs.signin', { id: created.id }, ws.id);
+      check('logs: signing in again with a live session opens no window', again.state === 'signed-in' && fakeGrafana.seen.logins === 1, { again: again.state, logins: fakeGrafana.seen.logins });
+
+      const sources = await run<LogsDatasource[]>('logs.datasources', { id: created.id }, ws.id);
+      check('logs: only VictoriaLogs data sources are listed', sources.length === 1 && sources[0]?.uid === 'vl-smoke' && sources[0]?.type === 'victoriametrics-logs-datasource', sources);
+      await run('logs.connection.save', { connection: { id: created.id, datasourceUid: 'vl-smoke', datasourceName: 'VictoriaLogs-Smoke', name: 'VictoriaLogs-Smoke' } }, ws.id);
+
+      fakeGrafana.expireTokens();
+      const api = await run<LogsQueryResult>('logs.query', { id: created.id, filters: [{ field: 'app', value: 'api' }], from: 'now-15m', limit: 100 }, ws.id);
+      check(
+        'logs: a query renews a token that is due, folds the filters in and returns the entries newest first',
+        fakeGrafana.seen.rotations >= 1 &&
+          api.query === 'app:="api"' &&
+          JSON.stringify(api.entries.map((e) => e.msg)) === JSON.stringify(['cache miss', 'payment failed: card declined', 'GET /health 200']) &&
+          api.entries[1]?.level === 'Error' &&
+          api.entries[1]?.fields['error.code'] === 'E42' &&
+          !('_stream_id' in (api.entries[0]?.fields ?? {})) &&
+          api.limited === false,
+        { rotations: fakeGrafana.seen.rotations, query: api.query, entries: api.entries.map((e) => [e.msg, e.level]) },
+      );
+      const narrowed = await run<LogsQueryResult>('logs.query', { id: created.id, query: 'payment', filters: [{ field: 'level', value: 'Debug', exclude: true }], limit: 1 }, ws.id);
+      check(
+        'logs: a free-text query with an excluding filter, and the limit is reported',
+        narrowed.query === '!level:="Debug" (payment)' && narrowed.entries.length === 1 && narrowed.entries[0]?.msg === 'payment failed: card declined' && narrowed.limited === true && fakeGrafana.seen.exprs.at(-1)?.maxLines === 1,
+        { query: narrowed.query, entries: narrowed.entries.map((e) => e.msg), limited: narrowed.limited },
+      );
+      const logsFields = await run<LogsFieldCount[]>('logs.fields', { id: created.id }, ws.id);
+      const levels = await run<LogsFieldCount[]>('logs.values', { id: created.id, field: 'level' }, ws.id);
+      const apps = await run<LogsFieldCount[]>('logs.values', { id: created.id, field: 'app', filters: [{ field: 'level', value: 'Information' }] }, ws.id);
+      check(
+        'logs: field names leave out the internal ones, and values come with counts, most common first',
+        logsFields.map((f) => f.name).join() === 'app,level,error.code' &&
+          levels[0]?.name === 'Information' &&
+          levels[0]?.hits === 2 &&
+          levels.length === 4 &&
+          JSON.stringify(apps) === JSON.stringify([{ name: 'api', hits: 1 }, { name: 'worker', hits: 1 }]) &&
+          fakeGrafana.seen.exprs.some((e) => e.expr === 'level:="Information" | stats by (app) count() hits | sort by (hits desc) | limit 50'),
+        { fields: logsFields, levels, apps },
+      );
+      const logsHits = await run<LogsHits>('logs.hits', { id: created.id, query: 'x | stats count()', from: 'now-15m' }, ws.id);
+      check(
+        'logs: hits count the filter part in about 60 buckets over the range',
+        logsHits.total === 0 && logsHits.stepMs === 30_000 && fakeGrafana.seen.exprs.at(-1)?.expr === 'x' && fakeGrafana.seen.exprs.at(-1)?.queryType === 'hits',
+        { total: logsHits.total, stepMs: logsHits.stepMs, sent: fakeGrafana.seen.exprs.at(-1) },
+      );
+      const allHits = await run<LogsHits>('logs.hits', { id: created.id }, ws.id);
+      check('logs: hits add up to every entry in range', allHits.total === 5 && allHits.buckets.length >= 1, allHits);
+      const broken = await fail('logs.query', { id: created.id, query: 'app:(((' });
+      check("logs: a LogsQL error comes back without Grafana's prefix or the echoed query", broken.startsWith("REQUEST_FAILED: cannot parse `query` arg: missing ')'") && !broken.includes('query='), broken);
+      const badRange = await fail('logs.query', { id: created.id, from: 'now', to: 'now-1h' });
+      check('logs: a range that ends before it starts is refused', badRange.startsWith('INVALID_INPUT'), badRange);
+
+      const logsHistory = await run<LogsHistoryEntry[]>('logs.history.list', { id: created.id }, ws.id);
+      check(
+        'logs: the history keeps each query newest first, with its count or its error',
+        logsHistory.length === 3 && logsHistory[0]?.query === 'app:(((' && logsHistory[0]?.error?.startsWith('cannot parse') === true && logsHistory[1]?.count === 1 && logsHistory[2]?.count === 3,
+        logsHistory.map((h) => [h.query, h.count, h.error]),
+      );
+
+      const agentQuery = await fail('logs.query', { id: created.id, limit: 2 }, 'mcp');
+      const agentSignOut = await fail('logs.signout', { id: created.id }, 'mcp');
+      const agentDelete = await fail('logs.connection.delete', { id: created.id }, 'mcp');
+      const agentClear = await fail('logs.history.clear', {}, 'mcp');
+      const signInMeta = host.registry.list().find((c) => c.id === 'logs.signin');
+      check(
+        'logs: agents may query but not sign out, delete or clear, and sign-in is not offered to them',
+        agentQuery === 'ok' && agentSignOut.startsWith('MUTATION_BLOCKED') && agentDelete.startsWith('MUTATION_BLOCKED') && agentClear.startsWith('MUTATION_BLOCKED') && signInMeta?.hidden === true,
+        { agentQuery, agentSignOut, agentDelete, agentClear, signInHidden: signInMeta?.hidden },
+      );
+
+      const signedOff = await run<LogsSession>('logs.signout', { id: created.id }, ws.id);
+      const afterSignOut = await fail('logs.query', { id: created.id });
+      const listedOut = (await run<LogsConnectionSummary[]>('logs.connection.list', {}, ws.id)).find((c) => c.id === created.id);
+      check(
+        'logs: signing out ends the session on Grafana and on this machine',
+        signedOff.state === 'signed-out' && fakeGrafana.seen.logouts === 1 && afterSignOut.startsWith('SIGN_IN_REQUIRED') && listedOut?.session.state === 'signed-out',
+        { signedOff: signedOff.state, logouts: fakeGrafana.seen.logouts, afterSignOut, listed: listedOut?.session.state },
+      );
+      const back = await run<LogsSession>('logs.signin', { id: created.id }, ws.id);
+      check('logs: signing in after signing out goes through the login page again', back.state === 'signed-in' && fakeGrafana.seen.logins === 2, { back: back.state, logins: fakeGrafana.seen.logins });
+    }
+
     const envFiles = await run<EnvFileSummary[]>('env.file.list', {}, ws.id);
     check('env files: finds dotenv files up to four folders deep, ordered by kind, skipping node_modules', envFiles.map((f) => f.path).join() === '.env,.env.local,.env.staging,.env.example,docker.env,apps/web/.env', envFiles.map((f) => f.path));
     const envMain = envFiles.find((f) => f.path === '.env')!;
@@ -1882,6 +2229,38 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(300);
       await shot('03-request-light');
+      // The sidebar's history follows each send without leaving the module.
+      {
+        const historyTitles = () => js(`[...document.querySelectorAll('[data-testid=api-history-entry]')].map((b) => b.title)`) as Promise<string[]>;
+        if (!(await historyTitles()).length) await js(`[...document.querySelectorAll('aside button')].find((b) => b.textContent.trim() === 'History')?.click()`);
+        await wait(300);
+        const before = await historyTitles();
+        await js(`[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Send')?.click()`);
+        await wait(1500);
+        const after = await historyTitles();
+        check('ui: a send shows up in the history right away', before.length > 0 && after.length > 0 && after[0] !== before[0] && after.slice(1).includes(before[0]), { before: before.slice(0, 2), after: after.slice(0, 2) });
+      }
+
+      // Import from curl: the dialog says which shell it will read the paste as, and the shell can be picked.
+      {
+        const opened = await js(`(() => { const b = document.querySelector('button[aria-label="Import from curl"]'); if (b) b.click(); return Boolean(b); })()`);
+        await wait(300);
+        const typed = await js(
+          `(() => { const ta = document.querySelector('textarea'); if (!ta) return false; const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; set.call(ta, ${JSON.stringify('curl ^"https://example.test/x?merchantId=376^" ^\n  -H ^"accept: application/json^" ^\n  --data-raw ^"null^"')}); ta.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`,
+        );
+        await wait(200);
+        const dialog = (await js(
+          `(() => { const s = document.querySelector('select[aria-label="Shell"]'); return s ? { options: [...s.options].map((o) => o.textContent), hint: s.parentElement.querySelector('span')?.textContent ?? null } : null; })()`,
+        )) as { options: string[]; hint: string | null } | null;
+        check(
+          'ui: curl import offers the shells and reads a Chrome cmd copy as cmd.exe',
+          opened === true && typed === true && dialog?.options.join() === 'Detect,bash/zsh,cmd.exe,PowerShell' && dialog.hint === 'Reads as cmd.exe',
+          dialog,
+        );
+        await shot('03a-curl-import-light');
+        await js(`(() => { const b = [...document.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Cancel'); if (b) b.click(); })()`);
+        await wait(200);
+      }
 
       // Variables: {{name}} is marked in inputs and editors, and hovering shows the value, with secrets masked until revealed.
       const hoverVariable = (inputSelector: string, name: string) =>
@@ -2015,12 +2394,12 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         `(() => { const s = document.querySelector('[data-testid=variable-card-target]'); return s ? { target: s.value, options: [...s.options].map((o) => o.textContent), focused: document.activeElement?.getAttribute('data-testid') } : null; })()`,
       ) as { target: string; options: string[]; focused: string } | null;
       await js(
-        `(() => { const s = document.querySelector('[data-testid=variable-card-target]'); const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set; set.call(s, 'global'); s.dispatchEvent(new Event('change', { bubbles: true })); })()`,
+        `(() => { const s = document.querySelector('[data-testid=variable-card-target]'); const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set; set.call(s, 'global'); s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); })()`,
       );
       await wait(100);
       const secretDisabledForGlobal = await js(`document.querySelector('[data-testid=variable-card-secret]')?.disabled`);
       await js(
-        `(() => { const s = document.querySelector('[data-testid=variable-card-target]'); const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set; set.call(s, ${JSON.stringify(env.id)}); s.dispatchEvent(new Event('change', { bubbles: true })); })()`,
+        `(() => { const s = document.querySelector('[data-testid=variable-card-target]'); const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set; set.call(s, ${JSON.stringify(env.id)}); s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); })()`,
       );
       await wait(100);
       await js(`document.querySelector('[data-testid=variable-card-secret]')?.click()`);
@@ -2122,7 +2501,68 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await wait(1200);
       const gridHasAda = await js(`[...document.querySelectorAll('[role=gridcell]')].some((c) => c.textContent === 'Ada')`);
       check('ui: table grid renders rows', gridHasAda === true);
+      const tableHeader = await js(`[...document.querySelectorAll('[data-testid=db-table-connection]')].find((el) => el.offsetParent !== null)?.textContent.trim() ?? null`);
+      check('ui: a table tab names the connection it belongs to', typeof tableHeader === 'string' && tableHeader.includes('smoke sqlite'), tableHeader);
       await shot('05-table-light');
+      // A write from elsewhere (another tab, an agent) reloads the schema tree and the open table's rows.
+      {
+        const visibleCells = () => js(`[...document.querySelectorAll('[role=gridcell]')].filter((c) => c.offsetParent !== null).map((c) => c.textContent)`) as Promise<string[]>;
+        const tableRows = () => js(`[...document.querySelectorAll('aside [role=button]')].map((r) => r.textContent.trim().split(/\\s+/)[0])`) as Promise<string[]>;
+        await run('db.query.run', { connectionId: sqlite.id, query: 'CREATE TABLE smoke_live (id INTEGER PRIMARY KEY)' }, ws.id);
+        await run('db.query.run', { connectionId: sqlite.id, query: "UPDATE users SET name = 'Ada Lovelace' WHERE name = 'Ada'" }, ws.id);
+        await wait(1000);
+        const created = { tables: await tableRows(), cells: await visibleCells() };
+        await run('db.query.run', { connectionId: sqlite.id, query: 'DROP TABLE smoke_live' }, ws.id);
+        await run('db.query.run', { connectionId: sqlite.id, query: "UPDATE users SET name = 'Ada' WHERE name = 'Ada Lovelace'" }, ws.id);
+        await wait(1000);
+        const dropped = { tables: await tableRows(), cells: await visibleCells() };
+        check(
+          'ui: a write reloads the table list and the open rows',
+          created.tables.includes('smoke_live') && created.cells.includes('Ada Lovelace') && !dropped.tables.includes('smoke_live') && dropped.cells.includes('Ada') && !dropped.cells.includes('Ada Lovelace'),
+          { created, dropped },
+        );
+      }
+      // A long table list gets a filter (Enter opens the first match, Escape clears it), and a cell holding JSON text shows it formatted.
+      {
+        const sidebarTables = async () =>
+          ((await js(`[...document.querySelectorAll('aside [role=button]')].map((r) => r.textContent.trim().split(/\\s+/)[0])`)) as string[]).filter((name) => name === 'users' || name.startsWith('smoke_'));
+        const filterInput = `document.querySelector('[data-testid=db-table-filter]')`;
+        const fillers = Array.from({ length: 10 }, (_, i) => `smoke_filter_${String(i).padStart(2, '0')}`);
+        await run(
+          'db.query.run',
+          {
+            connectionId: sqlite.id,
+            query: [...fillers.map((t) => `CREATE TABLE ${t} (id INTEGER PRIMARY KEY);`), 'CREATE TABLE smoke_json (id INTEGER PRIMARY KEY, doc TEXT);', `INSERT INTO smoke_json (doc) VALUES ('{"id":12345678901234567890,"tags":["a","b"]}');`].join('\n'),
+          },
+          ws.id,
+        );
+        await wait(1000);
+        const placeholder = await js(`${filterInput}?.placeholder ?? null`);
+        await js(`(() => { const el = ${filterInput}; el.value = 'JSON'; el.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+        await wait(200);
+        const matching = await sidebarTables();
+        await shot('05a-table-filter-light');
+        await js(`${filterInput}.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`);
+        await wait(1200);
+        const clickedJson = await js(`(() => { const cell = [...document.querySelectorAll('[role=gridcell]')].find((c) => c.offsetParent !== null && c.textContent.startsWith('{"id"')); if (cell) cell.click(); return Boolean(cell); })()`);
+        await wait(200);
+        const detail = await js(`[...document.querySelectorAll('[data-testid=db-cell-detail]')].find((p) => p.offsetParent !== null)?.textContent ?? null`);
+        await shot('05a-table-json-cell-light');
+        await js(`${filterInput}.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+        await wait(200);
+        const cleared = await sidebarTables();
+        check(
+          'ui: a long table list filters by name and Enter opens the first match',
+          placeholder === 'Filter 12 tables' && matching.join() === 'smoke_json' && clickedJson === true && cleared.includes('users') && cleared.includes('smoke_filter_09'),
+          { placeholder, matching, clickedJson, cleared },
+        );
+        check('ui: a cell holding JSON text shows it formatted, numbers as written', detail === '{\n  "id": 12345678901234567890,\n  "tags": [\n    "a",\n    "b"\n  ]\n}', detail);
+        await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+        await run('db.query.run', { connectionId: sqlite.id, query: [...fillers, 'smoke_json'].map((t) => `DROP TABLE ${t};`).join('\n') }, ws.id);
+        await wait(1000);
+        const filterGone = await js(`!${filterInput}`);
+        check('ui: the filter goes away once the list is short again', filterGone === true && (await sidebarTables()).join() === 'users', filterGone);
+      }
       // The WHERE filter completes the table's columns: Enter picks one while the list is open, then applies the filter.
       const typeText = (text: string) => {
         for (const ch of text) win.webContents.sendInputEvent({ type: 'char', keyCode: ch });
@@ -2160,6 +2600,70 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await wait(200);
       const whereAfter = await js(`[...document.querySelectorAll('[data-testid=db-table-where] .cm-line')].map((l) => l.textContent)`);
       check('ui: the WHERE filter stays one line', Array.isArray(whereAfter) && whereAfter.length === 1 && whereAfter[0] === "email = 'linus@example.com' AND id > 0", whereAfter);
+      // The grid edits in place: double-click, type, Enter, then Apply runs the UPDATE and the row comes back changed.
+      {
+        const nameCell = `[...document.querySelectorAll('[role=gridcell]')].find((c) => c.offsetParent !== null && c.textContent.trim() === 'Linus')`;
+        const dblClicked = await js(`(() => { const c = ${nameCell}; if (!c) return false; c.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })); return true; })()`);
+        await wait(200);
+        const typed = await js(
+          `(() => { const el = document.querySelector('[data-testid=db-cell-editor]'); if (!el) return false; const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(el, 'Linus T'); el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return true; })()`,
+        );
+        await wait(200);
+        const pending = await js(`document.querySelector('[data-testid=db-pending]')?.textContent.trim() ?? null`);
+        const changedCells = await js(`[...document.querySelectorAll('[role=gridcell][data-changed]')].filter((c) => c.offsetParent !== null).map((c) => c.textContent.trim())`);
+        await shot('05c-table-pending-edit-light');
+        await js(`document.querySelector('[data-testid=db-apply]')?.click()`);
+        await wait(1500);
+        const afterApply = await js(`[...document.querySelectorAll('[role=gridcell]')].filter((c) => c.offsetParent !== null).map((c) => c.textContent.trim())`);
+        const stored = await run<DbTableRows>('db.table.rows', { connectionId: sqlite.id, table: 'users', where: "name = 'Linus T'" }, ws.id);
+        check(
+          'ui: a cell edited in the grid is applied by key and read back',
+          dblClicked === true && typed === true && pending === '1 pending' && Array.isArray(changedCells) && changedCells.join() === 'Linus T' && Array.isArray(afterApply) && afterApply.includes('Linus T') && stored.rows.length === 1 && !(await js(`Boolean(document.querySelector('[data-testid=db-pending]'))`)),
+          { dblClicked, typed, pending, changedCells, afterApply, stored: stored.rows },
+        );
+        await run('db.query.run', { connectionId: sqlite.id, query: "UPDATE users SET name = 'Linus' WHERE name = 'Linus T'", record: false }, ws.id);
+        await wait(800);
+      }
+      // Right-click offers the row actions; the detail strip opens the transposed row; the export menu lists the formats.
+      {
+        const nameCell = `[...document.querySelectorAll('[role=gridcell]')].find((c) => c.offsetParent !== null && c.textContent.trim() === 'Linus')`;
+        await js(`(() => { const c = ${nameCell}; if (c) c.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 320, clientY: 320 })); })()`);
+        await wait(200);
+        const menuItems = (await js(`[...document.querySelectorAll('[data-testid=context-menu] button')].map((b) => b.textContent.trim())`)) as string[];
+        await shot('05d-table-context-menu-light');
+        await js(`document.querySelector('[data-testid=context-menu]')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+        await wait(100);
+        await js(`(() => { const c = ${nameCell}; if (c) c.click(); })()`);
+        await wait(100);
+        await js(`[...document.querySelectorAll('button[aria-label="Show row detail"]')].find((b) => b.offsetParent !== null)?.click()`);
+        await wait(200);
+        const detailText = await js(`document.querySelector('[data-testid=db-row-detail]')?.textContent ?? null`);
+        await shot('05e-table-row-detail-light');
+        await js(`[...document.querySelectorAll('button[aria-label="Hide row detail"]')].find((b) => b.offsetParent !== null)?.click()`);
+        await js(`[...document.querySelectorAll('[data-testid=db-export]')].find((b) => b.offsetParent !== null)?.click()`);
+        await wait(200);
+        const exportItems = (await js(`[...document.querySelectorAll('[role=menuitem]')].map((b) => b.textContent.trim())`)) as string[];
+        await js(`document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))`);
+        await wait(100);
+        check(
+          'ui: the grid has a context menu, a row detail panel and an export menu',
+          Array.isArray(menuItems) && menuItems.some((t) => t.startsWith('Filter by name')) && menuItems.some((t) => t.startsWith('Edit cell')) && menuItems.includes('Delete row') && typeof detailText === 'string' && detailText.includes('email') && detailText.includes('linus@example.com') && exportItems.includes('CSV') && exportItems.includes('INSERT statements…'),
+          { menuItems, detailText, exportItems },
+        );
+      }
+      // The history tab lists every run and searches it.
+      {
+        await js(`document.querySelector('[data-testid=db-history-open]')?.click()`);
+        await wait(800);
+        const all = await js(`document.querySelectorAll('[data-testid=db-history-entry]').length`);
+        await js(`(() => { const el = document.querySelector('[data-testid=db-history-search]'); const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(el, 'nope'); el.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+        await wait(800);
+        const searched = (await js(`[...document.querySelectorAll('[data-testid=db-history-entry]')].map((e) => e.title)`)) as string[];
+        await shot('05f-history-tab-light');
+        check('ui: the history tab lists runs and filters them by text', typeof all === 'number' && all > 3 && searched.length > 0 && searched.every((t) => t.includes('nope')), { all, searched });
+        await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+        await wait(300);
+      }
       const clickedQuery = await js(
         `(() => { const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Query'); if (btn) btn.click(); return Boolean(btn); })()`,
       );
@@ -2190,7 +2694,110 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await wait(800);
       const hashRendered = await js(`[...document.querySelectorAll('[role=gridcell]')].some((c) => c.textContent === 'Ada')`);
       check('ui: redis hash rendered', hashRendered === true);
+      // A write from elsewhere rescans the keys and reloads the open key.
+      {
+        const keyNames = () => js(`[...document.querySelectorAll('button')].map((b) => b.textContent.trim()).filter((t) => /^(string|hash|list|set|zset|stream)/.test(t))`) as Promise<string[]>;
+        const cells = () => js(`[...document.querySelectorAll('[role=gridcell]')].map((c) => c.textContent)`) as Promise<string[]>;
+        await run('db.query.run', { connectionId: redis.id, query: 'SET smoke:live 1\nHSET user:1 name Grace' }, ws.id);
+        await wait(1000);
+        const written = { keys: await keyNames(), cells: await cells() };
+        await run('db.query.run', { connectionId: redis.id, query: 'DEL smoke:live\nHSET user:1 name Ada' }, ws.id);
+        await wait(1000);
+        const restored = { keys: await keyNames(), cells: await cells() };
+        check(
+          'ui: a redis write rescans the keys and reloads the open key',
+          written.keys.some((k) => k.endsWith('smoke:live')) && written.cells.includes('Grace') && !restored.keys.some((k) => k.endsWith('smoke:live')) && restored.cells.includes('Ada'),
+          { written, restored },
+        );
+      }
+      // The key browser shows the server's vitals, creates a key from a dialog and sets its expiry.
+      {
+        const vitals = await js(`document.querySelector('[data-testid=db-redis-info]')?.textContent ?? null`);
+        await js(`document.querySelector('[data-testid=db-redis-new-key]')?.click()`);
+        await wait(300);
+        const dialogFilled = await js(
+          `(() => { const el = document.querySelector('form input'); if (!el) return false; const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(el, 'smoke:new'); el.dispatchEvent(new Event('input', { bubbles: true })); const btn = [...document.querySelectorAll('form button')].find((b) => b.textContent.trim() === 'Create'); if (btn) btn.click(); return Boolean(btn); })()`,
+        );
+        await wait(1200);
+        const created = await js(`document.querySelector('[data-testid=db-redis-key-name]')?.textContent.trim() ?? null`);
+        await js(`document.querySelector('[data-testid=db-redis-ttl]')?.click()`);
+        await wait(300);
+        await js(
+          `(() => { const el = document.querySelector('form input'); if (!el) return; const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(el, '120'); el.dispatchEvent(new Event('input', { bubbles: true })); [...document.querySelectorAll('form button')].find((b) => b.textContent.trim() === 'Set')?.click(); })()`,
+        );
+        await wait(1000);
+        const ttlShown = await js(`document.querySelector('[data-testid=db-redis-ttl-value]')?.textContent ?? null`);
+        await shot('08a-redis-new-key-dark');
+        check(
+          'ui: the key browser shows vitals, creates a key and sets its TTL',
+          typeof vitals === 'string' && vitals.includes('7.2.0-fake') && vitals.includes('3 clients') && dialogFilled === true && created === 'smoke:new' && typeof ttlShown === 'string' && /TTL: (1m|2m)/.test(ttlShown),
+          { vitals, dialogFilled, created, ttlShown },
+        );
+        await run('db.redis.command', { connectionId: redis.id, commands: [['DEL', 'smoke:new']] }, ws.id);
+        await wait(500);
+      }
       await shot('08-redis-dark');
+
+      // Tools: the JWT tab decodes the token as it is pasted and verifies it once a key is given.
+      {
+        const clickedTools = await js(`(() => { const btn = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.title || '') === 'Tools'); if (btn) btn.click(); return Boolean(btn); })()`);
+        await wait(300);
+        await js(`(() => { const btn = [...document.querySelectorAll('aside button')].find((b) => b.textContent.includes('verify its signature')); if (btn) btn.click(); })()`);
+        await wait(500);
+        const pane = `[...document.querySelectorAll('[data-tab-type="tools.tool"]')].find((el) => !el.classList.contains('hidden'))`;
+        const typeInto = (editor: string, text: string, replace = false) =>
+          js(
+            `(() => { const c = ${pane}?.querySelector('${editor} .cm-content'); if (!c) return false; c.focus(); ${replace ? "document.execCommand('selectAll');" : ''} document.execCommand('insertText', false, ${JSON.stringify(text)}); return true; })()`,
+          );
+        const summary = () => js(`${pane}?.querySelector('[data-testid=tool-summary]')?.textContent.trim() ?? null`);
+        const typedToken = await typeInto(':scope', jwtToken);
+        await wait(500);
+        const decoded = { output: await js(`[...(${pane}?.querySelectorAll('.cm-content') ?? [])].at(-1)?.textContent ?? ''`), summary: await summary() };
+        await typeInto('[data-testid=tool-second-input]', 'your-256-bit-secret');
+        await wait(500);
+        const verified = await summary();
+        await shot('08b-jwt-verify-dark');
+        await typeInto('[data-testid=tool-second-input]', '!');
+        await wait(500);
+        const mismatched = await summary();
+        check(
+          'ui: the JWT tab decodes the token, then verifies it once a secret is given',
+          clickedTools === true &&
+            typedToken === true &&
+            typeof decoded.output === 'string' &&
+            decoded.output.includes('1234567890') &&
+            decoded.summary === null &&
+            verified === 'Valid: signature verified (HS256, secret)' &&
+            mismatched === 'Invalid (HS256, secret): the signature does not match the key',
+          { decoded, verified, mismatched },
+        );
+        // The auth-server case: "jwt <token>" pasted with the base64-wrapped public key and the issuer pinned.
+        await typeInto(':scope', `jwt ${authServer.token}`, true);
+        await typeInto('[data-testid=tool-second-input]', authServer.key, true);
+        const setOption = (key: string, value: string) =>
+          js(`(() => { const el = ${pane}?.querySelector('[data-testid=tool-option-${key}]'); el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+        await setOption('issuer', 'authservice');
+        await wait(600);
+        const authValid = await summary();
+        await shot('08c-jwt-auth-server-dark');
+        await setOption('issuer', 'someone-else');
+        await wait(600);
+        const authWrongIssuer = await summary();
+        await setOption('issuer', 'authservice');
+        await setOption('audience', 'checkout');
+        await wait(600);
+        const authNoAudience = await summary();
+        check(
+          'ui: the JWT tab validates an auth-server token against its base64-wrapped key, pinned issuer and audience',
+          typeof authValid === 'string' &&
+            /^Valid: signature verified \(RS256, base64 PEM\), expires \d+ minutes from now$/.test(authValid) &&
+            authWrongIssuer === 'Invalid (RS256, base64 PEM): issuer is "authservice", expected "someone-else"' &&
+            authNoAudience === 'Invalid (RS256, base64 PEM): no audience, expected "checkout"',
+          { authValid, authWrongIssuer, authNoAudience },
+        );
+        await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+        await wait(200);
+      }
 
       // Teleport module: one section per cluster, pinned resources from both, tunnels, kube clusters.
       const clickedTeleport = await js(
@@ -2214,6 +2821,53 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(300);
       await shot('10-teleport-light');
+      // The pinned row's tick follows the terminal's kubectl context even while its cluster's section is collapsed
+      // (and its kube list not loaded), e.g. when it changes from a terminal or an agent.
+      const secondHeader = `document.querySelector('[data-testid=teleport-cluster][data-proxy="${fakeTsh.proxies.second}"] > [role=button]')`;
+      await js(`${secondHeader}?.click()`);
+      await wait(300);
+      const collapsedKubes = await js(`[...document.querySelectorAll('[data-testid=teleport-kube]')].map((r) => r.textContent.trim().split(/\\s+/)[0])`);
+      await run('teleport.kube.login', { proxy: fakeTsh.proxies.second, cluster: 'eu-eks' }, null);
+      await wait(1500);
+      const pinnedActive = await js(
+        `[...document.querySelectorAll('[data-testid=teleport-pin]')].map((r) => [r.textContent.includes('eu-eks') ? 'eu-eks' : r.textContent.includes('smoke-redis') ? 'smoke-redis' : 'other', Boolean(r.querySelector('[aria-label=active]'))])`,
+      );
+      check(
+        'ui: the pinned kube cluster the terminal points at is ticked, its cluster collapsed',
+        Array.isArray(collapsedKubes) && !collapsedKubes.includes('eu-eks') && Array.isArray(pinnedActive) && pinnedActive.some((r: [string, boolean]) => r[0] === 'eu-eks' && r[1]) && pinnedActive.every((r: [string, boolean]) => r[0] === 'eu-eks' || !r[1]),
+        { collapsedKubes, pinnedActive },
+      );
+      await js(`${secondHeader}?.click()`);
+      await wait(800);
+      // Switching the terminal to another kube cluster of the same Teleport cluster moves the tick and the "terminal" mark.
+      await js(
+        `(() => { const row = [...document.querySelectorAll('[data-testid=teleport-kube]')].find((r) => r.textContent.includes('dev-eks')); row?.querySelector('button[aria-label="Pin"]')?.click(); })()`,
+      );
+      await wait(1000);
+      const tickOf = (name: string) => js(`Boolean([...document.querySelectorAll('[data-testid=teleport-pin]')].find((r) => r.textContent.includes('${name}'))?.querySelector('[aria-label=active]'))`);
+      const devTickedBefore = await tickOf('dev-eks');
+      await js(
+        `(() => { const row = [...document.querySelectorAll('[data-testid=teleport-kube]')].find((r) => r.textContent.includes('prod-eks')); row?.querySelector('button[aria-label^="Set as kubectl context"]')?.click(); })()`,
+      );
+      await wait(300);
+      await js(`[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Set terminal context')?.click()`);
+      await wait(1500);
+      const switched = {
+        devTickedBefore,
+        devTickedAfter: await tickOf('dev-eks'),
+        euTicked: await tickOf('eu-eks'),
+        terminalRows: await js(`[...document.querySelectorAll('[data-testid=teleport-kube]')].filter((r) => r.textContent.includes('terminal')).map((r) => r.textContent.replace('terminal', '').trim())`),
+      };
+      check(
+        'ui: switching the terminal to another kube cluster clears the old tick',
+        switched.devTickedBefore === true && switched.devTickedAfter === false && switched.euTicked === true && JSON.stringify(switched.terminalRows) === JSON.stringify(['prod-eks', 'eu-eks']),
+        switched,
+      );
+      await shot('10b-teleport-kube-context');
+      await js(
+        `(() => { const row = [...document.querySelectorAll('[data-testid=teleport-pin]')].find((r) => r.textContent.includes('dev-eks')); row?.querySelector('button[aria-label="Unpin"]')?.click(); })()`,
+      );
+      await wait(1000);
       const clickedUnpin = await js(
         `(() => { const row = [...document.querySelectorAll('[data-testid=teleport-pin]')].find((r) => r.textContent.includes('second-mysql')); const btn = row && row.querySelector('button[aria-label="Unpin"]'); if (btn) btn.click(); return Boolean(btn); })()`,
       );
@@ -2251,14 +2905,15 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         await wait(1500);
         const viewCluster = await js(`document.querySelector('[data-testid=kube-query]')?.getAttribute('data-cluster') ?? null`);
         check('ui: query view is for the clicked cluster', viewCluster === 'prod-eks', viewCluster);
-        // React-controlled inputs need the native setter plus an input/change event.
+        // Set the value as a user would: the native setter, then the events a browser fires (a select fires input, then change).
         const setField = (testid: string, value: string) =>
           js(`(() => {
             const el = document.querySelector('[data-testid=${testid}]');
             if (!el) return false;
             const proto = el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
             Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, ${JSON.stringify(value)});
-            el.dispatchEvent(new Event(el instanceof HTMLSelectElement ? 'change' : 'input', { bubbles: true }));
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            if (el instanceof HTMLSelectElement) el.dispatchEvent(new Event('change', { bubbles: true }));
             return true;
           })()`);
         const text = (testid: string) => js(`document.querySelector('[data-testid=${testid}]')?.textContent ?? null`);
@@ -2420,6 +3075,37 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(200);
 
+      // A captured request becomes an unsaved route; deleting it again leaves nothing to save. Same for a settings toggle.
+      const mockSaveLabel = () => js(`document.querySelector('[data-testid=mock-server-tab] button[title="Ctrl+S"]')?.textContent.trim() ?? ''`);
+      const clickMockTab = (label: string) =>
+        js(`(() => { const btn = [...document.querySelectorAll('[data-testid=mock-server-tab] [role=tab]')].find((b) => b.textContent.startsWith(${JSON.stringify(label)})); if (btn) btn.click(); return Boolean(btn); })()`);
+      await js(`[...document.querySelectorAll('[data-testid=mock-request-detail] button')].find((b) => b.textContent.trim() === 'Route')?.click()`);
+      await wait(500);
+      const fromRequest = {
+        view: await js(`document.querySelector('[data-testid=mock-server-tab] [role=tab][aria-selected=true]')?.textContent ?? ''`),
+        path: await js(`document.querySelector('[data-testid=mock-route-path]')?.value ?? null`),
+        save: await mockSaveLabel(),
+      };
+      check('ui: a captured request turns into a selected, unsaved route', fromRequest.view === 'Routes (6)' && fromRequest.path === '/echo' && fromRequest.save === 'Save*', fromRequest);
+      await js(`document.querySelector('[data-testid=mock-route-editor] [aria-label="Delete route"]')?.click()`);
+      await wait(300);
+      const afterDelete = { routes: await js(`document.querySelectorAll('[data-testid=mock-route-item]').length`), save: await mockSaveLabel() };
+      check('ui: deleting the new route leaves the server unchanged', afterDelete.routes === 5 && afterDelete.save === 'Save', afterDelete);
+      await clickMockTab('Settings');
+      await wait(400);
+      const toggleCors = () => js(`[...document.querySelectorAll('[data-testid=mock-server-tab] label')].find((l) => l.textContent.includes('Allow browser calls'))?.querySelector('input')?.click()`);
+      const settingsPort = await js(`document.querySelector('[data-testid=mock-port]')?.value ?? null`);
+      await toggleCors();
+      await wait(200);
+      const corsToggled = await mockSaveLabel();
+      await toggleCors();
+      await wait(200);
+      const corsRestored = await mockSaveLabel();
+      check('ui: settings show the port and a toggle marks the server unsaved until undone', settingsPort === String(mock.port) && corsToggled === 'Save*' && corsRestored === 'Save', { settingsPort, corsToggled, corsRestored });
+      await shot('14b-mock-settings-light');
+      await clickMockTab('Routes');
+      await wait(200);
+
       // Realtime module: connection rows, live message log, composer.
       const clickedRealtime = await js(
         `(() => { const btn = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.title || '') === 'Realtime'); if (btn) btn.click(); return Boolean(btn); })()`,
@@ -2471,6 +3157,36 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await wait(300);
       await shot('16-realtime-dark');
       await js(`document.documentElement.classList.remove('dark')`);
+      await wait(200);
+
+      // The composed message is kept as an unsaved saved message; deleting it again leaves nothing to save.
+      const rtSaveLabel = () => js(`document.querySelector('[data-testid=realtime-connection-tab] button[title="Ctrl+S"]')?.textContent.trim() ?? ''`);
+      const savedItems = () => js(`[...document.querySelectorAll('[data-testid=realtime-connection-tab] .w-56 .overflow-y-auto button')].map((b) => b.textContent.trim())`);
+      await js(`[...document.querySelectorAll('[data-testid=realtime-composer] button')].find((b) => b.textContent.trim() === 'Save message')?.click()`);
+      await wait(400);
+      const kept = {
+        view: await js(`document.querySelector('[data-testid=realtime-connection-tab] [role=tab][aria-selected=true]')?.textContent ?? ''`),
+        items: await savedItems(),
+        firstName: await js(`document.querySelector('[data-testid=realtime-connection-tab] .w-56.border-r + div input')?.value ?? null`),
+        save: await rtSaveLabel(),
+      };
+      check(
+        'ui: a composed message joins the saved messages, unsaved, with the first one open',
+        kept.view === 'Saved (2)' && JSON.stringify(kept.items) === JSON.stringify(['ping', 'Message 2']) && kept.firstName === 'ping' && kept.save === 'Save*',
+        kept,
+      );
+      await js(`[...document.querySelectorAll('[data-testid=realtime-connection-tab] .w-56 .overflow-y-auto button')].find((b) => b.textContent.trim() === 'Message 2')?.click()`);
+      await wait(300);
+      const keptBody = await js(`document.querySelector('[data-testid=realtime-connection-tab] .cm-content')?.textContent ?? ''`);
+      await js(`document.querySelector('[data-testid=realtime-connection-tab] [aria-label="Delete message"]')?.click()`);
+      await wait(300);
+      const afterRemove = { items: await savedItems(), save: await rtSaveLabel() };
+      check(
+        'ui: deleting the kept message leaves the connection unchanged',
+        typeof keptBody === 'string' && keptBody.includes('from the ui') && Array.isArray(afterRemove.items) && afterRemove.items.length === 1 && afterRemove.save === 'Save',
+        { keptBody, ...afterRemove },
+      );
+      await js(`[...document.querySelectorAll('[data-testid=realtime-connection-tab] [role=tab]')].find((b) => b.textContent.startsWith('Messages'))?.click()`);
       await wait(200);
 
       // GraphQL: request row label, body editor with schema status, docs explorer.
@@ -2618,6 +3334,72 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await js(`document.documentElement.classList.remove('dark')`);
       await wait(200);
 
+      // Resources, a resource template, a prompt and the handshake info, driven from the same tab.
+      const clickMcpView = (label: string) =>
+        js(
+          `(() => { const pane = [...document.querySelectorAll('[data-tab-type="mcp.server"]')].find((el) => !el.classList.contains('hidden')); const btn = pane && [...pane.querySelectorAll('[role=tab]')].find((b) => b.textContent.startsWith(${JSON.stringify(label)})); if (btn) btn.click(); return Boolean(btn); })()`,
+        );
+      const typeInto = (selector: string, value: string) =>
+        js(
+          `(() => { const input = document.querySelector(${JSON.stringify(selector)}); if (!input) return false; const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; setter.call(input, ${JSON.stringify(value)}); input.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`,
+        );
+      await clickMcpView('Resources');
+      await wait(800);
+      const resourceRows = await js(`[...document.querySelectorAll('[data-testid=mcp-resource], [data-testid=mcp-resource-template]')].map((r) => r.getAttribute('data-testid') + ':' + r.textContent)`);
+      await js(`document.querySelector('[data-testid=mcp-resource]')?.click()`);
+      await wait(800);
+      const resourceRead = await js(`document.querySelector('[data-testid=mcp-resource-result]')?.textContent ?? ''`);
+      check(
+        'ui: resources and templates listed, and picking a resource reads it',
+        Array.isArray(resourceRows) &&
+          resourceRows.some((r: string) => r.startsWith('mcp-resource:') && r.includes('Greeting') && r.includes('smoke://greeting')) &&
+          resourceRows.some((r: string) => r.startsWith('mcp-resource-template:') && r.includes('(template)') && r.includes('smoke://users/{id}')) &&
+          typeof resourceRead === 'string' &&
+          resourceRead.includes('1 part') &&
+          resourceRead.includes('hello, inspector'),
+        { resourceRows, resourceRead: String(resourceRead).slice(0, 160) },
+      );
+      await js(`document.querySelector('[data-testid=mcp-resource-template]')?.click()`);
+      await wait(300);
+      const typedVariable = await typeInto('[data-testid=mcp-template-variable]', '7');
+      await wait(100);
+      await js(`document.querySelector('[data-testid=mcp-resource-read]')?.click()`);
+      await wait(800);
+      const templateRead = await js(`document.querySelector('[data-testid=mcp-resource-result]')?.textContent ?? ''`);
+      check(
+        'ui: a template expands its variables into the uri it reads',
+        typedVariable === true && typeof templateRead === 'string' && templateRead.includes('smoke://users/7') && templateRead.includes('"user 7"'),
+        String(templateRead).slice(0, 200),
+      );
+      await shot('21e-mcp-resources-light');
+      await clickMcpView('Prompts');
+      await wait(800);
+      await js(`[...document.querySelectorAll('[data-testid=mcp-prompt]')].find((p) => p.textContent.includes('summarize'))?.click()`);
+      await wait(300);
+      const promptArgs = await js(`document.querySelectorAll('[data-testid=mcp-prompt-argument]').length`);
+      await typeInto('[data-testid=mcp-prompt-argument]', 'signals');
+      await wait(100);
+      await js(`document.querySelector('[data-testid=mcp-prompt-get]')?.click()`);
+      await wait(800);
+      const promptResult = await js(`document.querySelector('[data-testid=mcp-prompt-result]')?.textContent ?? ''`);
+      check(
+        'ui: a prompt renders with its arguments into messages',
+        promptArgs === 2 && typeof promptResult === 'string' && promptResult.includes('1 message') && promptResult.includes('Summary of signals') && promptResult.includes('Summarize signals'),
+        { promptArgs, promptResult: String(promptResult).slice(0, 200) },
+      );
+      await clickMcpView('Info');
+      await wait(300);
+      const info = await js(
+        `[document.querySelector('[data-testid=mcp-info]')?.textContent ?? '', document.querySelector('[data-testid=mcp-capabilities]')?.textContent ?? '', document.querySelector('[data-testid=mcp-instructions]')?.textContent ?? '']`,
+      );
+      check(
+        'ui: info shows the server, its capabilities and its instructions',
+        Array.isArray(info) && info[0].includes('smoke-http 1.2.3') && info[1].includes('logging') && info[1].includes('tools') && info[2] === 'Use echo to test the connection.',
+        Array.isArray(info) ? info.map((t: string) => t.slice(0, 160)) : info,
+      );
+      await clickMcpView('Tools');
+      await wait(200);
+
       // Call recorder: opened from the inspector's sidebar, started in the UI, lists two agents' calls as they arrive, then ends.
       const clickedRecorderRow = await js(`(() => { const row = document.querySelector('[data-testid=mcp-recorder-row]'); if (row) row.click(); return Boolean(row); })()`);
       await wait(500);
@@ -2684,7 +3466,8 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
         `(() => { const btn = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.title || '') === 'Env files'); if (btn) btn.click(); return Boolean(btn); })()`,
       );
       check('ui: env files module button', clickedEnvModule === true);
-      await wait(1200);
+      // The list waits on git status for every file; give it time rather than a fixed pause.
+      await until(async () => Number(await js(`document.querySelectorAll('[data-testid=env-file]').length`)) >= 7, 10_000);
       const envRows = await js(`[...document.querySelectorAll('[data-testid=env-file]')].map((r) => [r.getAttribute('data-path'), r.getAttribute('data-kind'), r.getAttribute('data-warning')])`);
       check(
         'ui: env file rows show every file with its kind and git warning',
@@ -2750,6 +3533,49 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await wait(500);
       await shot('24-env-keys-dark');
       await js(`document.documentElement.classList.remove('dark')`);
+      await wait(200);
+
+      // Text view: masked while secrets are hidden, the raw text once revealed, saved as a whole; History lists what Quiver kept.
+      const clickEnvView = (label: string) =>
+        js(
+          `(() => { const pane = [...document.querySelectorAll('[data-tab-type="env.file"]')].find((el) => !el.classList.contains('hidden')); const btn = pane && [...pane.querySelectorAll('[role=tab]')].find((b) => b.textContent.startsWith(${JSON.stringify(label)})); if (btn) btn.click(); return Boolean(btn); })()`,
+        );
+      const envLabels = () =>
+        js(
+          `[document.querySelector('[data-testid=env-save]')?.textContent.trim() ?? '', [...document.querySelectorAll('[data-tab-type="env.file"] [role=tab]')].find((b) => b.textContent.startsWith('Text'))?.textContent ?? ''].join('|')`,
+        );
+      await js(`document.querySelector('[data-testid=env-reveal]')?.click()`);
+      await clickEnvView('Text');
+      await wait(400);
+      const maskedTextView = await js(`document.querySelector('[data-testid=env-text-masked] .cm-content')?.textContent ?? ''`);
+      await js(`document.querySelector('[data-testid=env-reveal]')?.click()`);
+      await wait(300);
+      const envBefore = await fs.readFile(path.join(envRoot, '.env'), 'utf8');
+      const typedText = await js(
+        `(() => { const content = document.querySelector('[data-testid=env-text] .cm-content'); if (!content) return false; content.focus(); document.execCommand('selectAll'); return document.execCommand('insertText', false, ${JSON.stringify(`${envBefore}FROM_TEXT=1\n`)}); })()`,
+      );
+      await wait(200);
+      const dirtyLabels = await envLabels();
+      await js(`document.querySelector('[data-testid=env-save]')?.click()`);
+      await wait(1200);
+      const envAfter = await fs.readFile(path.join(envRoot, '.env'), 'utf8');
+      const savedLabels = await envLabels();
+      check(
+        'ui: the text view masks secrets until revealed, then edits and saves the whole file',
+        typeof maskedTextView === 'string' &&
+          maskedTextView.includes('DB_PASSWORD="••••••••" # keep') &&
+          !maskedTextView.includes('p@ss word') &&
+          typedText === true &&
+          dirtyLabels === 'Save*|Text*' &&
+          envAfter === `${envBefore}FROM_TEXT=1\n` &&
+          savedLabels === 'Save|Text',
+        { maskedTextView: String(maskedTextView).slice(0, 120), dirtyLabels, savedLabels, tail: envAfter.split('\n').slice(-3) },
+      );
+      await clickEnvView('History');
+      await wait(800);
+      const backupRows = await js(`[...document.querySelectorAll('[data-testid=env-backup]')].map((r) => r.textContent)`);
+      check('ui: history lists the backups kept before each change', Array.isArray(backupRows) && backupRows.length >= 3 && backupRows.every((t: string) => t.includes('Restore')), backupRows);
+      await clickEnvView('Keys');
       await wait(200);
 
       // Status bar: the environment picker is a themed menu above the bar, not a native select.
@@ -2845,8 +3671,27 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       const orderAfterEsc = await tabTitles();
       check('ui: Escape cancels a tab drag and keeps the order', markerBeforeEsc && JSON.stringify(orderAfterEsc) === JSON.stringify(expectedOrder) && (await js(`Boolean(document.querySelector('[data-testid=tab-drop-marker]'))`)) === false, orderAfterEsc);
 
+      // A middle click closes the tab under the pointer; the scrollable strip must not start the browser's autoscroll instead.
+      const middleTabs = await tabTitles();
+      const middleTarget = (await js(
+        `(() => { const strip = document.querySelector('[role=tablist]').getBoundingClientRect(); const tabs = [...document.querySelectorAll('[data-testid=tab]')]; const t = tabs.reverse().find((t) => { const r = t.getBoundingClientRect(); return r.left >= strip.left && r.right <= strip.right; }); if (!t) return null; const r = t.getBoundingClientRect(); return { title: t.getAttribute('data-title'), x: Math.round(r.left + 24), y: Math.round(r.top + r.height / 2) }; })()`,
+      )) as { title: string; x: number; y: number } | null;
+      if (middleTabs.length >= 4 && middleTarget) {
+        win.webContents.sendInputEvent({ type: 'mouseMove', x: middleTarget.x, y: middleTarget.y });
+        win.webContents.sendInputEvent({ type: 'mouseDown', x: middleTarget.x, y: middleTarget.y, button: 'middle', clickCount: 1 });
+        await wait(50);
+        win.webContents.sendInputEvent({ type: 'mouseUp', x: middleTarget.x, y: middleTarget.y, button: 'middle', clickCount: 1 });
+      }
+      await wait(400);
+      const afterMiddle = await tabTitles();
+      check(
+        'ui: middle-clicking a tab closes it',
+        middleTabs.length >= 4 && middleTarget !== null && afterMiddle.length === middleTabs.length - 1 && !afterMiddle.includes(middleTarget.title),
+        { middleTabs, middleTarget, afterMiddle },
+      );
+
       const tabsBefore = await tabTitles();
-      const secondTab = `[data-testid=tab][data-title=${JSON.stringify(tabsBefore[1] ?? '')}]`;
+      const secondTab =`[data-testid=tab][data-title=${JSON.stringify(tabsBefore[1] ?? '')}]`;
       const openedTabMenu = await rightClick(secondTab);
       await wait(200);
       const tabMenu = await menuLabels();
@@ -3076,6 +3921,108 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
       await js(`document.querySelector('[data-testid=activity-item][data-drag-id=api]').click()`);
       await wait(200);
 
+      // Logs: the connection signed in above, its entries with level chips and histogram, filters from an entry and from the picker, the setup.
+      await js(`document.querySelector('[data-testid=activity-item][data-drag-id=logs]').click()`);
+      await wait(600);
+      const logsRows = (await js(`[...document.querySelectorAll('[data-testid=logs-connection]')].map((r) => [r.textContent.trim(), r.getAttribute('data-session')])`)) as string[][];
+      check('ui: logs: the sidebar lists the connection, signed in', logsRows.length === 1 && logsRows[0]![0]!.includes('VictoriaLogs-Smoke') && logsRows[0]![1] === 'signed-in', logsRows);
+      const logsEntries = () => js(`[...document.querySelectorAll('[data-testid=logs-entry]')].map((r) => r.getAttribute('data-level') + ':' + r.textContent.trim())`) as Promise<string[]>;
+      await js(`document.querySelector('[data-testid=logs-connection]').click()`);
+      await until(async () => (await logsEntries()).length === 5, 6000);
+      const firstEntries = await logsEntries();
+      check(
+        'ui: logs: the tab runs its query on open and lists the entries newest first with their level',
+        firstEntries.length === 5 && firstEntries[0]!.startsWith('Debug:') && firstEntries[0]!.includes('cache miss') && firstEntries[4]!.includes('GET /health 200'),
+        firstEntries,
+      );
+      await until(async () => (await js(`document.querySelectorAll('[data-testid=logs-level-chip]').length`)) === 4, 4000);
+      await until(async () => String(await js(`document.querySelector('[data-testid=logs-hits-total]')?.textContent ?? ''`)).trim().startsWith('5'), 4000);
+      const levelChips = (await js(`[...document.querySelectorAll('[data-testid=logs-level-chip]')].map((c) => c.textContent.trim())`)) as string[];
+      const histogramTotal = String(await js(`document.querySelector('[data-testid=logs-hits-total]')?.textContent ?? ''`)).trim();
+      check('ui: logs: level chips count each level and the histogram counts every match', levelChips.length === 4 && levelChips[0]!.startsWith('Information') && histogramTotal.startsWith('5'), { levelChips, histogramTotal });
+      await shot('28a-logs-light');
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(300);
+      await shot('28b-logs-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
+      await wait(200);
+
+      await js(`document.querySelector('[data-testid=logs-level-chip][data-level=Error]').click()`);
+      await until(async () => (await logsEntries()).length === 1, 4000);
+      const errorsOnly = await logsEntries();
+      check('ui: logs: a level chip keeps only that level', errorsOnly.length === 1 && errorsOnly[0]!.startsWith('Error:'), errorsOnly);
+      await js(`document.querySelector('[data-testid=logs-entry]').click()`);
+      await wait(400);
+      const detailFields = await js(`[...document.querySelectorAll('[data-testid=logs-entry-field]')].map((r) => r.getAttribute('data-field'))`);
+      check('ui: logs: clicking an entry shows its fields', JSON.stringify(detailFields) === JSON.stringify(['app', 'error.code', 'level']), detailFields);
+      await shot('28c-logs-entry-light');
+      await js(`document.querySelector('[data-testid=logs-entry-field][data-field=app] [data-testid=logs-filter-out]').click()`);
+      await until(async () => Boolean(await js(`document.querySelector('[data-testid=logs-empty]')`)), 4000);
+      const logsComposed = String(await js(`document.querySelector('[data-testid=logs-composed]')?.textContent ?? ''`)).trim();
+      const logsChipCount = await js(`document.querySelectorAll('[data-testid=logs-filter-chip]').length`);
+      check('ui: logs: leaving out a value from an entry adds a chip and runs again', logsComposed === 'level:="Error" !app:="api"' && logsChipCount === 2, { logsComposed, logsChipCount });
+
+      for (let i = 0; i < 2; i++) {
+        await js(`document.querySelector('[data-testid=logs-filter-chip] button[aria-label="Remove filter"]').click()`);
+        await wait(300);
+      }
+      await until(async () => (await logsEntries()).length === 5, 4000);
+
+      // Follow mode: an entry arrives stamped two minutes ahead of this clock, as a server whose clock runs ahead would stamp it. The first poll must fetch it, and the next poll must not fail on it.
+      fakeGrafana.add({ at: Date.now() + 120_000, msg: 'heartbeat from a server whose clock runs ahead', fields: { _stream_id: 's-api', app: 'api', level: 'Information' } });
+      await js(`document.querySelector('[data-testid=logs-follow]').click()`);
+      await until(async () => (await logsEntries()).length === 6, 6000);
+      const followed = await logsEntries();
+      await wait(5600);
+      const stillFollowing = await js(
+        `({ label: document.querySelector('[data-testid=logs-follow]')?.textContent.trim(), error: Boolean(document.querySelector('[data-testid=logs-error]')), count: document.querySelectorAll('[data-testid=logs-entry]').length })`,
+      );
+      check(
+        'ui: logs: follow mode picks up an entry stamped ahead of this clock and keeps following past it',
+        followed[0]!.includes('clock runs ahead') && JSON.stringify(stillFollowing) === JSON.stringify({ label: 'Following', error: false, count: 6 }),
+        { followed, stillFollowing },
+      );
+      await js(`document.querySelector('[data-testid=logs-follow]').click()`);
+      await wait(200);
+      await js(`document.querySelector('[data-testid=logs-add-filter]').click()`);
+      await until(async () => (await js(`document.querySelectorAll('[data-testid=logs-filter-field]').length`)) === 3, 4000);
+      const pickerFields = await js(`[...document.querySelectorAll('[data-testid=logs-filter-field]')].map((r) => r.getAttribute('data-field'))`);
+      await js(`document.querySelector('[data-testid=logs-filter-field][data-field=app]').click()`);
+      await until(async () => (await js(`document.querySelectorAll('[data-testid=logs-filter-value]').length`)) === 2, 4000);
+      const pickerValues = await js(`[...document.querySelectorAll('[data-testid=logs-filter-value]')].map((r) => r.textContent.replace(/\\s+/g, ' ').trim())`);
+      await shot('28d-logs-filter-picker-light');
+      await js(`document.querySelector('[data-testid=logs-filter-value][data-value=worker] button').click()`);
+      await until(async () => (await logsEntries()).length === 2, 4000);
+      const workerEntries = await logsEntries();
+      check(
+        'ui: logs: the filter picker lists fields, then values with counts, and keeps the one picked',
+        JSON.stringify(pickerFields) === JSON.stringify(['app', 'level', 'error.code']) &&
+          Array.isArray(pickerValues) &&
+          String(pickerValues[0]).startsWith('api3') &&
+          workerEntries.length === 2 &&
+          workerEntries.every((e) => e.includes('retrying publish') || e.includes('order.created')),
+        { pickerFields, pickerValues, workerEntries },
+      );
+      const logsTabState = (await js(`[...document.querySelectorAll('[data-testid=logs-filter-chip]')].map((c) => c.textContent.replace(/\\s+/g, '').trim())`));
+      check('ui: logs: the chip reads field = value', JSON.stringify(logsTabState) === JSON.stringify(['app=worker']), logsTabState);
+
+      await js(`document.querySelector('[data-testid=logs-settings]').click()`);
+      await until(async () => Boolean(await js(`document.querySelector('[data-testid=logs-setup]')`)), 3000);
+      await until(async () => (await js(`document.querySelector('[data-testid=logs-datasource]')?.value`)) === 'vl-smoke', 4000);
+      const setupState = await js(
+        `({ session: document.querySelector('[data-testid=logs-session]')?.textContent.trim(), source: document.querySelector('[data-testid=logs-datasource]')?.value, url: document.querySelector('[data-testid=logs-grafana-url]')?.value })`,
+      );
+      check(
+        'ui: logs: the settings show the address, who is signed in and the data source',
+        JSON.stringify(setupState) === JSON.stringify({ session: 'Signed in as smoke@example.com', source: 'vl-smoke', url: fakeGrafana.url }),
+        setupState,
+      );
+      await shot('28e-logs-setup-light');
+      await js(`document.querySelector('[data-testid=logs-setup-done]').click()`);
+      await wait(400);
+      await js(`document.querySelector('[data-testid=activity-item][data-drag-id=api]').click()`);
+      await wait(200);
+
       const revealedFolder = await run<{ path: string; revealed: boolean }>('workspace.reveal', { id: ws.id }, null);
       const revealByAgent = await host.invoke('workspace.reveal', { id: ws.id }, { caller: 'mcp', workspaceId: null });
       check('workspace.reveal: answers the folder for the UI and refuses agents', revealedFolder.path === folder && !revealByAgent.ok, { revealedFolder, agent: revealByAgent.ok });
@@ -3140,6 +4087,7 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     wsHttp.closeAllConnections();
     wsHttp.close();
     await fakeRedis.close();
+    await fakeGrafana.close();
     await fakeMcp.close();
     await fs.rm(folder, { recursive: true, force: true }).catch(() => {});
     await fs.rm(hooksFolder, { recursive: true, force: true }).catch(() => {});

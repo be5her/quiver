@@ -1,0 +1,26 @@
+<div class="grid grid-cols-[24px_1fr_1fr_auto] gap-1 px-1 py-1 text-[11px] font-medium text-muted uppercase tracking-wide items-center">
+  <span></span>
+  <span>{{ keyPlaceholder() }}</span>
+  <span>{{ valuePlaceholder() }}</span>
+  <span class="w-16 text-right">{{ extraHeader() }}</span>
+</div>
+<div class="flex flex-col gap-1">
+  @for (row of value(); track row.id) {
+    <div class="grid grid-cols-[24px_1fr_1fr_auto] gap-1 items-center px-1">
+      <input qCheckbox [checked]="row.enabled" [disabled]="readonly()" (change)="toggled(row.id, $event)" />
+      <q-variable-input [value]="row.key" (valueChange)="setKey(row.id, $event)" [placeholder]="keyPlaceholder()" [readonly]="readonly()" inputClass="h-7 font-mono text-xs" />
+      <q-variable-input [value]="row.value" (valueChange)="setValue(row.id, $event)" [placeholder]="valuePlaceholder()" [readonly]="readonly()" inputClass="h-7 font-mono text-xs" />
+      <div class="flex items-center justify-end gap-1 w-16">
+        @if (extra(); as extra) {
+          <ng-container [ngTemplateOutlet]="extra" [ngTemplateOutletContext]="extraContext(row)" />
+        }
+        @if (!readonly()) {
+          <button qIconButton label="Remove" size="sm" (click)="remove(row.id)"><svg [qIcon]="icons.Trash2" class="size-3.5"></svg></button>
+        }
+      </div>
+    </div>
+  }
+</div>
+@if (!readonly()) {
+  <button type="button" class="mt-1 ml-8 inline-flex items-center gap-1 text-xs text-muted hover:text-fg px-1 py-1" (click)="add()"><svg [qIcon]="icons.Plus" class="size-3.5"></svg> Add row</button>
+}

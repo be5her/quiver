@@ -1,0 +1,27 @@
+<button
+  type="button"
+  class="flex items-center gap-1 h-5 px-1.5 -mx-0.5 rounded hover:bg-elevated hover:text-fg transition-colors"
+  [class]="open() ? 'bg-elevated text-fg' : ''"
+  [title]="current() ? 'Environment: ' + current()!.name : 'No environment selected'"
+  aria-haspopup="menu"
+  [attr.aria-expanded]="open()"
+  data-testid="env-picker"
+  (click)="toggle()"
+><svg [qIcon]="icons.Layers" class="size-3"></svg><span class="truncate max-w-40" [class]="current() ? 'text-fg' : ''">{{ current()?.name ?? 'No environment' }}</span><svg [qIcon]="icons.ChevronUp" class="size-3 transition-transform" [class]="open() ? 'rotate-180' : ''"></svg></button>
+@if (open()) {
+  <div #menu role="menu" class="absolute left-0 bottom-full mb-1.5 z-30 min-w-48 max-w-72 rounded-md border border-edge bg-elevated shadow-lg py-1 select-none" data-testid="env-picker-menu" (keydown)="navigate($event)">
+    <div class="px-3 pt-1 pb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted">Environment</div>
+    @for (option of options(); track option.id) {
+      <button
+        type="button"
+        role="menuitemradio"
+        [attr.aria-checked]="option.id === activeId()"
+        class="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left outline-none hover:bg-surface focus-visible:bg-surface"
+        [class]="option.id === null ? 'text-muted' : 'text-fg'"
+        data-testid="env-picker-option"
+        [attr.data-env-id]="option.id ?? ''"
+        (click)="pick(option.id)"
+      ><span class="truncate flex-1">{{ option.name }}</span><svg [qIcon]="icons.Check" class="size-3.5 shrink-0 text-accent" [class]="option.id === activeId() ? '' : 'invisible'"></svg></button>
+    }
+  </div>
+}

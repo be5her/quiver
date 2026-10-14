@@ -1,0 +1,42 @@
+<div class="flex items-center justify-between px-3 h-10 border-b border-edge shrink-0">
+  <span class="text-[11px] font-semibold uppercase tracking-wide text-muted">History</span>
+  <button qIconButton label="Clear history" size="sm" [disabled]="!recent().length" (click)="clear()"><svg [qIcon]="icons.Trash2" class="size-3.5"></svg></button>
+</div>
+<div class="flex-1 min-h-0 overflow-y-auto">
+  @if (error(); as error) {
+    <q-db-error [error]="error" compact (retry)="reload.emit()" />
+  }
+  @for (item of items(); track item.key) {
+    @if (item.entry; as entry) {
+      <div
+        role="button"
+        tabindex="0"
+        class="group flex flex-col gap-0.5 px-3 py-1.5 hover:bg-elevated cursor-pointer min-w-0"
+        title="Fill the form with this query"
+        data-testid="kube-history-entry"
+        [attr.data-operation]="entry.query.operation"
+        (click)="fill.emit(entry)"
+        (keydown.enter)="fill.emit(entry)"
+      >
+        <div class="flex items-center gap-1.5 min-w-0">
+          <span class="size-1.5 rounded-full shrink-0" [class]="dotClass(entry)" [title]="'exit ' + (entry.exitCode ?? '–')"></span>
+          <span class="text-[13px] truncate flex-1">{{ title(entry) }}</span>
+          <span class="text-[10px] text-muted shrink-0 group-hover:hidden">{{ ago(entry.at) }}</span>
+          <span class="hidden group-hover:flex items-center shrink-0">
+            <button qIconButton label="Run again" size="sm" [disabled]="busy()" (click)="runAgain($event, entry)"><svg [qIcon]="icons.Play" class="size-3"></svg></button>
+            <button qIconButton [label]="entry.pinned ? 'Remove from favourites' : 'Add to favourites'" size="sm" (click)="togglePin($event, entry)"
+              ><svg [qIcon]="icons.Star" class="size-3" [class]="entry.pinned ? 'fill-current text-warning' : ''"></svg
+            ></button>
+            <button qIconButton label="Delete" size="sm" (click)="remove($event, entry)"><svg [qIcon]="icons.Trash2" class="size-3"></svg></button>
+          </span>
+        </div>
+        <div class="pl-3 text-[11px] text-muted font-mono truncate">{{ summary(entry) }}</div>
+      </div>
+    } @else {
+      <div class="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-muted">{{ item.heading }}</div>
+    }
+  }
+  @if (!entries().length && !loading()) {
+    <p class="px-3 py-4 text-xs text-muted">Queries you run on {{ cluster() }} show up here. Stored on this machine only.</p>
+  }
+</div>

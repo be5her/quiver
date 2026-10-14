@@ -1,0 +1,51 @@
+@if (loadError(); as error) {
+  <div class="p-4 text-sm text-danger">{{ error }}</div>
+} @else if (summary.value(); as server) {
+  @let d = draft();
+  <div class="flex flex-col h-full min-h-0" data-testid="mock-server-tab">
+    <div class="flex items-center gap-2 px-3 py-2 border-b border-edge shrink-0">
+      <div class="w-56 shrink-0">
+        <input qInput [formField]="serverForm.name" class="font-medium" aria-label="Server name" />
+      </div>
+      <span class="size-2 rounded-full shrink-0" [class]="dot()"></span>
+      <span class="text-xs font-mono text-muted truncate shrink" data-testid="mock-server-url">{{ server.running ? url() : 'stopped · port ' + server.port }}</span>
+      @if (server.host === '0.0.0.0') {
+        <span class="text-[10px] text-muted shrink-0">all interfaces</span>
+      }
+      <button qIconButton label="Copy URL" size="sm" (click)="copyUrl()"><svg [qIcon]="icons.Copy" class="size-3.5"></svg></button>
+      @if (server.error) {
+        <span class="text-xs text-danger truncate min-w-0" [title]="server.error">{{ server.error }}</span>
+      }
+      <div class="flex-1 min-w-4"></div>
+      <button
+        qButton
+        size="sm"
+        [variant]="server.running ? 'secondary' : 'primary'"
+        [icon]="server.running ? icons.Square : icons.Play"
+        [iconClass]="server.running ? 'size-3' : 'size-3.5'"
+        (click)="mock.toggleServer(server)"
+      >{{ server.running ? 'Stop' : 'Start' }}</button>
+      <button qButton size="sm" [variant]="dirty() ? 'secondary' : 'ghost'" [icon]="icons.Save" title="Ctrl+S" (click)="save()">Save{{ dirty() ? '*' : '' }}</button>
+    </div>
+    <q-segmented [(value)]="view" class="shrink-0 px-1">
+      <button qSegment="routes">Routes ({{ d.routes.length }})</button>
+      <button qSegment="requests">Requests ({{ server.requestCount }})</button>
+      <button qSegment="settings">Settings</button>
+    </q-segmented>
+    <div class="flex-1 min-h-0">
+      @switch (view()) {
+        @case ('routes') {
+          <q-mock-routes-view [routes]="d.routes" (routesChange)="patch({ routes: $event })" [(selected)]="routeId" />
+        }
+        @case ('requests') {
+          <q-mock-requests-view [server]="server" (createRoute)="addRouteFromRequest($event)" />
+        }
+        @case ('settings') {
+          <q-mock-settings-view [form]="serverForm" (remove)="mock.deleteServer(server)" />
+        }
+      }
+    </div>
+  </div>
+} @else {
+  <div class="flex items-center justify-center h-full"><svg qSpinner></svg></div>
+}

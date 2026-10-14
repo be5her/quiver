@@ -1,0 +1,114 @@
+<div class="flex items-center gap-2 px-3 py-2 border-b border-edge shrink-0 flex-wrap">
+  @if (kind(); as kind) {
+    <svg [qKindIcon]="kind" class="size-4"></svg>
+  }
+  <select qSelect class="h-7 text-xs max-w-56" data-testid="db-query-connection" (change)="pickConnection($event)">
+    @for (c of connections.value() ?? []; track c.id) {
+      <option [value]="c.id" [selected]="c.id === connectionId()">{{ c.name }}</option>
+    } @empty {
+      <option value="">No connections</option>
+    }
+  </select>
+  @if (hasSchemas()) {
+    <select qSelect class="h-7 text-xs max-w-48" [title]="kind() === 'postgres' ? 'Schema' : 'Database'" (change)="pickDatabase($event)">
+      <option value="" [selected]="!database()">{{ connection()?.database && kind() === 'mysql' ? connection()!.database + ' (default)' : kind() === 'postgres' ? 'public (default)' : 'Pick a database' }}</option>
+      @for (db of databases.value() ?? []; track db) {
+        <option [value]="db" [selected]="db === database()">{{ db }}</option>
+      }
+    </select>
+  }
+  @if (connection()?.production) {
+    <span qBadge class="text-danger border-danger/40" title="Production connection: writes are confirmed first" data-testid="db-prod-badge">PROD</span>
+  }
+  @if (canCancel()) {
+    <button qButton variant="danger" size="sm" [icon]="icons.CircleStop" [loading]="cancelling()" title="Stop the running statement" data-testid="db-stop" (click)="cancel()">Stop</button>
+  } @else {
+    <button
+      qButton
+      variant="primary"
+      size="sm"
+      [icon]="icons.Play"
+      [loading]="running()"
+      [disabled]="!connectionId()"
+      title="Ctrl+Enter runs the selection or everything; Ctrl+Shift+Enter runs the statement under the cursor"
+      (click)="run()"
+    >
+      Run
+    </button>
+  }
+  <select qSelect class="h-7 text-xs" title="Row limit per result" (change)="pickMaxRows($event)">
+    @for (n of maxRowsOptions; track n) {
+      <option [value]="n" [selected]="n === maxRows()">{{ n }} rows</option>
+    }
+  </select>
+  @if (sqlKind()) {
+    @if (inTransaction()) {
+      <span qBadge class="text-warning border-warning/40" title="Every statement on this connection, from any tab, is inside the transaction" data-testid="db-in-transaction">In transaction</span>
+      <button qButton size="sm" variant="primary" [icon]="icons.Check" data-testid="db-commit" (click)="transaction('commit')">Commit</button>
+      <button qButton size="sm" variant="ghost" [icon]="icons.Undo2" data-testid="db-rollback" (click)="transaction('rollback')">Rollback</button>
+    } @else {
+      <button qButton size="sm" variant="ghost" [icon]="icons.GitBranch" title="Start a transaction on this connection; commit or roll it back from here" data-testid="db-begin" (click)="transaction('begin')">Transaction</button>
+    }
+  }
+  <div class="flex-1"></div>
+  @if (saved(); as saved) {
+    <span class="text-xs text-muted truncate max-w-48">{{ saved.name }}</span>
+  }
+  <button qButton size="sm" [variant]="dirty() || !saved() ? 'secondary' : 'ghost'" [icon]="icons.Save" title="Ctrl+S" (click)="save()">{{ saved() ? 'Save' + (dirty() ? '*' : '') : 'Save as…' }}</button>
+</div>
+<div class="flex flex-col flex-1 min-h-0">
+  <div class="basis-[42%] min-h-[120px] p-2 border-b border-edge" qApiVariables>
+    <q-code-editor
+      [(value)]="text"
+      [language]="kind() === 'redis' ? 'text' : 'sql'"
+      [sqlDialect]="editorDialect()"
+      [sqlSchema]="sqlSchema()"
+      [placeholder]="placeholder()"
+      autofocus
+      (run)="run()"
+      (runCurrent)="run('current')"
+    />
+  </div>
+  <div class="flex-1 min-h-0 flex flex-col">
+    <div class="flex items-center gap-2 px-3 h-8 border-b border-edge shrink-0 text-xs text-muted">
+      @if (resultTabs().length > 1) {
+        <q-segmented [(value)]="activeResult" class="border-b-0 -ml-3">
+          @for (r of resultTabs(); track r.value) {
+            <button [qSegment]="r.value">{{ r.label }}</button>
+          }
+        </q-segmented>
+      }
+      @if (summary() && !error()) {
+        <span>{{ summary() }}</span>
+      }
+      @if (error(); as error) {
+        <span class="text-danger truncate">{{ error.message }}</span>
+      }
+      <div class="flex-1"></div>
+      @if (current(); as current) {
+        @if (current.kind === 'rows') {
+          @if (current.truncated) {
+            <span qBadge class="text-warning">first {{ current.rowCount.toLocaleString() }} rows</span>
+          }
+          @if (canLoadMore()) {
+            <button qButton size="sm" variant="ghost" [loading]="loadingMore()" title="Runs the statement again as a page after the rows in hand; without an ORDER BY the pages may overlap" data-testid="db-load-more" (click)="loadMore()">
+              Load next {{ maxRows() }}
+            </button>
+          }
+          @if (current.rows.length > 0 && connectionId()) {
+            <q-db-export-menu [connectionId]="connectionId()!" [kind]="sqlKind()" [columns]="current.columns" [rows]="current.rows" [database]="database()" [source]="exportSource()" />
+          }
+        }
+      }
+    </div>
+    <div class="flex-1 min-h-0">
+      @if (error(); as error) {
+        <q-db-error [error]="error" (retry)="run()" />
+      } @else if (!results()) {
+        <div class="h-full flex items-center justify-center text-xs text-muted">{{ running() ? 'Running…' : 'Results appear here.' }}</div>
+      } @else if (current(); as current) {
+        <q-query-result-view [result]="current" [sqlKind]="sqlKind()" />
+      }
+    </div>
+  </div>
+</div>

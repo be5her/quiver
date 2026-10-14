@@ -1,0 +1,45 @@
+@let s = server();
+<section class="grid grid-cols-2 gap-3">
+  <div>
+    <label qLabel>Transport</label>
+    <select qSelect [formField]="form().transport" class="w-full" data-testid="mcp-transport">
+      <option value="stdio">Command (stdio): Quiver starts the process</option>
+      <option value="http">Streamable HTTP</option>
+      <option value="sse">SSE (legacy HTTP+SSE)</option>
+    </select>
+  </div>
+  @if (isStdio()) {
+    <div>
+      <label qLabel>Working directory</label>
+      <input qInput [formField]="form().cwd" placeholder="project folder" class="font-mono" />
+    </div>
+  } @else {
+    <label class="flex items-center gap-2 text-sm self-end pb-2"><input type="checkbox" qCheckbox [formField]="form().insecure" /> Accept self-signed certificates</label>
+  }
+  <label class="flex items-center gap-2 text-sm"><input type="checkbox" qCheckbox [formField]="form().autoConnect" /> Connect when the workspace opens</label>
+  <div>
+    <label qLabel>Log entries to keep</label>
+    <input qInput type="number" min="10" max="5000" [value]="s.logLimit" class="font-mono" (input)="setLogLimit($event)" />
+  </div>
+</section>
+@if (isStdio()) {
+  <section>
+    <label qLabel>Environment variables</label>
+    <q-key-value-editor [formField]="form().env" keyPlaceholder="Variable" />
+    <p class="text-[11px] text-muted px-1 mt-1">Added to Quiver's own environment when the process starts.</p>
+  </section>
+} @else {
+  <section>
+    <label qLabel>Headers</label>
+    <q-key-value-editor [formField]="form().headers" keyPlaceholder="Header" />
+    <p class="text-[11px] text-muted px-1 mt-1">Sent with every request of the session.</p>
+  </section>
+  <section>
+    <label qLabel>Auth</label>
+    <q-auth-editor [formField]="form().auth" />
+  </section>
+}
+<p class="text-[11px] text-muted">{{ variablesHint }}</p>
+<section class="border-t border-edge pt-3">
+  <button qButton variant="danger" size="sm" [icon]="trash" (click)="remove.emit()">Delete this server</button>
+</section>

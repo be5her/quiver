@@ -1,4 +1,21 @@
-import { DbConnectionSchema, QuiverError, clusterLabel, findCluster, isLoginRequiredMessage, newId, type DbConnection, type DbConnectionSummary, type HostApi, type WorkspaceApi } from '@quiver/core';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import {
+  DbConnectionSchema,
+  QuiverError,
+  clusterLabel,
+  dotenvToMap,
+  findCluster,
+  isLoginRequiredMessage,
+  newId,
+  parseDotenv,
+  resolveConnectionTemplate,
+  type DbConnection,
+  type DbConnectionSummary,
+  type HostApi,
+  type WorkspaceApi,
+} from '@quiver/core';
+import { resolveVariableMap } from '../api/env';
 import { getTeleport } from '../teleport/runtime';
 import { createDriver, type Driver } from './drivers';
 
@@ -50,6 +67,29 @@ export async function getConnection(ws: WorkspaceApi, id: string): Promise<DbCon
   const item = await ws.store.get<DbConnection>(COLLECTIONS.connections, id);
   if (!item) throw new QuiverError('NOT_FOUND', `Connection ${id} not found`);
   return { ...DbConnectionSchema.parse(item), hasPassword: (await hasPasswordSet(ws)).has(id) };
+}
+
+// ---------- {{variables}} in connection fields ----------
+
+/**
+ * The values `{{name}}` in a connection resolves with: the workspace's root `.env` underneath,
+ * then the API module's global variables and its active environment on top. Missing files and
+ * unreadable env files count as empty.
+ */
+export async function connectionVariables(ws: WorkspaceApi, host: HostApi): Promise<Record<string, string>> {
+  let fromEnvFile: Record<string, string> = {};
+  try {
+    fromEnvFile = dotenvToMap(parseDotenv(await fs.readFile(path.join(ws.path, '.env'), 'utf8')));
+  } catch {
+    fromEnvFile = {};
+  }
+  const api = await resolveVariableMap(ws, host).catch(() => ({}) as Record<string, string>);
+  return { ...fromEnvFile, ...api };
+}
+
+/** A connection with its `{{variables}}` filled in, as the driver should dial it. */
+export async function resolvedConnection<T extends DbConnection>(connection: T, ws: WorkspaceApi, host: HostApi): Promise<T> {
+  return { ...connection, ...resolveConnectionTemplate(connection, await connectionVariables(ws, host)) };
 }
 
 // ---------- access: direct, Teleport tunnel, or a tunnel command ----------
@@ -115,6 +155,8 @@ interface PooledDriver {
   /** Tunnel user key, when the connection goes through one. */
   accessUser: string | null;
   access: DbConnection['access'];
+  /** Set by `db.transaction begin`, cleared by commit, rollback or a reopen. */
+  inTransaction: boolean;
 }
 
 /**
@@ -143,7 +185,7 @@ export class DriverPool {
       pending = (async () => {
         const password = await readPassword(ws, host, connectionId);
         const accessUser = connection.access.type === 'direct' ? null : key;
-        const effective = await resolveAccess(connection, host, key);
+        const effective = await resolveAccess(await resolvedConnection(connection, ws, host), host, key);
         const driver = createDriver(effective, password, ws.path);
         try {
           await driver.connect();
@@ -151,7 +193,7 @@ export class DriverPool {
           if (accessUser) await releaseAccess(connection, host, accessUser, false);
           throw await explainAccessError(host, connection, err);
         }
-        const pooled: PooledDriver = { driver, updatedAt: connection.updatedAt, accessUser, access: connection.access };
+        const pooled: PooledDriver = { driver, updatedAt: connection.updatedAt, accessUser, access: connection.access, inTransaction: false };
         pool.set(connectionId, pooled);
         return pooled;
       })().finally(() => this.opening.delete(key));
@@ -189,6 +231,22 @@ export class DriverPool {
     return Boolean(entry?.driver.isAlive());
   }
 
+  /** The open driver, without opening one: for cancelling a statement that is running on it. */
+  peek(workspaceId: string, connectionId: string): Driver | null {
+    const entry = this.pools.get(workspaceId)?.get(connectionId);
+    return entry?.driver.isAlive() ? entry.driver : null;
+  }
+
+  isInTransaction(workspaceId: string, connectionId: string): boolean {
+    const entry = this.pools.get(workspaceId)?.get(connectionId);
+    return Boolean(entry?.driver.isAlive() && entry.inTransaction);
+  }
+
+  setTransaction(workspaceId: string, connectionId: string, open: boolean): void {
+    const entry = this.pools.get(workspaceId)?.get(connectionId);
+    if (entry) entry.inTransaction = open;
+  }
+
   private poolFor(workspaceId: string): Map<string, PooledDriver> {
     let pool = this.pools.get(workspaceId);
     if (!pool) {
@@ -200,9 +258,10 @@ export class DriverPool {
 }
 
 /** Open a throwaway driver for an unsaved connection, e.g. the "Test" button in the editor. */
-export async function withTemporaryDriver<T>(connection: DbConnection, password: string, workspacePath: string, host: HostApi, fn: (driver: Driver) => Promise<T>): Promise<T> {
+export async function withTemporaryDriver<T>(connection: DbConnection, password: string, ws: WorkspaceApi, host: HostApi, fn: (driver: Driver) => Promise<T>): Promise<T> {
   const user = `temp/${newId()}`;
-  const effective = await resolveAccess(connection, host, user);
+  const workspacePath = ws.path;
+  const effective = await resolveAccess(await resolvedConnection(connection, ws, host), host, user);
   const driver = createDriver(effective, password, workspacePath);
   try {
     await driver.connect();

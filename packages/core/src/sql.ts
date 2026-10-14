@@ -1,18 +1,34 @@
 import { tokenizeShell } from './curl';
+import { QuiverError } from './errors';
+import type { DbTableEdit, SqlKind } from './models/db';
+
+export interface StatementRange {
+  /** The statement, trimmed, without its terminating semicolon. */
+  text: string;
+  /** Offset of the statement's first character in the script. */
+  from: number;
+  /** Offset just past its last character. */
+  to: number;
+}
 
 /**
- * Split a script into individual statements. Understands single/double/backtick quotes,
- * `--`, `#` and block comments, and keeps `CREATE TRIGGER ... BEGIN ... END` bodies intact.
+ * Split a script into individual statements with their positions. Understands single/double/backtick
+ * quotes, `--`, `#` and block comments, and keeps `CREATE TRIGGER ... BEGIN ... END` bodies intact.
  * Statements come back trimmed, with comments preserved (drivers ignore them).
  */
-export function splitStatements(sql: string): string[] {
-  const out: string[] = [];
+export function splitStatementRanges(sql: string): StatementRange[] {
+  const out: StatementRange[] = [];
   let current = '';
+  let start = 0;
   let quote: string | null = null;
   let inTrigger = false;
   let lastWord = '';
   let word = '';
 
+  const append = (text: string, at: number) => {
+    if (!current) start = at;
+    current += text;
+  };
   const flushWord = () => {
     if (!word) return;
     const upper = word.toUpperCase();
@@ -22,7 +38,10 @@ export function splitStatements(sql: string): string[] {
   };
   const push = () => {
     const text = current.trim();
-    if (text && !/^[\s;]*$/.test(text) && !isOnlyComments(text)) out.push(text);
+    if (text && !/^[\s;]*$/.test(text) && !isOnlyComments(text)) {
+      const from = start + (current.length - current.trimStart().length);
+      out.push({ text, from, to: from + text.length });
+    }
     current = '';
     inTrigger = false;
     lastWord = '';
@@ -33,7 +52,7 @@ export function splitStatements(sql: string): string[] {
     const next = sql[i + 1];
 
     if (quote) {
-      current += ch;
+      append(ch, i);
       if (ch === '\\' && quote !== '`' && next !== undefined) {
         current += next;
         i++;
@@ -48,37 +67,30 @@ export function splitStatements(sql: string): string[] {
       continue;
     }
 
-    if (ch === '-' && next === '-') {
+    if ((ch === '-' && next === '-') || ch === '#') {
       flushWord();
       const end = sql.indexOf('\n', i);
-      current += end < 0 ? sql.slice(i) : sql.slice(i, end);
-      i = end < 0 ? sql.length : end - 1;
-      continue;
-    }
-    if (ch === '#') {
-      flushWord();
-      const end = sql.indexOf('\n', i);
-      current += end < 0 ? sql.slice(i) : sql.slice(i, end);
+      append(end < 0 ? sql.slice(i) : sql.slice(i, end), i);
       i = end < 0 ? sql.length : end - 1;
       continue;
     }
     if (ch === '/' && next === '*') {
       flushWord();
       const end = sql.indexOf('*/', i + 2);
-      current += end < 0 ? sql.slice(i) : sql.slice(i, end + 2);
+      append(end < 0 ? sql.slice(i) : sql.slice(i, end + 2), i);
       i = end < 0 ? sql.length : end + 1;
       continue;
     }
     if (ch === "'" || ch === '"' || ch === '`') {
       flushWord();
       quote = ch;
-      current += ch;
+      append(ch, i);
       continue;
     }
     if (ch === ';') {
       flushWord();
       if (inTrigger && lastWord !== 'END') {
-        current += ch;
+        append(ch, i);
         continue;
       }
       push();
@@ -89,11 +101,30 @@ export function splitStatements(sql: string): string[] {
     } else {
       flushWord();
     }
-    current += ch;
+    append(ch, i);
   }
   flushWord();
   push();
   return out;
+}
+
+/** The statements of a script, trimmed, in order. See `splitStatementRanges`. */
+export function splitStatements(sql: string): string[] {
+  return splitStatementRanges(sql).map((r) => r.text);
+}
+
+/**
+ * The statement the cursor is in, for "run the statement under the cursor": the one spanning
+ * `offset`, else the last one that starts before it (the cursor sits in the whitespace after it),
+ * else the first. Null for a script without statements.
+ */
+export function statementAt(sql: string, offset: number): StatementRange | null {
+  const ranges = splitStatementRanges(sql);
+  if (!ranges.length) return null;
+  const within = ranges.find((r) => offset >= r.from && offset <= r.to);
+  if (within) return within;
+  const before = [...ranges].reverse().find((r) => r.from <= offset);
+  return before ?? ranges[0];
 }
 
 function isOnlyComments(text: string): boolean {
@@ -265,14 +296,104 @@ export function redisScriptIsReadOnly(text: string): boolean {
   return parseRedisCommands(text).every(redisCommandIsReadOnly);
 }
 
-// ---------- identifiers ----------
+/** True for a statement that returns rows and can be wrapped as a subquery: SELECT, VALUES, or a CTE ending in one. */
+export function isSelectLike(statement: string): boolean {
+  const { verb, readOnly } = classifyStatement(statement);
+  return readOnly && (verb === 'SELECT' || verb === 'VALUES');
+}
 
-export function quoteIdentifier(kind: 'mysql' | 'sqlite', name: string): string {
+/** `statement` as a page: wrapped as a subquery with LIMIT and OFFSET, for "load the next rows". */
+export function wrapForPage(statement: string, limit: number, offset: number): string {
+  const inner = stripComments(statement).trim().replace(/;+\s*$/, '');
+  return `SELECT * FROM (${inner}) AS q LIMIT ${Math.max(1, Math.floor(limit))} OFFSET ${Math.max(0, Math.floor(offset))}`;
+}
+
+// ---------- identifiers and literals ----------
+
+export function quoteIdentifier(kind: SqlKind, name: string): string {
   if (kind === 'mysql') return `\`${name.replace(/`/g, '``')}\``;
   return `"${name.replace(/"/g, '""')}"`;
 }
 
-export function qualifiedName(kind: 'mysql' | 'sqlite', table: string, database?: string | null): string {
+export function qualifiedName(kind: SqlKind, table: string, database?: string | null): string {
   const t = quoteIdentifier(kind, table);
   return database ? `${quoteIdentifier(kind, database)}.${t}` : t;
+}
+
+/** A value as a SQL literal of the dialect. Binary previews (`{ $bytes, hex }`) become `X'…'` when complete, else NULL. */
+export function sqlLiteral(kind: SqlKind, value: unknown): string {
+  if (value === null || value === undefined) return 'NULL';
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : 'NULL';
+  if (typeof value === 'bigint') return value.toString();
+  if (typeof value === 'boolean') return kind === 'sqlite' ? (value ? '1' : '0') : value ? 'TRUE' : 'FALSE';
+  if (value instanceof Date) return quoteString(kind, value.toISOString());
+  if (typeof value === 'string') return quoteString(kind, value);
+  if (typeof value === 'object' && '$bytes' in value) {
+    const bytes = value as { $bytes: number; hex: string };
+    return bytes.hex.length === bytes.$bytes * 2 ? `X'${bytes.hex}'` : 'NULL';
+  }
+  return quoteString(kind, JSON.stringify(value));
+}
+
+function quoteString(kind: SqlKind, text: string): string {
+  const doubled = text.replace(/'/g, "''");
+  return `'${kind === 'mysql' ? doubled.replace(/\\/g, '\\\\') : doubled}'`;
+}
+
+/** `name = value`, or `name IS NULL`, for a WHERE clause. */
+function keyCondition(kind: SqlKind, key: Record<string, unknown>): string {
+  const names = Object.keys(key);
+  if (!names.length) throw new QuiverError('INVALID_INPUT', 'A row edit needs a key: the table has no primary key');
+  return names.map((name) => (key[name] === null || key[name] === undefined ? `${quoteIdentifier(kind, name)} IS NULL` : `${quoteIdentifier(kind, name)} = ${sqlLiteral(kind, key[name])}`)).join(' AND ');
+}
+
+/**
+ * The statements that apply a set of row edits to a table, one per edit, in order. An update with
+ * nothing changed produces no statement. The host runs them inside a transaction (`db.table.apply`).
+ */
+export function buildTableEdits(kind: SqlKind, table: string, database: string | null | undefined, edits: DbTableEdit[]): string[] {
+  const target = qualifiedName(kind, table, database);
+  const statements: string[] = [];
+  for (const edit of edits) {
+    switch (edit.kind) {
+      case 'insert': {
+        const names = Object.keys(edit.values);
+        if (!names.length) {
+          statements.push(kind === 'mysql' ? `INSERT INTO ${target} () VALUES ()` : `INSERT INTO ${target} DEFAULT VALUES`);
+        } else {
+          statements.push(`INSERT INTO ${target} (${names.map((n) => quoteIdentifier(kind, n)).join(', ')}) VALUES (${names.map((n) => sqlLiteral(kind, edit.values[n])).join(', ')})`);
+        }
+        break;
+      }
+      case 'update': {
+        const names = Object.keys(edit.values);
+        if (!names.length) break;
+        statements.push(`UPDATE ${target} SET ${names.map((n) => `${quoteIdentifier(kind, n)} = ${sqlLiteral(kind, edit.values[n])}`).join(', ')} WHERE ${keyCondition(kind, edit.key)}`);
+        break;
+      }
+      case 'delete':
+        statements.push(`DELETE FROM ${target} WHERE ${keyCondition(kind, edit.key)}`);
+        break;
+    }
+  }
+  return statements;
+}
+
+/**
+ * What a value typed into a grid cell means for the column: numbers for numeric columns when the
+ * text is one, booleans for boolean columns, text otherwise. The grid sets NULL explicitly.
+ */
+export function coerceCellInput(text: string, columnType: string | null | undefined): unknown {
+  const type = (columnType ?? '').toLowerCase();
+  if (/\b(int|integer|smallint|bigint|tinyint|mediumint|serial|decimal|numeric|real|double|float|number|money)\b/.test(type) && /^-?\d+(\.\d+)?([eE][-+]?\d+)?$/.test(text.trim())) {
+    const n = Number(text.trim());
+    // Keep digits beyond what a double holds as text: the literal is written as-is either way.
+    return Number.isSafeInteger(n) || !/^-?\d+$/.test(text.trim()) ? n : text.trim();
+  }
+  if (/\b(bool|boolean)\b/.test(type)) {
+    const t = text.trim().toLowerCase();
+    if (t === 'true' || t === '1' || t === 't' || t === 'yes') return true;
+    if (t === 'false' || t === '0' || t === 'f' || t === 'no') return false;
+  }
+  return text;
 }

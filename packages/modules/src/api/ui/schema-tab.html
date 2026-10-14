@@ -1,0 +1,62 @@
+@if (doc() === undefined) {
+  <div class="flex items-center justify-center h-full"><svg qSpinner></svg></div>
+} @else if (error(); as error) {
+  <div class="p-4 text-sm text-danger">{{ error }}</div>
+} @else if (doc() && schema(); as schema) {
+  @let current = doc()!;
+  <div class="flex flex-col h-full min-h-0" data-testid="graphql-schema-tab">
+    <div class="flex items-center gap-3 px-3 h-9 border-b border-edge text-xs shrink-0 min-w-0">
+      <span class="font-mono truncate" [title]="current.url">{{ current.url }}</span>
+      <span class="text-muted shrink-0">{{ current.typeCount }} types</span>
+      <span class="text-muted shrink-0">fetched {{ fetchedAt() }}</span>
+      <div class="flex-1"></div>
+      <q-segmented [(value)]="view" class="border-b-0">
+        <button qSegment="explore">Explore</button>
+        <button qSegment="sdl">SDL</button>
+      </q-segmented>
+      <button qButton size="sm" variant="ghost" [icon]="refreshIcon" [loading]="fetching()" (click)="refresh()">Refresh</button>
+    </div>
+    @if (view() === 'sdl') {
+      <div class="flex-1 min-h-0 p-2">
+        <q-code-editor [value]="current.sdl" readonly language="graphql" />
+      </div>
+    } @else {
+      <div class="flex flex-1 min-h-0">
+        <div class="w-60 border-r border-edge flex flex-col min-h-0 shrink-0">
+          <div class="p-2 border-b border-edge shrink-0">
+            <input qInput [value]="search()" (input)="typed($event)" placeholder="Find a type" class="h-7 text-xs" />
+          </div>
+          <div class="flex-1 overflow-y-auto py-1">
+            @for (group of visible(); track group.title) {
+              <div class="mb-1">
+                <div class="px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted">{{ group.title }}</div>
+                @for (t of group.types; track t.name) {
+                  <button
+                    type="button"
+                    class="w-full text-left px-3 h-7 text-xs font-mono hover:bg-elevated truncate"
+                    [class.bg-elevated]="shown()?.name === t.name"
+                    data-testid="graphql-type"
+                    (click)="selected.set(t.name)"
+                  >{{ t.name }}</button>
+                }
+              </div>
+            } @empty {
+              <p class="px-3 py-2 text-xs text-muted">No type matches.</p>
+            }
+          </div>
+        </div>
+        <div class="flex-1 min-w-0 overflow-y-auto p-3">
+          @if (shown(); as type) {
+            <q-schema-type-detail [type]="type" [schema]="schema" (navigate)="selected.set($event)" />
+          } @else {
+            <q-empty-state title="Pick a type" />
+          }
+        </div>
+      </div>
+    }
+  </div>
+} @else {
+  <q-empty-state [title]="doc() ? 'The cached schema could not be parsed' : 'No schema fetched yet'" hint="Run the introspection query against the request's URL with its headers and auth.">
+    <button qButton variant="primary" [loading]="fetching()" (click)="refresh()">Fetch schema</button>
+  </q-empty-state>
+}

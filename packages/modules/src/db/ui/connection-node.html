@@ -1,0 +1,37 @@
+@let conn = connection();
+<div qDbRow [label]="conn.name" bold data-testid="db-connection-row" (click)="toggle()" (keydown.enter)="toggle()" (contextmenu)="menu($event)">
+  <svg rowPrefix [qIcon]="open() ? icons.ChevronDown : icons.ChevronRight" class="size-3.5 text-muted shrink-0"></svg>
+  <svg rowPrefix [qKindIcon]="conn.kind"></svg>
+  <q-access-badge rowBadge [access]="conn.access" />
+  @if (conn.production) {
+    <span rowBadge class="text-[9px] font-semibold text-danger border border-danger/40 rounded px-1 leading-4 shrink-0" title="Production connection">PROD</span>
+  }
+  @if (conn.inTransaction) {
+    <span rowBadge class="size-1.5 rounded-full bg-warning shrink-0" title="A transaction is open on this connection"></span>
+  } @else if (conn.connected) {
+    <span rowBadge class="size-1.5 rounded-full bg-success shrink-0" title="Connected"></span>
+  }
+  <button qIconButton [label]="openLabel()" size="sm" (click)="openMain($event)"><svg [qIcon]="conn.kind === 'redis' ? icons.KeyRound : icons.Terminal" class="size-3.5"></svg></button>
+  <button qIconButton label="More actions" size="sm" data-testid="db-connection-menu" (click)="menu($event)"><svg [qIcon]="icons.Ellipsis" class="size-3.5"></svg></button>
+</div>
+@if (open()) {
+  @switch (conn.kind) {
+    @case ('mysql') {
+      <q-db-database-list [connection]="conn" />
+    }
+    @case ('postgres') {
+      <q-db-database-list [connection]="conn" />
+    }
+    @case ('sqlite') {
+      <q-db-table-list [connectionId]="conn.id" [database]="null" [depth]="1" />
+    }
+    @case ('redis') {
+      <div qDbRow [depth]="1" label="Keys" (click)="db.openRedisTab(conn)" (keydown.enter)="db.openRedisTab(conn)">
+        <svg rowPrefix [qIcon]="icons.KeyRound" class="size-3.5 text-muted shrink-0"></svg>
+      </div>
+      <div qDbRow [depth]="1" label="Console" (click)="db.openQueryTab({ connectionId: conn.id })" (keydown.enter)="db.openQueryTab({ connectionId: conn.id })">
+        <svg rowPrefix [qIcon]="icons.Terminal" class="size-3.5 text-muted shrink-0"></svg>
+      </div>
+    }
+  }
+}

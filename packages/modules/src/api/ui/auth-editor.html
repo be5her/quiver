@@ -1,0 +1,50 @@
+@let auth = value();
+<div>
+  <label qLabel>Type</label>
+  <select qSelect [value]="auth.type" (change)="setType($event)">
+    <option value="none">No auth</option>
+    <option value="bearer">Bearer token</option>
+    <option value="basic">Basic</option>
+    <option value="apikey">API key</option>
+  </select>
+</div>
+@switch (auth.type) {
+  @case ('bearer') {
+    <div>
+      <label qLabel>Token</label>
+      <q-variable-input inputClass="font-mono" [value]="auth.token" (valueChange)="patch({ token: $event })" [placeholder]="tokenSyntax" />
+    </div>
+  }
+  @case ('basic') {
+    <div class="grid grid-cols-2 gap-2">
+      <div>
+        <label qLabel>Username</label>
+        <q-variable-input [value]="auth.username" (valueChange)="patch({ username: $event })" />
+      </div>
+      <div>
+        <label qLabel>Password</label>
+        <input qInput type="password" [value]="auth.password" (input)="patch({ password: text($event) })" />
+      </div>
+    </div>
+  }
+  @case ('apikey') {
+    <div class="grid grid-cols-[1fr_1fr_auto] gap-2">
+      <div>
+        <label qLabel>Key</label>
+        <q-variable-input inputClass="font-mono" [value]="auth.key" (valueChange)="patch({ key: $event })" />
+      </div>
+      <div>
+        <label qLabel>Value</label>
+        <q-variable-input inputClass="font-mono" [value]="auth.value" (valueChange)="patch({ value: $event })" />
+      </div>
+      <div>
+        <label qLabel>Add to</label>
+        <select qSelect [value]="auth.in" (change)="patch({ in: placement($event) })">
+          <option value="header">Header</option>
+          <option value="query">Query</option>
+        </select>
+      </div>
+    </div>
+  }
+}
+<p class="text-xs text-muted">Reference environment variables anywhere with {{ variableSyntax }}. Keep secrets in an environment and mark them secret.</p>

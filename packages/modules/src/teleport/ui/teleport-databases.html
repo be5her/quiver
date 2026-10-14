@@ -1,0 +1,47 @@
+<q-teleport-sub-header title="Databases" [loading]="dbs.isLoading()" (refresh)="refresh()" />
+@if (dbs.error(); as error) {
+  <q-db-error [error]="error" compact (retry)="dbs.reload()" />
+}
+@if (!dbs.value() && !dbs.error()) {
+  <div class="px-4 py-1"><svg qSpinner class="size-3.5"></svg></div>
+}
+@for (row of rows(); track row.db.name) {
+  <div
+    role="button"
+    tabindex="0"
+    class="group flex flex-col gap-0.5 pl-4 pr-2 py-1 hover:bg-elevated cursor-pointer min-w-0"
+    [title]="title(row.db)"
+    data-testid="teleport-db"
+    (click)="open(row)"
+    (keydown.enter)="connect(row.db)"
+  >
+    <div class="flex items-center gap-1.5 min-w-0">
+      <span class="truncate text-[13px] flex-1">{{ row.db.name }}</span>
+      <span qBadge class="font-mono text-[10px]" [class]="protocolColors[row.db.protocol] ?? ''">{{ row.db.protocol }}</span>
+    </div>
+    <div class="flex items-center gap-1.5 min-w-0 h-5">
+      @if (row.tunnel; as tunnel) {
+        <span class="flex items-center gap-1 text-[11px] text-success font-mono shrink-0" [title]="'Tunnel as ' + tunnel.dbUser + ' · pid ' + (tunnel.pid ?? '?')"
+          ><span class="size-1.5 rounded-full bg-success"></span>:{{ tunnel.port }}</span
+        >
+      }
+      <span class="truncate text-[11px] text-muted flex-1" [title]="'Allowed users: ' + (row.db.allowedUsers.join(', ') || 'none')">{{
+        row.tunnel ? 'as ' + row.tunnel.dbUser : row.db.allowedUsers.length ? row.db.allowedUsers.join(', ') : 'no users allowed'
+      }}</span>
+      <span class="hidden group-hover:flex items-center gap-0.5 shrink-0">
+        <button qIconButton [label]="row.pinned ? 'Unpin' : 'Pin'" size="sm" (click)="togglePin($event, row)"><svg [qIcon]="row.pinned ? icons.PinOff : icons.Pin" class="size-3.5"></svg></button>
+        @if (row.tunnel) {
+          <button qButton size="sm" variant="ghost" [icon]="icons.Square" iconClass="size-3" (click)="stop($event, row.db)">Stop</button>
+        } @else {
+          <button qButton size="sm" variant="ghost" [icon]="icons.Plug" iconClass="size-3" [loading]="busy() === row.db.name" (click)="connect(row.db, $event)">Connect</button>
+        }
+      </span>
+      @if (row.pinned) {
+        <svg [qIcon]="icons.Pin" class="size-3 text-muted shrink-0 group-hover:hidden" aria-label="pinned"></svg>
+      }
+    </div>
+  </div>
+}
+@if (dbs.value()?.length === 0) {
+  <p class="px-4 py-1 text-xs text-muted">No databases are visible to your roles here.</p>
+}

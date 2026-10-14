@@ -1,15 +1,32 @@
 import { z } from 'zod';
 import { newId, nowIso } from '../ids';
+import { resolveTemplate } from '../variables';
 
-export const DbKindSchema = z.enum(['mysql', 'sqlite', 'redis']);
+export const DbKindSchema = z.enum(['mysql', 'postgres', 'sqlite', 'redis']);
+/** The kinds that speak SQL. */
+export type SqlKind = 'mysql' | 'postgres' | 'sqlite';
 export type DbKind = z.infer<typeof DbKindSchema>;
 
-export const DB_KIND_LABELS: Record<DbKind, string> = { mysql: 'MySQL', sqlite: 'SQLite', redis: 'Redis' };
+/**
+ * The `store.changed` collection the host announces after a query that can write runs on a
+ * connection: its tables, rows or keys may have changed, so views of them reload.
+ */
+export function dbDataCollection(connectionId: string): string {
+  return `db-data:${connectionId}`;
+}
+
+export const DB_KIND_LABELS: Record<DbKind, string> = { mysql: 'MySQL', postgres: 'PostgreSQL', sqlite: 'SQLite', redis: 'Redis' };
+
+export function isSqlKind(kind: DbKind): kind is SqlKind {
+  return kind !== 'redis';
+}
 
 export function defaultPort(kind: DbKind): number {
   switch (kind) {
     case 'mysql':
       return 3306;
+    case 'postgres':
+      return 5432;
     case 'redis':
       return 6379;
     default:
@@ -50,15 +67,15 @@ export const DbConnectionSchema = z.object({
   id: z.string(),
   name: z.string(),
   kind: DbKindSchema,
-  /** MySQL and Redis. */
+  /** MySQL, PostgreSQL and Redis. */
   host: z.string().default('127.0.0.1'),
   /** 0 means the kind's default port. */
   port: z.number().int().min(0).max(65535).default(0),
-  /** MySQL user or Redis ACL username. */
+  /** MySQL or PostgreSQL user, or Redis ACL username. */
   user: z.string().default(''),
-  /** MySQL default schema. */
+  /** MySQL default schema, or the PostgreSQL database to connect to (its schemas are the tree's second level). */
   database: z.string().default(''),
-  /** TLS for MySQL and Redis. */
+  /** TLS for MySQL, PostgreSQL and Redis. */
   ssl: z.boolean().default(false),
   /** SQLite file, absolute or relative to the workspace folder. */
   file: z.string().default(''),
@@ -67,6 +84,8 @@ export const DbConnectionSchema = z.object({
   /** Redis logical database index. */
   dbIndex: z.number().int().min(0).default(0),
   access: DbAccessSchema.default({ type: 'direct' }),
+  /** A production system: the UI asks before every write and marks the connection's tabs. Committed, so the whole team gets the guard. */
+  production: z.boolean().default(false),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -117,12 +136,77 @@ export interface DbTable {
   engine: string | null;
 }
 
+/** A foreign key: `table.columns` reference `refTable.refColumns`. */
+export interface DbForeignKey {
+  name: string;
+  table: string;
+  database: string | null;
+  columns: string[];
+  refTable: string;
+  refDatabase: string | null;
+  refColumns: string[];
+}
+
 export interface DbTableDetail {
   name: string;
   database: string | null;
   columns: DbColumn[];
+  /** The primary key's columns, in key order; empty for views and keyless tables, which the grid keeps read-only. */
+  primaryKey: string[];
   indexes: DbIndex[];
+  /** Keys of this table pointing at other tables. */
+  foreignKeys: DbForeignKey[];
+  /** Keys of other tables pointing at this one. */
+  referencedBy: DbForeignKey[];
   ddl: string | null;
+}
+
+/** Every table of a database with its columns, in one call: completion and schema search. */
+export interface DbTableColumns {
+  name: string;
+  type: 'table' | 'view';
+  columns: { name: string; type: string }[];
+}
+
+/** One hit of the schema search: a table, or a column of one. */
+export interface DbSchemaMatch {
+  connectionId: string;
+  connectionName: string;
+  kind: DbKind;
+  database: string | null;
+  table: string;
+  column: string | null;
+  type: string | null;
+}
+
+/** A change to one row of a table, as the grid collects them. Keys identify the row by its primary key. */
+export const DbTableEditSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('insert'), values: z.record(z.string(), z.unknown()) }),
+  z.object({ kind: z.literal('update'), key: z.record(z.string(), z.unknown()), values: z.record(z.string(), z.unknown()) }),
+  z.object({ kind: z.literal('delete'), key: z.record(z.string(), z.unknown()) }),
+]);
+export type DbTableEdit = z.infer<typeof DbTableEditSchema>;
+
+export interface DbTableApplyResult {
+  /** The statements, in order. */
+  statements: string[];
+  /** False for a preview. */
+  applied: boolean;
+  affectedRows: number;
+  durationMs: number;
+}
+
+export type DbExportFormat = 'csv' | 'json' | 'markdown' | 'sql';
+
+export interface DbExportResult {
+  format: DbExportFormat;
+  rows: number;
+  /** Set when nothing was written to disk. */
+  text: string | null;
+  /** The file written, when `path` was given. */
+  path: string | null;
+  bytes: number;
+  truncated: boolean;
 }
 
 export interface DbResultColumn {
@@ -198,6 +282,41 @@ export interface RedisKeyDetail {
   /** string: text; hash: record; list/set: string[]; zset: [member, score][]; stream: entries. */
   value: unknown;
   truncated: boolean;
+}
+
+/** What `INFO` and `DBSIZE` say about a Redis server, for the key browser's strip. */
+export interface RedisInfo {
+  version: string | null;
+  mode: string | null;
+  uptimeSeconds: number | null;
+  connectedClients: number | null;
+  usedMemory: number | null;
+  usedMemoryHuman: string | null;
+  maxMemoryHuman: string | null;
+  keys: number | null;
+  opsPerSecond: number | null;
+  /** keyspace_hits / (hits + misses), 0..1, null before any lookup. */
+  hitRate: number | null;
+  role: string | null;
+}
+
+/** A query the UI stopped with `db.query.cancel`, or one the server rejected after it was cancelled. */
+export const DB_QUERY_CANCELLED = 'QUERY_CANCELLED' as const;
+
+/**
+ * `{{name}}` in the fields that name a server or a file, resolved with the variables in effect
+ * (API globals, the active environment, the workspace `.env`), so a committed connection can say
+ * `{{DB_HOST}}` and every teammate dials their own. Unknown names stay as written.
+ */
+export function resolveConnectionTemplate(connection: DbConnection, vars: Record<string, string>): DbConnection {
+  const r = (s: string) => resolveTemplate(s, vars);
+  const access: DbAccess =
+    connection.access.type === 'teleport'
+      ? { ...connection.access, proxy: r(connection.access.proxy), database: r(connection.access.database), dbUser: r(connection.access.dbUser) }
+      : connection.access.type === 'command'
+        ? { ...connection.access, command: r(connection.access.command) }
+        : connection.access;
+  return { ...connection, host: r(connection.host), user: r(connection.user), database: r(connection.database), file: r(connection.file), access };
 }
 
 export function newDbConnection(kind: DbKind, partial: Partial<DbConnection> = {}): DbConnection {

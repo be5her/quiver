@@ -1,15 +1,15 @@
 # Core
 
-The engine, with no Electron or React in it: the command registry (`defineCommand`, `defineModule`, the mutating gate), the models every module shares, variable resolution, the file store behind `.quiver/`, the colour palettes, and small pure helpers (arrays, activity bar layout). Everything here is unit-tested with vitest (`npm test`); if a piece of logic can be written without I/O, it belongs here with a test beside it.
+The engine, with no Electron or UI framework in it: the command registry (`defineCommand`, `defineModule`, the mutating gate), the models every module shares, variable resolution, the file store behind `.quiver/`, the colour palettes, and small pure helpers (arrays, activity bar layout, JSON formatting that keeps numbers as written, relative times). Everything here is unit-tested with vitest (`npm test`); if a piece of logic can be written without I/O, it belongs here with a test beside it.
 
-`src/index.ts` is the pure entry point, safe to import from the renderer. `src/node/` holds the Node-only parts: the workspace manager, the file store and the global config store.
+`src/index.ts` is the pure entry point, safe to import from the renderer. `src/node/` holds the Node-only parts: the workspace manager, the file store, the global config store and the JWT validation behind `tools.jwt.verify`.
 
 ## Storage
 
 - `.quiver/<collection>/<id>.json`: committed, one file per item, diffable in pull requests. Quiver watches the folder, so files an agent writes by hand, a `git pull` or a branch switch show up without a restart.
-- `.quiver/local/`: gitignored (the store writes the `.gitignore` itself). UI state (tabs, tree state), request and query history, requests captured by mock servers, realtime message logs, MCP traffic logs, env file backups, fetched GraphQL schemas, the todo list, and secrets (environment values, database passwords) encrypted with the OS keychain.
+- `.quiver/local/`: gitignored (the store writes the `.gitignore` itself). UI state (tabs, tree state), request and query history, requests captured by mock servers, realtime message logs, MCP traffic logs, the logs query history, env file backups, fetched GraphQL schemas, the todo list, and secrets (environment values, database passwords) encrypted with the OS keychain.
 - SQLite files referenced by a relative path resolve against the project folder, so a committed connection works for every teammate.
-- Global config lives in the Electron user data folder as `config.json`: theme and palette, recent and open workspaces (in the order the title bar shows them), global variables, the MCP port and mutation switch, the update channel, the activity bar arrangement (`activityBar`: order and hidden modules), and the Teleport settings (cluster proxy addresses, pins, optional tsh path, log in on launch). Nested sections are merged one level deep and normalised on load, so an older or hand-edited file cannot break the app. The Kubernetes query history and the private kubeconfigs Quiver queries through live in `teleport-kube/` in the same folder, per machine.
+- Global config lives in the Electron user data folder as `config.json`: theme and palette, recent and open workspaces (in the order the title bar shows them), global variables, the MCP port and mutation switch, the update channel, the activity bar arrangement (`activityBar`: order and hidden modules), and the Teleport settings (cluster proxy addresses, pins, optional tsh path, log in on launch). Nested sections are merged one level deep and normalised on load, so an older or hand-edited file cannot break the app. The Kubernetes query history and the private kubeconfigs Quiver queries through live in `teleport-kube/` in the same folder, per machine. Grafana sign-ins for the logs module are Electron session partitions (`Partitions/quiver-grafana-<origin>`) in the same folder, one per Grafana address.
 
 ## Commands and the mutating gate
 

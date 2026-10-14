@@ -1,0 +1,80 @@
+<div class="flex flex-col flex-1 min-w-0 min-h-0">
+  <div class="flex items-center gap-2 px-3 h-10 border-b border-edge shrink-0">
+    <svg [qIcon]="icons.Boxes" class="size-4 text-accent shrink-0"></svg>
+    <span class="font-medium text-sm shrink-0">{{ cluster() }}</span>
+    <span class="text-xs text-muted truncate min-w-0" [title]="proxy()">via {{ proxy() }}</span>
+    <div class="flex-1"></div>
+    <button
+      qButton
+      size="sm"
+      class="whitespace-nowrap shrink-0"
+      [icon]="icons.Terminal"
+      title="Runs tsh kube login: changes the current kubectl context in your terminals"
+      data-testid="kube-terminal-context"
+      (click)="setTerminalContext()"
+    >Set as kubectl context for my terminal</button>
+  </div>
+
+  <div class="px-3 pt-3 pb-2 border-b border-edge shrink-0 flex flex-col gap-2.5">
+    <div class="flex items-end gap-3 flex-wrap">
+      <q-kube-field-box label="Operation">
+        <select qSelect class="w-48" data-testid="kube-operation" (change)="pickOperation($event)">
+          @for (o of operations; track o.id) {
+            <option [value]="o.id" [selected]="o.id === operation()">{{ o.title }}</option>
+          }
+        </select>
+      </q-kube-field-box>
+      @for (field of info().fields; track operation() + ':' + field.key) {
+        <q-kube-field-editor [field]="field" [values]="values()" [error]="fieldError(field.key)" [lookups]="lookups" [namespace]="namespace()" (changed)="setField(field.key, $event)" />
+      }
+    </div>
+    <div class="flex items-center gap-2">
+      <div class="flex-1 min-w-0 flex items-center gap-1 rounded-md border border-edge bg-canvas pl-2.5 pr-1 h-8">
+        <code class="flex-1 min-w-0 truncate text-xs font-mono text-muted" [attr.title]="preview()?.command ?? null" data-testid="kube-preview">{{ shortCommand() ?? 'Fill in the required fields to see the command' }}</code>
+        <span
+          tabindex="0"
+          class="inline-flex items-center justify-center size-6 text-muted hover:text-fg cursor-help focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 rounded-md"
+          [title]="infoTitle()"
+          aria-label="About this command"
+          data-testid="kube-info"
+        ><svg [qIcon]="icons.Info" class="size-3.5"></svg></span>
+        @if (preview(); as preview) {
+          <button qIconButton label="Copy the exact command" size="sm" (click)="copyPreview(preview.command)"><svg [qIcon]="icons.Copy" class="size-3"></svg></button>
+        }
+      </div>
+      @if (running(); as running) {
+        <button qButton size="md" variant="danger" [icon]="stopping() ? undefined : icons.Square" [disabled]="stopping()" data-testid="kube-stop" (click)="stop()">
+          @if (stopping()) {<svg qSpinner class="size-3.5"></svg>}{{ stopping() ? 'Stopping…' : running.streaming ? 'Stop' : 'Cancel' }}
+        </button>
+      } @else {
+        <button qButton size="md" variant="primary" [icon]="icons.Play" [disabled]="!valid()" data-testid="kube-run" (click)="run()">Run</button>
+      }
+    </div>
+  </div>
+
+  <q-kube-output-panel
+    [lines]="lines()"
+    [stderr]="stderr()"
+    [exitCode]="exitCode()"
+    [durationMs]="durationMs()"
+    [running]="running()"
+    [truncated]="truncated()"
+    [error]="error()"
+    [ran]="ran()"
+    [hasResult]="hasResult()"
+    (retry)="run()"
+  />
+</div>
+
+<aside
+  qKubeHistory
+  [entries]="history.value()?.entries ?? []"
+  [error]="history.error()"
+  [loading]="history.isLoading()"
+  [proxy]="proxy()"
+  [cluster]="cluster()"
+  [busy]="!!running()"
+  (fill)="fillFrom($event)"
+  (rerun)="rerun($event)"
+  (reload)="history.reload()"
+></aside>

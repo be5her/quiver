@@ -1,0 +1,42 @@
+<div class="flex items-center gap-1.5 px-1.5 font-semibold text-sm tracking-tight"><svg qQuiverMark class="size-5"></svg>Quiver</div>
+
+<div #strip class="relative flex items-center gap-1 ml-2 min-w-0 overflow-x-auto no-scrollbar" [class.cursor-grabbing]="reorder.drag()">
+  @if (reorder.drag(); as drag) {
+    <q-drop-marker axis="x" [at]="drag.marker" testId="workspace-drop-marker" />
+  }
+  @for (ws of workspaces(); track ws.id; let index = $index) {
+    <div
+      role="tab"
+      [attr.aria-selected]="ws.id === activeId()"
+      tabindex="0"
+      data-testid="workspace-tab"
+      [attr.data-name]="ws.name"
+      [attr.data-drag-id]="ws.id"
+      [title]="ws.path + '\nCtrl+' + (index + 1)"
+      class="group flex items-center gap-1.5 h-7 pl-2.5 pr-1 rounded-md text-xs cursor-pointer border"
+      [class]="(ws.id === activeId() ? 'bg-canvas border-edge text-fg' : 'border-transparent text-muted hover:text-fg hover:bg-elevated') + (reorder.drag()?.id === ws.id ? ' opacity-50' : '')"
+      (pointerdown)="reorder.pointerDown($event, ws.id)"
+      (click)="select(ws)"
+      (keydown.enter)="select(ws)"
+      (contextmenu)="showMenu($event, ws)"
+    >
+      <span class="truncate max-w-40">{{ ws.name }}</span>
+      @if (dirty().has(ws.id)) {
+        <span class="size-1.5 rounded-full bg-warning" title="Unsaved changes"></span>
+      }
+      <button type="button" [attr.aria-label]="'Close ' + ws.name" class="opacity-0 group-hover:opacity-100 rounded p-0.5 hover:bg-elevated text-muted hover:text-fg" (click)="close($event, ws)">
+        <svg [qIcon]="icons.X" class="size-3"></svg>
+      </button>
+    </div>
+  }
+  <button qIconButton label="Open folder (Ctrl+O)" size="sm" (click)="shell.openWorkspace()"><svg [qIcon]="icons.FolderOpen" class="size-4"></svg></button>
+</div>
+
+<div class="flex-1"></div>
+
+<button type="button" class="flex items-center gap-2 h-7 px-2.5 rounded-md border border-edge bg-canvas text-xs text-muted hover:text-fg w-64" (click)="openPalette()">
+  <svg [qIcon]="icons.Search" class="size-3.5"></svg>
+  <span class="flex-1 text-left">Search commands…</span>
+  <kbd qKbd>Ctrl K</kbd>
+</button>
+<button qIconButton label="Settings (Ctrl+,)" (click)="shell.openSettings()"><svg [qIcon]="icons.Settings" class="size-4"></svg></button>

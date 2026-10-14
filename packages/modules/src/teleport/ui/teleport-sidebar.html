@@ -1,0 +1,33 @@
+<q-section-header title="Clusters">
+  <button qIconButton label="Add cluster" size="sm" (click)="actions.addCluster()"><svg [qIcon]="icons.Plus" class="size-3.5"></svg></button>
+  <button qIconButton label="Refresh status" size="sm" (click)="refreshNow()"><svg [qIcon]="icons.RefreshCw" class="size-3.5" [class.animate-spin]="status.isLoading()"></svg></button>
+</q-section-header>
+@if (status.value(); as s) {
+  @if (s.state === 'no-tsh') {
+    <div class="mx-2 mb-1 rounded-md border border-edge bg-canvas p-2.5 text-xs" data-testid="teleport-status" data-state="no-tsh">
+      <div class="flex items-center gap-2 font-medium text-[13px] mb-1"><span class="size-2 rounded-full bg-muted"></span> tsh not found</div>
+      <p class="text-muted">
+        Install Teleport Connect, add tsh to PATH, or set its path in <button type="button" class="underline hover:text-fg" (click)="openSettings()">Settings</button>.
+      </p>
+    </div>
+  } @else if (!s.clusters.length) {
+    <p class="px-3 py-2 text-xs text-muted">No clusters yet. Add a proxy address with the plus button, or log in once with tsh in your terminal and it appears here.</p>
+  }
+  @if (s.error) {
+    <p class="px-3 py-1 text-[11px] text-danger break-words">{{ s.error }}</p>
+  }
+  @if (s.pins.length) {
+    <q-teleport-pinned [status]="s" [connections]="connections.value()" />
+  }
+  @for (cluster of s.clusters; track cluster.proxy) {
+    <q-teleport-cluster [cluster]="cluster" [status]="s" [connections]="connections.value()" />
+  }
+  @if (s.tunnels.length) {
+    <q-teleport-tunnels [tunnels]="s.tunnels" [clusters]="s.clusters" />
+  }
+  @if (s.tshVersion) {
+    <div class="px-3 py-2 mt-auto text-[10px] text-muted truncate" [title]="s.tsh?.join(' ') ?? ''">tsh {{ s.tshVersion }} · {{ tshSource() }}</div>
+  }
+} @else {
+  <div class="px-3 py-2"><svg qSpinner></svg></div>
+}

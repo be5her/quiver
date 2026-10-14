@@ -1,0 +1,124 @@
+@if (card(); as c) {
+  <div
+    #panel
+    [attr.role]="editing() ? 'dialog' : 'tooltip'"
+    [attr.aria-label]="editing() ? 'Edit ' + c.name : null"
+    class="fixed z-50 w-80 max-w-[calc(100vw-8px)] rounded-md border border-edge bg-elevated shadow-lg p-2.5 text-xs"
+    [style.left.px]="c.anchor.left"
+    [style.top.px]="c.anchor.bottom + 6"
+    style="visibility: hidden"
+    data-testid="variable-card"
+    [attr.data-name]="c.name"
+    [attr.data-editing]="editing() || null"
+    (mouseenter)="cancelHide()"
+    (mousemove)="pointerMoved()"
+    (mouseleave)="pointerLeft()"
+  >
+    <div class="flex items-center gap-2 min-w-0">
+      <code class="font-mono font-semibold truncate" [class]="c.info ? 'text-fg' : 'text-danger'">{{ braced() }}</code>
+      <span class="flex-1"></span>
+      <span class="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium" [class]="c.info ? 'bg-surface text-muted' : 'bg-danger/15 text-danger'" data-testid="variable-card-source">{{ source() }}</span>
+    </div>
+
+    @if (c.info && c.info.value !== null) {
+      <div class="mt-2 flex items-start gap-1">
+        @if (editing()) {
+          <textarea
+            qAutofocus
+            [formField]="editForm.draft"
+            spellcheck="false"
+            class="flex-1 min-w-0 field-sizing-content max-h-32 resize-none rounded border border-accent bg-surface px-2 py-1.5 font-mono text-fg break-all outline-none focus:ring-2 focus:ring-accent/30"
+            [class]="hidden() ? '[-webkit-text-security:disc]' : ''"
+            [attr.aria-label]="'Value of ' + c.name"
+            data-testid="variable-card-input"
+            (focus)="selectAll($event)"
+            (keydown)="draftKey($event)"
+          ></textarea>
+        } @else {
+          <div
+            class="flex-1 min-w-0 max-h-32 overflow-auto overscroll-contain rounded border border-edge bg-surface px-2 py-1.5 font-mono whitespace-pre-wrap break-all"
+            [class]="c.info.value === '' && !hidden() ? 'italic text-muted' : ''"
+            data-testid="variable-card-value"
+            (dblclick)="startEditing()"
+          >{{ hidden() ? mask : c.info.value === '' ? '(empty)' : c.info.value }}</div>
+        }
+        <div class="flex flex-col gap-0.5 shrink-0">
+          @if (c.info.secret) {
+            <button
+              type="button"
+              class="rounded p-1 text-muted hover:text-fg hover:bg-surface"
+              [title]="revealed() ? 'Hide value' : 'Show value'"
+              [attr.aria-label]="revealed() ? 'Hide value' : 'Show value'"
+              data-testid="variable-card-reveal"
+              (click)="toggleReveal()"
+            ><svg [qIcon]="revealed() ? icons.EyeOff : icons.Eye" class="size-3.5"></svg></button>
+          }
+          @if (!editing() && editable()) {
+            <button type="button" class="rounded p-1 text-muted hover:text-fg hover:bg-surface" title="Edit value" aria-label="Edit value" data-testid="variable-card-edit" (click)="startEditing()"><svg [qIcon]="icons.Pencil" class="size-3.5"></svg></button>
+          }
+          @if (!editing()) {
+            <button type="button" class="rounded p-1 text-muted hover:text-fg hover:bg-surface" title="Copy value" aria-label="Copy value" (click)="copyValue()"><svg [qIcon]="icons.Copy" class="size-3.5"></svg></button>
+          }
+        </div>
+      </div>
+    }
+
+    @if (defining()) {
+      <div class="mt-2 flex flex-col gap-1.5">
+        <label class="flex items-center gap-2">
+          <span class="text-muted shrink-0 w-12">Save in</span>
+          <select qSelect [formField]="editForm.target" class="h-7 flex-1 min-w-0 text-xs" data-testid="variable-card-target" (input)="targetPicked($event)">
+            @for (e of targets(); track e.id) {
+              <option [value]="e.id">{{ e.id === c.environment?.id ? e.name + ' (active)' : e.name }}</option>
+            }
+            <option value="global">Global variables</option>
+          </select>
+        </label>
+        <div class="flex items-start gap-1">
+          <textarea
+            qAutofocus
+            [formField]="editForm.draft"
+            placeholder="Value"
+            spellcheck="false"
+            class="flex-1 min-w-0 field-sizing-content min-h-8 max-h-32 resize-none rounded border border-accent bg-surface px-2 py-1.5 font-mono text-fg break-all outline-none focus:ring-2 focus:ring-accent/30 placeholder:text-muted"
+            [class]="edit().secret && !revealed() ? '[-webkit-text-security:disc]' : ''"
+            [attr.aria-label]="'Value of ' + c.name"
+            data-testid="variable-card-input"
+            (keydown)="draftKey($event)"
+          ></textarea>
+          @if (edit().secret) {
+            <button
+              type="button"
+              class="rounded p-1 text-muted hover:text-fg hover:bg-surface"
+              [title]="revealed() ? 'Hide value' : 'Show value'"
+              [attr.aria-label]="revealed() ? 'Hide value' : 'Show value'"
+              (click)="toggleReveal()"
+            ><svg [qIcon]="revealed() ? icons.EyeOff : icons.Eye" class="size-3.5"></svg></button>
+          }
+        </div>
+        <label
+          class="flex items-center gap-1.5"
+          [class]="edit().target === 'global' ? 'text-muted/60' : 'text-muted'"
+          [title]="edit().target === 'global' ? 'Keep secrets in an environment' : 'Stored encrypted on this machine, never committed'"
+        ><input type="checkbox" qCheckbox [formField]="editForm.secret" data-testid="variable-card-secret" />Secret</label>
+      </div>
+    }
+
+    @if (note(); as note) {
+      <p class="mt-1.5 text-[11px] text-muted">{{ note }}</p>
+    }
+
+    @if (definable() && !editing()) {
+      <div class="mt-2 flex justify-end">
+        <button qButton size="sm" variant="secondary" [icon]="icons.Plus" data-testid="variable-card-define" (click)="startDefining()">Define {{ c.name }}</button>
+      </div>
+    }
+
+    @if (editing()) {
+      <div class="mt-2 flex justify-end gap-1.5">
+        <button qButton size="sm" variant="ghost" [icon]="icons.X" data-testid="variable-card-cancel" (click)="cancelEditing()">Cancel</button>
+        <button qButton size="sm" variant="primary" [icon]="icons.Check" [loading]="saving()" data-testid="variable-card-save" (click)="commit()">Save</button>
+      </div>
+    }
+  </div>
+}

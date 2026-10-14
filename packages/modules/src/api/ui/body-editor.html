@@ -1,0 +1,23 @@
+<div class="flex items-center gap-2">
+  <select qSelect class="h-7 text-xs" (change)="setType($event)">
+    @for (t of types; track t.value) {
+      <option [value]="t.value" [selected]="t.value === value().type">{{ t.label }}</option>
+    }
+  </select>
+</div>
+@if (content(); as body) {
+  <div class="flex-1 min-h-[80px]">
+    <q-code-editor [value]="body.content" (valueChange)="setContent(body, $event)" [language]="language()" [placeholder]="body.type === 'json' ? jsonPlaceholder : ''" />
+  </div>
+}
+@if (fields(); as body) {
+  <q-key-value-editor [value]="body.fields" (valueChange)="setFields(body, $event)" keyPlaceholder="Field" />
+}
+@if (graphql(); as body) {
+  <div class="flex-1 min-h-0">
+    <q-graphql-editor [value]="body" (valueChange)="setGraphql($event)" [request]="request()" />
+  </div>
+}
+@if (value().type === 'none') {
+  <p class="text-xs text-muted px-1">This request has no body.</p>
+}

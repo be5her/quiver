@@ -1,0 +1,36 @@
+<div class="w-64 border-r border-edge flex flex-col min-h-0 shrink-0">
+  <div class="flex items-center justify-between pl-3 pr-1 h-9 border-b border-edge shrink-0">
+    <span class="text-[11px] text-muted">First match wins, top to bottom</span>
+    <button qIconButton label="Add route" size="sm" (click)="add()"><svg [qIcon]="plus" class="size-3.5"></svg></button>
+  </div>
+  <div class="flex-1 overflow-y-auto">
+    @for (r of routes(); track r.id) {
+      <button
+        type="button"
+        class="w-full text-left flex items-center gap-2 px-3 h-8 hover:bg-elevated min-w-0"
+        [class]="(r.id === selected() ? 'bg-elevated' : '') + (r.enabled ? '' : ' opacity-50')"
+        [title]="describe(r)"
+        data-testid="mock-route-item"
+        (click)="selected.set(r.id)"
+      >
+        <span class="text-[10px] font-semibold w-11 shrink-0" [class]="methodColors[r.method] ?? 'text-muted'">{{ r.method }}</span>
+        <span class="truncate flex-1 text-xs font-mono">{{ r.path || '/' }}</span>
+        <span class="text-[10px] text-muted shrink-0">{{ r.status }}</span>
+      </button>
+    } @empty {
+      <div class="px-3 py-3 text-xs text-muted flex flex-col gap-2">
+        <p>No routes yet. Every request gets the fallback answer from Settings, which is all a webhook receiver needs.</p>
+        <button qButton size="sm" variant="secondary" [icon]="plus" class="self-start" (click)="add()">Add route</button>
+      </div>
+    }
+  </div>
+</div>
+<div class="flex-1 min-w-0 overflow-y-auto">
+  @if (route(); as r) {
+    <q-mock-route-editor [value]="r" (valueChange)="update($event)" [canUp]="index() > 0" [canDown]="index() < routes().length - 1" (moved)="move($event)" (removed)="remove()" />
+  } @else {
+    <q-empty-state title="Pick a route" hint="Routes answer with a status, headers and a templated body. Requests that match none get the fallback.">
+      <button qButton (click)="add()">Add route</button>
+    </q-empty-state>
+  }
+</div>

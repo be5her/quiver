@@ -1,0 +1,45 @@
+@let route = value();
+<div class="flex items-end gap-2 flex-wrap">
+  <label class="flex items-center gap-1.5 text-xs h-8"><input type="checkbox" qCheckbox [formField]="routeForm.enabled" /> Enabled</label>
+  <div>
+    <label qLabel>Method</label>
+    <select qSelect [formField]="routeForm.method" class="w-24" data-testid="mock-route-method">
+      @for (m of methods; track m) {
+        <option [value]="m">{{ m }}</option>
+      }
+    </select>
+  </div>
+  <div class="flex-1 min-w-48">
+    <label qLabel>Path</label>
+    <input qInput [formField]="routeForm.path" placeholder="/users/:id or /files/*" class="font-mono" data-testid="mock-route-path" />
+  </div>
+  <div>
+    <label qLabel>Status</label>
+    <input qInput type="number" min="100" max="599" [value]="route.status" class="w-20 font-mono" (input)="setStatus($event)" />
+  </div>
+  <div>
+    <label qLabel>Delay (ms)</label>
+    <input qInput type="number" min="0" max="120000" [value]="route.delayMs" class="w-24 font-mono" (input)="setDelay($event)" />
+  </div>
+  <div class="flex items-center gap-0.5 h-8">
+    <button qIconButton label="Move up" size="sm" [disabled]="!canUp()" (click)="moved.emit(-1)"><svg [qIcon]="icons.ArrowUp" class="size-3.5"></svg></button>
+    <button qIconButton label="Move down" size="sm" [disabled]="!canDown()" (click)="moved.emit(1)"><svg [qIcon]="icons.ArrowDown" class="size-3.5"></svg></button>
+    <button qIconButton label="Delete route" size="sm" (click)="removed.emit()"><svg [qIcon]="icons.Trash2" class="size-3.5"></svg></button>
+  </div>
+</div>
+<div>
+  <label qLabel>Description</label>
+  <input qInput [formField]="routeForm.description" placeholder="What this route stands in for" />
+</div>
+<div>
+  <label qLabel>Response headers</label>
+  <q-key-value-editor [formField]="routeForm.headers" keyPlaceholder="Header" valuePlaceholder="Value" />
+  <p class="text-[11px] text-muted mt-1">Content-Type is inferred from the body when not set.</p>
+</div>
+<div class="flex flex-col gap-1">
+  <label qLabel>Response body</label>
+  <div class="border border-edge rounded-md min-h-[200px] h-[280px]">
+    <q-code-editor [formField]="routeForm.body" [language]="language()" fill placeholder="Leave empty for no body" />
+  </div>
+  <p class="text-[11px] text-muted font-mono">{{ templateHint }}</p>
+</div>

@@ -17,6 +17,7 @@ import {
   type SecretsApi,
   type UpdateState,
   type UpdatesApi,
+  type WebSessionsApi,
   type WorkspaceApi,
 } from '@quiver/core';
 import { GlobalStore, WorkspaceManager, workspaceIdFor, type WorkspaceSession } from '@quiver/core/node';
@@ -37,6 +38,8 @@ export interface HostOptions {
   revealFolder?(folder: string): Promise<void>;
   /** In-app updates; absent in development and smoke runs. */
   updates?: UpdatesApi;
+  /** Browser sessions for web sign-ins (Grafana). */
+  web?: WebSessionsApi;
 }
 
 export interface InvokeOptions {
@@ -88,6 +91,7 @@ export class Host {
         pickFolder: opts.pickFolder,
       },
       secrets: opts.secrets,
+      web: opts.web,
       emit: (event, payload) => this.emit(event, payload),
       dialogs: opts.pickFile ? { pickFile: opts.pickFile } : undefined,
     };
@@ -410,6 +414,22 @@ export class Host {
         handler: async (input, ctx) => {
           if (ctx.caller !== 'ui' || !this.opts.pickFile) throw new QuiverError('INVALID_INPUT', 'File picker is only available from the UI');
           return { path: (await this.opts.pickFile(input)) ?? null };
+        },
+      }),
+      defineCommand({
+        id: 'app.pickSavePath',
+        title: 'Pick a path to save to',
+        description: 'Opens the native save dialog and returns the chosen path, which may not exist yet.',
+        scope: 'global',
+        hidden: true,
+        input: z.object({
+          title: z.string().optional(),
+          filters: z.array(z.object({ name: z.string(), extensions: z.array(z.string()) })).optional(),
+          defaultPath: z.string().optional(),
+        }),
+        handler: async (input, ctx) => {
+          if (ctx.caller !== 'ui' || !this.opts.pickSavePath) throw new QuiverError('INVALID_INPUT', 'The save dialog is only available from the UI');
+          return { path: (await this.opts.pickSavePath(input)) ?? null };
         },
       }),
       defineCommand({

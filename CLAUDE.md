@@ -1,6 +1,6 @@
 # Working on Quiver
 
-Quiver is a per-project developer toolbelt: Electron + React in an npm workspaces monorepo. README.md is the overview; each module has its own README under `packages/modules/src/<name>/` (what it does, storage, which tools agents may call), `packages/core/README.md` covers the engine and storage, `src/renderer/README.md` the shell, and `docs/releasing.md` the release process. This file is about how changes get made.
+Quiver is a per-project developer toolbelt: Electron + Angular in an npm workspaces monorepo. README.md is the overview; each module has its own README under `packages/modules/src/<name>/` (what it does, storage, which tools agents may call), `packages/core/README.md` covers the engine and storage, `src/renderer/README.md` the shell, and `docs/releasing.md` the release process. This file is about how changes get made.
 
 ## One branch and one pull request per change
 
@@ -21,8 +21,8 @@ Every feature, fix or chore is its own branch and its own pull request against `
 - Mark commands that delete, write externally or change shared state as `mutating` (a function for per-call decisions). Agents get those refused until the user enables mutations.
 - Secrets go through `host.secrets` (encrypted per machine, under `.quiver/local`), never into committed files, and are masked for MCP callers.
 - Committed data: `.quiver/<collection>/<id>.json`, one item per file. Per-machine data: `.quiver/local/`.
-- Host to UI notifications: add the event to `HostEvents` in `packages/core/src/types.ts`; the UI refreshes with `useInvoke(..., { refreshOnEvents })`.
-- Module layout: `packages/modules/src/<name>/main.ts` (Node side) and `ui/` (React side), registered in `packages/modules/src/main.ts` and `ui.ts`, and listed in `tsconfig.node.json` / `tsconfig.web.json`.
+- Host to UI notifications: add the event to `HostEvents` in `packages/core/src/types.ts`; the UI refreshes with `invokeResource(..., { refreshOn, refreshOnState, refreshOnEvents })` or `injectHostEvent`. Every write the UI shows must be announced: `store.put`/`store.remove` and workspace state emit on their own, but `appendLog`, `writeLocal` and writes outside the store do not, so emit `store.changed` (or the module's event) after them. Otherwise the view only catches up when it is reopened.
+- Module layout: `packages/modules/src/<name>/main.ts` (Node side) and `ui/` (Angular side), registered in `packages/modules/src/main.ts` and `ui.ts`. The Node side is listed in `tsconfig.node.json`; `src/renderer/tsconfig.app.json` picks up every `ui/` folder. UI code follows `src/renderer/README.md` (standalone components, signals, Signal Forms, no experimental APIs).
 - Line endings are LF everywhere (`.gitattributes`). On Windows, git's CRLF warnings are expected.
 - No new dependency without a sentence in the pull request saying why.
 

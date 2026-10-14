@@ -1,0 +1,27 @@
+@if (reorder.drag(); as drag) {
+  <q-drop-marker axis="y" [at]="drag.marker" testId="activity-drop-marker" />
+}
+@for (mod of visible(); track mod.id) {
+  <button
+    type="button"
+    [title]="enabled(mod) ? mod.title : mod.title + ' (open a workspace first)'"
+    [attr.aria-disabled]="!enabled(mod)"
+    class="relative flex items-center justify-center size-9 shrink-0 rounded-md transition-colors"
+    [class]="
+      (mod.id === activeModule() ? 'text-fg bg-elevated' : 'text-muted hover:text-fg hover:bg-elevated/60') +
+      (enabled(mod) ? '' : ' opacity-35 cursor-default hover:bg-transparent hover:text-muted') +
+      (reorder.drag()?.id === mod.id ? ' opacity-50' : '')
+    "
+    data-testid="activity-item"
+    [attr.data-drag-id]="mod.id"
+    [attr.data-active]="mod.id === activeModule() || null"
+    (pointerdown)="reorder.pointerDown($event, mod.id)"
+    (click)="show(mod)"
+    (contextmenu)="showMenu($event, mod.id)"
+  >
+    @if (mod.id === activeModule()) {
+      <span class="absolute left-0 top-2 bottom-2 w-0.5 rounded-r bg-accent"></span>
+    }
+    <svg [qIcon]="mod.icon" strokeWidth="1.75" class="size-[18px]"></svg>
+  </button>
+}

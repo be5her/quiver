@@ -1,0 +1,21 @@
+@if (ready()) {
+  <div class="flex flex-col h-full bg-canvas text-fg" data-testid="app-ready">
+    <header qTitleBar></header>
+    <div class="flex flex-1 min-h-0">
+      <nav qActivityBar></nav>
+      <aside qSidebar></aside>
+      <main class="flex flex-col flex-1 min-w-0 min-h-0">
+        <q-tab-bar />
+        <q-tab-content />
+      </main>
+    </div>
+    <footer qStatusBar></footer>
+    <q-command-palette />
+    <q-context-menu-host />
+    <q-variable-hover-card />
+    <q-dialog-host />
+    <q-toast-host />
+  </div>
+} @else {
+  <div class="h-full bg-canvas"></div>
+}

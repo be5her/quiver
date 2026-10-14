@@ -20,15 +20,16 @@ Each feature is a module with its own README that goes into the details: what it
 
 | Module | In one line | Details |
 | ------ | ----------- | ------- |
-| API client | Collections, requests, environments with encrypted secrets, history, curl import and export, `{{variables}}` everywhere with their value on hover, GraphQL with schema-aware editing. | [packages/modules/src/api](packages/modules/src/api/README.md) |
-| Databases | MySQL, SQLite and Redis: schema tree, table browser, SQL editor with autocompletion, Redis key browser and console, saved queries and history. | [packages/modules/src/db](packages/modules/src/db/README.md) |
+| API client | Collections, requests, environments with encrypted secrets, history, curl import (bash, cmd.exe, PowerShell) and export, `{{variables}}` everywhere with their value on hover, GraphQL with schema-aware editing. | [packages/modules/src/api](packages/modules/src/api/README.md) |
+| Databases | MySQL, PostgreSQL, SQLite and Redis: schema tree, a table browser that edits rows, SQL editor with column completion, parameters, cancel and transactions, exports, Redis key browser that edits keys, saved queries, searchable history and schema search. | [packages/modules/src/db](packages/modules/src/db/README.md) |
 | Teleport | Several clusters side by side, SSO login, database tunnels that become Quiver connections, and a read-only Kubernetes query view that never touches your terminal's kubectl context. | [packages/modules/src/teleport](packages/modules/src/teleport/README.md) |
+| Logs | VictoriaLogs through Grafana: sign in once in a Quiver window with your browser account (Google SSO works), then LogsQL with click-to-filter fields, level chips, a histogram and follow mode. | [packages/modules/src/logs](packages/modules/src/logs/README.md) |
 | Mock servers | Local HTTP servers saved with the project: templated routes, forwarding to a real upstream, every request captured, so an empty server is a webhook receiver. | [packages/modules/src/mock](packages/modules/src/mock/README.md) |
 | Realtime | WebSocket and Server-Sent Events connections with a live log, a composer, saved messages and automatic reconnects. | [packages/modules/src/realtime](packages/modules/src/realtime/README.md) |
 | MCP inspector | Connect to any MCP server, browse and call its tools, resources and prompts, and watch the JSON-RPC traffic. Record what agents call on Quiver's own server. | [packages/modules/src/mcp](packages/modules/src/mcp/README.md) |
 | Env files | Every `.env` of the project in one place: masked secrets, edits that keep the file's formatting, compare with the example, profiles, history. | [packages/modules/src/env](packages/modules/src/env/README.md) |
 | Todo | A plain list for the day, per workspace and per machine. | [packages/modules/src/todo](packages/modules/src/todo/README.md) |
-| Tools | JSON format, JWT decode, base64, URL encode, hash, UUID, timestamp. | [packages/modules/src/tools](packages/modules/src/tools/README.md) |
+| Tools | JSON format, JWT decode and signature check, base64, URL encode, hash, UUID, timestamp. | [packages/modules/src/tools](packages/modules/src/tools/README.md) |
 
 Around the modules, the shell gives you a workspace model (several folders open at once, per-workspace tabs restored on return and after a restart, tabs, workspaces and the activity bar arranged by dragging), a command palette (`Ctrl+K`), light and dark themes in six brand palettes, and the MCP server below. [src/renderer/README.md](src/renderer/README.md) describes the shell, [packages/core/README.md](packages/core/README.md) the engine and where everything is stored.
 
@@ -53,11 +54,13 @@ npm install
 npm run dev
 ```
 
+Node 22.22.3 or later is needed (on Node 24, 24.15 or later), the minimum of the Angular CLI that builds the renderer.
+
 | Script                 | What it does                                                                                                      |
 | ---------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `npm test`             | Unit tests for the core engine (vitest).                                                                          |
 | `npm run typecheck`    | Type-checks the main process and the renderer separately.                                                         |
-| `npm run smoke`        | Builds, then runs a headless end-to-end check of every module against local fakes and exits. `QUIVER_SMOKE_SHOTS=<dir>` captures screenshots; `QUIVER_SMOKE_MYSQL=mysql://user:pass@host:3306/db` also exercises a live MySQL server. It uses a private MCP port, so a Quiver you have open is left alone. Each module's README says what its part of the smoke covers. |
+| `npm run smoke`        | Builds, then runs a headless end-to-end check of every module against local fakes and exits. `QUIVER_SMOKE_SHOTS=<dir>` captures screenshots; `QUIVER_SMOKE_MYSQL=mysql://user:pass@host:3306/db` or `QUIVER_SMOKE_POSTGRES=postgres://user:pass@host:5432/db` also exercises a live server. It uses a private MCP port, so a Quiver you have open is left alone. Each module's README says what its part of the smoke covers. |
 | `npm run package`      | Builds the installer for this platform into `release/` with electron-builder, without publishing.                |
 | `npm run icon`         | Renders `resources/icon.svg` to `resources/icon.png`, the source of every platform icon.                          |
 | `npm run release:plan` | Previews the next stable release from the current checkout. Needs the GitHub CLI signed in; see [docs/releasing.md](docs/releasing.md). |
@@ -65,13 +68,13 @@ npm run dev
 ## Layout
 
 ```
-packages/core      Engine: command registry, models, variable resolution, file store. No Electron or React.
-packages/ui        Host contract for the renderer: stores, IPC client, shared components.
-packages/modules   One folder per feature. `main.ts` (Node side), `ui/` (React side) and `README.md` per module.
+packages/core      Engine: command registry, models, variable resolution, file store. No Electron or UI framework.
+packages/ui        Host contract for the renderer: state services, IPC client, shared Angular components.
+packages/modules   One folder per feature. `main.ts` (Node side), `ui/` (Angular side) and `README.md` per module.
 packages/mcp       Adapts the command registry to an MCP server.
 src/main           Electron main process: host wiring, IPC, window, smoke test.
 src/preload        The only bridge between renderer and main (three functions).
-src/renderer       The shell: title bar, activity bar, sidebar, tabs, status bar, palette, settings.
+src/renderer       The Angular app and the shell: title bar, activity bar, sidebar, tabs, status bar, palette, settings.
 ```
 
 A feature is a set of commands (`defineCommand` with a zod input schema, validated on every call and turned into the MCP tool schema for free) plus UI. Commands are the only way the UI talks to the host, so anything you add is reachable from the palette, from MCP and from a future CLI without extra work. [CLAUDE.md](CLAUDE.md) walks through adding a module and the conventions.

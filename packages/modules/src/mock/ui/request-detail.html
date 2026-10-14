@@ -1,0 +1,67 @@
+@let r = req();
+<div class="flex flex-col gap-1.5 px-3 py-2 border-b border-edge shrink-0">
+  <div class="flex items-center gap-2 min-w-0 text-xs">
+    <span class="font-semibold" [class]="methodColors[r.method] ?? ''">{{ r.method }}</span>
+    <span class="font-mono truncate flex-1" [title]="r.url">{{ r.url }}</span>
+    <span class="font-semibold" [class]="statusColor(r.response.status)">{{ r.response.status }}</span>
+  </div>
+  <div class="flex items-center gap-2 text-[11px] text-muted flex-wrap">
+    <span qBadge [class]="outcomeClass[r.outcome]">{{ outcomeLabel[r.outcome] }}</span>
+    <span>{{ at() }}</span>
+    <span>{{ formatMs(r.response.durationMs) }}</span>
+    <span>{{ formatBytes(r.size) }} in</span>
+    <span>{{ formatBytes(r.response.size) }} out</span>
+    @if (r.remoteAddress) {
+      <span>from {{ r.remoteAddress }}</span>
+    }
+    <span class="flex-1"></span>
+    <button qButton size="sm" variant="ghost" [icon]="icons.Repeat" [loading]="replaying()" title="Send this request to another server" (click)="doReplay()">Replay</button>
+    <button qButton size="sm" variant="ghost" [icon]="icons.Plus" title="Add a route that answers this method and path" (click)="createRoute.emit(r)">Route</button>
+    <button qButton size="sm" variant="ghost" [icon]="icons.ExternalLink" title="Open as an editable request in the API client" (click)="openInApi()">API client</button>
+    <button qButton size="sm" variant="ghost" [icon]="icons.Copy" (click)="copyCurl()">curl</button>
+  </div>
+  @if (replay() || replayError()) {
+    <div class="text-[11px] flex items-center gap-2">
+      <span class="text-muted">Replay:</span>
+      @if (replay(); as replay) {
+        <span class="font-semibold" [class]="statusColor(replay.status)">{{ replay.status }} {{ replay.statusText }}</span>
+        <span class="text-muted">{{ formatMs(replay.durationMs) }}</span>
+        <span class="text-muted truncate">{{ replay.url }}</span>
+      }
+      @if (replayError(); as error) {
+        <span class="text-danger truncate">{{ error }}</span>
+      }
+    </div>
+  }
+</div>
+<q-segmented [(value)]="view" class="shrink-0">
+  <button qSegment="body">Body</button>
+  <button qSegment="headers">Headers ({{ r.headers.length }})</button>
+  <button qSegment="query">Query ({{ query().length }})</button>
+  <button qSegment="response">{{ replay() ? 'Response / replay' : 'Response' }}</button>
+</q-segmented>
+<div class="flex-1 min-h-0 p-2 overflow-auto">
+  @switch (view()) {
+    @case ('body') {
+      <q-mock-body-pane [body]="body()" />
+    }
+    @case ('headers') {
+      <q-header-table [headers]="r.headers" />
+    }
+    @case ('query') {
+      @if (query().length) {
+        <q-header-table [headers]="query()" />
+      } @else {
+        <p class="text-xs text-muted px-1">No query parameters.</p>
+      }
+    }
+    @case ('response') {
+      <div class="flex flex-col gap-3 h-full min-h-0">
+        <q-mock-response-block [title]="'Answered ' + r.response.status" [headers]="r.response.headers" [body]="responseBody()" />
+        @if (replayAnswer(); as answer) {
+          <q-mock-response-block [title]="answer.title" [headers]="answer.headers" [body]="answer.body" />
+        }
+      </div>
+    }
+  }
+</div>

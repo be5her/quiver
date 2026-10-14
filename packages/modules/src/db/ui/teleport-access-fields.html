@@ -1,0 +1,34 @@
+@let access = value();
+<div class="mb-2">
+  <label qLabel>Cluster</label>
+  <select qSelect data-testid="db-teleport-cluster" (change)="pickCluster($event)">
+    <option value="" [selected]="!access.proxy">Current tsh profile</option>
+    @for (c of clusters(); track c.proxy) {
+      <option [value]="c.proxy" [selected]="c.proxy === access.proxy">{{ clusterLabel(c) }} ({{ c.proxy }}){{ clusterState(c.state) }}</option>
+    }
+    @if (!knownProxy()) {
+      <option [value]="access.proxy" selected>{{ access.proxy }}</option>
+    }
+  </select>
+</div>
+<div class="grid grid-cols-2 gap-2">
+  <div>
+    <label qLabel>Teleport database</label>
+    <input qInput class="font-mono" list="teleport-db-names" [value]="access.database" placeholder="name from tsh db ls" (input)="setDatabase($event)" />
+    <datalist id="teleport-db-names">
+      @for (d of dbs.value() ?? []; track d.name) {
+        <option [value]="d.name">{{ d.protocol }} · {{ d.description || d.uri }}</option>
+      }
+    </datalist>
+  </div>
+  <div>
+    <label qLabel>Database user</label>
+    <input qInput class="font-mono" list="teleport-db-users" [value]="access.dbUser" [placeholder]="users()[0] ?? 'app'" (input)="setUser($event)" />
+    <datalist id="teleport-db-users">
+      @for (u of users(); track u) {
+        <option [value]="u"></option>
+      }
+    </datalist>
+  </div>
+</div>
+<p class="text-xs text-muted mt-1">{{ note() }}</p>

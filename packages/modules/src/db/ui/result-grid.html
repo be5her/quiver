@@ -1,0 +1,105 @@
+<div class="flex flex-1 min-h-0">
+  <div
+    #scroller
+    class="flex-1 min-h-0 min-w-0 overflow-auto font-mono text-xs select-text outline-none"
+    role="grid"
+    tabindex="0"
+    [attr.aria-rowcount]="rows().length"
+    [attr.aria-colcount]="columns().length"
+    (scroll)="scrolled()"
+  >
+    <div class="relative" [style.width.px]="totalWidth()" [style.height.px]="headerHeight + rows().length * rowHeight">
+      <div class="sticky top-0 z-10 grid bg-elevated border-b border-edge font-sans font-medium text-muted" [style.grid-template-columns]="template()" [style.height.px]="headerHeight" role="row">
+        <div class="px-2 flex items-center justify-end border-r border-edge/60">#</div>
+        @for (column of columns(); track $index) {
+          @let sorted = sort()?.column === column.name ? sort()!.direction : null;
+          <button
+            type="button"
+            role="columnheader"
+            class="px-2 flex items-center gap-1 min-w-0 border-r border-edge/60 text-left"
+            [class]="sortable() ? 'hover:text-fg cursor-pointer' : 'cursor-default'"
+            [title]="column.type ? column.name + ': ' + column.type : column.name"
+            (click)="requestSort(column.name)"
+          >
+            <span class="truncate">{{ column.name }}</span>
+            @if (sorted === 'asc') {
+              <svg [qIcon]="icons.ArrowUp" class="size-3 shrink-0"></svg>
+            } @else if (sorted === 'desc') {
+              <svg [qIcon]="icons.ArrowDown" class="size-3 shrink-0"></svg>
+            }
+          </button>
+        }
+      </div>
+      @for (row of visible(); track row.index) {
+        <div
+          role="row"
+          class="absolute left-0 grid items-center hover:bg-elevated/60"
+          [class]="rowClass(row.index)"
+          [attr.data-inserted]="isInserted(row.index) ? '' : null"
+          [attr.data-deleted]="isDeleted(row.index) ? '' : null"
+          [style.top.px]="headerHeight + row.index * rowHeight"
+          [style.height.px]="rowHeight"
+          [style.grid-template-columns]="template()"
+          [style.width.px]="totalWidth()"
+        >
+          <div class="px-2 text-right text-muted border-r border-edge/40">{{ row.index + 1 }}</div>
+          @for (column of columns(); track $index; let col = $index) {
+            @let value = valueAt(row.index, col);
+            @let editingHere = editing()?.row === row.index && editing()?.col === col;
+            <div
+              role="gridcell"
+              class="group/cell relative px-2 truncate h-full leading-[26px] border-r border-edge/40 cursor-default"
+              [class]="cellClass(row.index, col, value)"
+              [attr.data-changed]="isChanged(row.index, col) ? '' : null"
+              (click)="select(row.index, col)"
+              (dblclick)="startEdit(row.index, col)"
+              (contextmenu)="openMenu($event, row.index, col)"
+            >
+              @if (editingHere) {
+                <input
+                  qAutofocus
+                  class="absolute inset-0 w-full h-full px-2 bg-surface text-fg font-mono text-xs outline-none ring-2 ring-inset ring-accent"
+                  data-testid="db-cell-editor"
+                  [value]="draft()"
+                  (input)="draftTyped($event)"
+                  (keydown)="editorKeys($event)"
+                  (blur)="commitEdit()"
+                />
+              } @else {<!-- no whitespace around the text: the cell's textContent is the value -->{{ formatCell(value) }}@if (keyFor(col); as key) {@if (!isNull(value)) {<button
+                      type="button"
+                      class="absolute right-0.5 top-1/2 -translate-y-1/2 size-5 rounded flex items-center justify-center text-muted bg-elevated/90 opacity-0 group-hover/cell:opacity-100 hover:text-accent"
+                      [title]="'Open the ' + key.refTable + ' row this points to'"
+                      (click)="$event.stopPropagation(); followKey(row.index, key)"
+                    ><svg [qIcon]="icons.ArrowUpRight" class="size-3"></svg></button>}}}
+            </div>
+          }
+        </div>
+      }
+      @if (rows().length === 0) {
+        <div class="absolute inset-x-0 top-8 p-4 text-center text-muted font-sans">{{ emptyMessage() }}</div>
+      }
+    </div>
+  </div>
+  @if (detailOpen() && selected(); as cell) {
+    <div class="w-80 shrink-0 border-l border-edge bg-surface overflow-auto text-xs" data-testid="db-row-detail">
+      <div class="sticky top-0 bg-surface border-b border-edge px-3 h-7 flex items-center justify-between">
+        <span class="font-medium">Row {{ cell.row + 1 }}</span>
+        <button qIconButton label="Close row detail" size="sm" (click)="toggleDetail()"><svg [qIcon]="icons.PanelRight" class="size-3.5"></svg></button>
+      </div>
+      @for (field of detailRows(); track field.name) {
+        <div class="px-3 py-1.5 border-b border-edge/60" [class]="field.changed ? 'bg-warning/10' : ''">
+          <div class="flex items-baseline gap-2 text-[10px] uppercase tracking-wide text-muted"><span class="truncate">{{ field.name }}</span>@if (field.type) {<span class="ml-auto normal-case tracking-normal shrink-0">{{ field.type }}</span>}</div>
+          <pre class="font-mono whitespace-pre-wrap break-all mt-0.5" [class]="isNull(field.value) ? 'text-muted italic' : ''">{{ formatCellFull(field.value) }}</pre>
+        </div>
+      }
+    </div>
+  }
+</div>
+@if (selected(); as cell) {
+  <div class="shrink-0 border-t border-edge bg-surface flex items-start gap-2 px-2 py-1 max-h-32">
+    <span class="text-[10px] uppercase tracking-wide text-muted shrink-0 pt-1">{{ columns()[cell.col]?.name }} · row {{ cell.row + 1 }}</span>
+    <pre class="flex-1 min-w-0 overflow-auto text-xs font-mono whitespace-pre-wrap break-all max-h-28" data-testid="db-cell-detail">{{ selectedText() }}</pre>
+    <button qIconButton [label]="detailOpen() ? 'Hide row detail' : 'Show row detail'" size="sm" [class]="detailOpen() ? 'text-accent' : ''" (click)="toggleDetail()"><svg [qIcon]="icons.PanelRight" class="size-3.5"></svg></button>
+    <button qIconButton label="Copy value" size="sm" (click)="copySelected()"><svg [qIcon]="icons.Copy" class="size-3.5"></svg></button>
+  </div>
+}

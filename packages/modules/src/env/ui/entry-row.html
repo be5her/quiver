@@ -1,0 +1,55 @@
+@let e = entry();
+<td class="px-3 py-1 font-mono whitespace-nowrap">
+  <div class="flex items-center gap-1.5 min-w-0">
+    <span class="truncate" [title]="'line ' + e.line">@if (e.exported) {<span class="text-muted">export </span>}{{ e.key }}</span>
+    @if (e.shadowed) {
+      <span class="text-[10px] rounded bg-elevated px-1 text-muted shrink-0 font-sans" title="A later line defines this key again; that one wins">shadowed</span>
+    }
+    @if (e.interpolates) {
+      <span class="text-[10px] rounded bg-elevated px-1 text-muted shrink-0 font-sans" title="References another variable (dotenv-expand syntax)">$ref</span>
+    }
+    @if (display() === '') {
+      <span class="text-[10px] rounded bg-elevated px-1 text-muted shrink-0 font-sans text-warning">empty</span>
+    }
+  </div>
+</td>
+<td class="px-2 py-1 font-mono min-w-0">
+  @if (editing()) {
+    <div class="flex items-center gap-1">
+      <input
+        qInput
+        qAutofocus
+        [type]="e.secret && !shown() ? 'password' : 'text'"
+        [value]="draft()"
+        class="h-6 text-xs font-mono"
+        data-testid="env-value-input"
+        (input)="typed($event)"
+        (keydown)="keydown($event)"
+      />
+      <button qIconButton label="Save value" size="sm" [disabled]="saving()" data-testid="env-value-save" (click)="commit()"><svg [qIcon]="icons.Check" class="size-3.5"></svg></button>
+      <button qIconButton label="Cancel" size="sm" (click)="cancel()"><svg [qIcon]="icons.X" class="size-3.5"></svg></button>
+    </div>
+  } @else {
+    <div class="flex items-start gap-1.5 min-w-0">
+      <button
+        type="button"
+        class="text-left break-all whitespace-pre-wrap flex-1 min-w-0 rounded px-1 -mx-1 hover:bg-surface"
+        [class]="masked() ? 'tracking-wider text-muted' : display() === '' ? 'text-muted/60 italic' : ''"
+        title="Click to edit"
+        data-testid="env-value"
+        (click)="edit()"
+      >{{ masked() ? mask : display() === '' ? '(empty)' : display() }}</button>
+      @if (e.comment) {
+        <span class="text-muted text-[11px] truncate max-w-[40%] shrink-0" [title]="e.comment"># {{ e.comment }}</span>
+      }
+      @if (secret()) {
+        <button qIconButton [label]="shown() ? 'Hide value' : 'Show value'" size="sm" class="opacity-0 group-hover:opacity-100 shrink-0" data-testid="env-value-toggle" (click)="toggle.emit()">
+          <svg [qIcon]="shown() ? icons.EyeOff : icons.Eye" class="size-3.5"></svg>
+        </button>
+      }
+    </div>
+  }
+</td>
+<td class="px-1 py-1">
+  <button qIconButton label="Remove key" size="sm" class="opacity-0 group-hover:opacity-100" (click)="remove()"><svg [qIcon]="icons.Trash2" class="size-3.5"></svg></button>
+</td>

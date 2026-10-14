@@ -1,0 +1,46 @@
+<q-teleport-sub-header title="Kubernetes" [loading]="kubes.isLoading()" (refresh)="refresh()" />
+@if (kubes.error(); as error) {
+  <q-db-error [error]="error" compact (retry)="kubes.reload()" />
+}
+@for (kube of kubes.value() ?? []; track kube.name) {
+  @let active = isActive(kube);
+  <div
+    role="button"
+    tabindex="0"
+    class="group flex items-center gap-2 pl-4 pr-2 h-7 hover:bg-elevated cursor-pointer min-w-0"
+    [title]="title(kube)"
+    data-testid="teleport-kube"
+    (click)="actions.openKubeQuery(kube.proxy, kube.name)"
+    (keydown.enter)="actions.openKubeQuery(kube.proxy, kube.name)"
+  >
+    <svg [qIcon]="icons.Boxes" class="size-3.5 text-muted shrink-0"></svg>
+    <span class="truncate text-[13px] flex-1">{{ kube.name }}</span>
+    @if (kube.pinned) {
+      <svg [qIcon]="icons.Pin" class="size-3 text-muted shrink-0 group-hover:hidden" aria-label="pinned"></svg>
+    }
+    @if (active) {
+      <span class="flex items-center gap-0.5 text-[10px] text-muted group-hover:hidden" title="Current kubectl context in your terminal"><svg [qIcon]="icons.Terminal" class="size-3"></svg> terminal</span>
+    }
+    <span class="hidden group-hover:flex items-center gap-0.5 shrink-0">
+      <button qIconButton [label]="kube.pinned ? 'Unpin' : 'Pin'" size="sm" (click)="togglePin($event, kube)"><svg [qIcon]="kube.pinned ? icons.PinOff : icons.Pin" class="size-3.5"></svg></button>
+      @if (!active) {
+        <button
+          qIconButton
+          label="Set as kubectl context for my terminal (changes kubectl in your terminals)"
+          size="sm"
+          [disabled]="busy() === kube.name"
+          (click)="useInTerminal($event, kube)"
+        >
+          @if (busy() === kube.name) {
+            <svg qSpinner class="size-3"></svg>
+          } @else {
+            <svg [qIcon]="icons.Terminal" class="size-3.5"></svg>
+          }
+        </button>
+      }
+    </span>
+  </div>
+}
+@if (kubes.value()?.length === 0) {
+  <p class="px-4 py-1 text-xs text-muted">No Kubernetes clusters are visible to your roles here.</p>
+}

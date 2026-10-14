@@ -1,0 +1,142 @@
+@if (loadError(); as error) {
+  <div class="p-4 text-sm text-danger">{{ error }}</div>
+} @else if (summary.value(); as c) {
+  <div class="flex flex-col h-full min-h-0 w-full" data-testid="logs-connection-tab" [attr.data-session]="c.session.state">
+    <div class="flex items-center gap-2 px-3 h-10 border-b border-edge shrink-0">
+      <svg [qIcon]="icons.Logs" class="size-4 text-accent shrink-0"></svg>
+      <span class="font-medium text-sm shrink-0 truncate max-w-64">{{ c.name }}</span>
+      <span class="text-xs text-muted truncate min-w-0" [title]="c.grafanaUrl">{{ where() }}</span>
+      <span class="flex-1 min-w-4"></span>
+      <span class="size-2 rounded-full shrink-0" [class]="dot()"></span>
+      <span class="text-xs text-muted shrink-0 truncate max-w-56" data-testid="logs-tab-session" [title]="c.session.error ?? sessionText()">{{ sessionText() }}</span>
+      @if (c.session.state === 'signed-out') {
+        <button qButton size="sm" variant="primary" [icon]="icons.LogIn" [disabled]="!c.grafanaUrl" (click)="signInAndRun()">Sign in</button>
+      }
+      @if (configured()) {
+        <button qIconButton [label]="settingsOpen() ? 'Back to the logs' : 'Connection settings'" size="sm" data-testid="logs-settings" (click)="settingsOpen() ? closeSetup() : settingsOpen.set(true)">
+          <svg [qIcon]="settingsOpen() ? icons.X : icons.Settings2" class="size-3.5"></svg>
+        </button>
+      }
+    </div>
+
+    @if (showSetup()) {
+      <q-logs-setup class="flex-1 min-h-0" [conn]="c" (saved)="setupSaved($event)" (done)="closeSetup()" />
+    } @else {
+      <div class="flex items-center gap-2 px-3 pt-2 pb-1.5 shrink-0">
+        <q-code-editor class="flex-1 min-w-0 h-8 font-mono" singleLine [(value)]="query" placeholder="LogsQL, e.g. error or app:=&quot;api&quot; timeout | stats count()" data-testid="logs-query" (run)="run()" />
+        <select qSelect class="w-40 shrink-0" aria-label="Time range" data-testid="logs-range" (change)="pickRange($event)">
+          @for (r of ranges; track r.id) {
+            <option [value]="r.id" [selected]="r.id === range()">{{ r.label }}</option>
+          }
+        </select>
+        <select qSelect class="w-24 shrink-0" aria-label="Line limit" title="Most entries to fetch" (change)="pickLimit($event)">
+          @for (l of limits; track l) {
+            <option [value]="l" [selected]="l === limit()">{{ l.toLocaleString() }}</option>
+          }
+        </select>
+        <button qButton variant="primary" [icon]="icons.Play" [loading]="running()" data-testid="logs-run" (click)="run()">Run</button>
+        <button
+          qButton
+          [variant]="follow() ? 'secondary' : 'ghost'"
+          [icon]="follow() ? icons.Pause : icons.Radio"
+          [disabled]="!applied() || !!error()"
+          [title]="follow() ? 'Stop following' : 'Fetch new entries every 5 seconds'"
+          data-testid="logs-follow"
+          (click)="follow.set(!follow())"
+        >{{ follow() ? 'Following' : 'Follow' }}</button>
+      </div>
+
+      <div class="flex items-center gap-1.5 px-3 pb-2 flex-wrap shrink-0 min-h-8" data-testid="logs-filters">
+        @for (f of filters(); track f.field + '=' + f.value; let i = $index) {
+          <span class="inline-flex items-center gap-1 h-6 rounded-md border pl-2 pr-0.5 text-xs font-mono max-w-80" [class]="f.exclude ? 'border-danger/40 bg-danger/5' : 'border-accent/40 bg-accent/5'" data-testid="logs-filter-chip" [attr.data-exclude]="f.exclude">
+            <button type="button" class="truncate" [title]="(f.exclude ? 'Leaving out ' : 'Keeping only ') + f.field + ' = ' + f.value + '. Click to flip.'" (click)="toggleFilter(i)">{{ f.field }}<span class="text-muted px-0.5">{{ f.exclude ? '≠' : '=' }}</span>{{ f.value || '(empty)' }}</button>
+            <button qIconButton size="sm" label="Remove filter" class="!size-5" (click)="removeFilter(i)"><svg [qIcon]="icons.X" class="size-3"></svg></button>
+          </span>
+        }
+        <q-logs-filter-picker [scope]="applied()" (add)="addFilter($event)" />
+        @if (levelChips().length) {
+          <span class="w-px h-4 bg-edge mx-1"></span>
+          @for (l of levelChips(); track l.name) {
+            <button
+              type="button"
+              class="inline-flex items-center gap-1.5 h-6 rounded-full border px-2 text-[11px] transition-colors"
+              [class]="l.on ? 'border-fg/40 bg-elevated text-fg' : 'border-edge text-muted hover:text-fg'"
+              [title]="(l.on ? 'Show every level' : 'Only ' + l.name) + ' · ' + l.hits.toLocaleString() + ' in range'"
+              data-testid="logs-level-chip"
+              [attr.data-level]="l.name"
+              [attr.data-on]="l.on"
+              (click)="toggleLevel(l.name)"
+            ><span class="size-2 rounded-full" [class]="levelDot(l.name)"></span>{{ l.name }}<span class="text-muted">{{ l.hits.toLocaleString() }}</span></button>
+          }
+        }
+      </div>
+
+      <q-logs-histogram [hits]="hits.value() ?? null" />
+
+      <div class="flex flex-1 min-h-0">
+        <div class="flex-1 min-w-0 flex flex-col min-h-0">
+          <div class="flex items-center gap-2 px-3 h-7 border-b border-edge text-[11px] text-muted shrink-0" data-testid="logs-result-meta">
+            @if (result(); as r) {
+              <span data-testid="logs-count">{{ entries().length.toLocaleString() }} {{ entries().length === 1 ? 'entry' : 'entries' }}</span>
+              @if (r.limited && !follow()) {
+                <span class="text-warning" title="Raise the limit or narrow the query to see the rest">limit reached</span>
+              }
+              <span>· {{ r.tookMs }} ms · newest first</span>
+              @if (follow()) {
+                <span class="inline-flex items-center gap-1 text-success"><span class="size-1.5 rounded-full bg-success animate-pulse"></span>following</span>
+              }
+            } @else if (running()) {
+              <span>Running…</span>
+            }
+            <span class="flex-1"></span>
+            <code class="truncate max-w-[50%] font-mono" [title]="result()?.query ?? composed()" data-testid="logs-composed">{{ result()?.query ?? composed() }}</code>
+            <button qIconButton label="Copy the query that ran" size="sm" (click)="copyQuery()"><svg [qIcon]="icons.Copy" class="size-3"></svg></button>
+          </div>
+
+          @if (error(); as e) {
+            <div class="p-3 flex flex-col gap-2 items-start" role="alert" data-testid="logs-error">
+              <pre class="text-xs text-danger whitespace-pre-wrap break-words font-mono">{{ e.message }}</pre>
+              <div class="flex items-center gap-2">
+                @if (e.code === 'SIGN_IN_REQUIRED') {
+                  <button qButton size="sm" variant="primary" [icon]="icons.LogIn" (click)="signInAndRun()">Sign in</button>
+                }
+                <button qButton size="sm" variant="ghost" (click)="run()">Retry</button>
+              </div>
+            </div>
+          }
+
+          <div class="flex-1 min-h-0 overflow-y-auto" data-testid="logs-list">
+            @for (e of entries(); track e.id) {
+              <button
+                type="button"
+                class="w-full text-left flex items-start gap-2 px-3 py-0.5 border-b border-edge/50 hover:bg-elevated text-xs font-mono min-w-0"
+                [class.bg-elevated]="e.id === selectedId()"
+                data-testid="logs-entry"
+                [attr.data-level]="e.level"
+                (click)="pick(e.id)"
+              >
+                <span class="w-1 self-stretch rounded-full shrink-0" [class]="levelDot(e.level)"></span>
+                <span class="text-muted shrink-0 tabular-nums" [title]="e.time">{{ wide() ? dayTime(e.time) : clockTime(e.time) }}</span>
+                <span class="w-[5.25rem] shrink-0 truncate font-semibold" [class]="levelText(e.level)">{{ e.level ?? '' }}</span>
+                <span class="flex-1 min-w-0 truncate">{{ oneLine(e.msg) }}@if (!e.msg) {<span class="text-muted">{{ oneLine(fieldsLine(e)) }}</span>}</span>
+              </button>
+            }
+            @if (result() && entries().length === 0 && !error()) {
+              <p class="px-3 py-4 text-xs text-muted" data-testid="logs-empty">Nothing matches in this range. Widen the range or loosen the query.</p>
+            }
+            @if (!result() && !error() && !running()) {
+              <p class="px-3 py-4 text-xs text-muted">Run a query to see entries.</p>
+            }
+          </div>
+        </div>
+        @if (selected(); as entry) {
+          <div class="w-[30rem] max-w-[50%] border-l border-edge flex flex-col min-h-0 shrink-0">
+            <q-logs-entry-detail [entry]="entry" (filter)="addFilter($event)" (closed)="selectedId.set(null)" />
+          </div>
+        }
+      </div>
+    }
+  </div>
+} @else {
+  <div class="flex items-center justify-center h-full w-full"><svg qSpinner></svg></div>
+}

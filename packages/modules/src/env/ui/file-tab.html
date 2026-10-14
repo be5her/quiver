@@ -1,0 +1,77 @@
+@if (loadError(); as error) {
+  <div class="p-4 text-sm text-danger">{{ error }}</div>
+} @else if (content.value(); as c) {
+  <div class="flex flex-col h-full min-h-0" data-testid="env-file-tab">
+    <div class="flex items-center gap-2 px-3 py-2 border-b border-edge shrink-0 min-w-0">
+      <span class="font-mono font-medium text-sm truncate" [title]="c.path">@if (c.dir) {<span class="text-muted">{{ c.dir }}/</span>}{{ c.name }}</span>
+      @if (kindLabel(); as label) {
+        <span qBadge>{{ label }}</span>
+      }
+      @if (c.warning) {
+        <span [title]="warningTitle[c.warning]" data-testid="env-warning"><span qBadge [class]="c.warning === 'tracked' ? 'bg-danger/10 text-danger' : 'bg-warning/10 text-warning'">{{ c.warning === 'tracked' ? 'committed to git' : 'not gitignored' }}</span></span>
+      }
+      @if (c.git?.ignored && !c.warning && c.kind !== 'example') {
+        <span title="Covered by .gitignore"><span qBadge>gitignored</span></span>
+      }
+      <span class="text-xs text-muted shrink-0" data-testid="env-counts">{{ c.keys }} keys · {{ c.secrets }} secret · {{ c.empty }} empty</span>
+      <div class="flex-1 min-w-4"></div>
+      @if (switchable().length > 0) {
+        <select qSelect class="h-7 text-xs" title="Copy a profile over this .env" data-testid="env-profile-select" (change)="pickProfile($event)">
+          <option value="">Switch profile…</option>
+          @for (p of switchable(); track p.path) {
+            <option [value]="p.path">{{ p.name }}{{ p.active ? ' (active)' : '' }}</option>
+          }
+        </select>
+      }
+      <button qButton size="sm" variant="ghost" [icon]="icons.Upload" [title]="importTitle" (click)="env.importIntoEnvironment(c)">To environment</button>
+      <button qIconButton [label]="reveal() ? 'Hide secret values' : 'Reveal secret values'" size="sm" data-testid="env-reveal" [attr.aria-pressed]="reveal()" (click)="reveal.set(!reveal())">
+        <svg [qIcon]="reveal() ? icons.EyeOff : icons.Eye" class="size-3.5"></svg>
+      </button>
+      <button qIconButton label="Delete file" size="sm" (click)="env.deleteEnvFile(c)"><svg [qIcon]="icons.Trash2" class="size-3.5"></svg></button>
+      @if (view() === 'text') {
+        <button qButton size="sm" [variant]="dirty() ? 'primary' : 'ghost'" [icon]="icons.Save" [loading]="busy()" title="Ctrl+S" data-testid="env-save" (click)="saveAndSay()">Save{{ dirty() ? '*' : '' }}</button>
+      }
+    </div>
+    <q-segmented [(value)]="view" class="shrink-0 px-1">
+      <button qSegment="keys">Keys ({{ c.keys }})</button>
+      <button qSegment="text">{{ dirty() ? 'Text*' : 'Text' }}</button>
+      <button qSegment="compare">Compare</button>
+      <button qSegment="history">History</button>
+    </q-segmented>
+    <div class="flex-1 min-h-0">
+      @switch (view()) {
+        @case ('keys') {
+          <q-env-keys-view [content]="c" [reveal]="reveal()" (changed)="reload()" />
+        }
+        @case ('text') {
+          <div class="flex flex-col h-full min-h-0">
+            @if (!reveal() && c.secrets > 0) {
+              <div class="flex-1 min-h-0 relative" data-testid="env-text-masked">
+                <q-code-editor [value]="masked()" readonly fill language="text" />
+                <div class="absolute inset-x-0 bottom-0 flex items-center gap-2 px-3 py-2 border-t border-edge bg-surface text-xs text-muted">
+                  Secret values are hidden. Reveal them to edit the raw text.
+                  <button qButton size="sm" variant="secondary" [icon]="icons.Eye" (click)="reveal.set(true)">Reveal</button>
+                </div>
+              </div>
+            } @else {
+              <div class="flex-1 min-h-0" data-testid="env-text">
+                <q-code-editor [value]="draft()" (valueChange)="setDraft($event)" fill language="text" (run)="save()" />
+              </div>
+            }
+            @if (changedOnDisk()) {
+              <div class="px-3 py-1 text-[11px] text-warning border-t border-edge">The file changed on disk since you started editing.</div>
+            }
+          </div>
+        }
+        @case ('compare') {
+          <q-env-compare-view [content]="c" [files]="siblings()" (changed)="reload()" />
+        }
+        @case ('history') {
+          <q-env-history-view [content]="c" (changed)="reload()" />
+        }
+      }
+    </div>
+  </div>
+} @else {
+  <div class="flex items-center justify-center h-full"><svg qSpinner></svg></div>
+}

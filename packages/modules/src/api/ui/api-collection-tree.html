@@ -1,0 +1,29 @@
+@for (collection of children(); track collection.id) {
+  @let open = isOpen(collection);
+  <div data-testid="api-collection" [attr.data-name]="collection.name" [attr.data-open]="open ? 'true' : 'false'">
+    <div qApiRow [depth]="depth()" [label]="collection.name" bold (click)="toggle(collection)" (keydown.enter)="toggle(collection)">
+      <svg rowPrefix [qIcon]="open ? icons.ChevronDown : icons.ChevronRight" class="size-3.5 text-muted"></svg>
+      <button qIconButton label="New request here" size="sm" (click)="newRequestIn($event, collection)"><svg [qIcon]="icons.Plus" class="size-3.5"></svg></button>
+      <button qIconButton label="New sub-collection" size="sm" (click)="newCollectionIn($event, collection)"><svg [qIcon]="icons.FolderPlus" class="size-3.5"></svg></button>
+      <button qIconButton label="Rename" size="sm" (click)="renameCollection($event, collection)"><svg [qIcon]="icons.Pencil" class="size-3.5"></svg></button>
+      <button qIconButton label="Delete" size="sm" (click)="deleteCollection($event, collection)"><svg [qIcon]="icons.Trash2" class="size-3.5"></svg></button>
+    </div>
+    @if (open) {
+      <q-api-collection-tree [collections]="collections()" [requests]="requests()" [parentId]="collection.id" [depth]="depth() + 1" />
+    }
+  </div>
+}
+@for (request of items(); track request.id) {
+  @let graphql = request.body.type === 'graphql';
+  <div qApiRow [depth]="depth()" [label]="request.name" [active]="activeRequestId() === request.id" (click)="api.openRequestTab(request)" (keydown.enter)="api.openRequestTab(request)">
+    <span
+      rowPrefix
+      class="text-[10px] font-bold w-10 shrink-0 text-right"
+      [class]="graphql ? 'text-pink-600 dark:text-pink-400' : methodColors[request.method]"
+      [attr.title]="graphql ? 'GraphQL over ' + request.method : null"
+    >{{ graphql ? 'GQL' : request.method }}</span>
+    <button qIconButton label="Rename" size="sm" (click)="renameRequest($event, request)"><svg [qIcon]="icons.Pencil" class="size-3.5"></svg></button>
+    <button qIconButton label="Duplicate" size="sm" (click)="duplicateRequest($event, request)"><svg [qIcon]="icons.Copy" class="size-3.5"></svg></button>
+    <button qIconButton label="Delete" size="sm" (click)="deleteRequest($event, request)"><svg [qIcon]="icons.Trash2" class="size-3.5"></svg></button>
+  </div>
+}

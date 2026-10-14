@@ -246,6 +246,7 @@ const requestSend = defineCommand({
         await historyReady.get(w.id);
         // The log is a plain file: credentials typed into the request, and secrets the URL resolved to, are masked before they reach it.
         await w.store.appendLog(HISTORY_LOG, redactHistoryEntry(entry, secrets));
+        ctx.host.emit('store.changed', { workspaceId: w.id, collection: HISTORY_LOG });
       }
     }
   },
@@ -501,7 +502,7 @@ const historyClear = defineCommand({
   handler: async (_i, ctx) => {
     await historyReady.get(ws(ctx).id);
     await ws(ctx).store.clearLog(HISTORY_LOG);
-    ctx.host.emit('store.changed', { workspaceId: ws(ctx).id, collection: 'history' });
+    ctx.host.emit('store.changed', { workspaceId: ws(ctx).id, collection: HISTORY_LOG });
     return { cleared: true };
   },
 });
@@ -511,13 +512,19 @@ const historyClear = defineCommand({
 const importCurl = defineCommand({
   id: 'api.import.curl',
   title: 'Import from curl',
-  description: 'Parses a curl command and saves it as a request.',
+  description:
+    'Parses a curl command and saves it as a request. The command is read with the quoting rules of the shell it was copied for: bash/zsh, cmd.exe (Chrome\'s "Copy as cURL (cmd)") or PowerShell, detected from the text unless `dialect` says. A command that cannot be imported exactly is refused and nothing is saved.',
   scope: 'workspace',
-  input: z.object({ command: z.string().min(4), collectionId: z.string().nullable().optional(), name: z.string().optional() }),
-  handler: async ({ command, collectionId, name }, ctx) => {
+  input: z.object({
+    command: z.string().min(4),
+    collectionId: z.string().nullable().optional(),
+    name: z.string().optional(),
+    dialect: z.enum(['auto', 'posix', 'cmd', 'powershell']).optional().describe('Shell the command was written for; auto (the default) detects it.'),
+  }),
+  handler: async ({ command, collectionId, name, dialect }, ctx) => {
     let parsed: ApiRequest;
     try {
-      parsed = parseCurl(command);
+      parsed = parseCurl(command, { dialect });
     } catch (err) {
       throw new QuiverError('INVALID_INPUT', (err as Error).message);
     }
