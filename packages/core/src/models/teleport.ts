@@ -88,6 +88,8 @@ export interface TeleportTunnel {
   /** Teleport database name, or the command line for command tunnels. */
   target: string;
   dbUser: string | null;
+  /** The database name handed to `--db-name` (PostgreSQL needs one); null otherwise. */
+  dbName: string | null;
   port: number;
   pid: number | null;
   startedAt: string;
@@ -305,10 +307,13 @@ export function tshSettingToArgv(setting: string, exists: (file: string) => bool
 }
 
 /** Map a Teleport database protocol to a Quiver database kind, or null when Quiver has no client for it. */
-export function dbKindForProtocol(protocol: string): 'mysql' | 'redis' | null {
+export function dbKindForProtocol(protocol: string): 'mysql' | 'postgres' | 'redis' | null {
   switch (protocol.toLowerCase()) {
     case 'mysql':
       return 'mysql';
+    case 'postgres':
+    case 'postgresql':
+      return 'postgres';
     case 'redis':
       return 'redis';
     default:

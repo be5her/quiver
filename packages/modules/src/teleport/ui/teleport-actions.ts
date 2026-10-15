@@ -1,5 +1,5 @@
 import { Service, inject, untracked } from '@angular/core';
-import { clusterLabel, type DbConnectionSummary, type TeleportPin, type TeleportStatus, type TeleportTunnel } from '@quiver/core';
+import { clusterLabel, toErrorPayload, type DbConnectionSummary, type TeleportPin, type TeleportStatus, type TeleportTunnel } from '@quiver/core';
 import { AppState, Dialogs, HostBridge, TabsState, Toasts } from '@quiver/ui';
 import { DbActions, TeleportLogin } from '../../db/ui';
 import { connectionFor } from './teleport-display';
@@ -39,7 +39,17 @@ export class TeleportActions {
         dbUser = picked.trim();
       }
     }
-    const result = await this.host.invoke<ConnectResult>('teleport.db.connect', { proxy, database: name, dbUser: dbUser || undefined });
+    let result: ConnectResult;
+    try {
+      result = await this.host.invoke<ConnectResult>('teleport.db.connect', { proxy, database: name, dbUser: dbUser || undefined });
+    } catch (err) {
+      // PostgreSQL: tsh needs the database inside the server too.
+      const details = toErrorPayload(err).details as { needs?: string } | undefined;
+      if (details?.needs !== 'dbName') throw err;
+      const dbName = await this.dialogs.prompt({ title: `Database name on ${name}`, label: 'tsh proxy db passes it as --db-name', placeholder: 'postgres', confirmLabel: 'Connect' });
+      if (!dbName?.trim()) return;
+      result = await this.host.invoke<ConnectResult>('teleport.db.connect', { proxy, database: name, dbUser: dbUser || undefined, dbName: dbName.trim() });
+    }
     if (result.connection) {
       this.toasts.notify(`Tunnel to ${name} on 127.0.0.1:${result.tunnel.port}`, 'success');
       this.db.revealConnection(result.connection);

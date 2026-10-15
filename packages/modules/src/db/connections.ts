@@ -13,10 +13,12 @@ import {
   type DbConnection,
   type DbConnectionSummary,
   type HostApi,
+  type TeleportTunnel,
   type WorkspaceApi,
 } from '@quiver/core';
 import { resolveVariableMap } from '../api/env';
 import { getTeleport } from '../teleport/runtime';
+import type { TunnelSpec } from '../teleport/tunnels';
 import { createDriver, type Driver } from './drivers';
 
 export const COLLECTIONS = {
@@ -95,6 +97,20 @@ export async function resolvedConnection<T extends DbConnection>(connection: T, 
 // ---------- access: direct, Teleport tunnel, or a tunnel command ----------
 
 /**
+ * The tunnel a Teleport-backed connection needs. PostgreSQL goes through `tsh proxy db` with the
+ * database name (`--db-name`), which tsh requires; that is the connection's Database field.
+ */
+export function teleportSpec(connection: Pick<DbConnection, 'kind' | 'database' | 'access'>): Extract<TunnelSpec, { kind: 'teleport' }> {
+  const { access } = connection;
+  if (access.type !== 'teleport') throw new QuiverError('INVALID_INPUT', 'Not a Teleport connection');
+  const dbName = connection.kind === 'postgres' ? connection.database.trim() : '';
+  if (connection.kind === 'postgres' && !dbName) {
+    throw new QuiverError('INVALID_INPUT', `PostgreSQL through Teleport needs the database name: fill in the Database field of the connection (tsh proxy db passes it as --db-name).`, { needs: 'dbName' });
+  }
+  return { kind: 'teleport', proxy: access.proxy, database: access.database, dbUser: access.dbUser, dbName: dbName || null };
+}
+
+/**
  * Make sure the tunnel behind `connection.access` is running and return the connection
  * the driver should actually dial (127.0.0.1 and the tunnel port). `user` keeps the tunnel open.
  */
@@ -103,10 +119,10 @@ export async function resolveAccess(connection: DbConnection, host: HostApi, use
   if (access.type === 'direct') return connection;
   const { tunnels } = getTeleport(host);
   if (access.type === 'teleport') {
-    const tunnel = await tunnels.ensure({ kind: 'teleport', proxy: access.proxy, database: access.database, dbUser: access.dbUser }, user);
-    // Teleport's local tunnel is plaintext and already authenticated as --db-user: no TLS, MySQL still
-    // needs a handshake user, and Redis must not send AUTH at all.
-    const dialUser = connection.kind === 'mysql' ? connection.user || access.dbUser : '';
+    const tunnel = await tunnels.ensure(teleportSpec(connection), user);
+    // Teleport's local tunnel is plaintext and already authenticated as --db-user: no TLS, MySQL and
+    // PostgreSQL still need a handshake user, and Redis must not send AUTH at all.
+    const dialUser = connection.kind === 'redis' ? '' : connection.user || access.dbUser;
     return { ...connection, host: '127.0.0.1', port: tunnel.port, ssl: false, user: dialUser };
   }
   const tunnel = await tunnels.ensure({ kind: 'command', command: access.command }, user);
@@ -123,13 +139,18 @@ export async function releaseAccess(connection: Pick<DbConnection, 'access'>, ho
  * Turn a driver error on a Teleport-backed connection into TELEPORT_LOGIN_REQUIRED when the
  * real cause is a missing or expired certificate, so the UI can offer "Log in again".
  */
-export async function explainAccessError(host: HostApi, connection: Pick<DbConnection, 'access'>, err: unknown): Promise<unknown> {
+export async function explainAccessError(host: HostApi, connection: Pick<DbConnection, 'kind' | 'database' | 'access'>, err: unknown): Promise<unknown> {
   if (connection.access.type !== 'teleport') return err;
   if (err instanceof QuiverError && err.code === 'TELEPORT_LOGIN_REQUIRED') return err;
   const { session, tunnels } = getTeleport(host);
   const { proxy, database, dbUser } = connection.access;
   const cause = err instanceof Error ? err.message : String(err);
-  const tunnel = tunnels.find({ kind: 'teleport', proxy, database, dbUser });
+  let tunnel: TeleportTunnel | null = null;
+  try {
+    tunnel = tunnels.find(teleportSpec(connection));
+  } catch {
+    tunnel = null;
+  }
   if (tunnel && isLoginRequiredMessage(tunnel.output.join('\n'))) {
     return new QuiverError('TELEPORT_LOGIN_REQUIRED', `Teleport rejected the tunnel for ${database}: ${cause}`, { output: tunnel.output, proxy: tunnel.proxy });
   }

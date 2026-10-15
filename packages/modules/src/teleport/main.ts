@@ -258,15 +258,16 @@ const dbConnect = defineCommand({
   id: 'teleport.db.connect',
   title: 'Connect to a Teleport database',
   description:
-    'Starts (or reuses) a local tunnel with tsh proxy db --tunnel for the database and user, then creates or reuses a Quiver database connection bound to it in the workspace (MySQL and Redis; other protocols only get the tunnel port). Without proxy the database is looked up across logged-in clusters and must be unique. dbUser defaults to the existing connection\'s user, or the single allowed user.',
+    'Starts (or reuses) a local tunnel with tsh proxy db --tunnel for the database and user, then creates or reuses a Quiver database connection bound to it in the workspace (MySQL, PostgreSQL and Redis; other protocols only get the tunnel port). PostgreSQL needs dbName, the database inside the server, which tsh passes as --db-name. Without proxy the database is looked up across logged-in clusters and must be unique. dbUser defaults to the existing connection\'s user, or the single allowed user.',
   scope: 'global',
   input: z.object({
     proxy: ProxyInput,
     database: z.string().describe('Teleport database name (see teleport.db.list)'),
     dbUser: z.string().optional(),
+    dbName: z.string().optional().describe('PostgreSQL: the database inside the server (--db-name)'),
     name: z.string().optional().describe('Name for a newly created Quiver connection; defaults to the database name'),
   }),
-  handler: async ({ proxy: proxyArg, database, dbUser, name }, ctx): Promise<{ tunnel: TeleportTunnel; connection: DbConnectionSummary | null; database: TeleportDatabase; message: string | null }> => {
+  handler: async ({ proxy: proxyArg, database, dbUser, dbName, name }, ctx): Promise<{ tunnel: TeleportTunnel; connection: DbConnectionSummary | null; database: TeleportDatabase; message: string | null }> => {
     const { tunnels } = getTeleport(ctx.host);
     let candidates = (await listDatabases(ctx.host, proxyArg, false)).filter((d) => d.name === database);
     if (!candidates.length) candidates = (await listDatabases(ctx.host, proxyArg, true)).filter((d) => d.name === database);
@@ -292,11 +293,20 @@ const dbConnect = defineCommand({
         throw new QuiverError('INVALID_INPUT', `Pick a database user for ${database}: ${db.allowedUsers.length ? db.allowedUsers.join(', ') : 'none allowed'}`, { allowedUsers: db.allowedUsers });
     }
 
-    const tunnel = await tunnels.ensure({ kind: 'teleport', proxy, database, dbUser: user }, 'pinned');
+    const kind = dbKindForProtocol(db.protocol);
+    const connections0 = connections;
+    let name0 = dbName?.trim() ?? '';
+    if (kind === 'postgres' && !name0) {
+      const prior = findTeleportConnection(connections0, proxy, database, user);
+      name0 = prior?.database ?? '';
+    }
+    if (kind === 'postgres' && !name0) {
+      throw new QuiverError('INVALID_INPUT', `PostgreSQL needs the database name inside ${database} (tsh proxy db passes it as --db-name): pass dbName.`, { needs: 'dbName' });
+    }
+    const tunnel = await tunnels.ensure({ kind: 'teleport', proxy, database, dbUser: user, dbName: kind === 'postgres' ? name0 : null }, 'pinned');
 
     let connection: DbConnectionSummary | null = null;
     let message: string | null = null;
-    const kind = dbKindForProtocol(db.protocol);
     if (!ctx.workspace) {
       message = `Tunnel is listening on 127.0.0.1:${tunnel.port}. Open a workspace to attach a Quiver connection.`;
     } else if (!kind) {
@@ -310,7 +320,8 @@ const dbConnect = defineCommand({
           name: name?.trim() || database,
           host: '127.0.0.1',
           port: 0,
-          user: kind === 'mysql' ? user : '',
+          user: kind === 'redis' ? '' : user,
+          database: kind === 'postgres' ? name0 : '',
           access: { type: 'teleport', proxy, database, dbUser: user },
         });
         await ctx.workspace.store.put(COLLECTIONS.connections, DbConnectionSchema.parse(created));

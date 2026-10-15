@@ -3,7 +3,8 @@ import { connect, createServer } from 'node:net';
 import { QuiverError, isLoginRequiredMessage, newId, normalizeProxy, nowIso, sameProxy, tokenizeShell, type TeleportTunnel } from '@quiver/core';
 import { lineSplitter, type TshCommand } from './tsh';
 
-export type TunnelSpec = { kind: 'teleport'; proxy: string; database: string; dbUser: string } | { kind: 'command'; command: string };
+/** `dbName` is the database inside the server, which tsh needs (`--db-name`) for PostgreSQL. */
+export type TunnelSpec = { kind: 'teleport'; proxy: string; database: string; dbUser: string; dbName?: string | null } | { kind: 'command'; command: string };
 
 interface LiveTunnel {
   key: string;
@@ -31,7 +32,7 @@ export interface TunnelManagerOptions {
 const OUTPUT_TAIL = 60;
 
 export function tunnelKey(spec: TunnelSpec): string {
-  return spec.kind === 'teleport' ? `teleport:${normalizeProxy(spec.proxy)}:${spec.database}:${spec.dbUser}` : `command:${spec.command.trim()}`;
+  return spec.kind === 'teleport' ? `teleport:${normalizeProxy(spec.proxy)}:${spec.database}:${spec.dbUser}:${spec.dbName ?? ''}` : `command:${spec.command.trim()}`;
 }
 
 /**
@@ -140,7 +141,7 @@ export class TunnelManager {
     if (spec.kind === 'teleport') {
       proxy = await this.opts.requireSession(spec.proxy);
       const tsh = await this.opts.tsh();
-      argv = [...tsh.argv, 'proxy', 'db', spec.database, '--tunnel', `--db-user=${spec.dbUser}`, `--port=${port}`, `--proxy=${proxy}`];
+      argv = [...tsh.argv, 'proxy', 'db', spec.database, '--tunnel', `--db-user=${spec.dbUser}`, ...(spec.dbName ? [`--db-name=${spec.dbName}`] : []), `--port=${port}`, `--proxy=${proxy}`];
     } else {
       argv = tokenizeShell(spec.command.replaceAll('{port}', String(port)));
       if (!argv.length) throw new QuiverError('INVALID_INPUT', 'Tunnel command is empty');
@@ -162,6 +163,7 @@ export class TunnelManager {
         proxy,
         target: spec.kind === 'teleport' ? spec.database : spec.command,
         dbUser: spec.kind === 'teleport' ? spec.dbUser : null,
+        dbName: spec.kind === 'teleport' ? (spec.dbName ?? null) : null,
         port,
         pid: child.pid ?? null,
         startedAt: nowIso(),

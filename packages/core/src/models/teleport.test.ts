@@ -170,7 +170,8 @@ describe('helpers', () => {
 
   it('maps protocols and formats time left', () => {
     expect(dbKindForProtocol('MySQL')).toBe('mysql');
-    expect(dbKindForProtocol('postgres')).toBeNull();
+    expect(dbKindForProtocol('postgres')).toBe('postgres');
+    expect(dbKindForProtocol('mongodb')).toBeNull();
     expect(formatRemaining('2026-09-25T21:42:00Z', now)).toBe('11h 42m');
     expect(formatRemaining('2026-09-25T10:09:30Z', now)).toBe('9m');
     expect(formatRemaining('2026-09-27T12:00:00Z', now)).toBe('2d 2h');
