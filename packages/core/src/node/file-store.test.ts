@@ -50,6 +50,17 @@ describe('FileStore external changes', () => {
     expect(changes).toEqual(['requests']);
   });
 
+  it('the watcher does not report a first save into a new collection twice, however fast it fires', async () => {
+    const { store, changes } = await tempStore();
+    // A 1 ms debounce makes the watcher's reload run while the save is still landing (what a slow
+    // macOS runner did with 50 ms): before the item is cached, so it used to look like an outside edit.
+    store.watch(1);
+    const names = Array.from({ length: 20 }, (_, i) => `things${i}`);
+    for (const name of names) await store.put(name, { id: 'a', name });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(changes).toEqual(names);
+  });
+
   it('the watcher reloads on external edits and deletions but stays quiet for its own writes', async () => {
     const { store, root, changes } = await tempStore();
     store.watch(50);
