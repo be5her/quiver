@@ -123,6 +123,14 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     if (ok) passes++;
     else failures.push(name);
   };
+  /** A PostgreSQL connection through Teleport saved without its Database field: opening it must explain itself. */
+  const db_connection_save_postgres_without_database = async (workspaceId: string) => {
+    const saved = await host.invoke('db.connection.save', { connection: { kind: 'postgres', name: 'pg no name', access: { type: 'teleport', proxy: '', database: 'analytics-pg', dbUser: 'readonly' } } }, { caller: 'ui', workspaceId });
+    if (!saved.ok) return saved;
+    const test = await host.invoke('db.connection.test', { id: (saved.result as { id: string }).id }, { caller: 'ui', workspaceId });
+    await host.invoke('db.connection.delete', { id: (saved.result as { id: string }).id }, { caller: 'ui', workspaceId });
+    return test;
+  };
   const run = async <T>(id: string, input: unknown, workspaceId: string | null): Promise<T> => {
     const out = await host.invoke(id, input, { caller: 'ui', workspaceId });
     if (!out.ok) throw new Error(`${id}: ${out.error.code} ${out.error.message}`);
@@ -970,8 +978,23 @@ export async function runSmokeTest(host: Host, openWindow: () => BrowserWindow):
     );
     const viaSecond = await run<DbQueryResult[]>('db.query.run', { connectionId: onSecond.connection!.id, query: 'PING', record: false }, ws.id);
     check('teleport: query through the second cluster tunnel', viaSecond[0].value === 'PONG');
-    const pgOnly = await run<ConnectOut>('teleport.db.connect', { database: 'analytics-pg', dbUser: 'readonly' }, ws.id);
-    check('teleport: unsupported protocol still gets a tunnel', pgOnly.connection === null && pgOnly.tunnel.port > 0 && /no postgres client/.test(pgOnly.message ?? ''), pgOnly.message);
+    const pgNoName = await host.invoke('teleport.db.connect', { database: 'analytics-pg', dbUser: 'readonly' }, { caller: 'ui', workspaceId: ws.id });
+    const pgOnly = await run<ConnectOut>('teleport.db.connect', { database: 'analytics-pg', dbUser: 'readonly', dbName: 'analytics' }, ws.id);
+    check(
+      'teleport: postgres asks for the database name, then tunnels with --db-name and gets a connection',
+      !pgNoName.ok &&
+        pgNoName.error.code === 'INVALID_INPUT' &&
+        (pgNoName.error.details as { needs?: string })?.needs === 'dbName' &&
+        pgOnly.tunnel.port > 0 &&
+        pgOnly.tunnel.dbName === 'analytics' &&
+        pgOnly.connection?.kind === 'postgres' &&
+        pgOnly.connection.database === 'analytics' &&
+        pgOnly.connection.user === 'readonly',
+      { noName: pgNoName.ok ? 'ok?' : pgNoName.error.message, tunnel: pgOnly.tunnel, connection: pgOnly.connection },
+    );
+    const pgKindless = await db_connection_save_postgres_without_database(ws.id);
+    check('teleport: a postgres connection without a database name says what to fill in', !pgKindless.ok && pgKindless.error.code === 'INVALID_INPUT' && /Database field/.test(pgKindless.error.message), pgKindless.ok ? 'ok?' : pgKindless.error.message);
+    if (pgOnly.connection) await run('db.connection.delete', { id: pgOnly.connection.id }, ws.id);
     const ambiguous = await host.invoke('teleport.db.connect', { database: 'orders-mysql' }, { caller: 'ui', workspaceId: ws.id });
     check('teleport: ambiguous db user is refused with the allowed list', !ambiguous.ok && ambiguous.error.code === 'INVALID_INPUT' && /app, readonly/.test(ambiguous.error.message), ambiguous.ok ? 'ok?' : ambiguous.error.message);
     const status1 = await run<TeleportStatus>('teleport.status', {}, null);

@@ -418,6 +418,7 @@ switch (args[0]) {
     const entry = dbsFor(sel.proxy).find((d) => d.metadata.name === db);
     if (!entry || db === 'broken-db') { err('ERROR: database "' + db + '" not found, use tsh db ls'); process.exit(1); }
     if (!port || !user || !args.includes('--tunnel')) { err('ERROR: --tunnel, --port and --db-user are required'); process.exit(1); }
+    if (entry.spec.protocol === 'postgres' && !flag('db-name')) { err('ERROR: please provide the database name using the --db-name flag, allowed database names for ' + db + ': [*]'); process.exit(1); }
     forward(port, REDIS_PORT, () => out('Started authenticated tunnel for the ' + entry.spec.protocol + ' database "' + db + '" in cluster "' + sel.p.cluster + '" on 127.0.0.1:' + port + '.'));
     break;
   }

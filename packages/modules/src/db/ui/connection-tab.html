@@ -72,7 +72,7 @@
               <label qLabel>{{ conn.kind === 'postgres' ? 'Database' : 'Default database (optional)' }}</label>
               <q-variable-input [formField]="connectionForm.database" inputClass="font-mono" [placeholder]="conn.kind === 'postgres' ? 'postgres' : 'app'" />
               @if (conn.kind === 'postgres') {
-                <p class="text-xs text-muted mt-1">The tree lists this database's schemas; queries run with <code class="font-mono">public</code> first on the search path.</p>
+                <p class="text-xs text-muted mt-1">The tree lists this database's schemas; queries run with <code class="font-mono">public</code> first on the search path.@if (conn.access.type === 'teleport') {<span> Required through Teleport: tsh passes it as <code class="font-mono">--db-name</code>.</span>}</p>
               }
             </div>
           }
