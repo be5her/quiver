@@ -20,8 +20,15 @@ export async function startFixtures() {
     let body = '';
     req.on('data', (c) => (body += c));
     req.on('end', () => {
-      res.writeHead(200, { 'content-type': 'application/json', 'x-echo': 'yes' });
-      res.end(JSON.stringify({ method: req.method, url: req.url, headers: req.headers, body }));
+      // `/slow?ms=N` answers after N milliseconds, for timeouts and cancelling a send.
+      const slow = /^\/slow\b.*[?&]ms=(\d+)/.exec(req.url ?? '');
+      const answer = () => {
+        if (res.destroyed) return;
+        res.writeHead(200, { 'content-type': 'application/json', 'x-echo': 'yes' });
+        res.end(JSON.stringify({ method: req.method, url: req.url, headers: req.headers, body }));
+      };
+      if (slow) setTimeout(answer, Number(slow[1]));
+      else answer();
     });
   });
   await new Promise<void>((r) => echo.listen(0, '127.0.0.1', () => r()));

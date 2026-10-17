@@ -59,6 +59,11 @@ export class ApiCollectionTree {
     this.act(event, this.api.deleteCollection(collection));
   }
 
+  /** The first line of the request's description, as the row's tooltip. */
+  protected summary(request: ApiRequest): string | null {
+    return request.description?.trim().split('\n')[0] || null;
+  }
+
   protected renameRequest(event: MouseEvent, request: ApiRequest): void {
     this.act(event, this.api.renameRequest(request));
   }

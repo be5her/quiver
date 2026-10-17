@@ -1,0 +1,40 @@
+@let current = effective();
+<div class="grid grid-cols-[minmax(9rem,auto)_1fr] items-center gap-x-4 gap-y-2.5 max-w-xl">
+  <label for="api-option-timeout" class="text-xs font-medium text-muted">Timeout (seconds)</label>
+  <div class="flex items-center gap-2">
+    <div class="w-28 shrink-0"><input qInput id="api-option-timeout" data-testid="api-option-timeout" type="number" min="0.001" step="any" [value]="seconds()" [placeholder]="defaultSeconds + ''" (change)="setNumber($event, 'timeoutMs', 1000)" /></div>
+    @if (isSet('timeoutMs')) {
+      <button qButton size="sm" variant="ghost" class="whitespace-nowrap" [icon]="icons.RotateCcw" (click)="set('timeoutMs', undefined)">Default ({{ defaultSeconds }})</button>
+    } @else {
+      <span class="text-xs text-muted">default</span>
+    }
+  </div>
+
+  <label for="api-option-redirects" class="text-xs font-medium text-muted">Follow redirects</label>
+  <div class="flex items-center gap-2">
+    <input qCheckbox id="api-option-redirects" data-testid="api-option-redirects" [checked]="current.followRedirects" (change)="set('followRedirects', checked($event))" />
+    <span class="text-xs text-muted">{{ isSet('followRedirects') ? 'changed from the default' : 'default' }}</span>
+  </div>
+
+  <label for="api-option-insecure" class="text-xs font-medium text-muted">Accept invalid certificates</label>
+  <div class="flex items-center gap-2">
+    <input qCheckbox id="api-option-insecure" data-testid="api-option-insecure" [checked]="current.insecure" (change)="set('insecure', checked($event))" />
+    <span class="text-xs" [class]="current.insecure ? 'text-warning' : 'text-muted'">{{ current.insecure ? 'self-signed and expired certificates are accepted' : 'default' }}</span>
+  </div>
+
+  <label for="api-option-body" class="text-xs font-medium text-muted">Max response body (MB)</label>
+  <div class="flex items-center gap-2">
+    <div class="w-28 shrink-0"><input qInput id="api-option-body" data-testid="api-option-body" type="number" min="0.01" step="any" [value]="megabytes()" [placeholder]="defaultMegabytes + ''" (change)="setNumber($event, 'maxBodyBytes', 1048576)" /></div>
+    @if (isSet('maxBodyBytes')) {
+      <button qButton size="sm" variant="ghost" class="whitespace-nowrap" [icon]="icons.RotateCcw" (click)="set('maxBodyBytes', undefined)">Default ({{ defaultMegabytes }})</button>
+    } @else {
+      <span class="text-xs text-muted">default; a longer body is cut and marked truncated</span>
+    }
+  </div>
+</div>
+<div class="flex items-center gap-3 mt-4">
+  <p class="text-xs text-muted">Only settings that differ from the defaults are saved with the request.</p>
+  @if (value()) {
+    <button qButton size="sm" variant="ghost" [icon]="icons.RotateCcw" data-testid="api-options-reset" (click)="resetAll()">Reset all</button>
+  }
+</div>

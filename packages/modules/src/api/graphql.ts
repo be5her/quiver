@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { QuiverError, SendOptionsSchema, type ApiRequest, type GraphqlSchemaDoc, type WorkspaceApi } from '@quiver/core';
+import { QuiverError, effectiveSendOptions, type ApiRequest, type GraphqlSchemaDoc, type WorkspaceApi } from '@quiver/core';
 import { buildClientSchema, getIntrospectionQuery, printSchema, type IntrospectionQuery } from 'graphql';
 import { prepareRequest, sendPrepared } from './http';
 
@@ -29,7 +29,8 @@ export async function introspect(ws: WorkspaceApi, resolved: ApiRequest): Promis
   };
   const prepared = prepareRequest(probe);
   const endpoint = graphqlEndpoint(prepared.url);
-  const response = await sendPrepared(prepared, SendOptionsSchema.parse({ maxBodyBytes: 64 * 1024 * 1024 }));
+  // The request's own timeout and TLS choice apply; schemas get a larger body cap than responses.
+  const response = await sendPrepared(prepared, effectiveSendOptions(resolved.options, { maxBodyBytes: 64 * 1024 * 1024 }));
   if (response.bodyEncoding !== 'utf8') {
     throw new QuiverError('REQUEST_FAILED', `Introspection returned a binary body (${response.contentType ?? 'unknown content type'})`, { status: response.status });
   }

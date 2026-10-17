@@ -19,7 +19,17 @@
         }
       </select>
       <q-variable-input [formField]="requestForm.url" [placeholder]="urlPlaceholder" inputClass="font-mono" [autofocus]="!current.url" />
-      <button qButton variant="primary" [icon]="icons.Send" [loading]="sending()" title="Ctrl+Enter" (click)="send()">Send</button>
+      <select qSelect class="w-36 shrink-0 text-xs" [title]="envPickerTitle" data-testid="api-env-picker" (change)="setEnvironment($event)">
+        <option value="" [selected]="!activeEnvironmentId()">No environment</option>
+        @for (env of environments.value() ?? []; track env.id) {
+          <option [value]="env.id" [selected]="env.id === activeEnvironmentId()">{{ env.name }}</option>
+        }
+      </select>
+      @if (sending()) {
+        <button qButton variant="danger" [icon]="icons.Square" title="Stop (Esc)" data-testid="api-stop" (click)="cancel()">Stop</button>
+      } @else {
+        <button qButton variant="primary" [icon]="icons.Send" title="Ctrl+Enter" (click)="send()">Send</button>
+      }
     </div>
 
     <div class="flex flex-col flex-1 min-h-0">
@@ -29,6 +39,8 @@
           <button qSegment="headers"><span class="flex items-center gap-1">Headers@if (counts().headers) {<span class="text-[10px] rounded-full bg-elevated px-1.5 text-muted">{{ counts().headers }}</span>}</span></button>
           <button qSegment="body"><span class="flex items-center gap-1">Body@if (counts().body) {<span class="text-[10px] rounded-full bg-elevated px-1.5 text-muted">{{ counts().body }}</span>}</span></button>
           <button qSegment="auth"><span class="flex items-center gap-1">Auth@if (counts().auth) {<span class="text-[10px] rounded-full bg-elevated px-1.5 text-muted">{{ counts().auth }}</span>}</span></button>
+          <button qSegment="settings" data-testid="api-section-settings"><span class="flex items-center gap-1">Settings@if (counts().settings) {<span class="text-[10px] rounded-full bg-elevated px-1.5 text-muted">{{ counts().settings }}</span>}</span></button>
+          <button qSegment="notes" data-testid="api-section-notes"><span class="flex items-center gap-1">Notes@if (counts().notes) {<span class="size-1.5 rounded-full bg-accent" title="Has a description"></span>}</span></button>
         </q-segmented>
         <div class="flex-1 min-h-0 overflow-auto p-2">
           @switch (section()) {
@@ -43,6 +55,12 @@
             }
             @case ('auth') {
               <q-auth-editor [formField]="requestForm.auth" />
+            }
+            @case ('settings') {
+              <q-request-settings [value]="current.options" (valueChange)="setOptions($event)" />
+            }
+            @case ('notes') {
+              <q-code-editor [value]="current.description ?? ''" (valueChange)="setDescription($event)" language="text" wrap [placeholder]="notesPlaceholder" />
             }
           }
         </div>

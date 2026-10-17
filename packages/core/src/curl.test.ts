@@ -237,6 +237,12 @@ describe('parseCurl: curl options', () => {
 });
 
 describe('toCurl', () => {
+  it('renders how the request is sent: -L, -k and --max-time', () => {
+    const out = toCurl({ method: 'GET', url: 'https://x.test/', headers: [], body: null, options: { followRedirects: true, insecure: true, timeoutMs: 1500 } });
+    expect(out.split(' \\\n  ')[1]).toBe('-L -k --max-time 1.5');
+    expect(toCurl({ method: 'GET', url: 'https://x.test/', headers: [], body: null, options: { followRedirects: false } })).toBe("curl -X GET 'https://x.test/'");
+  });
+
   it('quotes safely', () => {
     const out = toCurl({ method: 'POST', url: "https://x.test/it's", headers: [['A', 'b']], body: '{"q":1}' });
     expect(out).toBe(`curl -X POST 'https://x.test/it'\\''s' \\\n  -H 'A: b' \\\n  --data-raw '{"q":1}'`);

@@ -1,0 +1,165 @@
+# API client: the client update
+
+Fourteen pull requests, each its own branch off a fresh `main`, in the order below (later ones build on earlier ones; the dependencies are named). This file is the checklist: tick items as they land so a later session can pick up where the last one stopped. Design decisions are recorded next to each item so they are not re-litigated.
+
+Written on 2026-10-17 against `main` at `4b3bbc6`, after the smoke was split into parts (pull request #21): checks live in `src/main/smoke/parts/<module>.ts` and run per part. Nothing in the API module itself has changed since the plan was drawn up.
+
+What exists today (`packages/modules/src/api`): collections and requests (`params`, `headers`, `body`, `auth` with none/bearer/basic/apikey), environments with encrypted secrets, `{{variables}}` with hover cards, a masked history, curl import and export, GraphQL with introspection. `SendOptionsSchema` (timeout, redirects, insecure TLS, body cap) exists but has no UI. There is no cancel, no inheritance from collections, no scripting, no drag and drop, no file bodies.
+
+## Ground rules
+
+- Every feature is host commands (`defineCommand`, zod input) plus UI. Agents get the commands through MCP; writes outside the workspace store are `mutating`. Anything that can carry a credential (tokens, cookies, captured values) is masked for `ctx.caller === 'mcp'` the way `sent` and the history already are.
+- Pure logic goes in `packages/core` with vitest tests: inheritance merging, JSON path, Set-Cookie parsing, the cookie jar, code generation, the importers, check evaluation, redirect semantics.
+- Model changes are additive with defaults (`.optional()` or `.default()`), so requests committed by older versions still parse, and the files `.quiver/requests/*.json` stay diffable.
+- The host announces every write the UI shows: `store.put` emits on its own; after `writeLocal` and `appendLog` emit `store.changed` with the document's name (`history`, `cookies`, `runs`), and `api.changed` for in-memory progress (runs, streams).
+- Smoke checks go in the API part, `src/main/smoke/parts/api.ts` (`src/main/smoke/README.md` has the contract): host and agent checks in `run`, UI checks and screenshots in the `ui` hook, which only runs with `--shots`. The runner already provides the workspace, the `local` environment (`{{baseUrl}}` is the echo server, `{{token}}` the secret) and an MCP client; the local servers live in `src/main/smoke/fixtures.ts` (echo, GraphQL, SSE and WebSocket) and fakes with more to them in `src/main/smoke/fake-*.ts`. A part must pass on its own, so the API part creates whatever else it needs. While iterating run `npm run smoke -- api` (with `--shots` for UI work, screenshots in `out/smoke-shots`); before committing run the whole `npm run smoke`, `npm run typecheck` and `npm test`. A shared piece added to `packages/ui` (the drag helper, the searchable editor) gets its check in the `shell` part if the shell uses it.
+- Docs per pull request: `packages/modules/src/api/README.md` (what, how, Agents, Verified by), the README table row when the one-line summary changes, `src/renderer/README.md` when `packages/ui` gains a shared piece. Label `enhancement`; a new dependency gets a sentence in the pull request.
+
+Sizes: S is a day or less, M a few days, L a week or more.
+
+## PR 1: request tab basics (`feat/api-request-tab`, M)
+
+- [x] `ApiRequestSchema` gains `options: RequestOptionsSchema.optional()`. Only overrides are stored (`requestOptionOverrides` drops values equal to the defaults), so a committed request documents "this endpoint needs 120 s" and nothing else. `api.request.send` merges with `effectiveSendOptions`: schema defaults, then `request.options`, then the call's `options`. GraphQL introspection uses the request's options too.
+- [x] A fifth segment in the request tab, `Settings`: timeout (seconds), follow redirects, accept invalid certificates, max body size (MB), each showing the value in effect and the default, with a badge counting the overrides and Reset all. A segment rather than a popover: `packages/ui` has no popover primitive and the segments are where request-level things live.
+- [x] `api.export.curl` says what the request does: `-L` when redirects are followed (the default, unlike curl's), `-k` for insecure, `--max-time` only when the request sets a timeout.
+- [x] Cancel: `api.request.send` input gains `sendId`; the module keeps a map of AbortControllers by workspace and send id; `sendPrepared` takes a signal and combines it with the timeout. New command `api.request.cancel { sendId }` (not mutating, agents may call it). A cancelled send fails with `REQUEST_CANCELLED` and the history entry says `Cancelled` (`STOP` in the sidebar).
+- [x] UI: the Send button becomes `Stop` (danger variant) while sending; Escape in the tab cancels too. The request tab generates a `sendId` per send.
+- [x] Environment picker: a `select` before Send listing the environments and `No environment`, bound to `api.environment.active` and `api.environment.setActive`. It switches the workspace's active environment (the same thing the sidebar tick does) rather than a per-tab override, so hover cards, database parameters and the status bar agree.
+- [x] `Notes` segment (named Notes, not Docs: the GraphQL editor already has a Docs button for the schema explorer): a plain-text editor for the existing `description` field (CodeMirror `text`, wrapping), with a dot on the segment when there is one. No markdown rendering and no new dependency; agents already get `description` from `api.request.get`. The sidebar row's tooltip is its first line.
+- [x] Sidebar history rows show a compact age (`shortRelativeTime` in `packages/core/src/time.ts`: `now`, `45s`, `3m`, `2h`), moved on every half minute; the tooltip keeps the full time, the URL and the error.
+- [x] Unit tests: option merging and overrides (including that `RequestOptionsSchema` fills in no defaults), the curl flags, the short age.
+- [x] Smoke (`parts/api.ts`): the echo server in `fixtures.ts` gains a `/slow?ms=` route; a request's own timeout and one given with the call, only overrides written to the file, the curl flags, cancel mid-flight as the UI and as an agent recording `Cancelled`; in the `ui` hook the Settings segment (override, badge, Reset all leaves the request unmodified), the Notes segment, the picker switching the active environment, Stop cancelling a slow send, history ages.
+
+## PR 2: response pane (`feat/api-response-pane`, M)
+
+- [ ] Search in the body: `CodeEditor` gains `searchable` (the `@codemirror/search` keymap, already a dependency) and the response editor turns it on; Ctrl+F while the pane has focus.
+- [ ] Binary previews: `image/*` renders an `<img>` from a data URL; `application/pdf` an `<iframe>` from a blob URL; everything else keeps the size and base64 summary. The preview is behind the existing `Pretty`/`Raw` toggle (`Preview`/`Raw`).
+- [ ] Save body to a file: `api.response.save { path, body, bodyEncoding }` writes what the UI holds, `mutating` (a write outside the store); the UI picks the path with `app.pickSavePath`, suggesting a name from the URL and the content type.
+- [ ] JSON filter: `jsonPath(value, path)` in `packages/core/src/json-path.ts`, the subset that covers daily use: `$`, `.key`, `['key']`, `[0]`, `[*]`, `..key`, negative indexes. No filter expressions, no new dependency; the README says so. A filter input above the body applies it to the parsed JSON and shows the result (or the error) without touching the raw body.
+- [ ] Redirect chain: `sendPrepared` follows redirects itself (`redirect: 'manual'`, up to 20 hops) so the hops are known: `ApiResponse.redirects: { url, status, location, durationMs }[]`. Method semantics as browsers do them: 301, 302 and 303 turn a POST into a GET and drop the body; 307 and 308 keep both; `Authorization` is dropped when the host changes. Pure `nextRequest(hop, response)` in core with tests.
+- [ ] Cookies view: `ApiResponse.setCookies: string[]` from `headers.getSetCookie()`; `parseSetCookie(header)` in `packages/core/src/cookies.ts` (name, value, Domain, Path, Expires, Max-Age, Secure, HttpOnly, SameSite) with tests. The pane gets a `Cookies (n)` view.
+- [ ] Timing: `timings` gains `download` (total minus time to first byte) and per-hop times from the redirect loop, shown as a small bar under the status line. DNS, connect and TLS split are deferred (undici does not expose them per request without diagnostics channels).
+- [ ] `Headers` view groups the response headers from the final hop; each redirect hop is expandable with its own headers.
+- [ ] Smoke: redirect chain from the echo server (302 to GET, 307 keeping POST, cross-host drops `Authorization`), `setCookies` parsed, `api.response.save` writes the file and refuses a path outside the workspace for agents, JSON path cases in unit tests, the image preview in a screenshot.
+
+## PR 3: sidebar and tree (`feat/api-tree`, M)
+
+- [ ] Move `drag-reorder.ts` and `drop-marker.ts` from `src/renderer/src/app` into `packages/ui/src/drag/` and add `dragInto` beside them: pointer-event based (as the shell's reordering is), with drop targets that highlight while hovered. Shell README updated.
+- [ ] Drag a request onto a collection (or the root) calls `api.request.move`; drag a collection into another calls the new `api.collection.move { id, parentId }`, which refuses cycles and a move into itself. No manual ordering yet: items stay alphabetical so committed files do not churn when someone reorders (PR 11 adds an explicit `order` for runs).
+- [ ] Context menu (the shared `ContextMenu` service) on request rows: Open, Rename, Duplicate, Copy as curl, Move to… (a prompt with a choice of collections), Delete; on collection rows: New request, New GraphQL request, New sub-collection, Import here, Settings (PR 4), Rename, Delete. The four hover icons become one `…` button that opens the same menu, as the Databases sidebar does.
+- [ ] A filter input at the top of the sidebar: matches request name, method and URL, keeps the collections that contain a match and expands them while the filter is on. Pure `matchesRequest(request, query)` in core.
+- [ ] History: the same filter input also filters history entries (method, URL, status); the section keeps the last 30 and gets `Show all`, opening a `api.history` tab: search, method and status filters, time, duration, open as draft, `Save as request` (creates a request from the entry, masks and all).
+- [ ] Smoke (UI): drop a request on a collection and read `collectionId` back, the context menu opens and renames, the filter hides non-matching rows; screenshots of the menu and the history tab.
+
+## PR 4: collection defaults and inheritance (`feat/api-collection-defaults`, M)
+
+- [ ] `ApiCollectionSchema` gains `baseUrl: z.string().default('')`, `headers: z.array(KeyValueSchema).default([])`, `auth: RequestAuthSchema.default({ type: 'inherit' })`, `description: z.string().optional()`. `RequestAuthSchema` gains `{ type: 'inherit' }`.
+- [ ] `effectiveRequest(request, collectionsById)` in `packages/core/src/models/api-inherit.ts` with tests: the auth is the request's unless it is `inherit`, then the nearest ancestor with a non-inherit auth, else `none`; headers are the ancestors' from the root down then the request's, later wins per name (case-insensitive), disabled rows removed; a request URL starting with `/` is prefixed with the nearest non-empty `baseUrl`. Variables are resolved after this, so a collection can say `{{baseUrl}}`.
+- [ ] `resolveRequest` in `main.ts` applies `effectiveRequest` before variables; `api.export.curl`, `api.graphql.introspect` and the masking (`knownSecrets`) see the effective request. New requests created inside a collection default to `auth: inherit`; at the root `inherit` behaves as `none`.
+- [ ] Commands: `api.collection.get { id }`, `api.collection.save { collection }` (rename stays for compatibility and the palette); `api.request.get` gains `effective: z.boolean().optional()`, returning `{ ...request, effective: ApiRequest }` so agents see what will be sent.
+- [ ] UI: a `api.collection` tab (Name, Base URL, Headers, Auth, Description) opened from the tree's context menu and from a gear on the row. The request tab shows inherited headers as read-only grey rows above its own, labelled with the collection they come from, and the Auth editor's type list gains `Inherit from collection` with a line saying what that resolves to (`Bearer from Payments`).
+- [ ] Smoke: a request under two nested collections sends the merged headers, the base URL prefix, the inherited bearer, an override on the request winning; `effective: true` reports the same for an agent with the token masked; screenshot of the collection tab and of the greyed inherited rows.
+
+## PR 5: response capture (chaining) (`feat/api-capture`, M, needs PR 2)
+
+- [ ] `ApiRequestSchema.capture: z.array(CaptureSchema).default([])`, `Capture = { id, enabled, variable, from: 'body' | 'header' | 'cookie' | 'status', path, secret: boolean }`. `path` is a JSON path for the body, a header name, a cookie name; empty for status.
+- [ ] After a successful send, `api.request.send` applies the captures to the active (or given) environment through `defineVariable` (an existing secret stays secret). Without an environment the captures are reported as failed and the send still succeeds. `ApiResponse.captured: { variable, value, ok, error }[]`, values of secret captures masked for agents. Writing to the active environment is what `api.variables.set` already allows agents, so no new gate.
+- [ ] `extractCapture(capture, response)` in core with tests (JSON path through `jsonPath`, header lookup case-insensitive, cookie through `parseSetCookie`, non-string JSON values serialised).
+- [ ] UI: a `Capture` segment: variable, from, path, secret; the response pane shows a `Captured` strip (variable, value masked when secret, or the error). The hover cards pick the new value up on their own because `saveEnvironment` goes through `store.put`.
+- [ ] Smoke: a login call captures `token` from the body and `session` from a Set-Cookie into the environment; the next request resolves `{{token}}`; an agent's response masks the secret capture.
+
+## PR 6: files and binary bodies (`feat/api-files`, M)
+
+- [ ] `FormFieldSchema = KeyValueSchema.extend({ kind: z.enum(['text', 'file']).default('text'), fileName: z.string().optional(), contentType: z.string().optional() })`; the `form` body uses it. New body type `{ type: 'binary', path, contentType? }`. A file field's `value` is its path: relative to the workspace when the file is inside it (so the committed request works for teammates), absolute otherwise.
+- [ ] `prepareRequest` becomes async and streams: multipart parts are an async generator of Buffers (text parts, then `fs.createReadStream` per file with `filename` and the content type from a small extension table in core, `contentTypeFor(ext)`); the binary body is the stream itself. `bodyPreview` shows `<file: name, size>` in place of the bytes. undici's fetch accepts an async iterable as `body` when `duplex: 'half'` is set; the content length is sent when every part's size is known (text and regular files), else chunked.
+- [ ] Guard for agents: for `ctx.caller === 'mcp'`, file paths must resolve inside the workspace folder, else `INVALID_INPUT`; the UI may pick any file. The README's Agents section says so.
+- [ ] `api.export.curl`: `-F 'field=@path;type=…'` for file fields, `--data-binary @path` for a binary body. The curl importer gains `-d @file`, `--data-binary @file` and `-F field=@file` (today refused) mapped to these.
+- [ ] UI: form rows get an extra column (the key/value editor's template slot) with a `Text | File` toggle and a `Browse` button through `app.pickFile`; the binary body shows the chosen file, its size and a content type input.
+- [ ] Smoke: a multipart upload and a binary body reach the echo server with the right boundaries, filename and content type; an agent sending a path outside the workspace is refused; curl export and re-import round-trip.
+
+## PR 7: OAuth 2.0 (`feat/api-oauth2`, L, best after PR 4)
+
+- [ ] `RequestAuthSchema` gains `oauth2`: `grant: 'client_credentials' | 'authorization_code'`, `tokenUrl`, `authUrl?`, `clientId`, `clientSecret` (meant to be `{{secret}}`), `scopes`, `audience?`, `clientAuth: 'basic' | 'body'`, `pkce: boolean`, `headerPrefix` (default `Bearer`). Tokens are cached per machine in `.quiver/local/oauth-tokens.json`, encrypted with `host.secrets`, keyed by a hash of grant, token URL, client id and scopes.
+- [ ] `api.oauth2.token { requestId | auth, environmentId?, force? }`: returns `{ expiresAt, scopes, tokenType, token }` (token masked for agents). Client credentials posts to the token URL. Authorization code opens `host.web.signIn` on the authorize URL in partition `quiver-oauth-<hash>` while a loopback listener on a free port (`http://127.0.0.1:<port>/callback`, shown in the form so it can be registered) receives the code, answers "You can close this window" and `done(url)` resolves the sign-in; PKCE (S256) on by default. Refresh tokens are used when present and the access token is within 30 s of expiry. For agents there is no window: a cached token or client credentials, else an error telling them to sign in from the UI.
+- [ ] `api.request.send` applies the token before `prepareRequest` (auth becomes a bearer with the prefix) and adds it to `knownSecrets`, so it is masked in `sent`, in the history and in curl exports.
+- [ ] UI: the Auth editor's `OAuth 2.0` case with the fields, `Get token`, a status line (expires in, scopes), `Clear token`. The collection tab (PR 4) gets the same, so one sign-in serves a whole collection.
+- [ ] Smoke: a `fake-oauth.ts` beside the other fakes in `src/main/smoke/` with a token endpoint (client credentials, refresh) and an authorize page that redirects with a code at once; the sign-in window is hidden under `QUIVER_SMOKE` (`ElectronWebSessions({ show: false })`, as the logs part does with its fake Grafana); a token is cached, reused, refreshed when expired, masked for agents.
+
+## PR 8: cookie jar (`feat/api-cookies`, M, needs PR 1 and PR 2)
+
+- [ ] `packages/core/src/cookie-jar.ts`: `storeCookies(jar, url, setCookies)`, `cookiesFor(jar, url)`, `expire(jar, now)`; RFC 6265 subset: host-only and Domain cookies, Path matching, Expires and Max-Age, Secure, SameSite kept but not enforced. No `tough-cookie` dependency. Tests cover the matching rules.
+- [ ] The jar is per workspace and per machine: `.quiver/local/cookies.json`; writes emit `store.changed` with collection `cookies`. Session cookies (no expiry) are kept until `Clear`.
+- [ ] Send option `cookies: boolean` (default true) in `SendOptionsSchema` and the `Settings` segment: jar cookies are added to the request for names an explicit `Cookie` header does not already set; `Set-Cookie` answers (and those of redirect hops) are stored.
+- [ ] Commands: `api.cookie.list { url? }`, `api.cookie.set { url, cookie }`, `api.cookie.delete { domain, path, name }` and `api.cookie.clear` (the last two mutating). Values are masked for agents, as the `Cookie` header already is.
+- [ ] UI: `Cookies` entry in the sidebar's `…` menu opening a `api.cookies` tab grouped by domain with delete and clear; the response pane's Cookies view marks which ones went into the jar.
+- [ ] Smoke: a login sets a cookie, the next request carries it, a cookie for another path does not, `Max-Age=0` deletes, redirect hops store theirs, agents see masked values.
+
+## PR 9: code generation (`feat/api-codegen`, S)
+
+- [ ] `packages/core/src/codegen.ts`: `toCode(target, wire)` for `javascript-fetch`, `axios`, `python-requests`, `go-net-http`, `csharp-httpclient`, `powershell` (`Invoke-RestMethod`), with a test per target covering headers, JSON and form bodies, binary and multipart (PR 6) as file references. `toCurl` stays where it is and becomes one target of the list.
+- [ ] `api.export.code { requestId | request, environmentId?, target }`, masked for agents the way `api.export.curl` is; `api.export.curl` stays as it is.
+- [ ] UI: the `curl` button becomes `Code`, a menu of targets; the pick is remembered in workspace state `api.codegen.target`. The lower pane gains a `Code` view showing the snippet for the current (effective) request in an editor with the target select and Copy, so it can be read before copying.
+- [ ] Smoke: one snippet per target from the saved echo request, compared against fixtures; an agent's snippet has the bearer masked.
+
+## PR 10: import formats (`feat/api-import`, L, best after PR 4, PR 6 and PR 7)
+
+- [ ] New dependency `yaml` (OpenAPI files are mostly YAML; the package is small and dependency-free).
+- [ ] `packages/core/src/import/openapi.ts`: OpenAPI 3.0 and 3.1 (JSON or YAML) and Swagger 2.0 basics. Collections by tag (or by first path segment when there are no tags), one request per operation, `{param}` in paths becomes `{{param}}`, query and header parameters become disabled rows with their examples, the first server URL becomes the root collection's `baseUrl`, request bodies from `example`/`examples` or a skeleton built from the schema (`exampleFromSchema`, with `$ref` resolution inside the document), security schemes become collection auth (`http bearer` → bearer `{{token}}`, `apiKey` → apikey, `oauth2` client credentials → oauth2 with `{{clientId}}`/`{{clientSecret}}`). Tests on small fixtures and on the Petstore document.
+- [ ] `postman.ts`: Collection v2.1 (folders, requests, bodies raw/urlencoded/formdata/graphql, auth bearer/basic/apikey, `{{variables}}` kept as they are) and environments (`type: secret` → secret). Scripts and tests are listed in the report, not imported.
+- [ ] `insomnia.ts`: v4 export (workspace, folders, requests, environments). `har.ts`: HAR 1.2 entries, optional host filter, cookies dropped, credential headers masked at import.
+- [ ] Commands: `api.import.openapi`, `api.import.postman`, `api.import.insomnia`, `api.import.har`, each `{ source: { text } | { path }, collectionId?, name? }`, returning `{ collectionId, requests: number, environments: number, skipped: string[] }`. A `path` source for agents must be inside the workspace. Imports are additive; nothing existing is touched.
+- [ ] UI: the sidebar's Import button becomes a menu: From curl…, From OpenAPI…, From Postman…, From Insomnia…, From HAR…; each picks a file (`app.pickFile`) with a `Paste instead` fallback dialog, then opens the created collection and shows the report in a toast.
+- [ ] Smoke: each importer against a sample file in `src/main/smoke/samples/` (`fixtures.ts` stays the servers), the created tree sent against the echo server where the sample points there, a broken file refused with nothing saved.
+
+## PR 11: checks and the collection runner (`feat/api-runner`, L, needs PR 2 and PR 5)
+
+- [ ] `ApiRequestSchema.checks: z.array(CheckSchema).default([])`, `Check = { id, enabled, on: 'status' | 'header' | 'body' | 'jsonPath' | 'time' | 'size', path?, op: 'eq' | 'neq' | 'lt' | 'gt' | 'contains' | 'matches' | 'exists' | 'isType', expected }`, `{{variables}}` resolved in `expected`. `evaluateChecks(checks, response)` in core with tests; `ApiResponse.checks: { id, ok, actual, message }[]`; the history entry gets `checks: { passed, total }`.
+- [ ] Order: `ApiRequestSchema.order: z.number().optional()`; the tree and the runner sort by `order` then name. The collection tab lists its requests with up and down buttons (a drag reorder there uses the `packages/ui` helper from PR 3), writing `order` only for collections where it is used.
+- [ ] `api.collection.run { collectionId, environmentId?, recursive?, stopOnFail?, delayMs? }` runs the requests in order, applying captures between them, and returns `{ runId }` at once; progress is in memory (`api.run.get { runId }`: items with status, duration, checks, error; passed and failed counts) announced with the new host event `api.changed { workspaceId, reason: 'run', runId }`; `api.run.cancel { runId }`. Finished runs are appended to `.quiver/local/runs.jsonl` (`api.run.list { collectionId?, limit }`), requests masked like history entries. Running is not mutating: agents may already send every request.
+- [ ] UI: a `Checks` segment in the request tab (editor rows with an op select); the response pane's status line shows `3/4 checks` and a `Checks` view lists them with pass and fail badges; `Run collection` in the collection menu opens a `api.run` tab with a live table, progress, Stop, re-run and open-request on a row; the sidebar shows the last run's result next to the collection name.
+- [ ] Smoke: checks on status, JSON path, header and time against the echo server; a run of three requests where the second captures a token the third uses; `stopOnFail`; cancel; the run tab in a screenshot.
+
+## PR 12: streaming responses (`feat/api-streaming`, M, needs PR 1)
+
+- [ ] `api.request.send` gains `stream: z.boolean().optional()`; a response whose content type is `text/event-stream` streams on its own. A streamed send returns `{ streamId, status, statusText, headers }` at once; chunks are parsed by `createSseParser` (from `packages/core/src/models/realtime.ts`) for event streams and split on newlines otherwise (NDJSON), into a 5000-item buffer per stream.
+- [ ] `api.request.stream.read { streamId, since }` returns items after `since`, `next`, `done` and `dropped`, the way `teleport.kube.stream.read` does; `api.request.stream.stop { streamId }`; `api.changed { reason: 'stream', streamId }` on new items and on end. Large non-streamed bodies report progress through the same event (`received` bytes), so the pane can say `Receiving… 3.2 MB`.
+- [ ] UI: the response pane switches to a live list (event name, data, id, time; the styling of the realtime log), with the status and headers available from the first byte, a Stop button and `Follow` toggled off when the user scrolls up. A `Stream response` option in the `Settings` segment for NDJSON endpoints.
+- [ ] Smoke: the SSE server already in `fixtures.ts` (`ssePort`, its `/echo` route) covers event streams, and the echo server gains an NDJSON route; items arrive in order, `since` paging works, stop ends the connection, a plain request still returns one response.
+
+## PR 13: response history and diff (`feat/api-response-diff`, M)
+
+- [ ] History entries store the response when it is 256 KB or smaller: `HistoryEntry.response?: { status, headers, contentType, body, bodyEncoding, truncated }`, headers with `set-cookie` values masked. A workspace setting `api.history.keepResponses` (default on) in the request tab's Settings turns it off. The sidebar's history menu gets `Open response`.
+- [ ] New dependency `@codemirror/merge` for the side-by-side view (the rest of CodeMirror is already there).
+- [ ] `api.diff` tab: two pickers (history entries of the same request, the newest two by default), a `Normalise JSON` toggle (sorted keys, two-space indent, through the core's JSON formatter) and a `Headers` toggle. Opened from `Compare with previous` in the response pane and from `Compare…` in the history menu.
+- [ ] Smoke: two sends with different bodies are stored, `api.history.list` returns them with the response, the Set-Cookie value is masked in the file; a screenshot of the diff tab.
+
+## PR 14: client certificates and proxy (`feat/api-network`, M)
+
+- [ ] Proxy is per machine and per network, so it is global config: `GlobalConfig.network: { proxy: 'none' | 'system' | 'manual', url, noProxy: string[] }`, with the password in `host.secrets`; `system` reads `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`. A `Network` section in Settings.
+- [ ] Client certificates are per host and project-related, but the files are per machine: `.quiver/local/certificates.json` with `{ id, hostPattern, certPath, keyPath, pfxPath, passphrase (encrypted), caPath }`; commands `api.certificate.list`, `api.certificate.save`, `api.certificate.delete` (paths masked to their basenames for agents, passphrase never returned). A `Certificates` tab from the sidebar's `…` menu.
+- [ ] `http.ts` keeps a cache of undici dispatchers keyed by proxy, certificate and `insecure`: `ProxyAgent` for the proxy, `Agent({ connect: { cert, key, pfx, passphrase, ca, rejectUnauthorized } })` for the rest; `getInsecureAgent` folds into it. Realtime and GraphQL introspection use the same dispatcher for their requests.
+- [ ] Smoke: `fixtures.ts` starts an HTTPS echo server with a self-signed certificate that requires a client certificate (a key pair generated at smoke time with Node's `crypto`) and a small forward proxy; a request without the certificate fails, with it succeeds; the proxy sees the request when `manual` is set and not when the host is in `noProxy`.
+
+## Decisions worth knowing
+
+- Request options have their own zod schema with no defaults. `SendOptionsSchema.partial()` still fills in every default, which would have saved all four values on every request and let a call that sets one option reset the request's others.
+- Send options live on the request as overrides, not in a settings page: the timeout an endpoint needs is a property of the endpoint and should travel with the committed request.
+- The environment picker in the request tab changes the workspace's active environment, not a per-tab choice. One active environment is what the hover cards, the status bar and the database parameters already assume; a per-tab override would make two tabs disagree about what `{{baseUrl}}` means.
+- Redirects are followed by Quiver's own loop. undici's follow hides the hops and the per-hop timings, and the browser rules (303 to GET, cross-host drops `Authorization`) are what people expect to see in the chain.
+- Inheritance is resolved before variables, in a pure function, so curl export, introspection, masking and the `effective` view of agents all go through the same code. `inherit` at the root means `none`.
+- Captures write to the active environment through the same path as `api.variables.define`, so agents keep the gate they already have (environment yes, globals no) and an existing secret never becomes plain.
+- File paths in requests are relative to the workspace when the file is inside it; a committed request then works for every teammate. Agents may only reference files inside the workspace, so a tool call cannot post an arbitrary local file to a URL.
+- OAuth tokens never enter a committed file; they are encrypted per machine like environment secrets, and are added to the masking list so they are hidden in `sent`, history and exports.
+- The cookie jar is our own RFC 6265 subset rather than `tough-cookie`: a few hundred lines with tests against a dependency with its own release cadence.
+- The runner is not mutating: it sends requests that agents may send one by one already. What it writes (runs) is local history.
+- Streaming reuses the SSE parser and the `since`/`next` read pattern that exist; the shape agents learn once applies to Kubernetes logs and to API streams.
+- Proxy settings are global config; certificates are workspace-local files. The first depends on the network you are on, the second on the project you are in.
+
+## Deferred (not in these pull requests)
+
+- Pre-request and post-response scripting (JavaScript). Captures and checks cover the common cases without a sandbox; revisit if they prove not to.
+- DNS, connect and TLS timing split; needs undici diagnostics channels or a custom connector.
+- Bruno import (a folder format, not a file) and Postman or OpenAPI export.
+- Manual drag ordering in the tree beyond the `order` the runner needs.
+- Custom HTTP methods and `TRACE`/`CONNECT`.
+- A per-tab environment override.

@@ -51,6 +51,42 @@ export const RequestAuthSchema = z.discriminatedUnion('type', [
 ]);
 export type RequestAuth = z.infer<typeof RequestAuthSchema>;
 
+export const SendOptionsSchema = z.object({
+  followRedirects: z.boolean().default(true),
+  timeoutMs: z.number().int().positive().default(30_000),
+  /** Accept self-signed or otherwise invalid TLS certificates. */
+  insecure: z.boolean().default(false),
+  /** Cap on the body kept in memory and returned to the UI. */
+  maxBodyBytes: z.number().int().positive().default(10 * 1024 * 1024),
+});
+export type SendOptions = z.infer<typeof SendOptionsSchema>;
+
+/**
+ * What a request sets for itself: only the options that differ from the defaults, so a committed
+ * request says "this endpoint needs 120 s" and nothing else.
+ */
+export const RequestOptionsSchema = z.object({
+  followRedirects: z.boolean().optional(),
+  timeoutMs: z.number().int().positive().optional(),
+  insecure: z.boolean().optional(),
+  maxBodyBytes: z.number().int().positive().optional(),
+});
+export type RequestOptions = z.infer<typeof RequestOptionsSchema>;
+
+/** The options a send uses: the defaults, then the request's own, then the caller's. */
+export function effectiveSendOptions(request?: RequestOptions, call?: RequestOptions): SendOptions {
+  const defined = (o?: RequestOptions) => Object.fromEntries(Object.entries(o ?? {}).filter(([, v]) => v !== undefined));
+  return SendOptionsSchema.parse({ ...defined(request), ...defined(call) });
+}
+
+/** Keep only the options that differ from the defaults; undefined when none does. */
+export function requestOptionOverrides(options?: RequestOptions): RequestOptions | undefined {
+  if (!options) return undefined;
+  const defaults = SendOptionsSchema.parse({});
+  const kept = Object.fromEntries(Object.entries(options).filter(([k, v]) => v !== undefined && v !== defaults[k as keyof SendOptions])) as RequestOptions;
+  return Object.keys(kept).length ? kept : undefined;
+}
+
 export const ApiRequestSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -62,6 +98,8 @@ export const ApiRequestSchema = z.object({
   body: RequestBodySchema.default({ type: 'none' }),
   auth: RequestAuthSchema.default({ type: 'none' }),
   description: z.string().optional(),
+  /** Send options this request overrides (timeout, redirects, TLS, body cap). */
+  options: RequestOptionsSchema.optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -82,15 +120,7 @@ export const EnvironmentSchema = z.object({
 });
 export type Environment = z.infer<typeof EnvironmentSchema>;
 
-export const SendOptionsSchema = z.object({
-  followRedirects: z.boolean().default(true),
-  timeoutMs: z.number().int().positive().default(30_000),
-  /** Accept self-signed or otherwise invalid TLS certificates. */
-  insecure: z.boolean().default(false),
-  /** Cap on the body kept in memory and returned to the UI. */
-  maxBodyBytes: z.number().int().positive().default(10 * 1024 * 1024),
-});
-export type SendOptions = z.infer<typeof SendOptionsSchema>;
+
 
 export interface ApiResponse {
   ok: boolean;

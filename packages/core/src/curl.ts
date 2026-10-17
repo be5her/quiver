@@ -453,11 +453,15 @@ export interface CurlInput {
   body: string | null;
   bodyType?: 'raw' | 'urlencoded' | 'form';
   formFields?: [string, string][];
+  /** How curl should send it: `-L` to follow redirects, `-k` for invalid certificates, `--max-time` in seconds. */
+  options?: { followRedirects?: boolean; insecure?: boolean; timeoutMs?: number };
 }
 
 /** Render a resolved request as a curl command. Uses single quotes, works in bash and zsh. */
 export function toCurl(input: CurlInput): string {
   const lines: string[] = [`curl -X ${input.method} ${shellQuote(input.url)}`];
+  const flags = [input.options?.followRedirects ? '-L' : '', input.options?.insecure ? '-k' : '', input.options?.timeoutMs ? `--max-time ${input.options.timeoutMs / 1000}` : ''].filter(Boolean);
+  if (flags.length) lines.push(flags.join(' '));
   for (const [k, v] of input.headers) lines.push(`-H ${shellQuote(`${k}: ${v}`)}`);
   if (input.bodyType === 'form' && input.formFields) {
     for (const [k, v] of input.formFields) lines.push(`-F ${shellQuote(`${k}=${v}`)}`);

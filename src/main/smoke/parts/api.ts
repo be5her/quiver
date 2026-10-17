@@ -337,6 +337,48 @@ export default definePart({
     const mcpSchema = await rpc('tools/call', { name: 'api_graphql_schema', arguments: { requestId: gqlSaved.id } });
     check('mcp reads the cached graphql schema as SDL', (mcpSchema.result?.content?.[0]?.text ?? '').includes('type User'), mcpSchema.result?.content?.[0]?.text?.slice(0, 80));
 
+    // Send options: the defaults, then the request's own, then the call's; only overrides are saved; curl says what the request does.
+    {
+      const probe = await run<ApiRequest>('api.request.create', { name: 'timeout probe', method: 'GET', url: '{{baseUrl}}/slow?ms=1500' }, ws.id);
+      const withOptions = await run<ApiRequest>('api.request.save', { request: { ...probe, options: { timeoutMs: 300, insecure: true } } }, ws.id);
+      const stored = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'requests', `${probe.id}.json`), 'utf8')) as ApiRequest;
+      const timedOut = await host.invoke('api.request.send', { requestId: probe.id }, { caller: 'ui', workspaceId: ws.id });
+      const longer = await host.invoke('api.request.send', { requestId: probe.id, options: { timeoutMs: 5000 } }, { caller: 'ui', workspaceId: ws.id });
+      check(
+        'api.request.send: a request\'s own timeout applies, and a timeout given with the call wins over it',
+        !timedOut.ok && timedOut.error.message.includes('Timed out after 300 ms') && longer.ok && (longer.result as ApiResponse).status === 200,
+        { timedOut: timedOut.ok ? 'ok?' : timedOut.error.message, longer: longer.ok ? (longer.result as ApiResponse).status : longer.error.message },
+      );
+      check('api.request.save: only the overridden options are written to the request file', JSON.stringify(stored.options) === JSON.stringify({ timeoutMs: 300, insecure: true }), stored.options);
+      const probeCurl = await run<{ command: string }>('api.export.curl', { requestId: withOptions.id }, ws.id);
+      const plainCurl = await run<{ command: string }>('api.export.curl', { requestId: saved.id }, ws.id);
+      check(
+        'api.export.curl: -L for followed redirects, -k and --max-time from the request\'s options',
+        probeCurl.command.includes('-L -k --max-time 0.3') && plainCurl.command.includes('-L') && !plainCurl.command.includes('--max-time') && !plainCurl.command.includes(' -k'),
+        probeCurl.command,
+      );
+
+      // Cancelling: a send given a sendId stops on api.request.cancel, also for an agent, and the history says Cancelled.
+      const started = Date.now();
+      const pending = host.invoke('api.request.send', { requestId: probe.id, sendId: 'smoke-cancel', options: { timeoutMs: 10_000 } }, { caller: 'ui', workspaceId: ws.id });
+      await new Promise((r) => setTimeout(r, 300));
+      const cancelled = await host.invoke('api.request.cancel', { sendId: 'smoke-cancel' }, { caller: 'mcp', workspaceId: ws.id });
+      const outcome = await pending;
+      const elapsed = Date.now() - started;
+      const afterCancel = await run<{ cancelled: boolean }>('api.request.cancel', { sendId: 'smoke-cancel' }, ws.id);
+      const cancelledEntry = (await run<HistoryEntry[]>('api.history.list', { limit: 1 }, ws.id))[0];
+      check(
+        'api.request.cancel: stops a running send with REQUEST_CANCELLED, agents may call it, and the history records Cancelled',
+        cancelled.ok && (cancelled.result as { cancelled: boolean }).cancelled === true &&
+          !outcome.ok && outcome.error.code === 'REQUEST_CANCELLED' && elapsed < 1400 &&
+          afterCancel.cancelled === false &&
+          cancelledEntry?.error === 'Cancelled' && cancelledEntry.status === null,
+        { cancelled: cancelled.ok ? cancelled.result : cancelled.error.code, outcome: outcome.ok ? 'ok?' : outcome.error.code, elapsed, afterCancel, entry: cancelledEntry?.error },
+      );
+      check('mcp lists api_request_cancel', names.includes('api_request_cancel'));
+      await run('api.request.delete', { id: probe.id }, ws.id);
+    }
+
     return {
       ui: async (u) => {
         const { win, js, wait, shot } = u;
@@ -369,6 +411,89 @@ export default definePart({
           await wait(1500);
           const after = await historyTitles();
           check('ui: a send shows up in the history right away', before.length > 0 && after.length > 0 && after[0] !== before[0] && after.slice(1).includes(before[0]), { before: before.slice(0, 2), after: after.slice(0, 2) });
+          const ages = (await js(`[...document.querySelectorAll('[data-testid=api-history-age]')].map((s) => s.textContent.trim())`)) as string[];
+          check('ui: history rows say how long ago they were sent', ages.length > 0 && /^(now|\d+[smhd])$/.test(ages[0]), ages.slice(0, 3));
+        }
+
+        // The request tab's own controls, found among the visible ones (other tabs stay in the page).
+        const visible = (selector: string) => `[...document.querySelectorAll('${selector}')].find((e) => e.offsetParent !== null)`;
+        const saveButtonLabel = () => js(`[...document.querySelectorAll('button')].find((b) => b.offsetParent !== null && b.title === 'Ctrl+S')?.textContent.trim() ?? null`);
+
+        // Settings: the options in effect, only overrides kept, a badge on the segment, Reset all puts the request back.
+        {
+          await js(`${visible('[data-testid=api-section-settings]')}?.click()`);
+          await wait(300);
+          const placeholder = await js(`${visible('[data-testid=api-option-timeout]')}?.placeholder ?? null`);
+          await js(`(() => { const i = ${visible('[data-testid=api-option-timeout]')}; i.value = '120'; i.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+          await wait(300);
+          const segment = await js(`${visible('[data-testid=api-section-settings]')}?.textContent.trim() ?? null`);
+          const dirtyLabel = await saveButtonLabel();
+          await shot('03i-request-settings-light');
+          await js(`${visible('[data-testid=api-options-reset]')}?.click()`);
+          await wait(300);
+          const cleanLabel = await saveButtonLabel();
+          check(
+            'ui: the Settings segment shows the default timeout, marks an override and resets to an unmodified request',
+            placeholder === '30' && segment === 'Settings1' && dirtyLabel === 'Save*' && cleanLabel === 'Save',
+            { placeholder, segment, dirtyLabel, cleanLabel },
+          );
+          await js(`${visible('[data-testid=api-section-notes]')}?.click()`);
+          await wait(300);
+          const docsEditor = await js(`Boolean(${visible('.cm-placeholder')}?.textContent.includes('Agents read this too'))`);
+          check('ui: the Notes segment edits the request description', docsEditor === true);
+          await js(`[...document.querySelectorAll('button')].find((b) => b.offsetParent !== null && b.textContent.trim().startsWith('Params'))?.click()`);
+          await wait(200);
+        }
+
+        // The environment picker beside Send switches the workspace's active environment, as the sidebar tick does.
+        {
+          const staging = await run<Environment>('api.environment.create', { name: 'staging' }, ws.id);
+          await wait(600);
+          const pick = (id: string) => js(`(() => { const s = ${visible('[data-testid=api-env-picker]')}; s.value = '${id}'; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+          const options = await js(`[...${visible('[data-testid=api-env-picker]')}.options].map((o) => o.textContent.trim())`);
+          await pick(staging.id);
+          await wait(500);
+          const switched = await run<{ id: string | null }>('api.environment.active', {}, ws.id);
+          await shot('03j-environment-picker-light');
+          await pick(env.id);
+          await wait(500);
+          const back = await run<{ id: string | null }>('api.environment.active', {}, ws.id);
+          const shown = await js(`${visible('[data-testid=api-env-picker]')}.selectedOptions[0]?.textContent.trim()`);
+          check(
+            'ui: the environment picker lists the environments and switches the active one',
+            Array.isArray(options) && options.includes('No environment') && options.includes('staging') && options.includes('local') && switched.id === staging.id && back.id === env.id && shown === 'local',
+            { options, switched, back, shown },
+          );
+          await run('api.environment.delete', { id: staging.id }, ws.id);
+          await wait(300);
+        }
+
+        // Stop: a slow send turns Send into Stop, which cancels it; the history marks it STOP.
+        {
+          await run('api.request.create', { name: 'stop probe', method: 'GET', url: '{{baseUrl}}/slow?ms=5000' }, ws.id);
+          await wait(600);
+          await js(`[...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('stop probe'))?.click()`);
+          await wait(800);
+          await js(`[...document.querySelectorAll('button')].find((b) => b.offsetParent !== null && b.textContent.trim() === 'Send')?.click()`);
+          await wait(400);
+          const stopShown = await js(`Boolean(${visible('[data-testid=api-stop]')})`);
+          await shot('03k-request-stop-light');
+          await js(`${visible('[data-testid=api-stop]')}?.click()`);
+          await wait(800);
+          const sendBack = await js(`[...document.querySelectorAll('button')].some((b) => b.offsetParent !== null && b.textContent.trim() === 'Send')`);
+          const cancelledShown = await js(`document.body.innerText.includes('Cancelled')`);
+          const firstStatus = await js(`document.querySelector('[data-testid=api-history-entry]')?.textContent ?? ''`);
+          check(
+            'ui: Stop cancels a running send and the history marks it',
+            stopShown === true && sendBack === true && cancelledShown === true && String(firstStatus).includes('STOP'),
+            { stopShown, sendBack, cancelledShown, firstStatus },
+          );
+          await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+          await wait(300);
+          const probeRow = (await run<ApiRequest[]>('api.request.list', {}, ws.id)).find((r) => r.name === 'stop probe');
+          if (probeRow) await run('api.request.delete', { id: probeRow.id }, ws.id);
+          await js(`[...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('echo'))?.click()`);
+          await wait(600);
         }
 
         // Import from curl: the dialog says which shell it will read the paste as, and the shell can be picked.

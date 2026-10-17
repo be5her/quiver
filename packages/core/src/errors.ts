@@ -5,6 +5,8 @@ export type QuiverErrorCode =
   | 'NOT_FOUND'
   | 'MUTATION_BLOCKED'
   | 'REQUEST_FAILED'
+  /** An HTTP request was stopped with api.request.cancel. */
+  | 'REQUEST_CANCELLED'
   | 'UNRESOLVED_VARIABLES'
   /** The Teleport certificate is missing or expired; the UI offers "Log in again". */
   | 'TELEPORT_LOGIN_REQUIRED'

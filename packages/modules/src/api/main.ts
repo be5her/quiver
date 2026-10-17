@@ -4,10 +4,11 @@ import {
   EnvironmentSchema,
   QuiverError,
   RequestBodySchema,
-  SendOptionsSchema,
+  RequestOptionsSchema,
   defaultRequestName,
   defineCommand,
   defineModule,
+  effectiveSendOptions,
   findUnresolved,
   newApiRequest,
   newCollection,
@@ -200,21 +201,22 @@ const requestSend = defineCommand({
   id: 'api.request.send',
   title: 'Send API request',
   description:
-    'Sends an HTTP request and returns status, headers, body and timings. Pass a saved requestId or an inline request. Variables like {{baseUrl}} resolve from global variables and the active (or given) environment. For agents, the credentials and secret variables in `sent` (what went on the wire) are masked.',
+    'Sends an HTTP request and returns status, headers, body and timings. Pass a saved requestId or an inline request. Variables like {{baseUrl}} resolve from global variables and the active (or given) environment. Send options are the defaults, then the request\'s own `options`, then the `options` given here. Pass a `sendId` to be able to stop the send with api.request.cancel. For agents, the credentials and secret variables in `sent` (what went on the wire) are masked.',
   scope: 'workspace',
   input: z.object({
     requestId: z.string().optional(),
     request: ApiRequestSchema.optional(),
     environmentId: z.string().nullable().optional(),
-    options: SendOptionsSchema.partial().optional(),
+    options: RequestOptionsSchema.optional().describe('Overrides for this send only: timeoutMs, followRedirects, insecure, maxBodyBytes'),
     /** Record the call in workspace history. Defaults to true. */
     record: z.boolean().optional(),
+    sendId: z.string().min(1).max(100).optional().describe('Any id of your choosing; api.request.cancel with the same id stops this send'),
   }),
   handler: async (input, ctx): Promise<ApiResponse> => {
     const w = ws(ctx);
     const request = input.request ?? (input.requestId ? await requireRequest(w, input.requestId) : null);
     if (!request) throw new QuiverError('INVALID_INPUT', 'Provide requestId or request');
-    const options = SendOptionsSchema.parse(input.options ?? {});
+    const options = effectiveSendOptions(request.options, input.options);
     const { resolved } = await resolveRequest(ctx, request, input.environmentId);
     const prepared = prepareRequest(resolved);
     // Known before sending, so a failed send is recorded just as carefully.
@@ -232,8 +234,12 @@ const requestSend = defineCommand({
       error: null,
       request,
     };
+    const key = input.sendId ? inflightKey(w, input.sendId) : null;
+    if (key && inflight.has(key)) throw new QuiverError('INVALID_INPUT', `A send with id ${input.sendId} is already running`);
+    const controller = new AbortController();
+    if (key) inflight.set(key, controller);
     try {
-      const response = await sendPrepared(prepared, options);
+      const response = await sendPrepared(prepared, options, controller.signal);
       entry.status = response.status;
       entry.durationMs = Math.round(response.timings.total);
       // The response is the server's own; `sent` and the final URL are what Quiver adds, with the secrets resolved into them.
@@ -242,6 +248,7 @@ const requestSend = defineCommand({
       entry.error = err instanceof Error ? err.message : String(err);
       throw forAgent ? errorForAgent(err, secrets) : err;
     } finally {
+      if (key) inflight.delete(key);
       if (input.record !== false) {
         await historyReady.get(w.id);
         // The log is a plain file: credentials typed into the request, and secrets the URL resolved to, are masked before they reach it.
@@ -249,6 +256,27 @@ const requestSend = defineCommand({
         ctx.host.emit('store.changed', { workspaceId: w.id, collection: HISTORY_LOG });
       }
     }
+  },
+});
+
+/** Sends that were given a sendId, by workspace and id, so api.request.cancel can stop them. */
+const inflight = new Map<string, AbortController>();
+
+function inflightKey(w: WorkspaceApi, sendId: string): string {
+  return `${w.id}\u0000${sendId}`;
+}
+
+const requestCancel = defineCommand({
+  id: 'api.request.cancel',
+  title: 'Cancel API request',
+  description:
+    'Stops a running api.request.send that was given this sendId. The send fails with REQUEST_CANCELLED and its history entry says Cancelled. Returns whether a running send was found.',
+  scope: 'workspace',
+  input: z.object({ sendId: z.string().min(1).max(100) }),
+  handler: async ({ sendId }, ctx) => {
+    const controller = inflight.get(inflightKey(ws(ctx), sendId));
+    controller?.abort();
+    return { cancelled: Boolean(controller) };
   },
 });
 
@@ -559,6 +587,8 @@ const exportCurl = defineCommand({
         body: shown.bodyPreview,
         bodyType: form ? 'form' : 'raw',
         formFields: form,
+        // curl's own defaults differ from Quiver's: it follows no redirects and has no time limit, so say what this request does.
+        options: { ...effectiveSendOptions(request.options), timeoutMs: request.options?.timeoutMs },
       }),
     };
   },
@@ -594,6 +624,7 @@ export const apiModule = defineModule({
     requestMove,
     requestDelete,
     requestSend,
+    requestCancel,
     graphqlIntrospect,
     graphqlSchema,
     collectionList,

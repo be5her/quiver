@@ -1,8 +1,9 @@
 import { Component, computed, effect, inject, input, linkedSignal, resource, signal, untracked } from '@angular/core';
 import { FormField, form } from '@angular/forms/signals';
-import { HttpMethodSchema, newApiRequest, toErrorPayload, type ApiRequest, type ApiResponse } from '@quiver/core';
+import { HttpMethodSchema, newApiRequest, newId, toErrorPayload, type ApiRequest, type ApiResponse, type Environment, type RequestOptions } from '@quiver/core';
 import {
   Button,
+  CodeEditor,
   HostBridge,
   Input,
   KeyValueEditor,
@@ -15,25 +16,27 @@ import {
   Toasts,
   VariableInput,
   injectHostEvent,
+  invokeResource,
   type Tab,
   type TabComponent,
 } from '@quiver/ui';
-import { Copy, Save, Send } from 'lucide';
+import { Copy, Save, Send, Square } from 'lucide';
 import { ApiVariables } from './api-variables';
 import { AuthEditor } from './auth-editor';
 import { BodyEditor } from './body-editor';
+import { RequestSettings } from './request-settings';
 import { ResponsePane } from './response-pane';
 
-type Section = 'params' | 'headers' | 'body' | 'auth';
+type Section = 'params' | 'headers' | 'body' | 'auth' | 'settings' | 'notes';
 
 /**
  * One request: name, method and URL, then params, headers, body and auth, and the last response.
- * Ctrl+Enter sends, Ctrl+S saves. While there are no unsaved edits, it follows the stored request
+ * Ctrl+Enter sends, Escape stops a send, Ctrl+S saves. While there are no unsaved edits, it follows the stored request
  * when it changes elsewhere (an agent, a git pull or branch switch, another tab).
  */
 @Component({
   selector: 'q-request-tab',
-  imports: [AuthEditor, BodyEditor, Button, FormField, Input, KeyValueEditor, ResponsePane, Segment, Segmented, Select, Spinner, VariableInput],
+  imports: [AuthEditor, BodyEditor, Button, CodeEditor, FormField, Input, KeyValueEditor, RequestSettings, ResponsePane, Segment, Segmented, Select, Spinner, VariableInput],
   hostDirectives: [ApiVariables],
   templateUrl: './request-tab.html',
   host: { class: 'contents', '(keydown)': 'shortcut($event)' },
@@ -46,7 +49,7 @@ export class RequestTab implements TabComponent {
   readonly tab = input.required<Tab>();
   readonly scope = input.required<string>();
 
-  protected readonly icons = { Copy, Save, Send };
+  protected readonly icons = { Copy, Save, Send, Square };
   protected readonly methods = HttpMethodSchema.options;
   protected readonly methodColors = METHOD_COLORS;
   protected readonly urlPlaceholder = 'https://{{baseUrl}}/path';
@@ -81,6 +84,13 @@ export class RequestTab implements TabComponent {
   protected readonly response = signal<ApiResponse | null>(null);
   protected readonly sendError = signal<string | null>(null);
   protected readonly sending = signal(false);
+  /** The id the running send was given, so Stop can cancel it. */
+  private sendId: string | null = null;
+  protected readonly envPickerTitle = 'Active environment, where {{variables}} come from';
+  protected readonly notesPlaceholder = 'What this request is for, what it needs and what it returns. Agents read this too.';
+  protected readonly environments = invokeResource<Environment[]>('api.environment.list', () => ({}), { refreshOn: ['environments'] });
+  private readonly active = invokeResource<{ id: string | null }>('api.environment.active', () => ({}), { refreshOnState: ['api.activeEnvironment'] });
+  protected readonly activeEnvironmentId = computed(() => this.active.value()?.id ?? null);
   protected readonly counts = computed(() => {
     const request = this.request();
     return {
@@ -88,6 +98,8 @@ export class RequestTab implements TabComponent {
       headers: request.headers.filter((h) => h.enabled && h.key).length,
       body: request.body.type === 'none' ? 0 : 1,
       auth: request.auth.type === 'none' ? 0 : 1,
+      settings: Object.keys(request.options ?? {}).length,
+      notes: request.description?.trim() ? 1 : 0,
     };
   });
 
@@ -110,6 +122,9 @@ export class RequestTab implements TabComponent {
     if (mod && event.key === 'Enter') {
       event.preventDefault();
       void this.send();
+    } else if (event.key === 'Escape' && this.sending()) {
+      event.preventDefault();
+      void this.cancel();
     } else if (mod && event.key.toLowerCase() === 's') {
       event.preventDefault();
       void this.save();
@@ -132,13 +147,52 @@ export class RequestTab implements TabComponent {
     if (this.sending()) return;
     this.sending.set(true);
     this.sendError.set(null);
+    const sendId = newId();
+    this.sendId = sendId;
     try {
-      this.response.set(await this.host.invoke<ApiResponse>('api.request.send', { request: this.request() }));
+      this.response.set(await this.host.invoke<ApiResponse>('api.request.send', { request: this.request(), sendId }));
     } catch (err) {
       this.sendError.set(toErrorPayload(err).message);
     } finally {
+      this.sendId = null;
       this.sending.set(false);
     }
+  }
+
+  protected async cancel(): Promise<void> {
+    if (!this.sendId) return;
+    try {
+      await this.host.invoke('api.request.cancel', { sendId: this.sendId });
+    } catch (err) {
+      this.toasts.error(err);
+    }
+  }
+
+  /** Switches the workspace's active environment, the same one the sidebar ticks. */
+  protected async setEnvironment(event: Event): Promise<void> {
+    const id = (event.target as HTMLSelectElement).value || null;
+    try {
+      await this.host.invoke('api.environment.setActive', { id });
+    } catch (err) {
+      this.toasts.error(err);
+    }
+  }
+
+  /** Overrides only; a request with none carries no `options` key, so it stays equal to the saved one. */
+  protected setOptions(options: RequestOptions | undefined): void {
+    this.request.update((request) => {
+      const next: ApiRequest = { ...request, options };
+      if (!options) delete next.options;
+      return next;
+    });
+  }
+
+  protected setDescription(text: string): void {
+    this.request.update((request) => {
+      const next: ApiRequest = { ...request, description: text };
+      if (!text) delete next.description;
+      return next;
+    });
   }
 
   protected async copyCurl(): Promise<void> {

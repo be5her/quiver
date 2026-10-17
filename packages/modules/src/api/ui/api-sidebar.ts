@@ -1,5 +1,5 @@
-import { Component, computed, inject } from '@angular/core';
-import type { ApiCollection, ApiRequest, Environment, HistoryEntry } from '@quiver/core';
+import { Component, DestroyRef, computed, inject, signal } from '@angular/core';
+import { shortRelativeTime, type ApiCollection, type ApiRequest, type Environment, type HistoryEntry } from '@quiver/core';
 import { Icon, IconButton, METHOD_COLORS, SectionHeader, Toasts, TreeState, invokeResource, statusColor } from '@quiver/ui';
 import { Braces, Check, ChevronDown, ChevronRight, FolderPlus, Import, Plus, Trash2 } from 'lucide';
 import { ApiActions } from './api-actions';
@@ -31,6 +31,13 @@ export class ApiSidebar {
   protected readonly empty = computed(() => !this.requests.value()?.length && !this.collections.value()?.length);
   protected readonly envOpen = computed(() => this.tree.isExpanded('api/section/environments', true));
   protected readonly historyOpen = computed(() => this.tree.isExpanded('api/section/history'));
+  /** The clock the history's "3m" ages are read against, moved on every half minute. */
+  private readonly now = signal(Date.now());
+
+  constructor() {
+    const timer = setInterval(() => this.now.set(Date.now()), 30_000);
+    inject(DestroyRef).onDestroy(() => clearInterval(timer));
+  }
 
   protected toggleEnvironments(): void {
     this.tree.toggle('api/section/environments', true);
@@ -54,6 +61,18 @@ export class ApiSidebar {
   /** A past request opens as an unsaved draft. */
   protected replay(entry: HistoryEntry): void {
     this.api.openRequestTab({ id: `history-${entry.id}`, name: entry.request.name }, { ...entry.request, id: `history-${entry.id}` });
+  }
+
+  protected age(entry: HistoryEntry): string {
+    return shortRelativeTime(Date.parse(entry.at) - this.now());
+  }
+
+  protected cancelled(entry: HistoryEntry): boolean {
+    return entry.status === null && entry.error === 'Cancelled';
+  }
+
+  protected entryTitle(entry: HistoryEntry): string {
+    return [new Date(entry.at).toLocaleString(), entry.url, entry.error].filter(Boolean).join('\n');
   }
 
   protected shortUrl(url: string): string {

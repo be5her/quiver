@@ -136,9 +136,13 @@ function getInsecureAgent(): Dispatcher {
   return insecureAgent;
 }
 
-export async function sendPrepared(prepared: PreparedRequest, options: SendOptions): Promise<ApiResponse> {
+/** Send what `prepareRequest` built. Aborting `signal` stops the send, also while the body downloads, with REQUEST_CANCELLED. */
+export async function sendPrepared(prepared: PreparedRequest, options: SendOptions, signal?: AbortSignal): Promise<ApiResponse> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error(`Timed out after ${options.timeoutMs} ms`)), options.timeoutMs);
+  const onCancel = () => controller.abort(new Error('Cancelled'));
+  if (signal?.aborted) onCancel();
+  else signal?.addEventListener('abort', onCancel, { once: true });
   const started = performance.now();
 
   try {
@@ -175,11 +179,13 @@ export async function sendPrepared(prepared: PreparedRequest, options: SendOptio
       sent: { method: prepared.method, url: prepared.url, headers: prepared.headers, bodyPreview: prepared.bodyPreview },
     };
   } catch (err) {
+    if (signal?.aborted) throw new QuiverError('REQUEST_CANCELLED', 'Cancelled', { url: prepared.url });
     const cause = (err as { cause?: Error }).cause;
     const message = cause?.message ? `${(err as Error).message}: ${cause.message}` : (err as Error).message;
     throw new QuiverError('REQUEST_FAILED', message, { url: prepared.url });
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', onCancel);
   }
 }
 

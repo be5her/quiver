@@ -15,7 +15,7 @@
 }
 @for (request of items(); track request.id) {
   @let graphql = request.body.type === 'graphql';
-  <div qApiRow [depth]="depth()" [label]="request.name" [active]="activeRequestId() === request.id" (click)="api.openRequestTab(request)" (keydown.enter)="api.openRequestTab(request)">
+  <div qApiRow [depth]="depth()" [label]="request.name" [active]="activeRequestId() === request.id" [attr.title]="summary(request)" (click)="api.openRequestTab(request)" (keydown.enter)="api.openRequestTab(request)">
     <span
       rowPrefix
       class="text-[10px] font-bold w-10 shrink-0 text-right"
