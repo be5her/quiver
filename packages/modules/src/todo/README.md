@@ -15,3 +15,5 @@ Long text stays readable in the narrow panel. A closed line wraps its title over
 ## Verified by
 
 The smoke adds, ticks, annotates and clears items through the commands, checks the gating for agents, and drives the panel: typing a line, ticking it, writing notes, clearing the done ones. With a long title and long notes it checks that the closed line wraps to three lines with a notes preview, that the open one shows all of both without inner scrolling or overflowing the panel, and that the title edits in place.
+
+The smoke checks are in [`src/main/smoke/parts/todo.ts`](../../../../src/main/smoke/parts/todo.ts); `npm run smoke -- todo` runs them alone, with `--shots` for the UI checks.

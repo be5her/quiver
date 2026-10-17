@@ -60,7 +60,7 @@ Node 22.22.3 or later is needed (on Node 24, 24.15 or later), the minimum of the
 | ---------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `npm test`             | Unit tests for the core engine (vitest).                                                                          |
 | `npm run typecheck`    | Type-checks the main process and the renderer separately.                                                         |
-| `npm run smoke`        | Builds, then runs a headless end-to-end check of every module against local fakes and exits. `QUIVER_SMOKE_SHOTS=<dir>` captures screenshots; `QUIVER_SMOKE_MYSQL=mysql://user:pass@host:3306/db` or `QUIVER_SMOKE_POSTGRES=postgres://user:pass@host:5432/db` also exercises a live server. It uses a private MCP port, so a Quiver you have open is left alone. Each module's README says what its part of the smoke covers. |
+| `npm run smoke`        | Builds, then runs a headless end-to-end check of every module against local fakes and exits. `npm run smoke -- db teleport` runs only those parts (one per module, plus `shell`; `--list` names them), for quick runs while working on a change; the whole smoke runs before committing. `--shots` (or `QUIVER_SMOKE_SHOTS=<dir>`) adds the UI checks and captures screenshots; `QUIVER_SMOKE_MYSQL=mysql://user:pass@host:3306/db` or `QUIVER_SMOKE_POSTGRES=postgres://user:pass@host:5432/db` also exercises a live server. It uses a private MCP port, so a Quiver you have open is left alone. Each module's README says what its part of the smoke covers; [src/main/smoke/README.md](src/main/smoke/README.md) explains the rest. |
 | `npm run package`      | Builds the installer for this platform into `release/` with electron-builder, without publishing.                |
 | `npm run icon`         | Renders `resources/icon.svg` to `resources/icon.png`, the source of every platform icon.                          |
 | `npm run release:plan` | Previews the next stable release from the current checkout. Needs the GitHub CLI signed in; see [docs/releasing.md](docs/releasing.md). |
@@ -72,7 +72,7 @@ packages/core      Engine: command registry, models, variable resolution, file s
 packages/ui        Host contract for the renderer: state services, IPC client, shared Angular components.
 packages/modules   One folder per feature. `main.ts` (Node side), `ui/` (Angular side) and `README.md` per module.
 packages/mcp       Adapts the command registry to an MCP server.
-src/main           Electron main process: host wiring, IPC, window, smoke test.
+src/main           Electron main process: host wiring, IPC, window, and the smoke test in src/main/smoke.
 src/preload        The only bridge between renderer and main (three functions).
 src/renderer       The Angular app and the shell: title bar, activity bar, sidebar, tabs, status bar, palette, settings.
 ```

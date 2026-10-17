@@ -6,7 +6,7 @@
 
 - [ ] `npm run typecheck`
 - [ ] `npm test`
-- [ ] `npm run smoke`, with new checks covering the new behaviour
+- [ ] The whole `npm run smoke`, not only the parts touched, with new checks covering the new behaviour
 - [ ] Screenshots attached for UI changes
 
 ## Worth knowing

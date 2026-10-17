@@ -52,3 +52,5 @@ In the UI, the checks cover:
 - follow mode picking up the entry stamped ahead of the clock and staying on past it
 - the filter picker's fields, values and counts
 - the settings view
+
+The smoke checks are in [`src/main/smoke/parts/logs.ts`](../../../../src/main/smoke/parts/logs.ts); `npm run smoke -- logs` runs them alone, with `--shots` for the UI checks.

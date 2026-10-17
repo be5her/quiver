@@ -15,3 +15,5 @@ Keys that look like credentials (`SECRET`, `PASSWORD`, `TOKEN`, `API_KEY`, `PRIV
 ## Verified by
 
 The smoke builds a temporary project with a committed `.env`, an example, a profile, a nested app and a `node_modules` decoy, and checks discovery, parsing, masking for agents, in-place edits, compare and sync, profile switches, backups and restores, import to and export from environments, the UI table and the watcher, and in the text view that secrets stay masked until revealed and that a whole-file edit is saved, plus the backup history.
+
+The smoke checks are in [`src/main/smoke/parts/env.ts`](../../../../src/main/smoke/parts/env.ts); `npm run smoke -- env` runs them alone, with `--shots` for the UI checks.
