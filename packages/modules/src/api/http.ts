@@ -1,4 +1,4 @@
-import { QuiverError, type ApiRequest, type ApiResponse, type HttpMethod, type RequestBody, type SendOptions } from '@quiver/core';
+import { QuiverError, REDIRECT_STATUSES, nextRequest, type ApiRequest, type ApiResponse, type HttpMethod, type RedirectHop, type RequestBody, type SendOptions, type WireRequest } from '@quiver/core';
 import { Agent, fetch as undiciFetch, type Dispatcher } from 'undici';
 
 export interface PreparedRequest {
@@ -136,7 +136,20 @@ function getInsecureAgent(): Dispatcher {
   return insecureAgent;
 }
 
-/** Send what `prepareRequest` built. Aborting `signal` stops the send, also while the body downloads, with REQUEST_CANCELLED. */
+/** Redirects followed before giving up, as browsers do. */
+export const MAX_REDIRECTS = 20;
+
+function headerList(headers: { forEach(cb: (value: string, key: string) => void): void }): [string, string][] {
+  const list: [string, string][] = [];
+  headers.forEach((value, key) => list.push([key, value]));
+  return list;
+}
+
+/**
+ * Send what `prepareRequest` built. Redirects are followed here rather than by fetch, so every hop
+ * is known (status, headers, time) and the browser rules apply: see `nextRequest`. Aborting
+ * `signal` stops the send, also while the body downloads, with REQUEST_CANCELLED.
+ */
 export async function sendPrepared(prepared: PreparedRequest, options: SendOptions, signal?: AbortSignal): Promise<ApiResponse> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error(`Timed out after ${options.timeoutMs} ms`)), options.timeoutMs);
@@ -144,45 +157,61 @@ export async function sendPrepared(prepared: PreparedRequest, options: SendOptio
   if (signal?.aborted) onCancel();
   else signal?.addEventListener('abort', onCancel, { once: true });
   const started = performance.now();
+  let current: WireRequest<string | Buffer> = { method: prepared.method, url: prepared.url, headers: prepared.headers, body: prepared.body };
+  const redirects: RedirectHop[] = [];
 
   try {
-    const res = await undiciFetch(prepared.url, {
-      method: prepared.method,
-      headers: prepared.headers,
-      body: prepared.body ?? undefined,
-      redirect: options.followRedirects ? 'follow' : 'manual',
-      signal: controller.signal,
-      dispatcher: options.insecure ? getInsecureAgent() : undefined,
-    });
-    const ttfb = performance.now() - started;
+    for (;;) {
+      const hopStarted = performance.now();
+      const res = await undiciFetch(current.url, {
+        method: current.method,
+        headers: current.headers,
+        body: current.body ?? undefined,
+        redirect: 'manual',
+        signal: controller.signal,
+        dispatcher: options.insecure ? getInsecureAgent() : undefined,
+      });
+      const location = res.headers.get('location');
+      const next = options.followRedirects && REDIRECT_STATUSES.has(res.status) && location ? nextRequest(current, res.status, location) : null;
+      if (next) {
+        if (redirects.length >= MAX_REDIRECTS) {
+          await res.body?.cancel();
+          throw new QuiverError('REQUEST_FAILED', `Stopped after ${MAX_REDIRECTS} redirects`, { url: prepared.url, redirects: redirects.map((r) => r.url) });
+        }
+        redirects.push({ method: current.method, url: current.url, status: res.status, statusText: res.statusText, location: next.url, headers: headerList(res.headers), durationMs: performance.now() - hopStarted });
+        await res.body?.cancel();
+        current = next;
+        continue;
+      }
+      const ttfb = performance.now() - started;
+      const { buffer, truncated } = await readBody(res.body, options.maxBodyBytes);
+      const total = performance.now() - started;
+      const contentType = res.headers.get('content-type');
+      const isText = contentType ? TEXT_TYPES.test(contentType) : !buffer.subarray(0, 512).includes(0);
 
-    const { buffer, truncated } = await readBody(res.body, options.maxBodyBytes);
-    const total = performance.now() - started;
-
-    const headers: [string, string][] = [];
-    res.headers.forEach((value, key) => headers.push([key, value]));
-    const contentType = res.headers.get('content-type');
-    const isText = contentType ? TEXT_TYPES.test(contentType) : !buffer.subarray(0, 512).includes(0);
-
-    return {
-      ok: res.ok,
-      status: res.status,
-      statusText: res.statusText,
-      url: res.url || prepared.url,
-      headers,
-      body: isText ? buffer.toString('utf8') : buffer.toString('base64'),
-      bodyEncoding: isText ? 'utf8' : 'base64',
-      contentType,
-      size: buffer.length,
-      truncated,
-      timings: { total, ttfb },
-      sent: { method: prepared.method, url: prepared.url, headers: prepared.headers, bodyPreview: prepared.bodyPreview },
-    };
+      return {
+        ok: res.ok,
+        status: res.status,
+        statusText: res.statusText,
+        url: current.url,
+        headers: headerList(res.headers),
+        body: isText ? buffer.toString('utf8') : buffer.toString('base64'),
+        bodyEncoding: isText ? 'utf8' : 'base64',
+        contentType,
+        size: buffer.length,
+        truncated,
+        timings: { total, ttfb, download: total - ttfb },
+        redirects,
+        setCookies: res.headers.getSetCookie(),
+        sent: { method: prepared.method, url: prepared.url, headers: prepared.headers, bodyPreview: prepared.bodyPreview },
+      };
+    }
   } catch (err) {
     if (signal?.aborted) throw new QuiverError('REQUEST_CANCELLED', 'Cancelled', { url: prepared.url });
+    if (err instanceof QuiverError) throw err;
     const cause = (err as { cause?: Error }).cause;
     const message = cause?.message ? `${(err as Error).message}: ${cause.message}` : (err as Error).message;
-    throw new QuiverError('REQUEST_FAILED', message, { url: prepared.url });
+    throw new QuiverError('REQUEST_FAILED', message, { url: current.url });
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener('abort', onCancel);

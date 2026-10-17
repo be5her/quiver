@@ -122,6 +122,18 @@ export type Environment = z.infer<typeof EnvironmentSchema>;
 
 
 
+/** One redirect followed while sending: the request that got it and where it pointed. */
+export interface RedirectHop {
+  method: HttpMethod;
+  url: string;
+  status: number;
+  statusText: string;
+  /** The absolute URL the next request went to. */
+  location: string;
+  headers: [string, string][];
+  durationMs: number;
+}
+
 export interface ApiResponse {
   ok: boolean;
   status: number;
@@ -133,7 +145,12 @@ export interface ApiResponse {
   contentType: string | null;
   size: number;
   truncated: boolean;
-  timings: { total: number; ttfb: number };
+  /** Milliseconds: the whole send, until the final response's headers, and reading its body. */
+  timings: { total: number; ttfb: number; download: number };
+  /** The redirects followed on the way, in order; empty when there were none or they were not followed. */
+  redirects: RedirectHop[];
+  /** The final response's Set-Cookie headers, one per cookie (the joined `set-cookie` header cannot be split safely). */
+  setCookies: string[];
   /** The request after variable resolution and auth application. */
   sent: { method: HttpMethod; url: string; headers: [string, string][]; bodyPreview: string | null };
 }

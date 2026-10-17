@@ -1,5 +1,5 @@
 import { promises as fs } from 'node:fs';
-import { createServer } from 'node:http';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { buildSchema, graphql as executeGraphql } from 'graphql';
@@ -16,7 +16,32 @@ export type Fixtures = Awaited<ReturnType<typeof startFixtures>>;
  * a second) so that every part finds them, whichever parts were picked.
  */
 export async function startFixtures() {
-  const echo = createServer((req, res) => {
+  // A 1×1 PNG, for the response pane's image preview.
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+  const echoHandler = (req: IncomingMessage, res: ServerResponse) => {
+    const route = new URL(req.url ?? '/', 'http://x');
+    // `/redirect/<status>?to=<location>` redirects; `/loop` redirects to itself for ever.
+    const redirect = /^\/redirect\/(\d{3})$/.exec(route.pathname);
+    if (redirect || route.pathname === '/loop') {
+      req.resume();
+      res.writeHead(redirect ? Number(redirect[1]) : 302, { location: redirect ? (route.searchParams.get('to') ?? '/') : '/loop' });
+      res.end();
+      return;
+    }
+    if (route.pathname === '/cookies') {
+      req.resume();
+      // The second Expires holds a comma: why Set-Cookie headers are kept one by one.
+      res.setHeader('set-cookie', ['sid=abc123; Path=/; HttpOnly; SameSite=Lax', 'theme=dark; Max-Age=3600; Expires=Wed, 21 Oct 2026 07:28:00 GMT; Secure']);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"cookies":2}');
+      return;
+    }
+    if (route.pathname === '/image.png') {
+      req.resume();
+      res.writeHead(200, { 'content-type': 'image/png' });
+      res.end(png);
+      return;
+    }
     let body = '';
     req.on('data', (c) => (body += c));
     req.on('end', () => {
@@ -30,9 +55,14 @@ export async function startFixtures() {
       if (slow) setTimeout(answer, Number(slow[1]));
       else answer();
     });
-  });
+  };
+  const echo = createServer(echoHandler);
   await new Promise<void>((r) => echo.listen(0, '127.0.0.1', () => r()));
   const echoPort = (echo.address() as { port: number }).port;
+  // The same echo on another port: another origin, for redirects that leave it.
+  const echoOther = createServer(echoHandler);
+  await new Promise<void>((r) => echoOther.listen(0, '127.0.0.1', () => r()));
+  const echoOtherPort = (echoOther.address() as { port: number }).port;
 
   // GraphQL endpoint: a small schema executed by graphql-js, over POST (JSON) and GET (query parameters).
   const gqlSchema = buildSchema(`
@@ -165,6 +195,7 @@ export async function startFixtures() {
 
   return {
     echoPort,
+    echoOtherPort,
     gqlPort,
     gqlState,
     ssePort,

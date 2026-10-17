@@ -31,6 +31,8 @@ import {
   type RedactUrlOptions,
   type WorkspaceApi,
 } from '@quiver/core';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import { z } from 'zod';
 import {
   COLLECTIONS,
@@ -243,7 +245,10 @@ const requestSend = defineCommand({
       entry.status = response.status;
       entry.durationMs = Math.round(response.timings.total);
       // The response is the server's own; `sent` and the final URL are what Quiver adds, with the secrets resolved into them.
-      return forAgent ? { ...response, url: redactUrl(response.url, secrets), sent: redactSent(response.sent, secrets) } : response;
+      if (!forAgent) return response;
+      // Each hop's URL is one Quiver sent, so it can carry a secret the request resolved to, like `sent`.
+      const redirects = response.redirects.map((hop) => ({ ...hop, url: redactUrl(hop.url, secrets), location: redactUrl(hop.location, secrets) }));
+      return { ...response, url: redactUrl(response.url, secrets), redirects, sent: redactSent(response.sent, secrets) };
     } catch (err) {
       entry.error = err instanceof Error ? err.message : String(err);
       throw forAgent ? errorForAgent(err, secrets) : err;
@@ -277,6 +282,28 @@ const requestCancel = defineCommand({
     const controller = inflight.get(inflightKey(ws(ctx), sendId));
     controller?.abort();
     return { cancelled: Boolean(controller) };
+  },
+});
+
+const responseSave = defineCommand({
+  id: 'api.response.save',
+  title: 'Save response body',
+  description:
+    'Writes a response body to a file: a utf8 body as text, a base64 body (binary responses) as its bytes. `path` is relative to the workspace or absolute; agents may only write inside the workspace folder. Missing folders are created and an existing file is replaced.',
+  scope: 'workspace',
+  mutating: true,
+  input: z.object({ path: z.string().min(1), body: z.string(), bodyEncoding: z.enum(['utf8', 'base64']).default('utf8') }),
+  handler: async ({ path: target, body, bodyEncoding }, ctx) => {
+    const w = ws(ctx);
+    const abs = path.isAbsolute(target) ? path.normalize(target) : path.resolve(w.path, target);
+    if (ctx.caller === 'mcp') {
+      const back = path.relative(w.path, abs);
+      if (!back || back.startsWith('..') || path.isAbsolute(back)) throw new QuiverError('INVALID_INPUT', 'Agents may only save inside the project folder');
+    }
+    const data = Buffer.from(body, bodyEncoding === 'base64' ? 'base64' : 'utf8');
+    await fs.mkdir(path.dirname(abs), { recursive: true });
+    await fs.writeFile(abs, data);
+    return { path: abs, bytes: data.length };
   },
 });
 
@@ -625,6 +652,7 @@ export const apiModule = defineModule({
     requestDelete,
     requestSend,
     requestCancel,
+    responseSave,
     graphqlIntrospect,
     graphqlSchema,
     collectionList,

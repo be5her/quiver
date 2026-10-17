@@ -379,6 +379,79 @@ export default definePart({
       await run('api.request.delete', { id: probe.id }, ws.id);
     }
 
+    // Redirects are followed by Quiver: every hop is listed, POST becomes GET on 302, 307 repeats it, credentials stay with their origin.
+    {
+      const base = { ...saved, id: '', name: 'redirects', headers: [], auth: { type: 'bearer' as const, token: '{{token}}' }, body: { type: 'json' as const, content: '{"r":1}' } };
+      const send = (url: string, options?: object) => host.invoke('api.request.send', { request: { ...base, url }, options }, { caller: 'ui', workspaceId: ws.id });
+      const echoOf = (r: ApiResponse) => JSON.parse(r.body) as { method: string; url: string; body: string; headers: Record<string, string> };
+      const r302 = await run<ApiResponse>('api.request.send', { request: { ...base, url: '{{baseUrl}}/redirect/302?to=/landing' } }, ws.id);
+      const r307 = await run<ApiResponse>('api.request.send', { request: { ...base, url: '{{baseUrl}}/redirect/307?to=/again' } }, ws.id);
+      const cross = await run<ApiResponse>('api.request.send', { request: { ...base, url: `{{baseUrl}}/redirect/307?to=${encodeURIComponent(`http://127.0.0.1:${t.fixtures.echoOtherPort}/elsewhere`)}` } }, ws.id);
+      check(
+        'api.request.send: a 302 turns the POST into a GET without a body, and the hop is listed',
+        r302.status === 200 && echoOf(r302).method === 'GET' && echoOf(r302).body === '' && echoOf(r302).url === '/landing' &&
+          r302.redirects.length === 1 && r302.redirects[0].status === 302 && r302.redirects[0].method === 'POST' && r302.redirects[0].location.endsWith('/landing') && r302.url.endsWith('/landing'),
+        { method: echoOf(r302).method, body: echoOf(r302).body, redirects: r302.redirects.map((h) => `${h.status} ${h.method} ${h.location}`), url: r302.url },
+      );
+      check(
+        'api.request.send: a 307 repeats the POST with its body and Authorization; one that leaves the origin drops Authorization',
+        echoOf(r307).method === 'POST' && echoOf(r307).body === '{"r":1}' && echoOf(r307).headers.authorization === 'Bearer s3cret' &&
+          echoOf(cross).method === 'POST' && echoOf(cross).url === '/elsewhere' && echoOf(cross).headers.authorization === undefined,
+        { r307: [echoOf(r307).method, echoOf(r307).headers.authorization], cross: [echoOf(cross).url, echoOf(cross).headers.authorization ?? null] },
+      );
+      const unfollowed = await send('{{baseUrl}}/redirect/302?to=/landing', { followRedirects: false });
+      const loop = await send('{{baseUrl}}/loop');
+      check(
+        'api.request.send: with redirects off the 302 is the response, and a redirect loop stops after 20 hops',
+        unfollowed.ok && (unfollowed.result as ApiResponse).status === 302 && (unfollowed.result as ApiResponse).redirects.length === 0 && !loop.ok && loop.error.message.includes('Stopped after 20 redirects'),
+        { unfollowed: unfollowed.ok ? (unfollowed.result as ApiResponse).status : unfollowed.error.message, loop: loop.ok ? 'ok?' : loop.error.message },
+      );
+      const agentHop = await host.invoke('api.request.send', { request: { ...base, url: '{{baseUrl}}/redirect/302?to=/landing&key={{token}}' } }, { caller: 'mcp', workspaceId: ws.id });
+      const agentRedirects = agentHop.ok ? (agentHop.result as ApiResponse).redirects : [];
+      check(
+        'api.request.send: an agent sees each hop with the secrets in its URL masked',
+        agentHop.ok && agentRedirects.length === 1 && agentRedirects[0].url.includes(REDACTED) && !JSON.stringify(agentRedirects).includes('s3cret'),
+        agentRedirects.map((h) => h.url),
+      );
+      const cookies = await run<ApiResponse>('api.request.send', { request: { ...base, method: 'GET', url: '{{baseUrl}}/cookies' } }, ws.id);
+      check(
+        'api.request.send: Set-Cookie headers are kept one by one, an Expires with a comma included',
+        cookies.setCookies.length === 2 && cookies.setCookies[0].startsWith('sid=abc123') && cookies.setCookies[1].includes('Expires=Wed, 21 Oct 2026 07:28:00 GMT'),
+        cookies.setCookies,
+      );
+      const { total, ttfb, download } = cookies.timings;
+      check('api.request.send: timings split into waiting and download', download >= 0 && Math.abs(total - ttfb - download) < 1, cookies.timings);
+    }
+
+    // Saving a response body: text as text, a binary body as its bytes; agents are gated and kept inside the project.
+    {
+      const image = await run<ApiResponse>('api.request.send', { request: { ...saved, id: '', method: 'GET', url: '{{baseUrl}}/image.png', body: { type: 'none' } } }, ws.id);
+      const textPath = path.join(folder, 'saved', 'echo.json');
+      const savedText = await run<{ path: string; bytes: number }>('api.response.save', { path: 'saved/echo.json', body: '{"a":1}', bodyEncoding: 'utf8' }, ws.id);
+      const savedImage = await run<{ path: string; bytes: number }>('api.response.save', { path: path.join(folder, 'saved', 'pixel.png'), body: image.body, bodyEncoding: image.bodyEncoding }, ws.id);
+      const pngBytes = await fs.readFile(path.join(folder, 'saved', 'pixel.png'));
+      check(
+        'api.response.save: writes text, and a binary response as the bytes that came',
+        (await fs.readFile(textPath, 'utf8')) === '{"a":1}' && savedText.path === textPath && image.bodyEncoding === 'base64' && pngBytes.length === savedImage.bytes && pngBytes.subarray(1, 4).toString() === 'PNG',
+        { savedText, savedImage, encoding: image.bodyEncoding },
+      );
+      const outside = path.join(os.tmpdir(), `quiver-smoke-outside-${Date.now()}.txt`);
+      const blocked = await host.invoke('api.response.save', { path: 'saved/agent.txt', body: 'x' }, { caller: 'mcp', workspaceId: ws.id });
+      const mcpBefore = host.config.get().mcp;
+      await run('config.update', { patch: { mcp: { ...mcpBefore, allowMutating: true } } }, null);
+      const inside = await host.invoke('api.response.save', { path: 'saved/agent.txt', body: 'x' }, { caller: 'mcp', workspaceId: ws.id });
+      const escaped = await host.invoke('api.response.save', { path: outside, body: 'x' }, { caller: 'mcp', workspaceId: ws.id });
+      const climbed = await host.invoke('api.response.save', { path: '../climbed.txt', body: 'x' }, { caller: 'mcp', workspaceId: ws.id });
+      await run('config.update', { patch: { mcp: mcpBefore } }, null);
+      const outsideWritten = await fs.stat(outside).then(() => true, () => false);
+      check(
+        'api.response.save: gated for agents, and with mutations on still only inside the project folder',
+        !blocked.ok && blocked.error.code === 'MUTATION_BLOCKED' && inside.ok && !escaped.ok && escaped.error.code === 'INVALID_INPUT' && !climbed.ok && !outsideWritten,
+        { blocked: blocked.ok ? 'ok?' : blocked.error.code, inside: inside.ok, escaped: escaped.ok ? 'ok?' : escaped.error.code, climbed: climbed.ok ? 'ok?' : climbed.error.code },
+      );
+      await fs.rm(path.join(folder, 'saved'), { recursive: true, force: true });
+    }
+
     return {
       ui: async (u) => {
         const { win, js, wait, shot } = u;
@@ -492,6 +565,89 @@ export default definePart({
           await wait(300);
           const probeRow = (await run<ApiRequest[]>('api.request.list', {}, ws.id)).find((r) => r.name === 'stop probe');
           if (probeRow) await run('api.request.delete', { id: probeRow.id }, ws.id);
+          await js(`[...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('echo'))?.click()`);
+          await wait(600);
+        }
+
+        // The response pane: the redirect chain, the cookies a response set, image previews, a JSON path filter and Find.
+        {
+          const probe = await run<ApiRequest>('api.request.create', { name: 'pane probe', method: 'GET', url: '{{baseUrl}}/redirect/302?to=/landing' }, ws.id);
+          const point = async (url: string) => {
+            const current = await run<ApiRequest>('api.request.get', { id: probe.id }, ws.id);
+            await run('api.request.save', { request: { ...current, url } }, ws.id);
+            await wait(700);
+          };
+          const sendNow = async () => {
+            await js(`[...document.querySelectorAll('button')].find((b) => b.offsetParent !== null && b.textContent.trim() === 'Send')?.click()`);
+            await wait(1200);
+          };
+          await wait(600);
+          await js(`[...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('pane probe'))?.click()`);
+          await wait(800);
+          await sendNow();
+          const chip = await js(`${visible('[data-testid=api-response-redirects]')}?.textContent.trim() ?? null`);
+          const bar = await js(`${visible('[data-testid=api-response-timing]')}?.title ?? null`);
+          await js(`${visible('[data-testid=api-response-redirects]')}?.click()`);
+          await wait(300);
+          await js(`${visible('[data-testid=api-response-redirect-list] details')}?.setAttribute('open', '')`);
+          await wait(200);
+          const hopText = await js(`${visible('[data-testid=api-response-redirect-list] summary')}?.textContent.replace(/\\s+/g, ' ').trim() ?? null`);
+          await shot('03l-response-redirects-light');
+          check(
+            'ui: the response says how many redirects were followed, and the headers view lists each hop',
+            chip === '1 redirect' && typeof bar === 'string' && bar.includes('Redirects') && bar.includes('Download') && typeof hopText === 'string' && hopText.includes('302') && hopText.includes('/landing'),
+            { chip, bar, hopText },
+          );
+
+          await point('{{baseUrl}}/cookies');
+          await sendNow();
+          await js(`${visible('[data-testid=api-response-cookies-tab]')}?.click()`);
+          await wait(300);
+          const cookieRows = (await js(`[...(${visible('[data-testid=api-response-cookies]')}?.querySelectorAll('tbody tr') ?? [])].map((r) => r.textContent.replace(/\\s+/g, ' ').trim())`)) as string[];
+          await shot('03m-response-cookies-light');
+          check(
+            'ui: the Cookies view lists each cookie with its attributes',
+            cookieRows.length === 2 && cookieRows[0].includes('sid') && cookieRows[0].includes('Session') && cookieRows[0].includes('HttpOnly') && cookieRows[1].includes('theme') && cookieRows[1].includes('Secure'),
+            cookieRows,
+          );
+
+          await point('{{baseUrl}}/image.png');
+          await sendNow();
+          await js(`${visible('[data-testid=api-response-body-tab]')}?.click()`);
+          await wait(400);
+          const imageShown = await js(`(() => { const img = ${visible('[data-testid=api-response-image]')}; return img ? img.complete && img.naturalWidth === 1 : false; })()`);
+          await shot('03n-response-image-light');
+          await js(`${visible('[data-testid=api-response-preview-toggle]')}?.click()`);
+          await wait(300);
+          const rawShown = await js(`Boolean(${visible('.cm-content')}?.textContent.includes('Binary response'))`);
+          check('ui: an image response is previewed, and Raw shows the bytes instead', imageShown === true && rawShown === true, { imageShown, rawShown });
+
+          await point('{{baseUrl}}/things?x=1');
+          await sendNow();
+          const setFilter = (value: string) => js(`(() => { const i = ${visible('[data-testid=api-response-filter]')}; if (!i) return false; i.value = ${JSON.stringify(value)}; i.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
+          await setFilter('$.url');
+          await wait(300);
+          const filtered = await js(`${visible('.cm-content')}?.textContent ?? ''`);
+          const count = await js(`${visible('[data-testid=api-response-filter-count]')}?.textContent.trim() ?? null`);
+          await setFilter('$.headers[');
+          await wait(300);
+          const filterError = await js(`${visible('[data-testid=api-response-filter-error]')}?.textContent ?? null`);
+          await setFilter('');
+          await wait(200);
+          check(
+            'ui: a JSON path filters the body, counts the matches and says what is wrong with a broken path',
+            filtered === '"/things?x=1"' && count === '1 match' && typeof filterError === 'string' && filterError.includes('Missing "]"'),
+            { filtered, count, filterError },
+          );
+          await js(`${visible('[data-testid=api-response-search]')}?.click()`);
+          await wait(300);
+          const searchPanel = await js(`Boolean(${visible('.cm-search')})`);
+          check('ui: Find opens a search panel over the response body', searchPanel === true);
+          await shot('03o-response-find-light');
+
+          await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+          await wait(300);
+          await run('api.request.delete', { id: probe.id }, ws.id);
           await js(`[...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('echo'))?.click()`);
           await wait(600);
         }

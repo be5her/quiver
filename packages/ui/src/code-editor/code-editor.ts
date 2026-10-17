@@ -1,6 +1,7 @@
 import { Component, DestroyRef, ElementRef, afterNextRender, booleanAttribute, computed, effect, inject, input, model, output, untracked, viewChild } from '@angular/core';
 import type { FormValueControl } from '@angular/forms/signals';
 import { Annotation, EditorState, StateEffect } from '@codemirror/state';
+import { openSearchPanel } from '@codemirror/search';
 import { EditorView } from '@codemirror/view';
 import type { GraphQLSchema } from 'graphql';
 import { cn } from '../class-names';
@@ -31,6 +32,8 @@ export class CodeEditor implements FormValueControl<string> {
   readonly value = model('');
   readonly language = input<CodeLanguage>('text');
   readonly readonly = input(false, { transform: booleanAttribute });
+  /** With `readonly`: keep the view focusable so Mod-F searches it and text can be selected. */
+  readonly searchable = input(false, { transform: booleanAttribute });
   readonly placeholder = input('');
   /** Fill the parent instead of growing with content. */
   readonly fill = input(true, { transform: booleanAttribute });
@@ -73,6 +76,7 @@ export class CodeEditor implements FormValueControl<string> {
     ...editorExtensions({
       language: this.language(),
       readOnly: this.readonly(),
+      searchable: this.searchable(),
       placeholder: this.placeholder(),
       filled: this.filled(),
       wrap: this.wrap(),
@@ -117,6 +121,13 @@ export class CodeEditor implements FormValueControl<string> {
   focus(options?: FocusOptions): void {
     if (options?.preventScroll) this.view?.contentDOM.focus(options);
     else this.view?.focus();
+  }
+
+  /** Open CodeMirror's find panel, as Mod-F inside the editor does. */
+  openSearch(): void {
+    if (!this.view) return;
+    this.view.focus();
+    openSearchPanel(this.view);
   }
 
   /** Offset of the cursor (the main selection's head) in the document. */
