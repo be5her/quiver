@@ -759,6 +759,143 @@ export default definePart({
       );
     }
 
+    // Import formats: each sample, written into the project with the echo server's origin, imported by path, its tree checked and sent.
+    {
+      const samples = path.join(process.cwd(), 'src', 'main', 'smoke', 'samples');
+      const origin = `http://127.0.0.1:${echoPort}`;
+      await fs.mkdir(path.join(folder, 'imports'), { recursive: true });
+      for (const name of ['openapi.yaml', 'postman.json', 'insomnia.json', 'recording.har']) {
+        const text = (await fs.readFile(path.join(samples, name), 'utf8')).replaceAll('__ECHO__', origin);
+        await fs.writeFile(path.join(folder, 'imports', name), text);
+      }
+      type Summary = { collectionId: string | null; name: string | null; requests: number; collections: number; environments: number; environmentIds: string[]; skipped: string[] };
+      type Echo = { method: string; url: string; headers: Record<string, string>; body: string };
+      const allCollections = () => run<ApiCollection[]>('api.collection.list', {}, ws.id);
+      const allRequests = () => run<ApiRequest[]>('api.request.list', {}, ws.id);
+      /** The requests under a collection, at any depth, by name. */
+      const under = async (rootId: string) => {
+        const cols = await allCollections();
+        const ids = new Set([rootId]);
+        for (let grew = true; grew; ) {
+          grew = false;
+          for (const c of cols) if (c.parentId && ids.has(c.parentId) && !ids.has(c.id)) grew = ids.add(c.id).size > 0;
+        }
+        return { collections: cols.filter((c) => ids.has(c.id)), requests: (await allRequests()).filter((r) => r.collectionId && ids.has(r.collectionId)) };
+      };
+      const sendEcho = async (request: ApiRequest, environmentId?: string | null) => {
+        const response = await run<ApiResponse>('api.request.send', { requestId: request.id, ...(environmentId !== undefined ? { environmentId } : {}) }, ws.id);
+        return { status: response.status, echo: JSON.parse(response.body) as Echo };
+      };
+
+      // OpenAPI: tags as collections, the server as the root's base URL, the bearer scheme as root auth, a body from the schema.
+      const oa = await run<Summary>('api.import.openapi', { source: { path: 'imports/openapi.yaml' } }, ws.id);
+      const oaTree = await under(oa.collectionId!);
+      const oaRoot = oaTree.collections.find((c) => c.id === oa.collectionId)!;
+      const create = oaTree.requests.find((r) => r.name === 'Create item')!;
+      const sentCreate = create ? await sendEcho(create) : null;
+      const getItem = oaTree.requests.find((r) => r.name === 'Get item');
+      check(
+        'api.import.openapi: tags become collections, the server the base URL, the scheme the auth, and a request built from the schema is sent with them',
+        oa.requests === 3 &&
+          oa.collections === 3 &&
+          oaRoot.name === 'Smoke Shop' &&
+          oaRoot.baseUrl === `${origin}/v1` &&
+          oaRoot.auth.type === 'bearer' &&
+          oaTree.collections.map((c) => c.name).sort().join() === 'Smoke Shop,health,items' &&
+          getItem?.url === '/items/{{itemId}}' &&
+          getItem.params[0]?.key === 'verbose' &&
+          sentCreate?.status === 200 &&
+          sentCreate.echo.method === 'POST' &&
+          sentCreate.echo.url === '/v1/items' &&
+          /^Bearer [^{]+$/.test(sentCreate.echo.headers.authorization ?? '') &&
+          JSON.parse(sentCreate.echo.body).name === 'Widget',
+        { oa, root: { baseUrl: oaRoot.baseUrl, auth: oaRoot.auth.type }, cols: oaTree.collections.map((c) => c.name), sent: sentCreate?.echo },
+      );
+
+      // Postman: folders, {{baseUrl}} kept (the active environment has it), collection variables as an environment, scripts reported.
+      const pm = await run<Summary>('api.import.postman', { source: { text: await fs.readFile(path.join(folder, 'imports', 'postman.json'), 'utf8') } }, ws.id);
+      const pmTree = await under(pm.collectionId!);
+      const list = pmTree.requests.find((r) => r.name === 'List orders')!;
+      const sentList = list ? await sendEcho(list) : null;
+      const pmEnv = pm.environmentIds[0] ? await run<Environment>('api.environment.get', { id: pm.environmentIds[0] }, ws.id) : null;
+      check(
+        'api.import.postman: folders and requests, variables kept and resolved, collection variables as an environment, the test script reported',
+        pm.requests === 3 &&
+          pmTree.collections.map((c) => c.name).sort().join() === 'Orders,Smoke Postman' &&
+          pmTree.requests.find((r) => r.name === 'Get order')?.url === '{{baseUrl}}/pm/orders/{{orderId}}' &&
+          sentList?.echo.url === '/pm/orders?page=1' &&
+          sentList.echo.headers['x-source'] === 'postman' &&
+          pmEnv?.name === 'Smoke Postman variables' &&
+          pmEnv.variables.some((v) => v.key === 'orderId' && v.value === '7') &&
+          pm.skipped.some((s) => s.includes('test script on List orders')),
+        { pm, sent: sentList?.echo, env: pmEnv?.variables },
+      );
+
+      // Insomnia: {{ _.host }} templates as {{host}}, the sub-environment with the base merged in, and the request sent with it.
+      const ins = await run<Summary>('api.import.insomnia', { source: { path: path.join(folder, 'imports', 'insomnia.json') } }, ws.id);
+      const ping = (await under(ins.collectionId!)).requests.find((r) => r.name === 'Ping');
+      const sentPing = ping ? await sendEcho(ping, ins.environmentIds[0]) : null;
+      check(
+        'api.import.insomnia: the workspace, its folder and request, and the environment it needs, sent with it',
+        ins.requests === 1 && ins.environments === 1 && ping?.url === '{{host}}/ins/ping' && sentPing?.echo.url === '/ins/ping?q=1' && sentPing.echo.headers['x-env'] === 'dev',
+        { ins, url: ping?.url, sent: sentPing?.echo },
+      );
+
+      // HAR: only the API calls to the host asked for, cookies dropped, the bearer replaced by a variable, nothing secret written down.
+      const har = await run<Summary>('api.import.har', { source: { path: 'imports/recording.har' }, host: `127.0.0.1:${echoPort}` }, ws.id);
+      const harTree = await under(har.collectionId!);
+      const data = harTree.requests.find((r) => r.name === 'GET /har/data');
+      const harFiles = await Promise.all(harTree.requests.map((r) => fs.readFile(path.join(folder, '.quiver', 'requests', `${r.id}.json`), 'utf8')));
+      const unresolved = data ? await host.invoke('api.request.send', { requestId: data.id }, { caller: 'ui', workspaceId: ws.id }) : null;
+      const save = harTree.requests.find((r) => r.name === 'POST /har/save');
+      const sentSave = save ? await sendEcho(save) : null;
+      check(
+        'api.import.har: the two API calls to the echo host, the Cookie header dropped and the bearer a {{variable}} the send asks for, the rest sent as recorded',
+        har.requests === 2 &&
+          harTree.collections.length === 1 &&
+          data?.headers.map((h) => `${h.key}: ${h.value}`).join('|') === 'Authorization: Bearer {{authorization}}|Accept: application/json' &&
+          harFiles.every((f) => !f.includes('har-secret-token-123') && !f.includes('har-session-cookie')) &&
+          unresolved?.ok === false &&
+          unresolved.error.code === 'UNRESOLVED_VARIABLES' &&
+          sentSave?.echo.body === '{"note":"hi"}' &&
+          har.skipped.some((s) => s.includes('2 page loads')) &&
+          har.skipped.some((s) => s.includes('1 request to other hosts')),
+        { har, headers: data?.headers, unresolved: unresolved && !unresolved.ok ? unresolved.error.code : null },
+      );
+
+      // A broken file is refused and nothing is saved; agents may only import files inside the project.
+      const before = { collections: (await allCollections()).length, requests: (await allRequests()).length };
+      await fs.writeFile(path.join(folder, 'imports', 'broken.yaml'), 'openapi: 3.0.0\npaths:\n  /a: [unclosed\n');
+      const broken = await host.invoke('api.import.openapi', { source: { path: 'imports/broken.yaml' } }, { caller: 'ui', workspaceId: ws.id });
+      const wrongKind = await host.invoke('api.import.postman', { source: { path: 'imports/openapi.yaml' } }, { caller: 'ui', workspaceId: ws.id });
+      const outside = path.join(os.tmpdir(), `quiver-smoke-import-${Date.now()}.json`);
+      await fs.writeFile(path.join(outside), await fs.readFile(path.join(folder, 'imports', 'postman.json'), 'utf8'));
+      const agentOutside = await host.invoke('api.import.postman', { source: { path: outside } }, { caller: 'mcp', workspaceId: ws.id });
+      const agentInside = await host.invoke('api.import.postman', { source: { path: 'imports/postman.json' }, name: 'Agent import' }, { caller: 'mcp', workspaceId: ws.id });
+      await fs.rm(outside, { force: true });
+      const after = { collections: (await allCollections()).length, requests: (await allRequests()).length };
+      check(
+        'imports: a broken file and a file of another kind are refused with nothing saved; agents import from inside the project only',
+        broken.ok === false &&
+          broken.error.code === 'INVALID_INPUT' &&
+          wrongKind.ok === false &&
+          /not a Postman collection/.test(wrongKind.error.message) &&
+          agentOutside.ok === false &&
+          /inside the project folder/.test(agentOutside.error.message) &&
+          agentInside.ok === true &&
+          (agentInside.result as Summary).name === 'Agent import' &&
+          after.collections === before.collections + 2 &&
+          after.requests === before.requests + 3,
+        { broken: broken.ok ? 'ok' : broken.error.message, wrongKind: wrongKind.ok ? 'ok' : wrongKind.error.message, agentOutside: agentOutside.ok ? 'ok' : agentOutside.error.message, before, after },
+      );
+      const agentSummary = agentInside.ok ? (agentInside.result as Summary) : null;
+      for (const summary of [oa, pm, ins, har, agentSummary]) {
+        if (!summary) continue;
+        if (summary.collectionId) await run('api.collection.delete', { id: summary.collectionId }, ws.id);
+        for (const id of summary.environmentIds) await run('api.environment.delete', { id }, ws.id);
+      }
+    }
+
     return {
       ui: async (u) => {
         const { win, js, wait, shot } = u;
@@ -1034,7 +1171,7 @@ export default definePart({
           })();
           check(
             'ui: Rename… from the menu renames the request, and the collection menu offers its actions',
-            renamed === 'dragged and renamed' && ['New request', 'New GraphQL request', 'New sub-collection…', 'Import from curl here…', 'Rename…', 'Move to…', 'Delete'].every((l) => collectionMenuItems.includes(l)),
+            renamed === 'dragged and renamed' && ['New request', 'New GraphQL request', 'New sub-collection…', 'Import here…', 'Rename…', 'Move to…', 'Delete'].every((l) => collectionMenuItems.includes(l)),
             { renamed, collectionMenuItems },
           );
 
@@ -1268,7 +1405,9 @@ export default definePart({
 
         // Import from curl: the dialog says which shell it will read the paste as, and the shell can be picked.
         {
-          const opened = await js(`(() => { const b = document.querySelector('button[aria-label="Import from curl"]'); if (b) b.click(); return Boolean(b); })()`);
+          await js(`document.querySelector('[data-testid=api-import-menu]')?.click()`);
+          await wait(250);
+          const opened = await js(`(() => { const b = document.querySelector('[data-testid=api-import-curl]'); if (b) b.click(); return Boolean(b); })()`);
           await wait(300);
           const typed = await js(
             `(() => { const ta = document.querySelector('textarea'); if (!ta) return false; const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; set.call(ta, ${JSON.stringify('curl ^"https://example.test/x?merchantId=376^" ^\n  -H ^"accept: application/json^" ^\n  --data-raw ^"null^"')}); ta.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`,
@@ -1623,6 +1762,46 @@ export default definePart({
         await run('api.environment.setActive', { id: env.id }, ws.id);
         await run('api.environment.delete', { id: staging.id }, ws.id);
         await wait(300);
+
+        // Import menu: every format, and a pasted file read as what it is, opened, with what was not imported shown.
+        {
+          await js(`document.querySelector('[data-testid=api-import-menu]')?.click()`);
+          await wait(250);
+          const menu = (await js(`[...document.querySelectorAll('[data-testid=context-menu] button')].map((b) => b.textContent.trim())`)) as string[];
+          await js(`document.querySelector('[data-testid=api-import-paste]')?.click()`);
+          await wait(300);
+          const pasted = JSON.stringify({
+            openapi: '3.0.0',
+            info: { title: 'Pasted API' },
+            servers: [{ url: `http://127.0.0.1:${echoPort}` }],
+            paths: { '/pasted': { get: { summary: 'Pasted op', parameters: [{ in: 'cookie', name: 'sid' }] } } },
+          });
+          await js(
+            `(() => { const ta = document.querySelector('textarea'); const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; set.call(ta, ${JSON.stringify(pasted)}); ta.dispatchEvent(new Event('input', { bubbles: true })); })()`,
+          );
+          await wait(200);
+          const hint = await js(`document.querySelector('select[aria-label="Format"]')?.parentElement.querySelector('span')?.textContent ?? null`);
+          await js(`document.querySelector('form button[type=submit]')?.click()`);
+          await until(() => js(`Boolean(document.querySelector('[data-testid=dialog-ok]'))`).then(Boolean), 4000);
+          const notice = (await js(
+            `(() => { const ok = document.querySelector('[data-testid=dialog-ok]'); const box = ok?.closest('div.flex')?.parentElement; return ok ? { title: box?.querySelector('h2')?.textContent?.trim(), message: document.querySelector('[data-testid=dialog-message]')?.textContent ?? '' } : null; })()`,
+          )) as { title: string; message: string } | null;
+          await shot('03zc-import-report-light');
+          await js(`document.querySelector('[data-testid=dialog-ok]')?.click()`);
+          await wait(500);
+          const opened = await js(`document.body.innerText.includes('Pasted op') && [...document.querySelectorAll('[role=tab]')].some((t) => t.textContent.includes('Pasted API'))`);
+          check(
+            'ui: the Import menu offers every format and a paste, the paste is read as OpenAPI, and the import opens with a report of what was not imported',
+            ['From curl…', 'From OpenAPI…', 'From Postman…', 'From Insomnia…', 'From HAR…', 'Paste a file…'].every((label) => menu.includes(label)) &&
+              hint === 'Reads as OpenAPI' &&
+              notice?.title === 'Imported 1 request into Pasted API' &&
+              notice.message.includes('Cookie parameters') &&
+              opened === true,
+            { menu, hint, notice, opened },
+          );
+        }
+        const pastedRoot = (await run<ApiCollection[]>('api.collection.list', {}, ws.id)).find((c) => c.name === 'Pasted API');
+        if (pastedRoot) await run('api.collection.delete', { id: pastedRoot.id }, ws.id);
       },
     };
   },

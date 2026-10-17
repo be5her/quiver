@@ -1,9 +1,11 @@
 import { Service, inject, untracked } from '@angular/core';
 import {
+  IMPORT_FORMATS,
   SHELL_DIALECT_LABELS,
   SHELL_DIALECTS,
   canMoveCollection,
   collectionPath,
+  detectImportFormat,
   detectShellDialect,
   newId,
   nowIso,
@@ -11,8 +13,20 @@ import {
   type ApiRequest,
   type Environment,
   type HistoryEntry,
+  type ImportFormat,
 } from '@quiver/core';
 import { AppState, ContextMenu, Dialogs, HostBridge, TabsState, Toasts, TreeState, type ContextMenuItem } from '@quiver/ui';
+
+/** What an `api.import.*` command reports. */
+interface ImportSummary {
+  collectionId: string | null;
+  name: string | null;
+  requests: number;
+  environments: number;
+  skipped: string[];
+}
+
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 /** What the API client does from the sidebar, the palette and its tabs. */
 @Service()
@@ -78,6 +92,83 @@ export class ApiActions {
     } catch (err) {
       this.toasts.error(err);
     }
+  }
+
+  /** The Import button: a curl command, a file in one of the formats, or a file's text pasted. */
+  importMenu(event: MouseEvent, collectionId: string | null = null): void {
+    this.contextMenu.open(event, [
+      { label: 'From curl…', select: () => this.run(this.importCurl(collectionId)), testId: 'api-import-curl' },
+      'separator',
+      ...IMPORT_FORMATS.map((f) => ({ label: `From ${f.label}…`, select: () => this.run(this.importFile(f.value, collectionId)), testId: `api-import-${f.value}` })),
+      'separator',
+      { label: 'Paste a file…', select: () => this.run(this.importPasted(collectionId)), testId: 'api-import-paste' },
+    ]);
+  }
+
+  /** Pick a file and import it; nothing happens when the picker is cancelled. */
+  async importFile(format: ImportFormat, collectionId: string | null = null): Promise<void> {
+    const f = IMPORT_FORMATS.find((x) => x.value === format)!;
+    const workspacePath = untracked(this.app.activeWorkspace)?.path ?? '';
+    const { path } = await this.host.invoke<{ path: string | null }>('app.pickFile', {
+      title: `Import from ${f.label}`,
+      filters: [
+        { name: f.label, extensions: f.extensions },
+        { name: 'All files', extensions: ['*'] },
+      ],
+      defaultPath: workspacePath || undefined,
+    });
+    if (path) await this.importSource(format, { path }, collectionId);
+  }
+
+  /** For a file that is easier to copy than to save: its text pasted, the format detected or picked. */
+  async importPasted(collectionId: string | null = null): Promise<void> {
+    const label = (format: ImportFormat | null) => IMPORT_FORMATS.find((f) => f.value === format)?.label;
+    const result = await this.dialogs.promptWithChoice({
+      title: 'Import',
+      label: 'Paste an OpenAPI document, a Postman collection or environment, an Insomnia export or a HAR file (JSON or YAML)',
+      multiline: true,
+      confirmLabel: 'Import',
+      choice: {
+        label: 'Format',
+        defaultValue: 'auto',
+        options: [{ value: 'auto', label: 'Detect' }, ...IMPORT_FORMATS.map((f) => ({ value: f.value, label: f.label }))],
+        hint: (text, choice) => {
+          if (choice !== 'auto' || !text.trim()) return null;
+          const detected = detectImportFormat(text);
+          return detected ? `Reads as ${label(detected)}` : 'Not a format Quiver imports';
+        },
+      },
+    });
+    if (!result?.value.trim()) return;
+    const format = result.choice === 'auto' ? detectImportFormat(result.value) : (result.choice as ImportFormat);
+    if (!format) {
+      this.toasts.notify('That is not an OpenAPI, Postman, Insomnia or HAR file', 'error');
+      return;
+    }
+    await this.importSource(format, { text: result.value }, collectionId);
+  }
+
+  /** Import, then open what was created and say what was not imported. */
+  private async importSource(format: ImportFormat, source: { path: string } | { text: string }, collectionId: string | null): Promise<void> {
+    let summary: ImportSummary;
+    try {
+      summary = await this.host.invoke<ImportSummary>(`api.import.${format}`, { source, collectionId });
+    } catch (err) {
+      this.toasts.error(err);
+      return;
+    }
+    if (collectionId) this.tree.expand(`api/collection/${collectionId}`);
+    if (summary.collectionId) {
+      this.tree.expand(`api/collection/${summary.collectionId}`);
+      this.openCollectionTab({ id: summary.collectionId, name: summary.name ?? 'Imported' });
+    }
+    const parts = [summary.collectionId ? plural(summary.requests, 'request') : '', summary.environments ? plural(summary.environments, 'environment') : ''].filter(Boolean);
+    const title = `Imported ${parts.join(' and ') || 'nothing'}${summary.name ? ` into ${summary.name}` : ''}`;
+    if (!summary.skipped.length) {
+      this.toasts.notify(title, 'success');
+      return;
+    }
+    await this.dialogs.notice({ title, message: `Not imported:\n${summary.skipped.map((line) => `• ${line}`).join('\n')}` });
   }
 
   async createEnvironment(): Promise<void> {
@@ -207,7 +298,7 @@ export class ApiActions {
       { label: 'New request', select: () => this.run(this.createRequest(collection.id)) },
       { label: 'New GraphQL request', select: () => this.run(this.createGraphqlRequest(collection.id)) },
       { label: 'New sub-collection…', select: () => this.run(this.newCollection(collection.id)) },
-      { label: 'Import from curl here…', select: () => this.run(this.importCurl(collection.id)) },
+      { label: 'Import here…', select: () => this.run(Promise.resolve().then(() => this.importMenu(new MouseEvent('contextmenu', { clientX: at.x, clientY: at.y }), collection.id))), testId: 'api-menu-import-here' },
       'separator',
       { label: 'Rename…', select: () => this.run(this.renameCollection(collection)) },
       {

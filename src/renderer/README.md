@@ -34,7 +34,7 @@ Two things to know when styling: `cn` joins class names without Tailwind merging
 `packages/ui` holds what the shell and the modules share:
 
 - The host contract: `HostBridge` (commands and host events over the preload), `invokeResource` (a command as a `resource()` that runs again on store, state or host events and keeps its last value while reloading) and `injectHostEvent`.
-- State services: `AppState`, `TabsState`, `TreeState`, `UiActions` (the palette's entries), `Toasts`, `Dialogs`, the context menu and the variable hover.
+- State services: `AppState`, `TabsState`, `TreeState`, `UiActions` (the palette's entries), `Toasts`, `Dialogs` (prompt, prompt with a choice, confirm, and a notice with only OK), the context menu and the variable hover.
 - `defineModuleUI`, the renderer half of a module: id, title, icon, sidebar component, tab components by type, and palette actions created in an injection context.
 - Dragging: `dragReorder` and `DropMarker` for strips, `dragInto` for dropping items on targets.
 - Controls as directives on native elements (`button[qButton]`, `button[qIconButton]`, `input[qInput]`, `select[qSelect]`, `input[qCheckbox]`, `span[qBadge]`, `svg[qSpinner]`, `[qAutofocus]`), and components: the segmented tabs, section header, empty state, the key/value editor, the CodeMirror editor, the variable input with its hover card, and the toast, dialog and context menu hosts.

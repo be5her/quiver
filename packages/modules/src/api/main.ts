@@ -35,6 +35,12 @@ import {
   scrubSecrets,
   toCode,
   CODE_TARGETS,
+  ImportError,
+  importHar,
+  importInsomnia,
+  importOpenApi,
+  importPostman,
+  type ImportResult,
   type ApiCollection,
   type ApiRequest,
   type ApiAuth,
@@ -885,6 +891,112 @@ const importCurl = defineCommand({
   },
 });
 
+/** Files larger than this are refused before they are read: an API description or a recording is far smaller. */
+const MAX_IMPORT_BYTES = 50 * 1024 * 1024;
+
+const ImportSource = z
+  .union([z.object({ text: z.string().min(1) }), z.object({ path: z.string().min(1).describe('A file to read; relative paths are relative to the project folder, and agents may only read inside it.') })])
+  .describe('The file contents as `text`, or a `path` to read them from.');
+
+const ImportInput = z.object({
+  source: ImportSource,
+  collectionId: z.string().nullable().optional().describe('The collection to import under; the root of the tree when left out.'),
+  name: z.string().optional().describe('A name for the imported collection instead of the one in the file.'),
+});
+
+async function importText(ctx: CommandContext, source: z.infer<typeof ImportSource>): Promise<string> {
+  if ('text' in source) return source.text;
+  const w = ws(ctx);
+  const given = source.path.trim();
+  const abs = path.isAbsolute(given) ? path.normalize(given) : path.resolve(w.path, given);
+  if (ctx.caller === 'mcp') {
+    const back = path.relative(w.path, abs);
+    if (!back || back.startsWith('..') || path.isAbsolute(back)) throw new QuiverError('INVALID_INPUT', `Agents may only import files inside the project folder; ${given} is outside it`);
+  }
+  const stat = await fs.stat(abs).catch(() => null);
+  if (!stat?.isFile()) throw new QuiverError('INVALID_INPUT', `The file ${given} does not exist`);
+  if (stat.size > MAX_IMPORT_BYTES) throw new QuiverError('INVALID_INPUT', `${given} is ${Math.round(stat.size / 1024 / 1024)} MB; files over ${MAX_IMPORT_BYTES / 1024 / 1024} MB are not imported`);
+  return (await fs.readFile(abs, 'utf8')).replace(/^﻿/, '');
+}
+
+/**
+ * Reads and converts the whole file before anything is saved, so a broken file leaves the
+ * workspace as it was. Imports only add: collections, requests and environments are new.
+ */
+async function runImport(ctx: CommandContext, input: z.infer<typeof ImportInput>, convert: (text: string) => ImportResult) {
+  const w = ws(ctx);
+  const text = await importText(ctx, input.source);
+  let result: ImportResult;
+  try {
+    result = convert(text);
+  } catch (err) {
+    if (err instanceof ImportError) throw new QuiverError('INVALID_INPUT', err.message);
+    throw err;
+  }
+  const parentId = input.collectionId ?? null;
+  if (parentId && !(await w.store.get<ApiCollection>(COLLECTIONS.collections, parentId))) throw new QuiverError('NOT_FOUND', `Collection ${parentId} not found`);
+  const [root] = result.collections;
+  if (root) {
+    root.parentId = parentId;
+    if (input.name?.trim()) root.name = input.name.trim();
+  }
+  const collections = result.collections.map((c) => ApiCollectionSchema.parse(c));
+  const requests = result.requests.map((r) => ApiRequestSchema.parse(r));
+  const environments = result.environments.map((e) => EnvironmentSchema.parse(e));
+  // Parents before children, so the tree never shows a request without its collection.
+  for (const c of collections) await w.store.put(COLLECTIONS.collections, c);
+  for (const r of requests) await w.store.put(COLLECTIONS.requests, r);
+  const savedEnvironments = [];
+  for (const e of environments) savedEnvironments.push(await saveEnvironment(w, ctx.host, e));
+  return {
+    collectionId: root?.id ?? null,
+    name: root?.name ?? null,
+    requests: requests.length,
+    collections: collections.length,
+    environments: savedEnvironments.length,
+    environmentIds: savedEnvironments.map((e) => e.id),
+    skipped: result.skipped,
+  };
+}
+
+const IMPORT_RESULT = 'Returns the new collection id, how many requests and environments were created, and what was found but not imported (`skipped`). A file that cannot be read is refused and nothing is saved; nothing that exists is changed.';
+
+const importOpenApiCommand = defineCommand({
+  id: 'api.import.openapi',
+  title: 'Import from OpenAPI',
+  description: `Imports an OpenAPI 3.0/3.1 or Swagger 2.0 document (JSON or YAML) as a collection: one collection per tag, one request per operation, the first server as the base URL, path parameters as {{variables}}, bodies from examples or the schema, security schemes as collection auth with credentials as {{variables}}. ${IMPORT_RESULT}`,
+  scope: 'workspace',
+  input: ImportInput,
+  handler: (input, ctx) => runImport(ctx, input, importOpenApi),
+});
+
+const importPostmanCommand = defineCommand({
+  id: 'api.import.postman',
+  title: 'Import from Postman',
+  description: `Imports a Postman Collection v2.1 (or v2.0) with its folders, requests, bodies and auth, its variables as an environment; or a Postman environment file. Pre-request and test scripts are listed in skipped, not imported. ${IMPORT_RESULT}`,
+  scope: 'workspace',
+  input: ImportInput,
+  handler: (input, ctx) => runImport(ctx, input, importPostman),
+});
+
+const importInsomniaCommand = defineCommand({
+  id: 'api.import.insomnia',
+  title: 'Import from Insomnia',
+  description: `Imports an Insomnia export, v4 (JSON) or v5 (YAML): the workspace's folders and requests, and its environments (each sub-environment with the base merged in). Templates like {{ _.host }} become {{host}}. ${IMPORT_RESULT}`,
+  scope: 'workspace',
+  input: ImportInput,
+  handler: (input, ctx) => runImport(ctx, input, importInsomnia),
+});
+
+const importHarCommand = defineCommand({
+  id: 'api.import.har',
+  title: 'Import from HAR',
+  description: `Imports the API calls of a HAR 1.2 recording (a browser's "Save all as HAR"), a collection per host. Page loads and repeated requests are left out, cookies are dropped, and credentials (Authorization, API key headers, token parameters, password fields) are replaced with {{variables}}. ${IMPORT_RESULT}`,
+  scope: 'workspace',
+  input: ImportInput.extend({ host: z.string().optional().describe('Only requests to this host; a leading dot (.example.com) includes its subdomains.') }),
+  handler: (input, ctx) => runImport(ctx, input, (text) => importHar(text, { host: input.host })),
+});
+
 const ExportInput = z.object({ requestId: z.string().optional(), request: ApiRequestSchema.optional(), environmentId: z.string().nullable().optional() });
 
 /**
@@ -1023,6 +1135,10 @@ export const apiModule = defineModule({
     historyList,
     historyClear,
     importCurl,
+    importOpenApiCommand,
+    importPostmanCommand,
+    importInsomniaCommand,
+    importHarCommand,
     exportCurl,
     exportCode,
     fileStat,
