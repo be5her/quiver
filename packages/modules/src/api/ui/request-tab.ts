@@ -1,6 +1,7 @@
 import { Component, computed, effect, inject, input, linkedSignal, resource, signal, untracked } from '@angular/core';
 import { FormField, form } from '@angular/forms/signals';
 import {
+  CODE_TARGETS,
   HttpMethodSchema,
   inheritedAuth,
   inheritedBaseUrl,
@@ -12,12 +13,14 @@ import {
   type ApiRequest,
   type ApiResponse,
   type Capture,
+  type CodeTarget,
   type Environment,
   type RequestOptions,
 } from '@quiver/core';
 import {
   Button,
   CodeEditor,
+  ContextMenu,
   HostBridge,
   Input,
   KeyValueEditor,
@@ -34,11 +37,12 @@ import {
   type Tab,
   type TabComponent,
 } from '@quiver/ui';
-import { Copy, Save, Send, Square } from 'lucide';
+import { Code, Copy, Save, Send, Square } from 'lucide';
 import { ApiVariables } from './api-variables';
 import { AuthEditor, type InheritedAuthInfo } from './auth-editor';
 import { BodyEditor } from './body-editor';
 import { CaptureEditor } from './capture-editor';
+import { CodeView } from './code-view';
 import { RequestSettings } from './request-settings';
 import { ResponsePane } from './response-pane';
 
@@ -51,7 +55,7 @@ type Section = 'params' | 'headers' | 'body' | 'auth' | 'capture' | 'settings' |
  */
 @Component({
   selector: 'q-request-tab',
-  imports: [AuthEditor, BodyEditor, Button, CaptureEditor, CodeEditor, FormField, Input, KeyValueEditor, RequestSettings, ResponsePane, Segment, Segmented, Select, Spinner, VariableInput],
+  imports: [AuthEditor, BodyEditor, Button, CaptureEditor, CodeView, CodeEditor, FormField, Input, KeyValueEditor, RequestSettings, ResponsePane, Segment, Segmented, Select, Spinner, VariableInput],
   hostDirectives: [ApiVariables],
   templateUrl: './request-tab.html',
   host: { class: 'contents', '(keydown)': 'shortcut($event)' },
@@ -60,11 +64,12 @@ export class RequestTab implements TabComponent {
   private readonly host = inject(HostBridge);
   private readonly tabs = inject(TabsState);
   private readonly toasts = inject(Toasts);
+  private readonly contextMenu = inject(ContextMenu);
 
   readonly tab = input.required<Tab>();
   readonly scope = input.required<string>();
 
-  protected readonly icons = { Copy, Save, Send, Square };
+  protected readonly icons = { Code, Copy, Save, Send, Square };
   protected readonly methods = HttpMethodSchema.options;
   protected readonly methodColors = METHOD_COLORS;
   protected readonly urlPlaceholder = 'https://{{baseUrl}}/path';
@@ -106,6 +111,14 @@ export class RequestTab implements TabComponent {
   protected readonly environments = invokeResource<Environment[]>('api.environment.list', () => ({}), { refreshOn: ['environments'] });
   private readonly active = invokeResource<{ id: string | null }>('api.environment.active', () => ({}), { refreshOnState: ['api.activeEnvironment'] });
   protected readonly activeEnvironmentId = computed(() => this.active.value()?.id ?? null);
+  /** What the lower pane shows: the last response, or the request as code. */
+  protected readonly lower = signal<'response' | 'code'>('response');
+  /** The language last picked for code, per workspace on this machine. */
+  private readonly savedTarget = invokeResource<{ value: CodeTarget | null }>('workspace.state.get', () => ({ key: 'api.codegen.target' }));
+  protected readonly codeTarget = computed<CodeTarget>(() => {
+    const saved = this.savedTarget.value()?.value;
+    return saved && CODE_TARGETS.some((t) => t.value === saved) ? saved : 'curl';
+  });
   private readonly collections = invokeResource<ApiCollection[]>('api.collection.list', () => ({}), { refreshOn: ['collections'] });
   /** The headers the collections above add, struck through where the request sets its own of that name. */
   protected readonly inheritedHeaders = computed(() => {
@@ -239,13 +252,30 @@ export class RequestTab implements TabComponent {
     });
   }
 
-  protected async copyCurl(): Promise<void> {
+  /** Copy as one of the targets (the last one picked first), or show the code in the lower pane. */
+  protected codeMenu(event: MouseEvent): void {
+    const last = this.codeTarget();
+    const ordered = [...CODE_TARGETS].sort((a, b) => (a.value === last ? -1 : b.value === last ? 1 : 0));
+    this.contextMenu.open(event, [
+      ...ordered.map((t) => ({ label: `Copy as ${t.label}`, select: () => void this.copyCode(t.value), testId: `api-copy-${t.value}` })),
+      'separator',
+      { label: 'Show code', select: () => this.lower.set('code'), testId: 'api-show-code' },
+    ]);
+  }
+
+  protected async copyCode(target: CodeTarget): Promise<void> {
     try {
-      const { command } = await this.host.invoke<{ command: string }>('api.export.curl', { request: this.request() });
-      await navigator.clipboard.writeText(command);
-      this.toasts.notify('Copied curl command', 'success');
+      const { code } = await this.host.invoke<{ code: string }>('api.export.code', { request: this.request(), target });
+      await navigator.clipboard.writeText(code);
+      this.toasts.notify(`Copied as ${CODE_TARGETS.find((t) => t.value === target)?.label ?? target}`, 'success');
+      this.rememberTarget(target);
     } catch (err) {
       this.toasts.error(err);
     }
+  }
+
+  protected rememberTarget(target: CodeTarget): void {
+    if (target === this.codeTarget()) return;
+    this.host.invoke('workspace.state.set', { key: 'api.codegen.target', value: target }).then(() => this.savedTarget.reload(), (err) => this.toasts.error(err));
   }
 }

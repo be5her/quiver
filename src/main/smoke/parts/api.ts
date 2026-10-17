@@ -116,6 +116,26 @@ export default definePart({
     check('query param kept', echoed.url === '/things?x=1', echoed.url);
     check('dynamic variable resolved', /^[0-9a-f-]{36}$/.test(echoed.headers['x-test'] ?? ''));
 
+    // Code: the saved echo request as code for every target, masked for agents.
+    {
+      const targets = ['curl', 'javascript-fetch', 'axios', 'python-requests', 'go-net-http', 'csharp-httpclient', 'powershell'] as const;
+      const codes: Record<string, string> = {};
+      for (const target of targets) codes[target] = (await run<{ code: string }>('api.export.code', { requestId: saved.id, target }, ws.id)).code;
+      const url = `http://127.0.0.1:${echoPort}/things?x=1`;
+      const curlCommand = (await run<{ command: string }>('api.export.curl', { requestId: saved.id }, ws.id)).command;
+      const agentCodes = await Promise.all(targets.map((target) => host.invoke('api.export.code', { requestId: saved.id, target }, { caller: 'mcp', workspaceId: ws.id })));
+      check(
+        'api.export.code: every target carries the URL, the bearer and the JSON body, curl matches Copy as curl, and agents get the bearer masked',
+        targets.every((tg) => codes[tg].includes(url) && codes[tg].includes('Bearer s3cret') && codes[tg].includes('hello')) &&
+          codes['javascript-fetch'].includes('await fetch(') && codes.axios.includes("import axios from 'axios';") && codes['python-requests'].includes('requests.request(') &&
+          codes['go-net-http'].startsWith('package main') && codes['csharp-httpclient'].includes('new HttpRequestMessage(new HttpMethod("POST")') && codes.powershell.includes('Invoke-RestMethod') &&
+          // The echo request's X-Test is {{$uuid}}, new on every render.
+          codes.curl.replace(/X-Test: [^']*/, '') === curlCommand.replace(/X-Test: [^']*/, '') &&
+          agentCodes.every((r) => r.ok && !(r.result as { code: string }).code.includes('s3cret') && (r.result as { code: string }).code.includes(`Bearer ${REDACTED}`)),
+        { fetch: codes['javascript-fetch'].slice(0, 160), agent: agentCodes.map((r) => (r.ok ? 'ok' : r.error.code)) },
+      );
+    }
+
     const history = await run<HistoryEntry[]>('api.history.list', { limit: 5 }, ws.id);
     check('history recorded', history.length === 1 && history[0].status === 200);
 
@@ -1222,6 +1242,28 @@ export default definePart({
           await run('api.cookie.clear', {}, ws.id);
           await js(`[...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('echo'))?.click()`);
           await wait(600);
+        }
+
+        // Code in the UI: the Code menu copies as a language, and Show code puts the snippet in the lower pane, remembering the pick.
+        {
+          await js(`${visible('[data-testid=api-code-menu]')}?.click()`);
+          await wait(250);
+          const menu = (await js(`[...document.querySelectorAll('[data-testid=context-menu] button')].map((b) => b.textContent.trim())`)) as string[];
+          await js(`document.querySelector('[data-testid=api-show-code]')?.click()`);
+          await wait(800);
+          await js(`(() => { const s = ${visible('[data-testid=api-code-target]')}; s.value = 'python-requests'; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+          await wait(1000);
+          const snippet = await js(`${visible('[data-testid=api-code-editor] .cm-content')}?.textContent ?? ''`);
+          await shot('03zb-code-view-light');
+          const remembered = await run<{ value: string | null }>('workspace.state.get', { key: 'api.codegen.target' }, ws.id);
+          await js(`${visible('[data-testid=api-code-close]')}?.click()`);
+          await wait(300);
+          const backToResponse = await js(`Boolean(${visible('[data-testid=api-response-status]')}) || document.body.innerText.includes('No response yet')`);
+          check(
+            'ui: the Code menu offers every language and Show code, the code view shows the chosen one and remembers it, and closing it brings the response back',
+            menu.includes('Copy as curl') && menu.includes('Copy as Python (requests)') && menu.includes('Show code') && String(snippet).includes('requests.request(') && remembered.value === 'python-requests' && backToResponse === true,
+            { menu, snippet: String(snippet).slice(0, 80), remembered: remembered.value, backToResponse },
+          );
         }
 
         // Import from curl: the dialog says which shell it will read the paste as, and the shell can be picked.

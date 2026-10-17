@@ -8,7 +8,7 @@
     <div class="flex items-center gap-2 px-3 py-2 border-b border-edge shrink-0">
       <input qInput [formField]="requestForm.name" class="w-56 h-7 text-sm font-medium border-transparent bg-transparent hover:border-edge" placeholder="Request name" />
       <div class="flex-1"></div>
-      <button qButton size="sm" variant="ghost" [icon]="icons.Copy" (click)="copyCurl()">curl</button>
+      <button qButton size="sm" variant="ghost" [icon]="icons.Code" title="Copy this request as code, or show it" data-testid="api-code-menu" (click)="codeMenu($event)">Code</button>
       <button qButton size="sm" [variant]="dirty() ? 'secondary' : 'ghost'" [icon]="icons.Save" title="Ctrl+S" (click)="save()">Save{{ dirty() ? '*' : '' }}</button>
     </div>
 
@@ -91,7 +91,11 @@
         </div>
       </div>
       <div class="flex-1 min-h-0">
-        <q-response-pane [response]="response()" [error]="sendError()" [sending]="sending()" />
+        @if (lower() === 'code') {
+          <q-code-view [request]="current" [target]="codeTarget()" (targetChange)="rememberTarget($event)" (closed)="lower.set('response')" />
+        } @else {
+          <q-response-pane [response]="response()" [error]="sendError()" [sending]="sending()" />
+        }
       </div>
     </div>
   </div>

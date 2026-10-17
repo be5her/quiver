@@ -95,12 +95,12 @@ Sizes: S is a day or less, M a few days, L a week or more.
 - [x] UI: an `api.cookies` tab (by domain, filter, delete, clear per domain or all) opened from a cookie button in the Collections header (the sidebar has no global … menu), the palette and the response's Cookies view, which gains a Jar column (kept, deleted, refused with the reason); the Request view lists the cookies that came from the jar.
 - [x] Smoke: a `/setcookie?c=…&to=…` echo route; kept and refused cookies, matching by path with order, a request's own Cookie winning, a redirect hop's cookie kept and sent on, Max-Age=0, the jar off, agents masked and gated, set by hand, the jar file; the Cookies view's Jar column and the jar tab (screenshots `03z`, `03za`).
 
-## PR 9: code generation (`feat/api-codegen`, S)
+## PR 9: code generation (`feat/api-codegen`, S; landed on the PR 1 branch at the owner's request)
 
-- [ ] `packages/core/src/codegen.ts`: `toCode(target, wire)` for `javascript-fetch`, `axios`, `python-requests`, `go-net-http`, `csharp-httpclient`, `powershell` (`Invoke-RestMethod`), with a test per target covering headers, JSON and form bodies, binary and multipart (PR 6) as file references. `toCurl` stays where it is and becomes one target of the list.
-- [ ] `api.export.code { requestId | request, environmentId?, target }`, masked for agents the way `api.export.curl` is; `api.export.curl` stays as it is.
-- [ ] UI: the `curl` button becomes `Code`, a menu of targets; the pick is remembered in workspace state `api.codegen.target`. The lower pane gains a `Code` view showing the snippet for the current (effective) request in an editor with the target select and Copy, so it can be read before copying.
-- [ ] Smoke: one snippet per target from the saved echo request, compared against fixtures; an agent's snippet has the bearer masked.
+- [x] `packages/core/src/codegen.ts`: `toCode(target, input)` for `curl` (through `toCurl`, which stays), `javascript-fetch`, `axios`, `python-requests`, `go-net-http`, `csharp-httpclient` and `powershell`, from a `CodeInput` (method, URL, headers, a body that is none, text, multipart fields with files, or a file, and the send options). Multipart leaves the Content-Type to the library; C# puts Content-* headers on the content; PowerShell passes the type as `-ContentType`. Tests: fetch exactly, every target for JSON, multipart with files and a quote, a file body with the options, a GET without a body. The plan's "compared against fixtures" became key-line checks: exact fixtures for six languages would break on every formatting change.
+- [x] `api.export.code { requestId | request, environmentId?, target }`; `api.export.curl` and it share `exportInput`, so both mask for agents the same way and carry inheritance, OAuth (optional mode), files and options.
+- [x] UI: the `curl` button became `Code`, a menu of "Copy as …" (the last target first) and Show code; the lower pane shows a `CodeView` (target select, the snippet in a searchable read-only editor, Copy, close back to the response). The target is kept in workspace state `api.codegen.target`.
+- [x] Smoke: code for every target from the saved echo request (URL, bearer, body, each target's shape; curl equal to Copy as curl apart from the `{{$uuid}}` header), masked for agents; the Code menu, Show code, picking Python and its being remembered, closing back to the response (screenshot `03zb`).
 
 ## PR 10: import formats (`feat/api-import`, L, best after PR 4, PR 6 and PR 7)
 

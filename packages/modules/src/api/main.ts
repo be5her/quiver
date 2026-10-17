@@ -33,14 +33,17 @@ import {
   requestSecretValues,
   resolveDeep,
   scrubSecrets,
-  toCurl,
+  toCode,
+  CODE_TARGETS,
   type ApiCollection,
   type ApiRequest,
   type ApiAuth,
   type JarCookie,
   type ApiResponse,
   type CapturedValue,
-  type CurlFormField,
+  type CodeBody,
+  type CodeInput,
+  type CodeTarget,
   type CommandContext,
   type HistoryEntry,
   type RedactUrlOptions,
@@ -882,45 +885,62 @@ const importCurl = defineCommand({
   },
 });
 
+const ExportInput = z.object({ requestId: z.string().optional(), request: ApiRequestSchema.optional(), environmentId: z.string().nullable().optional() });
+
+/**
+ * What a request sends, ready for code: variables resolved, inheritance and a cached OAuth token
+ * applied (never a sign-in for a copy), files as references. For agents, credentials and secret
+ * variables are masked, as in `sent`: a command an agent asks for is one it reads, not one pasted.
+ */
+async function exportInput(ctx: CommandContext, input: z.infer<typeof ExportInput>): Promise<CodeInput> {
+  const request = input.request ?? (input.requestId ? await requireRequest(ws(ctx), input.requestId) : null);
+  if (!request) throw new QuiverError('INVALID_INPUT', 'Provide requestId or request');
+  const vars = await resolveVariableMap(ws(ctx), ctx.host, input.environmentId);
+  const written = resolveDeep(await withInheritance(ws(ctx), request), vars);
+  const resolved = await applyOAuth(ctx, written, 'optional');
+  const prepared = await prepareRequest(resolved);
+  const wire = { method: prepared.method, url: prepared.url, headers: prepared.headers, bodyPreview: typeof prepared.body === 'string' ? prepared.body : null };
+  const shown = ctx.caller === 'mcp' ? redactSent(wire, await knownSecrets(ctx, resolved, input.environmentId)) : wire;
+  const b = resolved.body;
+  const body: CodeBody =
+    b.type === 'form'
+      ? {
+          kind: 'form',
+          fields: b.fields
+            .filter((f) => f.enabled && f.key.trim())
+            .map((f) => (f.kind === 'file' ? { name: f.key.trim(), file: f.value.trim(), type: f.contentType?.trim() || undefined, fileName: f.fileName?.trim() || undefined } : ([f.key, f.value] as [string, string]))),
+        }
+      : b.type === 'binary'
+        ? { kind: 'file', path: b.path.trim() }
+        : shown.bodyPreview !== null && shown.bodyPreview !== ''
+          ? { kind: 'text', text: shown.bodyPreview }
+          : { kind: 'none' };
+  return {
+    method: shown.method,
+    url: shown.url,
+    headers: shown.headers,
+    body,
+    // Tools' own defaults differ from Quiver's (curl follows no redirects and has no time limit), so say what this request does.
+    options: { ...effectiveSendOptions(request.options), timeoutMs: request.options?.timeoutMs },
+  };
+}
+
 const exportCurl = defineCommand({
   id: 'api.export.curl',
   title: 'Copy as curl',
   description: 'Renders a request as a curl command with variables resolved. For agents, credentials and secret variables are masked in it.',
   scope: 'workspace',
-  input: z.object({ requestId: z.string().optional(), request: ApiRequestSchema.optional(), environmentId: z.string().nullable().optional() }),
-  handler: async (input, ctx) => {
-    const request = input.request ?? (input.requestId ? await requireRequest(ws(ctx), input.requestId) : null);
-    if (!request) throw new QuiverError('INVALID_INPUT', 'Provide requestId or request');
-    const vars = await resolveVariableMap(ws(ctx), ctx.host, input.environmentId);
-    const written = resolveDeep(await withInheritance(ws(ctx), request), vars);
-    // A cached or client credentials token goes in the command; a sign-in is never opened for a copy.
-    const resolved = await applyOAuth(ctx, written, 'optional');
-    const prepared = await prepareRequest(resolved);
-    const form: CurlFormField[] | undefined =
-      resolved.body.type === 'form'
-        ? resolved.body.fields
-            .filter((f) => f.enabled && f.key.trim())
-            .map((f) => (f.kind === 'file' ? { name: f.key.trim(), file: f.value.trim(), type: f.contentType?.trim() || undefined, fileName: f.fileName?.trim() || undefined } : ([f.key, f.value] as [string, string])))
-        : undefined;
-    const bodyFile = resolved.body.type === 'binary' ? resolved.body.path.trim() : undefined;
-    const body = typeof prepared.body === 'string' ? prepared.body : null;
-    // A command an agent asks for is one it reads, not one the user pastes into a terminal.
-    const wire = { method: prepared.method, url: prepared.url, headers: prepared.headers, bodyPreview: body };
-    const shown = ctx.caller === 'mcp' ? redactSent(wire, await knownSecrets(ctx, resolved, input.environmentId)) : wire;
-    return {
-      command: toCurl({
-        method: shown.method,
-        url: shown.url,
-        headers: form ? shown.headers.filter(([k]) => k.toLowerCase() !== 'content-type') : shown.headers,
-        body: shown.bodyPreview,
-        bodyType: form ? 'form' : 'raw',
-        formFields: form,
-        bodyFile,
-        // curl's own defaults differ from Quiver's: it follows no redirects and has no time limit, so say what this request does.
-        options: { ...effectiveSendOptions(request.options), timeoutMs: request.options?.timeoutMs },
-      }),
-    };
-  },
+  input: ExportInput,
+  handler: async (input, ctx) => ({ command: toCode('curl', await exportInput(ctx, input)) }),
+});
+
+const exportCode = defineCommand({
+  id: 'api.export.code',
+  title: 'Copy as code',
+  description: `Renders a request as code that sends it: ${CODE_TARGETS.map((t) => `${t.value} (${t.label})`).join(', ')}. Variables are resolved and files are referenced by path; for agents, credentials and secret variables are masked, as in api.export.curl.`,
+  scope: 'workspace',
+  input: ExportInput.extend({ target: z.enum(CODE_TARGETS.map((t) => t.value) as [CodeTarget, ...CodeTarget[]]) }),
+  handler: async (input, ctx) => ({ target: input.target, code: toCode(input.target, await exportInput(ctx, input)) }),
 });
 
 const fileStat = defineCommand({
@@ -1004,6 +1024,7 @@ export const apiModule = defineModule({
     historyClear,
     importCurl,
     exportCurl,
+    exportCode,
     fileStat,
     suggestName,
   ],
