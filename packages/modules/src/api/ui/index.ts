@@ -2,6 +2,7 @@ import { inject, untracked } from '@angular/core';
 import { AppState, defineModuleUI } from '@quiver/ui';
 import { Globe } from 'lucide';
 import { ApiActions } from './api-actions';
+import { RunTab } from './run-tab';
 import { ApiSidebar } from './api-sidebar';
 import { CollectionTab } from './collection-tab';
 import { CookieJarTab } from './cookie-jar-tab';
@@ -29,6 +30,7 @@ export const apiModuleUI = defineModuleUI({
     'api.graphql.schema': SchemaTab,
     'api.history': HistoryTab,
     'api.cookies': CookieJarTab,
+    'api.run': RunTab,
   },
   actions: () => {
     const api = inject(ApiActions);

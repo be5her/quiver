@@ -39,3 +39,4 @@ export * from './oauth';
 export * from './cookie-jar';
 export * from './codegen';
 export * from './import';
+export * from './checks';

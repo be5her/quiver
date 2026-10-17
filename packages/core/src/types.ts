@@ -272,6 +272,8 @@ export interface HostEvents {
   'teleport.changed': { reason: 'status' | 'tunnels' | 'login' | 'pins' };
   /** Kubernetes queries: the local history changed, or a followed log stream has new lines or ended. */
   'teleport.kube.changed': { reason: 'history' | 'stream'; runId?: string };
+  /** API client: a collection run started, moved on to the next request or finished. Fetch api.run.get for details. */
+  'api.changed': { workspaceId: string; reason: 'run'; runId: string };
   /** A mock server started or stopped, its definition changed, or it captured requests. */
   'mock.changed': { workspaceId: string; serverId: string; reason: 'status' | 'requests' | 'servers' };
   /** A WebSocket or SSE connection changed state, its definition changed, or messages arrived. */

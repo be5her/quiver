@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { REDACTED } from '@quiver/core';
-import type { ApiCollection, ApiRequest, ApiResponse, JarCookie, GraphqlSchemaDoc, Environment, HistoryEntry, WorkspaceInfo } from '@quiver/core';
+import type { ApiCollection, ApiRequest, ApiResponse, ApiRun, JarCookie, GraphqlSchemaDoc, Environment, HistoryEntry, WorkspaceInfo } from '@quiver/core';
 import { definePart, until } from '../part';
 
 export default definePart({
@@ -894,6 +894,117 @@ export default definePart({
         if (summary.collectionId) await run('api.collection.delete', { id: summary.collectionId }, ws.id);
         for (const id of summary.environmentIds) await run('api.environment.delete', { id }, ws.id);
       }
+    }
+
+    /** A request created, then saved with fields api.request.create does not take. */
+    const createWith = async (base: Record<string, unknown>, extra: Partial<ApiRequest>) => {
+      const created = await run<ApiRequest>('api.request.create', base, ws.id);
+      return run<ApiRequest>('api.request.save', { request: { ...created, ...extra } }, ws.id);
+    };
+
+    // Checks: assertions on the status, a JSON path, a header, the time and the size, run on every send and counted in the history.
+    {
+      const origin = `http://127.0.0.1:${echoPort}`;
+      const check6 = (on: string, path: string, op: string, expected: string) => ({ id: `${on}-${op}-${path}`, enabled: true, on, path, op, expected });
+      const checked = await createWith(
+        { name: 'checks probe', method: 'POST', url: `${origin}/checks?x=1`, body: { type: 'json', content: '{"n":1}' } },
+        {
+          checks: [
+            check6('status', '', 'eq', '200'),
+            check6('jsonPath', '$.method', 'eq', 'POST'),
+            check6('header', 'content-type', 'contains', 'json'),
+            check6('time', '', 'lt', '10000'),
+            check6('size', '', 'gt', '0'),
+            check6('jsonPath', '$.url', 'eq', '/nope'),
+            { ...check6('status', '', 'eq', '500'), id: 'off', enabled: false },
+          ] as ApiRequest['checks'],
+        },
+      );
+      const checkedResponse = await run<ApiResponse>('api.request.send', { requestId: checked.id }, ws.id);
+      const checkedEntry = (await run<HistoryEntry[]>('api.history.list', { limit: 1 }, ws.id))[0];
+      const agentChecked = await host.invoke('api.request.send', { requestId: checked.id }, { caller: 'mcp', workspaceId: ws.id });
+      const results = checkedResponse.checks ?? [];
+      check(
+        'checks: each enabled check runs on the response with what it read, the failing one says why, and the history counts them',
+        results.length === 6 &&
+          results.filter((r) => r.ok).length === 5 &&
+          results.find((r) => r.id.startsWith('jsonPath-eq-$.url'))?.message === 'Expected $.url to equal /nope, got "/checks?x=1"' &&
+          checkedEntry?.checks?.passed === 5 &&
+          checkedEntry.checks.total === 6 &&
+          agentChecked.ok &&
+          ((agentChecked.result as ApiResponse).checks ?? []).length === 6,
+        { results: results.map((r) => `${r.ok ? 'ok' : 'FAIL'} ${r.message}`), entry: checkedEntry?.checks },
+      );
+      await run('api.request.delete', { id: checked.id }, ws.id);
+    }
+
+    // Collection runs: requests in their set order, a capture from the second used by the third, stop at the first failure, cancel.
+    {
+      const origin = `http://127.0.0.1:${echoPort}`;
+      const statusCheck = (expected: string): ApiRequest['checks'] => [{ id: 'st', enabled: true, on: 'status', path: '', op: 'eq', expected }];
+      const flow = await run<ApiCollection>('api.collection.create', { name: 'run flow' }, ws.id);
+      const mk = (name: string, url: string, extra: Partial<ApiRequest> = {}) => createWith({ name, method: 'GET', url, collectionId: flow.id }, extra);
+      // Names sort the other way round, so only the set order puts them right.
+      const first = await mk('c first', `${origin}/run/one`, { checks: statusCheck('200') });
+      const login = await mk('b login', `${origin}/run/login?token=t-123`, { capture: [{ id: 'cap', enabled: true, variable: 'runToken', from: 'body', path: '$.url', secret: false }] });
+      const use = await mk('a use', `${origin}/run/use`, {
+        headers: [{ id: 'h', key: 'X-Run-Token', value: '{{runToken}}', enabled: true }],
+        checks: [{ id: 'tok', enabled: true, on: 'jsonPath', path: "$.headers['x-run-token']", op: 'contains', expected: 't-123' }],
+      });
+      const badOrder = await host.invoke('api.collection.reorder', { collectionId: flow.id, requestIds: [first.id, 'nope'] }, { caller: 'ui', workspaceId: ws.id });
+      await run('api.collection.reorder', { collectionId: flow.id, requestIds: [first.id, login.id, use.id] }, ws.id);
+      const historyBefore = (await run<HistoryEntry[]>('api.history.list', { limit: 500 }, ws.id)).length;
+      const finish = async (runId: string) => {
+        let got: ApiRun | null = null;
+        await until(async () => (got = await run<ApiRun>('api.run.get', { runId }, ws.id)).status !== 'running', 15000);
+        return got as unknown as ApiRun;
+      };
+      const started = await run<{ runId: string; requests: number }>('api.collection.run', { collectionId: flow.id, environmentId: env.id }, ws.id);
+      const done = await finish(started.runId);
+      const historyAfter = (await run<HistoryEntry[]>('api.history.list', { limit: 500 }, ws.id)).length;
+      const listed = await run<ApiRun[]>('api.run.list', { collectionId: flow.id }, ws.id);
+      const runsFile = await fs.readFile(path.join(folder, '.quiver', 'local', 'runs.jsonl'), 'utf8').catch(() => '');
+      check(
+        'api.collection.run: the requests go in their set order, the second captures a token the third sends and checks, and the run is kept',
+        badOrder.ok === false &&
+          started.requests === 3 &&
+          done.status === 'passed' &&
+          done.items.map((i) => i.name).join() === 'c first,b login,a use' &&
+          done.items.every((i) => i.status === 'passed' && i.httpStatus === 200) &&
+          done.items[1].captured?.join() === 'runToken' &&
+          done.items[2].checks?.[0]?.ok === true &&
+          done.passed === 3 &&
+          done.failed === 0 &&
+          historyAfter - historyBefore === 3 &&
+          listed[0]?.id === started.runId &&
+          runsFile.includes(started.runId),
+        { done: done.items.map((i) => `${i.name}:${i.status}:${i.httpStatus}:${i.error ?? ''}`), captured: done.items[1].captured, historyAdded: historyAfter - historyBefore, badOrder: badOrder.ok },
+      );
+
+      // Stop at the first failure: the first check fails, the rest are skipped.
+      await run('api.request.save', { request: { ...first, order: 0, checks: statusCheck('201') } }, ws.id);
+      const stopped = await finish((await run<{ runId: string }>('api.collection.run', { collectionId: flow.id, environmentId: env.id, stopOnFail: true }, ws.id)).runId);
+      check(
+        'api.collection.run with stopOnFail: a failing check fails the request and the rest are skipped',
+        stopped.status === 'failed' && stopped.items.map((i) => i.status).join() === 'failed,skipped,skipped' && stopped.failed === 1 && Boolean(stopped.items[0].checks?.[0]?.message.includes('Expected Status to equal 201')),
+        stopped.items.map((i) => `${i.name}:${i.status}`),
+      );
+
+      // Cancel: the request in flight stops and the rest are not sent; an agent may start and stop runs too.
+      await run('api.request.save', { request: { ...first, order: 0, url: `${origin}/slow?ms=4000`, checks: undefined } }, ws.id);
+      const agentStart = await host.invoke('api.collection.run', { collectionId: flow.id, environmentId: env.id }, { caller: 'mcp', workspaceId: ws.id });
+      const slowRunId = agentStart.ok ? (agentStart.result as { runId: string }).runId : '';
+      await until(async () => (await run<ApiRun>('api.run.get', { runId: slowRunId }, ws.id)).items[0]?.status === 'running', 3000);
+      const cancelled = await host.invoke('api.run.cancel', { runId: slowRunId }, { caller: 'mcp', workspaceId: ws.id });
+      const afterCancel = await finish(slowRunId);
+      check(
+        'api.run.cancel: a running run stops, the request in flight and the rest marked cancelled',
+        agentStart.ok && cancelled.ok && (cancelled.result as { cancelled: boolean }).cancelled === true && afterCancel.status === 'cancelled' && afterCancel.items.every((i) => i.status === 'cancelled'),
+        { status: afterCancel.status, items: afterCancel.items.map((i) => i.status) },
+      );
+      await run('api.collection.delete', { id: flow.id }, ws.id);
+      const tokenEnv = await run<Environment>('api.environment.get', { id: env.id }, ws.id);
+      await run('api.environment.save', { environment: { ...tokenEnv, variables: tokenEnv.variables.filter((v) => v.key !== 'runToken') } }, ws.id);
     }
 
     return {
@@ -1802,6 +1913,62 @@ export default definePart({
         }
         const pastedRoot = (await run<ApiCollection[]>('api.collection.list', {}, ws.id)).find((c) => c.name === 'Pasted API');
         if (pastedRoot) await run('api.collection.delete', { id: pastedRoot.id }, ws.id);
+
+        // Checks and runs in the UI: the Checks segment, the count on the status line and the Checks view, then Run collection and its tab.
+        {
+          const origin = `http://127.0.0.1:${echoPort}`;
+          const uiRun = await run<ApiCollection>('api.collection.create', { name: 'ui run' }, ws.id);
+          const add = async (name: string, path: string, checks: ApiRequest['checks']) => {
+            const created = await run<ApiRequest>('api.request.create', { name, method: 'GET', url: `${origin}${path}`, collectionId: uiRun.id }, ws.id);
+            return run<ApiRequest>('api.request.save', { request: { ...created, checks } }, ws.id);
+          };
+          await add('ui ok', '/ui/ok', [{ id: 'a', enabled: true, on: 'status', path: '', op: 'eq', expected: '200' }]);
+          await add('ui fail', '/ui/fail', [
+            { id: 'b', enabled: true, on: 'status', path: '', op: 'eq', expected: '200' },
+            { id: 'c', enabled: true, on: 'jsonPath', path: '$.url', op: 'eq', expected: '/elsewhere' },
+          ]);
+          await until(() => js(`Boolean(document.querySelector('[data-testid=api-collection][data-name="ui run"]'))`).then(Boolean), 3000);
+          await js(`(() => { const c = document.querySelector('[data-testid=api-collection][data-name="ui run"]'); if (c?.getAttribute('data-open') === 'false') c.querySelector('[role=button]')?.click(); })()`);
+          await wait(400);
+          await js(`[...document.querySelectorAll('[data-testid=api-request-row]')].find((r) => r.getAttribute('data-name') === 'ui fail')?.click()`);
+          await wait(900);
+          await js(`${visible('[data-testid=api-section-checks]')}?.click()`);
+          await wait(300);
+          const checkRows = await js(`[...document.querySelectorAll('[data-testid=api-check-row]')].filter((r) => r.offsetParent !== null).length`);
+          await js(`[...document.querySelectorAll('button')].find((b) => b.offsetParent !== null && b.textContent.trim() === 'Send')?.click()`);
+          await until(() => js(`Boolean(${visible('[data-testid=api-response-checks-count]')})`).then(Boolean), 4000);
+          const countLabel = await js(`${visible('[data-testid=api-response-checks-count]')}?.textContent.trim() ?? null`);
+          await js(`${visible('[data-testid=api-response-checks-count]')}?.click()`);
+          await wait(300);
+          const badges = await js(`[...document.querySelectorAll('[data-testid=api-response-check-badge]')].filter((e) => e.offsetParent !== null).map((e) => e.textContent.trim())`);
+          await shot('03zd-request-checks-light');
+          check(
+            'ui: the Checks segment lists the checks, the status line counts the passed ones, and the Checks view marks each pass or fail',
+            checkRows === 2 && countLabel === '1/2 checks' && JSON.stringify(badges) === '["pass","fail"]',
+            { checkRows, countLabel, badges },
+          );
+          await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+          await wait(300);
+
+          await js(`document.querySelector('[data-testid=api-collection][data-name="ui run"] [data-testid=api-collection-menu]')?.click()`);
+          await wait(250);
+          await js(`document.querySelector('[data-testid=api-menu-collection-run]')?.click()`);
+          await until(() => js(`(() => { const rows = [...document.querySelectorAll('[data-testid=api-run-row]')].filter((r) => r.offsetParent !== null); return rows.length === 2 && rows.every((r) => !['pending', 'running'].includes(r.getAttribute('data-status'))); })()`).then(Boolean), 6000);
+          await wait(300);
+          const runRows = await js(`[...document.querySelectorAll('[data-testid=api-run-row]')].filter((r) => r.offsetParent !== null).map((r) => r.getAttribute('data-status'))`);
+          const failedLine = await js(`${visible('[data-testid=api-run-failed-check]')}?.textContent.trim() ?? null`);
+          const summary = await js(`${visible('[data-testid=api-run-summary]')}?.textContent.replace(/\\s+/g, ' ').trim() ?? null`);
+          const badge = await js(`document.querySelector('[data-testid=api-collection][data-name="ui run"] [data-testid=api-collection-last-run]')?.textContent.trim() ?? null`);
+          await shot('03ze-collection-run-light');
+          check(
+            'ui: Run collection opens the run tab with each request\'s result and failed check, and the sidebar shows the last run after the collection',
+            JSON.stringify(runRows) === '["failed","passed"]' && String(failedLine).includes('Expected $.url to equal /elsewhere') && String(summary).startsWith('2 of 2 · 1 passed · 1 failed') && badge === '1/2',
+            { runRows, failedLine, summary, badge },
+          );
+          await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+          await wait(300);
+          await run('api.collection.delete', { id: uiRun.id }, ws.id);
+        }
       },
     };
   },

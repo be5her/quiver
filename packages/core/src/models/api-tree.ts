@@ -63,3 +63,27 @@ export function collectionPath(collections: Pick<ApiCollection, 'id' | 'parentId
   const byId = new Map(collections.map((c) => [c.id, c]));
   return [...collectionAncestors(collections, id).reverse(), id].map((c) => byId.get(c)?.name ?? '?').join(' / ');
 }
+
+/** Requests in their collection's order: those with an `order` first, by it, then the rest by name. */
+export function compareRequests(a: Pick<ApiRequest, 'name' | 'order'>, b: Pick<ApiRequest, 'name' | 'order'>): number {
+  const ao = a.order ?? Number.POSITIVE_INFINITY;
+  const bo = b.order ?? Number.POSITIVE_INFINITY;
+  if (ao !== bo) return ao < bo ? -1 : 1;
+  return a.name.localeCompare(b.name);
+}
+
+/**
+ * The requests a run of a collection sends: its own in order, then, when recursive, each
+ * sub-collection's (sub-collections by name), depth first.
+ */
+export function runOrder<R extends Pick<ApiRequest, 'name' | 'order' | 'collectionId'>>(
+  collections: Pick<ApiCollection, 'id' | 'parentId' | 'name'>[],
+  requests: R[],
+  collectionId: string,
+  recursive = true,
+): R[] {
+  const own = requests.filter((r) => r.collectionId === collectionId).sort(compareRequests);
+  if (!recursive) return own;
+  const children = collections.filter((c) => c.parentId === collectionId).sort((a, b) => a.name.localeCompare(b.name));
+  return [...own, ...children.flatMap((c) => runOrder(collections, requests, c.id, true))];
+}

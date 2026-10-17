@@ -19,11 +19,24 @@
       (contextmenu)="collectionMenu($event, collection)"
     >
       <svg rowPrefix [qIcon]="open ? icons.ChevronDown : icons.ChevronRight" class="size-3.5 text-muted"></svg>
+      @if (lastRuns().get(collection.id); as last) {
+        <button
+          rowSuffix
+          type="button"
+          class="text-[10px] font-medium px-1 rounded hover:bg-surface"
+          [class]="last.status === 'passed' ? 'text-success' : last.status === 'running' ? 'text-accent' : last.status === 'cancelled' ? 'text-warning' : 'text-danger'"
+          [title]="'Last run: ' + last.status + ' (' + last.passed + ' passed, ' + last.failed + ' failed). Open it.'"
+          data-testid="api-collection-last-run"
+          (click)="openRun($event, collection)"
+        >
+          {{ last.status === 'running' ? '…' : last.passed + '/' + last.items.length }}
+        </button>
+      }
       <button qIconButton label="Collection settings" size="sm" data-testid="api-collection-settings" (click)="openSettings($event, collection)"><svg [qIcon]="icons.Settings2" class="size-3.5"></svg></button>
       <button qIconButton label="More actions" size="sm" data-testid="api-collection-menu" (click)="collectionMenu($event, collection)"><svg [qIcon]="icons.Ellipsis" class="size-3.5"></svg></button>
     </div>
     @if (open) {
-      <q-api-collection-tree [collections]="collections()" [requests]="requests()" [parentId]="collection.id" [depth]="depth() + 1" [filter]="filter()" />
+      <q-api-collection-tree [collections]="collections()" [requests]="requests()" [parentId]="collection.id" [depth]="depth() + 1" [filter]="filter()" [lastRuns]="lastRuns()" />
     }
   </div>
 }

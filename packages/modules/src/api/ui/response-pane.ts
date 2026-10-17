@@ -1,11 +1,11 @@
 import { Component, computed, inject, input, signal, viewChild } from '@angular/core';
-import { cookieExpiry, jsonPath, parseSetCookie, responseFileName, toErrorPayload, type ApiResponse, type SetCookie } from '@quiver/core';
+import { checkSummary, cookieExpiry, jsonPath, parseSetCookie, responseFileName, toErrorPayload, type ApiResponse, type SetCookie } from '@quiver/core';
 import { Button, CodeEditor, EmptyState, HostBridge, Input, Segment, Segmented, Spinner, Toasts, formatBytes, formatMs, statusColor, type CodeLanguage } from '@quiver/ui';
 import { ChevronRight, Copy, Download, Search } from 'lucide';
 import { ApiActions } from './api-actions';
 import { HeaderTable } from './header-table';
 
-type View = 'body' | 'headers' | 'cookies' | 'request';
+type View = 'body' | 'headers' | 'cookies' | 'checks' | 'request';
 
 interface Shown {
   text: string;
@@ -81,6 +81,8 @@ export class ResponsePane {
   protected readonly formatMs = formatMs;
   protected readonly formatBytes = formatBytes;
   protected readonly view = signal<View>('body');
+  /** Passed and total checks of the response, for the status line. */
+  protected readonly checkCount = computed(() => checkSummary(this.response()?.checks));
   protected readonly pretty = signal(true);
   protected readonly preview = signal(true);
   /** A JSON path over the body; kept across sends so a re-send shows the same slice. */

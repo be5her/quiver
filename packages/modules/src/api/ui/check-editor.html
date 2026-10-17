@@ -1,0 +1,73 @@
+@if (rows().length) {
+  <table class="w-full" data-testid="api-check-table">
+    <thead class="text-xs text-muted text-left">
+      <tr>
+        <th class="w-7"></th>
+        <th class="font-medium pb-1 pr-2 w-32">Check</th>
+        <th class="font-medium pb-1 pr-2">Path or name</th>
+        <th class="font-medium pb-1 pr-2 w-36">Is</th>
+        <th class="font-medium pb-1 pr-2">Expected</th>
+        <th class="w-8"></th>
+      </tr>
+    </thead>
+    <tbody>
+      @for (row of rows(); track row.id) {
+        <tr data-testid="api-check-row">
+          <td class="py-0.5"><input qCheckbox [checked]="row.enabled" title="Run this check on every send" (change)="update(row.id, { enabled: checked($event) })" /></td>
+          <td class="py-0.5 pr-2">
+            <select qSelect class="h-7 w-full text-xs" data-testid="api-check-on" (change)="setTarget(row, $event)">
+              @for (t of targets; track t.value) {
+                <option [value]="t.value" [selected]="row.on === t.value">{{ t.label }}</option>
+              }
+            </select>
+          </td>
+          <td class="py-0.5 pr-2">
+            <input
+              class="w-full h-7 rounded-md border border-edge bg-surface px-2 text-xs font-mono text-fg placeholder:text-muted/70 focus:outline-none focus:border-accent disabled:opacity-50"
+              spellcheck="false"
+              data-testid="api-check-path"
+              [disabled]="!hasPath(row.on)"
+              [placeholder]="pathPlaceholder(row.on)"
+              [value]="row.path"
+              (input)="update(row.id, { path: text($event) })"
+            />
+          </td>
+          <td class="py-0.5 pr-2">
+            <select qSelect class="h-7 w-full text-xs" data-testid="api-check-op" (change)="setOp(row, $event)">
+              @for (o of ops(row.on); track o.value) {
+                <option [value]="o.value" [selected]="row.op === o.value">{{ o.label }}</option>
+              }
+            </select>
+          </td>
+          <td class="py-0.5 pr-2">
+            @if (row.op === 'isType') {
+              <select qSelect class="h-7 w-full text-xs" data-testid="api-check-type" (change)="update(row.id, { expected: text($event) })">
+                @for (t of types; track t) {
+                  <option [value]="t" [selected]="row.expected === t">{{ t }}</option>
+                }
+              </select>
+            } @else {
+              <input
+                class="w-full h-7 rounded-md border border-edge bg-surface px-2 text-xs font-mono text-fg placeholder:text-muted/70 focus:outline-none focus:border-accent disabled:opacity-50"
+                spellcheck="false"
+                data-testid="api-check-expected"
+                [disabled]="row.op === 'exists'"
+                [placeholder]="expectedPlaceholder(row.op)"
+                [value]="row.op === 'exists' ? '' : row.expected"
+                (input)="update(row.id, { expected: text($event) })"
+              />
+            }
+          </td>
+          <td class="py-0.5 text-right">
+            <button qIconButton label="Remove check" size="sm" (click)="remove(row.id)"><svg [qIcon]="icons.Trash2" class="size-3.5"></svg></button>
+          </td>
+        </tr>
+      }
+    </tbody>
+  </table>
+}
+<button qButton size="sm" variant="ghost" [icon]="icons.Plus" class="mt-1" data-testid="api-check-add" (click)="add()">Add check</button>
+<p class="text-xs text-muted mt-2 max-w-xl">
+  Checks run on the response after every send, and a collection run counts a request as failed when one does not pass. Values compare as numbers or
+  JSON where they are, and {{ variableSyntax }} works in Expected.
+</p>

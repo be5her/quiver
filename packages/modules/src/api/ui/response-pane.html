@@ -9,6 +9,17 @@
           {{ response.redirects.length }} {{ response.redirects.length === 1 ? 'redirect' : 'redirects' }}
         </button>
       }
+      @if (checkCount(); as count) {
+        <button
+          type="button"
+          class="font-medium underline decoration-dotted underline-offset-2"
+          [class]="count.passed === count.total ? 'text-success' : 'text-danger'"
+          data-testid="api-response-checks-count"
+          (click)="view.set('checks')"
+        >
+          {{ count.passed }}/{{ count.total }} checks
+        </button>
+      }
       @if (response.truncated) {
         <span class="text-warning">truncated</span>
       }
@@ -21,6 +32,9 @@
         <button qSegment="headers" data-testid="api-response-headers-tab">Headers ({{ response.headers.length }})</button>
         @if (response.setCookies.length) {
           <button qSegment="cookies" data-testid="api-response-cookies-tab">Cookies ({{ response.setCookies.length }})</button>
+        }
+        @if (response.checks?.length) {
+          <button qSegment="checks" data-testid="api-response-checks-tab">Checks</button>
         }
         <button qSegment="request">Request</button>
       </q-segmented>
@@ -150,6 +164,21 @@
             </table>
             <button type="button" class="mt-2 text-xs text-accent hover:underline" (click)="openJar()">Open the cookie jar</button>
           </div>
+        }
+        @case ('checks') {
+          <ul class="flex flex-col gap-1 text-xs" data-testid="api-response-checks">
+            @for (c of response.checks ?? []; track c.id) {
+              <li class="flex items-start gap-2" data-testid="api-response-check">
+                <span
+                  class="shrink-0 rounded px-1.5 py-px text-[10px] font-semibold uppercase"
+                  [class]="c.ok ? 'bg-success/15 text-success' : 'bg-danger/15 text-danger'"
+                  data-testid="api-response-check-badge"
+                  >{{ c.ok ? 'pass' : 'fail' }}</span
+                >
+                <span class="font-mono break-all" [class]="c.ok ? 'text-fg' : 'text-danger'">{{ c.message }}</span>
+              </li>
+            }
+          </ul>
         }
         @case ('request') {
           <div class="flex flex-col h-full gap-2 text-xs">

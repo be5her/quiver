@@ -170,6 +170,34 @@ export interface CapturedValue {
   secret: boolean;
 }
 
+export const CheckTargetSchema = z.enum(['status', 'header', 'body', 'jsonPath', 'time', 'size']);
+export type CheckTarget = z.infer<typeof CheckTargetSchema>;
+export const CheckOpSchema = z.enum(['eq', 'neq', 'lt', 'gt', 'contains', 'matches', 'exists', 'isType']);
+export type CheckOp = z.infer<typeof CheckOpSchema>;
+
+/**
+ * An assertion on the response, run after every send: the status, a header (`path` is its name),
+ * the body text, a JSON path into the body, the time in ms or the size in bytes, compared with
+ * `expected`, in which `{{variables}}` resolve.
+ */
+export const CheckSchema = z.object({
+  id: z.string(),
+  enabled: z.boolean(),
+  on: CheckTargetSchema,
+  path: z.string().default(''),
+  op: CheckOpSchema,
+  expected: z.string().default(''),
+});
+export type Check = z.infer<typeof CheckSchema>;
+
+/** How one check went: what it read (as text, null when there was nothing) and a line saying so. */
+export interface CheckResult {
+  id: string;
+  ok: boolean;
+  actual: string | null;
+  message: string;
+}
+
 export const ApiRequestSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -185,6 +213,10 @@ export const ApiRequestSchema = z.object({
   options: RequestOptionsSchema.optional(),
   /** Values taken from the response into environment variables after each send; absent when there are none. */
   capture: z.array(CaptureSchema).optional(),
+  /** Assertions on the response; absent when there are none. */
+  checks: z.array(CheckSchema).optional(),
+  /** Position among the requests of its collection; requests without one follow, by name. */
+  order: z.number().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -247,6 +279,8 @@ export interface ApiResponse {
   cookieJar?: { sent: string[]; stored: string[]; deleted: string[]; rejected: { name: string; reason: string }[] };
   /** What the request's captures wrote into the environment, when it has any. */
   captured?: CapturedValue[];
+  /** How the request's checks went, when it has any. */
+  checks?: CheckResult[];
   /** The request after variable resolution and auth application. */
   sent: { method: HttpMethod; url: string; headers: [string, string][]; bodyPreview: string | null };
 }
@@ -261,6 +295,41 @@ export interface HistoryEntry {
   durationMs: number | null;
   error: string | null;
   request: ApiRequest;
+  /** Passed and total checks, when the request has any and a response came back. */
+  checks?: { passed: number; total: number };
+}
+
+export type RunItemStatus = 'pending' | 'running' | 'passed' | 'failed' | 'error' | 'skipped' | 'cancelled';
+
+/** One request of a collection run: passed (a response, every check passing), failed (a check failed), error (no response). */
+export interface ApiRunItem {
+  requestId: string;
+  name: string;
+  method: HttpMethod;
+  /** The URL as sent, credentials masked as in the history. */
+  url: string | null;
+  status: RunItemStatus;
+  httpStatus: number | null;
+  durationMs: number | null;
+  checks?: CheckResult[];
+  /** Variables its captures wrote. */
+  captured?: string[];
+  error?: string;
+}
+
+/** A run of a collection's requests, in order, with captures applied between them. */
+export interface ApiRun {
+  id: string;
+  collectionId: string;
+  collectionName: string;
+  environmentId: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+  status: 'running' | 'passed' | 'failed' | 'cancelled';
+  stopOnFail: boolean;
+  items: ApiRunItem[];
+  passed: number;
+  failed: number;
 }
 
 export function keyValue(key = '', value = '', enabled = true): KeyValue {

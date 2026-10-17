@@ -1,5 +1,5 @@
 import { Component, computed, inject, input } from '@angular/core';
-import { collectionsWithMatches, matchesRequest, type ApiCollection, type ApiRequest } from '@quiver/core';
+import { collectionsWithMatches, compareRequests, matchesRequest, type ApiCollection, type ApiRequest, type ApiRun } from '@quiver/core';
 import { AppState, Icon, IconButton, METHOD_COLORS, TabsState, TreeState } from '@quiver/ui';
 import { ChevronDown, ChevronRight, Ellipsis, Settings2 } from 'lucide';
 import { ApiActions } from './api-actions';
@@ -26,6 +26,8 @@ export class ApiCollectionTree {
 
   readonly collections = input.required<ApiCollection[]>();
   readonly requests = input.required<ApiRequest[]>();
+  /** The latest run of each collection, by id, for the result after its name. */
+  readonly lastRuns = input<ReadonlyMap<string, ApiRun>>(new Map());
   readonly parentId = input<string | null>(null);
   readonly depth = input(0);
   readonly filter = input('');
@@ -39,7 +41,9 @@ export class ApiCollectionTree {
     return this.collections().filter((c) => (c.parentId ?? null) === this.parentId() && (!kept || kept.has(c.id)));
   });
   protected readonly items = computed(() =>
-    this.requests().filter((r) => (r.collectionId ?? null) === this.parentId() && (!this.filtering() || matchesRequest(r, this.filter()))),
+    this.requests()
+      .filter((r) => (r.collectionId ?? null) === this.parentId() && (!this.filtering() || matchesRequest(r, this.filter())))
+      .sort(compareRequests),
   );
   /** The request whose tab is on screen, highlighted in the tree. */
   protected readonly activeRequestId = computed(() => {
@@ -72,6 +76,11 @@ export class ApiCollectionTree {
   protected openSettings(event: MouseEvent, collection: ApiCollection): void {
     event.stopPropagation();
     this.api.openCollectionTab(collection);
+  }
+
+  protected openRun(event: MouseEvent, collection: ApiCollection): void {
+    event.stopPropagation();
+    this.api.openRunTab(collection);
   }
 
   protected collectionMenu(event: MouseEvent, collection: ApiCollection): void {

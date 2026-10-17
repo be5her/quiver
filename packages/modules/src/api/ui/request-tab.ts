@@ -13,6 +13,7 @@ import {
   type ApiRequest,
   type ApiResponse,
   type Capture,
+  type Check,
   type CodeTarget,
   type Environment,
   type RequestOptions,
@@ -42,11 +43,12 @@ import { ApiVariables } from './api-variables';
 import { AuthEditor, type InheritedAuthInfo } from './auth-editor';
 import { BodyEditor } from './body-editor';
 import { CaptureEditor } from './capture-editor';
+import { CheckEditor } from './check-editor';
 import { CodeView } from './code-view';
 import { RequestSettings } from './request-settings';
 import { ResponsePane } from './response-pane';
 
-type Section = 'params' | 'headers' | 'body' | 'auth' | 'capture' | 'settings' | 'notes';
+type Section = 'params' | 'headers' | 'body' | 'auth' | 'capture' | 'checks' | 'settings' | 'notes';
 
 /**
  * One request: name, method and URL, then params, headers, body and auth, and the last response.
@@ -55,7 +57,7 @@ type Section = 'params' | 'headers' | 'body' | 'auth' | 'capture' | 'settings' |
  */
 @Component({
   selector: 'q-request-tab',
-  imports: [AuthEditor, BodyEditor, Button, CaptureEditor, CodeView, CodeEditor, FormField, Input, KeyValueEditor, RequestSettings, ResponsePane, Segment, Segmented, Select, Spinner, VariableInput],
+  imports: [AuthEditor, BodyEditor, Button, CaptureEditor, CheckEditor, CodeView, CodeEditor, FormField, Input, KeyValueEditor, RequestSettings, ResponsePane, Segment, Segmented, Select, Spinner, VariableInput],
   hostDirectives: [ApiVariables],
   templateUrl: './request-tab.html',
   host: { class: 'contents', '(keydown)': 'shortcut($event)' },
@@ -146,6 +148,7 @@ export class RequestTab implements TabComponent {
       body: request.body.type === 'none' ? 0 : 1,
       auth: request.auth.type === 'none' || (request.auth.type === 'inherit' && !this.authInheritance()?.from) ? 0 : 1,
       capture: (request.capture ?? []).filter((c) => c.enabled).length,
+      checks: (request.checks ?? []).filter((c) => c.enabled).length,
       settings: Object.keys(request.options ?? {}).length,
       notes: request.description?.trim() ? 1 : 0,
     };
@@ -240,6 +243,15 @@ export class RequestTab implements TabComponent {
     this.request.update((request) => {
       const next: ApiRequest = { ...request, capture };
       if (!capture) delete next.capture;
+      return next;
+    });
+  }
+
+  /** No checks means no `checks` key, as for captures. */
+  protected setChecks(checks: Check[] | undefined): void {
+    this.request.update((request) => {
+      const next: ApiRequest = { ...request, checks };
+      if (!checks) delete next.checks;
       return next;
     });
   }

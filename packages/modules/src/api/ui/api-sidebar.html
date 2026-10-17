@@ -29,7 +29,7 @@
     <button qIconButton label="Import from curl, OpenAPI, Postman, Insomnia or HAR" size="sm" data-testid="api-import-menu" (click)="api.importMenu($event)"><svg [qIcon]="icons.Import" class="size-3.5"></svg></button>
     <button qIconButton label="Cookie jar" size="sm" data-testid="api-open-cookies" (click)="api.openCookieJar()"><svg [qIcon]="icons.Cookie" class="size-3.5"></svg></button>
   </q-section-header>
-  <q-api-collection-tree [collections]="collections.value() ?? []" [requests]="requests.value() ?? []" [filter]="filter()" />
+  <q-api-collection-tree [collections]="collections.value() ?? []" [requests]="requests.value() ?? []" [filter]="filter()" [lastRuns]="lastRuns()" />
   @if (empty()) {
     <p class="px-3 py-2 text-xs text-muted">No requests yet. Create one, or import a curl command, an OpenAPI document or a Postman, Insomnia or HAR file.</p>
   } @else if (noMatches()) {

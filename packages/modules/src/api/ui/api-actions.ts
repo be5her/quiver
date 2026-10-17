@@ -235,6 +235,18 @@ export class ApiActions {
     return info.relative ?? path;
   }
 
+  /** Start a run of the collection and show it in its run tab (one per collection, showing the latest run). */
+  async runCollection(collection: Pick<ApiCollection, 'id' | 'name'>, options: { stopOnFail?: boolean } = {}): Promise<void> {
+    const { runId } = await this.host.invoke<{ runId: string }>('api.collection.run', { collectionId: collection.id, ...options });
+    this.openRunTab(collection, runId);
+  }
+
+  openRunTab(collection: Pick<ApiCollection, 'id' | 'name'>, runId?: string): void {
+    const scope = untracked(this.app.scope);
+    const tab = this.tabs.openTab(scope, { type: 'api.run', title: `Run: ${collection.name}`, data: { collectionId: collection.id } }, { singletonKey: `api.run:${collection.id}` });
+    if (runId) this.tabs.updateTab(scope, tab.id, { data: { collectionId: collection.id, runId } });
+  }
+
   /** The workspace's cookie jar. */
   openCookieJar(): void {
     this.tabs.openTab(untracked(this.app.scope), { type: 'api.cookies', title: 'Cookie jar', data: {} }, { singletonKey: 'api.cookies' });
@@ -294,6 +306,7 @@ export class ApiActions {
     const at = { x: event.clientX, y: event.clientY };
     this.contextMenu.open(event, [
       { label: 'Settings…', select: () => this.openCollectionTab(collection), testId: 'api-menu-collection-settings' },
+      { label: 'Run collection', select: () => this.run(this.runCollection(collection)), testId: 'api-menu-collection-run' },
       'separator',
       { label: 'New request', select: () => this.run(this.createRequest(collection.id)) },
       { label: 'New GraphQL request', select: () => this.run(this.createGraphqlRequest(collection.id)) },

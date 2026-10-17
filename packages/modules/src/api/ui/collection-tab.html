@@ -11,7 +11,8 @@
         <span class="text-xs text-muted truncate">in {{ path }}</span>
       }
       <div class="flex-1"></div>
-      <button qButton size="sm" [variant]="dirty() ? 'primary' : 'ghost'" [icon]="saveIcon" title="Ctrl+S" data-testid="api-collection-save" (click)="save()">Save{{ dirty() ? '*' : '' }}</button>
+      <button qButton size="sm" variant="ghost" [icon]="icons.Play" title="Send every request in order, with captures and checks" data-testid="api-collection-run" (click)="runCollection()">Run</button>
+      <button qButton size="sm" [variant]="dirty() ? 'primary' : 'ghost'" [icon]="icons.Save" title="Ctrl+S" data-testid="api-collection-save" (click)="save()">Save{{ dirty() ? '*' : '' }}</button>
     </div>
     <div class="flex-1 overflow-auto p-3 flex flex-col gap-5 max-w-3xl">
       <p class="text-xs text-muted">
@@ -38,6 +39,26 @@
       <section class="flex flex-col gap-1">
         <h3 class="text-xs font-semibold text-muted uppercase tracking-wide">Auth</h3>
         <q-auth-editor [formField]="collectionForm.auth" [inherit]="authInheritance()" oauth />
+      </section>
+
+      <section class="flex flex-col gap-1">
+        <h3 class="text-xs font-semibold text-muted uppercase tracking-wide">Requests</h3>
+        @if (ordered().length) {
+          <ol class="flex flex-col rounded-md border border-edge divide-y divide-edge/60 text-xs" data-testid="api-collection-requests">
+            @for (request of ordered(); track request.id; let i = $index, last = $last) {
+              <li class="flex items-center gap-2 px-2 h-8" data-testid="api-collection-request" [attr.data-name]="request.name">
+                <span class="w-5 text-muted text-right">{{ i + 1 }}</span>
+                <span class="font-bold text-[10px] w-12" [class]="methodColors[request.method]">{{ request.method }}</span>
+                <button type="button" class="flex-1 text-left truncate hover:underline" (click)="openRequest(request)">{{ request.name }}</button>
+                <button qIconButton label="Move up" size="sm" [disabled]="i === 0" data-testid="api-collection-request-up" (click)="move(i, -1)"><svg [qIcon]="icons.ArrowUp" class="size-3.5"></svg></button>
+                <button qIconButton label="Move down" size="sm" [disabled]="last" data-testid="api-collection-request-down" (click)="move(i, 1)"><svg [qIcon]="icons.ArrowDown" class="size-3.5"></svg></button>
+              </li>
+            }
+          </ol>
+          <p class="text-[11px] text-muted">The order the sidebar shows and a run sends them in; sub-collections follow, by name.</p>
+        } @else {
+          <p class="text-xs text-muted">No requests directly in this collection.</p>
+        }
       </section>
 
       <section class="flex flex-col gap-1 min-h-[120px]">

@@ -1,8 +1,9 @@
 import { Component, computed, effect, inject, input, linkedSignal, resource, untracked } from '@angular/core';
 import { FormField, form } from '@angular/forms/signals';
-import { collectionPath, inheritedAuth, inheritedBaseUrl, newCollection, toErrorPayload, type ApiCollection } from '@quiver/core';
-import { Button, CodeEditor, HostBridge, Input, KeyValueEditor, Spinner, TabsState, Toasts, VariableInput, injectHostEvent, invokeResource, type Tab, type TabComponent } from '@quiver/ui';
-import { Save } from 'lucide';
+import { collectionPath, compareRequests, inheritedAuth, inheritedBaseUrl, newCollection, toErrorPayload, type ApiCollection, type ApiRequest } from '@quiver/core';
+import { Button, CodeEditor, HostBridge, Icon, IconButton, Input, KeyValueEditor, METHOD_COLORS, Spinner, TabsState, Toasts, VariableInput, injectHostEvent, invokeResource, type Tab, type TabComponent } from '@quiver/ui';
+import { ArrowDown, ArrowUp, Play, Save } from 'lucide';
+import { ApiActions } from './api-actions';
 import { ApiVariables } from './api-variables';
 import { AuthEditor, type InheritedAuthInfo } from './auth-editor';
 
@@ -13,7 +14,7 @@ import { AuthEditor, type InheritedAuthInfo } from './auth-editor';
  */
 @Component({
   selector: 'q-collection-tab',
-  imports: [AuthEditor, Button, CodeEditor, FormField, Input, KeyValueEditor, Spinner, VariableInput],
+  imports: [AuthEditor, Button, CodeEditor, FormField, Icon, IconButton, Input, KeyValueEditor, Spinner, VariableInput],
   hostDirectives: [ApiVariables],
   templateUrl: './collection-tab.html',
   host: { class: 'contents', '(keydown)': 'shortcut($event)' },
@@ -22,11 +23,13 @@ export class CollectionTab implements TabComponent {
   private readonly host = inject(HostBridge);
   private readonly tabs = inject(TabsState);
   private readonly toasts = inject(Toasts);
+  private readonly api = inject(ApiActions);
 
   readonly tab = input.required<Tab>();
   readonly scope = input.required<string>();
 
-  protected readonly saveIcon = Save;
+  protected readonly icons = { ArrowDown, ArrowUp, Play, Save };
+  protected readonly methodColors = METHOD_COLORS;
   protected readonly baseUrlPlaceholder = 'https://{{host}}/v1';
   protected readonly descriptionPlaceholder = 'What these requests are for and what they need. Agents read this too.';
   private readonly id = computed(() => String(this.tab().data?.['id'] ?? ''));
@@ -36,6 +39,9 @@ export class CollectionTab implements TabComponent {
   });
   private readonly all = invokeResource<ApiCollection[]>('api.collection.list', () => ({}), { refreshOn: ['collections'] });
   protected readonly loaded = computed(() => this.stored.hasValue());
+  private readonly requests = invokeResource<ApiRequest[]>('api.request.list', () => ({ collectionId: this.id() }), { refreshOn: ['requests'] });
+  /** The requests directly in the collection, in the order a run sends them. */
+  protected readonly ordered = computed(() => [...(this.requests.value() ?? [])].sort(compareRequests));
   protected readonly loadError = computed(() => (this.stored.status() === 'error' ? toErrorPayload(this.stored.error()).message : null));
   /** What the fields edit. A newer stored version replaces it while it has no unsaved edits. */
   protected readonly collection = linkedSignal<ApiCollection | undefined, ApiCollection>({
@@ -79,6 +85,27 @@ export class CollectionTab implements TabComponent {
       event.preventDefault();
       void this.save();
     }
+  }
+
+  /** Swap a request with its neighbour; the whole order is written, so requests without one get one. */
+  protected async move(index: number, delta: number): Promise<void> {
+    const ids = this.ordered().map((r) => r.id);
+    const to = index + delta;
+    if (to < 0 || to >= ids.length) return;
+    [ids[index], ids[to]] = [ids[to], ids[index]];
+    try {
+      await this.host.invoke('api.collection.reorder', { collectionId: this.id(), requestIds: ids });
+    } catch (err) {
+      this.toasts.error(err);
+    }
+  }
+
+  protected openRequest(request: ApiRequest): void {
+    this.api.openRequestTab(request);
+  }
+
+  protected runCollection(): void {
+    this.api.runCollection(this.collection()).catch((err) => this.toasts.error(err));
   }
 
   protected setDescription(text: string): void {

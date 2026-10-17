@@ -1,5 +1,5 @@
 import { Component, DestroyRef, computed, effect, inject, signal } from '@angular/core';
-import { historyStatusLabel, matchesHistory, matchesRequest, shortRelativeTime, type ApiCollection, type ApiRequest, type Environment, type HistoryEntry } from '@quiver/core';
+import { historyStatusLabel, matchesHistory, matchesRequest, shortRelativeTime, type ApiCollection, type ApiRequest, type ApiRun, type Environment, type HistoryEntry } from '@quiver/core';
 import { ContextMenu, Icon, IconButton, METHOD_COLORS, SectionHeader, Toasts, TreeState, invokeResource, statusColor } from '@quiver/ui';
 import { Braces, Check, ChevronDown, ChevronRight, Cookie, FolderPlus, Import, Plus, Search, Trash2, X } from 'lucide';
 import { ApiActions } from './api-actions';
@@ -36,6 +36,13 @@ export class ApiSidebar {
   protected readonly statusLabel = historyStatusLabel;
   protected readonly requests = invokeResource<ApiRequest[]>('api.request.list', () => ({}), { refreshOn: ['requests'] });
   protected readonly collections = invokeResource<ApiCollection[]>('api.collection.list', () => ({}), { refreshOn: ['collections'] });
+  private readonly runs = invokeResource<ApiRun[]>('api.run.list', () => ({ limit: 100 }), { refreshOn: ['runs'], refreshOnEvents: ['api.changed'] });
+  /** Each collection's latest run, running or finished. */
+  protected readonly lastRuns = computed(() => {
+    const latest = new Map<string, ApiRun>();
+    for (const run of this.runs.value() ?? []) if (!latest.has(run.collectionId)) latest.set(run.collectionId, run);
+    return latest;
+  });
   protected readonly environments = invokeResource<Environment[]>('api.environment.list', () => ({}), { refreshOn: ['environments'] });
   protected readonly active = invokeResource<{ id: string | null }>('api.environment.active', () => ({}), { refreshOnState: ['api.activeEnvironment'] });
   /** One more than the sidebar shows, to know whether "Show all" has anything more to show. */

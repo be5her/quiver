@@ -1,0 +1,188 @@
+import { jsonPath } from './json-path';
+import type { ApiResponse, Check, CheckOp, CheckResult, CheckTarget } from './models/api';
+
+/** The parts of a response checks read. */
+export type CheckSourceResponse = Pick<ApiResponse, 'status' | 'headers' | 'body' | 'bodyEncoding' | 'size' | 'timings'>;
+
+export const CHECK_TARGETS: { value: CheckTarget; label: string; path?: string }[] = [
+  { value: 'status', label: 'Status' },
+  { value: 'jsonPath', label: 'JSON path', path: '$.data.id' },
+  { value: 'header', label: 'Header', path: 'Content-Type' },
+  { value: 'body', label: 'Body' },
+  { value: 'time', label: 'Time (ms)' },
+  { value: 'size', label: 'Size (bytes)' },
+];
+
+export const CHECK_OPS: { value: CheckOp; label: string }[] = [
+  { value: 'eq', label: 'equals' },
+  { value: 'neq', label: 'does not equal' },
+  { value: 'lt', label: 'less than' },
+  { value: 'gt', label: 'greater than' },
+  { value: 'contains', label: 'contains' },
+  { value: 'matches', label: 'matches regex' },
+  { value: 'exists', label: 'exists' },
+  { value: 'isType', label: 'is of type' },
+];
+
+/** Types `isType` knows, as JSON names them. */
+export const CHECK_TYPES = ['string', 'number', 'boolean', 'object', 'array', 'null'] as const;
+
+type Read = { found: true; value: unknown } | { found: false; why: string };
+
+/** What a check reads from the response. A JSON path selecting several values reads them as an array. */
+function read(check: Pick<Check, 'on' | 'path'>, response: CheckSourceResponse): Read {
+  const path = check.path.trim();
+  switch (check.on) {
+    case 'status':
+      return { found: true, value: response.status };
+    case 'time':
+      return { found: true, value: Math.round(response.timings.total) };
+    case 'size':
+      return { found: true, value: response.size };
+    case 'header': {
+      if (!path) return { found: false, why: 'Name the header to check' };
+      const lower = path.toLowerCase();
+      const values = response.headers.filter(([key]) => key.toLowerCase() === lower).map(([, value]) => value);
+      return values.length ? { found: true, value: values.join(', ') } : { found: false, why: `The response has no ${path} header` };
+    }
+    case 'body':
+      return response.bodyEncoding === 'utf8' ? { found: true, value: response.body } : { found: false, why: 'The body is binary' };
+    case 'jsonPath': {
+      if (response.bodyEncoding !== 'utf8') return { found: false, why: 'The body is binary' };
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(response.body);
+      } catch {
+        return { found: false, why: 'The body is not JSON' };
+      }
+      let values: unknown[];
+      try {
+        values = jsonPath(parsed, path || '$');
+      } catch (err) {
+        return { found: false, why: (err as Error).message };
+      }
+      const defined = values.filter((v) => v !== undefined);
+      if (!defined.length) return { found: false, why: `${path || '$'} matched nothing in the body` };
+      return { found: true, value: defined.length === 1 ? defined[0] : defined };
+    }
+  }
+}
+
+function typeOf(value: unknown): string {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'array';
+  return typeof value;
+}
+
+function asText(value: unknown): string {
+  return typeof value === 'string' ? value : JSON.stringify(value);
+}
+
+/** Equal as the expected text means it: numbers as numbers, JSON values as JSON, strings as they are. */
+function equals(actual: unknown, expected: string): boolean {
+  if (typeof actual === 'string') return actual === expected;
+  if (typeof actual === 'number') return expected.trim() !== '' && Number(expected) === actual;
+  try {
+    return JSON.stringify(JSON.parse(expected)) === JSON.stringify(actual);
+  } catch {
+    return asText(actual) === expected;
+  }
+}
+
+function number(value: unknown): number | null {
+  const n = typeof value === 'number' ? value : typeof value === 'string' && value.trim() !== '' ? Number(value) : NaN;
+  return Number.isFinite(n) ? n : null;
+}
+
+function label(check: Pick<Check, 'on' | 'path'>): string {
+  const path = check.path.trim();
+  switch (check.on) {
+    case 'status':
+      return 'Status';
+    case 'time':
+      return 'Time';
+    case 'size':
+      return 'Size';
+    case 'body':
+      return 'Body';
+    case 'header':
+      return `Header ${path}`;
+    case 'jsonPath':
+      return path || '$';
+  }
+}
+
+function shown(check: Pick<Check, 'on'>, value: unknown): string {
+  const text = asText(value);
+  const short = text.length > 80 ? `${text.slice(0, 77)}…` : text;
+  if (check.on === 'time') return `${short} ms`;
+  if (check.on === 'size') return `${short} B`;
+  return typeof value === 'string' ? `"${short}"` : short;
+}
+
+const OP_WORDS: Record<CheckOp, string> = {
+  eq: 'to equal',
+  neq: 'not to equal',
+  lt: 'to be less than',
+  gt: 'to be greater than',
+  contains: 'to contain',
+  matches: 'to match',
+  exists: 'to exist',
+  isType: 'to be of type',
+};
+
+/** One check against a response; `expected` should already have its variables resolved. */
+export function evaluateCheck(check: Check, response: CheckSourceResponse): CheckResult {
+  const what = label(check);
+  const expected = check.expected;
+  const got = read(check, response);
+  const want = check.op === 'exists' ? `${what} to exist` : `${what} ${OP_WORDS[check.op]} ${check.op === 'matches' ? `/${expected}/` : expected}`;
+  if (!got.found) return { id: check.id, ok: false, actual: null, message: check.op === 'exists' ? `Expected ${want}: ${got.why}` : got.why };
+  const actual = got.value;
+  const result = (ok: boolean, why?: string): CheckResult => ({
+    id: check.id,
+    ok,
+    actual: asText(actual),
+    message: ok ? `${what} is ${shown(check, actual)}` : why ?? `Expected ${want}, got ${shown(check, actual)}`,
+  });
+  switch (check.op) {
+    case 'exists':
+      return result(true);
+    case 'eq':
+      return result(equals(actual, expected));
+    case 'neq':
+      return result(!equals(actual, expected));
+    case 'lt':
+    case 'gt': {
+      const a = number(actual);
+      const e = number(expected);
+      if (e === null) return result(false, `"${expected}" is not a number`);
+      if (a === null) return result(false, `Expected ${want}, got ${shown(check, actual)}, which is not a number`);
+      return result(check.op === 'lt' ? a < e : a > e);
+    }
+    case 'contains':
+      return result(Array.isArray(actual) ? actual.some((item) => equals(item, expected)) : asText(actual).includes(expected));
+    case 'matches': {
+      let pattern: RegExp;
+      try {
+        pattern = new RegExp(expected);
+      } catch (err) {
+        return result(false, `/${expected}/ is not a regular expression: ${(err as Error).message}`);
+      }
+      return result(pattern.test(asText(actual)));
+    }
+    case 'isType':
+      return result(typeOf(actual) === expected.trim().toLowerCase(), `Expected ${want}, got ${typeOf(actual)}`);
+  }
+}
+
+/** The enabled checks of a request against its response, `{{variables}}` in `expected` resolved by `resolve`. */
+export function evaluateChecks(checks: Check[] | undefined, response: CheckSourceResponse, resolve: (text: string) => string = (t) => t): CheckResult[] {
+  return (checks ?? []).filter((c) => c.enabled).map((c) => evaluateCheck({ ...c, expected: resolve(c.expected) }, response));
+}
+
+/** Passed and total, for the history and the status line. */
+export function checkSummary(results: CheckResult[] | undefined): { passed: number; total: number } | undefined {
+  if (!results?.length) return undefined;
+  return { passed: results.filter((r) => r.ok).length, total: results.length };
+}

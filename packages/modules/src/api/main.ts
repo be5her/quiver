@@ -35,6 +35,11 @@ import {
   scrubSecrets,
   toCode,
   CODE_TARGETS,
+  checkSummary,
+  evaluateChecks,
+  resolveTemplate,
+  runOrder,
+  type ApiRun,
   ImportError,
   importHar,
   importInsomnia,
@@ -301,80 +306,99 @@ const requestDelete = defineCommand({
   handler: async ({ id }, ctx) => ({ deleted: await ws(ctx).store.remove(COLLECTIONS.requests, id) }),
 });
 
+const SendInput = z.object({
+  requestId: z.string().optional(),
+  request: ApiRequestSchema.optional(),
+  environmentId: z.string().nullable().optional(),
+  options: RequestOptionsSchema.optional().describe('Overrides for this send only: timeoutMs, followRedirects, insecure, maxBodyBytes'),
+  /** Record the call in workspace history. Defaults to true. */
+  record: z.boolean().optional(),
+  sendId: z.string().min(1).max(100).optional().describe('Any id of your choosing; api.request.cancel with the same id stops this send'),
+});
+
+/**
+ * Send a request: resolve, apply OAuth, send through the cookie jar, run captures and checks, and
+ * record it in the history. `signal` stops it from outside (a run being cancelled); `recorded` gets
+ * the history entry as written, credentials masked, whether or not the send succeeded.
+ */
+async function sendRequest(ctx: CommandContext, input: z.infer<typeof SendInput>, signal?: AbortSignal, recorded?: (entry: HistoryEntry) => void): Promise<ApiResponse> {
+  const w = ws(ctx);
+  const request = input.request ?? (input.requestId ? await requireRequest(w, input.requestId) : null);
+  if (!request) throw new QuiverError('INVALID_INPUT', 'Provide requestId or request');
+  const options = effectiveSendOptions(request.options, input.options);
+  const { resolved, vars } = await resolveRequest(ctx, request, input.environmentId);
+  const sendable = await applyOAuth(ctx, resolved, 'send');
+  const prepared = await prepareRequest(sendable, { baseDir: w.path, agent: ctx.caller === 'mcp' });
+  // Known before sending, so a failed send is recorded just as carefully; an OAuth token too.
+  const secrets = await knownSecrets(ctx, resolved, input.environmentId);
+  secrets.values = [...(secrets.values ?? []), ...requestSecretValues(sendable)];
+  const forAgent = ctx.caller === 'mcp';
+
+  const entry: HistoryEntry = {
+    id: newId(),
+    at: nowIso(),
+    requestId: input.requestId ?? (request.id || null),
+    method: prepared.method,
+    url: prepared.url,
+    status: null,
+    durationMs: null,
+    error: null,
+    request,
+  };
+  const key = input.sendId ? inflightKey(w, input.sendId) : null;
+  if (key && inflight.has(key)) throw new QuiverError('INVALID_INPUT', `A send with id ${input.sendId} is already running`);
+  const controller = new AbortController();
+  if (signal?.aborted) controller.abort();
+  signal?.addEventListener('abort', () => controller.abort(), { once: true });
+  if (key) inflight.set(key, controller);
+  try {
+    // The cookie jar, unless the request or the call turns it off: cookies go out on every hop and answers' cookies are kept.
+    const jar = options.cookies ? jarSession(await readJar(w)) : null;
+    const response = await sendPrepared(prepared, options, controller.signal, jar?.hooks);
+    if (jar) {
+      response.cookieJar = jar.report;
+      if (jar.changed()) await writeJar(w, ctx.host, jar.jar());
+    }
+    entry.status = response.status;
+    entry.durationMs = Math.round(response.timings.total);
+    const captured = await runCaptures(ctx, request, response, input.environmentId);
+    if (captured) response.captured = captured;
+    // Checks read the response as the server sent it; their expected values resolve with the variables the request was sent with.
+    const checks = evaluateChecks(request.checks, response, (text) => resolveTemplate(text, vars));
+    if (checks.length) {
+      response.checks = checks;
+      entry.checks = checkSummary(checks);
+    }
+    // The response is the server's own; `sent` and the final URL are what Quiver adds, with the secrets resolved into them.
+    if (!forAgent) return response;
+    // Each hop's URL is one Quiver sent, so it can carry a secret the request resolved to, like `sent`.
+    const redirects = response.redirects.map((hop) => ({ ...hop, url: redactUrl(hop.url, secrets), location: redactUrl(hop.location, secrets) }));
+    const maskedCaptures = response.captured?.map((c) => (c.secret && c.value !== null ? { ...c, value: REDACTED } : c));
+    return { ...response, url: redactUrl(response.url, secrets), redirects, sent: redactSent(response.sent, secrets), ...(maskedCaptures ? { captured: maskedCaptures } : {}) };
+  } catch (err) {
+    entry.error = err instanceof Error ? err.message : String(err);
+    throw forAgent ? errorForAgent(err, secrets) : err;
+  } finally {
+    if (key) inflight.delete(key);
+    // The log is a plain file: credentials typed into the request, and secrets the URL resolved to, are masked before they reach it.
+    const masked = redactHistoryEntry(entry, secrets);
+    recorded?.(masked);
+    if (input.record !== false) {
+      await historyReady.get(w.id);
+      await w.store.appendLog(HISTORY_LOG, masked);
+      ctx.host.emit('store.changed', { workspaceId: w.id, collection: HISTORY_LOG });
+    }
+  }
+}
+
 const requestSend = defineCommand({
   id: 'api.request.send',
   title: 'Send API request',
   description:
-    'Sends an HTTP request and returns status, headers, body and timings. Pass a saved requestId or an inline request. A request\'s `capture` entries write values from the response (a JSON path into the body, a header, a cookie, the status) into the environment; `captured` reports each, secret ones masked for agents. Variables like {{baseUrl}} resolve from global variables and the active (or given) environment. Send options are the defaults, then the request\'s own `options`, then the `options` given here. Pass a `sendId` to be able to stop the send with api.request.cancel. For agents, the credentials and secret variables in `sent` (what went on the wire) are masked.',
+    'Sends an HTTP request and returns status, headers, body and timings. Pass a saved requestId or an inline request. A request\'s `capture` entries write values from the response (a JSON path into the body, a header, a cookie, the status) into the environment; `captured` reports each, secret ones masked for agents. Variables like {{baseUrl}} resolve from global variables and the active (or given) environment. A request\'s `checks` (assertions on the status, a header, the body, a JSON path, the time or the size) are run on the response and reported in `checks`. Send options are the defaults, then the request\'s own `options`, then the `options` given here. Pass a `sendId` to be able to stop the send with api.request.cancel. For agents, the credentials and secret variables in `sent` (what went on the wire) are masked.',
   scope: 'workspace',
-  input: z.object({
-    requestId: z.string().optional(),
-    request: ApiRequestSchema.optional(),
-    environmentId: z.string().nullable().optional(),
-    options: RequestOptionsSchema.optional().describe('Overrides for this send only: timeoutMs, followRedirects, insecure, maxBodyBytes'),
-    /** Record the call in workspace history. Defaults to true. */
-    record: z.boolean().optional(),
-    sendId: z.string().min(1).max(100).optional().describe('Any id of your choosing; api.request.cancel with the same id stops this send'),
-  }),
-  handler: async (input, ctx): Promise<ApiResponse> => {
-    const w = ws(ctx);
-    const request = input.request ?? (input.requestId ? await requireRequest(w, input.requestId) : null);
-    if (!request) throw new QuiverError('INVALID_INPUT', 'Provide requestId or request');
-    const options = effectiveSendOptions(request.options, input.options);
-    const { resolved } = await resolveRequest(ctx, request, input.environmentId);
-    const sendable = await applyOAuth(ctx, resolved, 'send');
-    const prepared = await prepareRequest(sendable, { baseDir: w.path, agent: ctx.caller === 'mcp' });
-    // Known before sending, so a failed send is recorded just as carefully; an OAuth token too.
-    const secrets = await knownSecrets(ctx, resolved, input.environmentId);
-    secrets.values = [...(secrets.values ?? []), ...requestSecretValues(sendable)];
-    const forAgent = ctx.caller === 'mcp';
-
-    const entry: HistoryEntry = {
-      id: newId(),
-      at: nowIso(),
-      requestId: input.requestId ?? (request.id || null),
-      method: prepared.method,
-      url: prepared.url,
-      status: null,
-      durationMs: null,
-      error: null,
-      request,
-    };
-    const key = input.sendId ? inflightKey(w, input.sendId) : null;
-    if (key && inflight.has(key)) throw new QuiverError('INVALID_INPUT', `A send with id ${input.sendId} is already running`);
-    const controller = new AbortController();
-    if (key) inflight.set(key, controller);
-    try {
-      // The cookie jar, unless the request or the call turns it off: cookies go out on every hop and answers' cookies are kept.
-      const jar = options.cookies ? jarSession(await readJar(w)) : null;
-      const response = await sendPrepared(prepared, options, controller.signal, jar?.hooks);
-      if (jar) {
-        response.cookieJar = jar.report;
-        if (jar.changed()) await writeJar(w, ctx.host, jar.jar());
-      }
-      entry.status = response.status;
-      entry.durationMs = Math.round(response.timings.total);
-      const captured = await runCaptures(ctx, request, response, input.environmentId);
-      if (captured) response.captured = captured;
-      // The response is the server's own; `sent` and the final URL are what Quiver adds, with the secrets resolved into them.
-      if (!forAgent) return response;
-      // Each hop's URL is one Quiver sent, so it can carry a secret the request resolved to, like `sent`.
-      const redirects = response.redirects.map((hop) => ({ ...hop, url: redactUrl(hop.url, secrets), location: redactUrl(hop.location, secrets) }));
-      const maskedCaptures = response.captured?.map((c) => (c.secret && c.value !== null ? { ...c, value: REDACTED } : c));
-      return { ...response, url: redactUrl(response.url, secrets), redirects, sent: redactSent(response.sent, secrets), ...(maskedCaptures ? { captured: maskedCaptures } : {}) };
-    } catch (err) {
-      entry.error = err instanceof Error ? err.message : String(err);
-      throw forAgent ? errorForAgent(err, secrets) : err;
-    } finally {
-      if (key) inflight.delete(key);
-      if (input.record !== false) {
-        await historyReady.get(w.id);
-        // The log is a plain file: credentials typed into the request, and secrets the URL resolved to, are masked before they reach it.
-        await w.store.appendLog(HISTORY_LOG, redactHistoryEntry(entry, secrets));
-        ctx.host.emit('store.changed', { workspaceId: w.id, collection: HISTORY_LOG });
-      }
-    }
-  },
+  input: SendInput,
+  handler: (input, ctx) => sendRequest(ctx, input),
 });
 
 /** Sends that were given a sendId, by workspace and id, so api.request.cancel can stop them. */
@@ -864,6 +888,193 @@ const historyClear = defineCommand({
   },
 });
 
+// ---------- collection runs ----------
+
+const RUNS_LOG = 'runs';
+/** Finished runs kept in memory per workspace, for api.run.get right after a run; older ones are read from the log. */
+const KEPT_RUNS = 10;
+
+interface LiveRun {
+  run: ApiRun;
+  workspaceId: string;
+  controller: AbortController;
+}
+
+const runs = new Map<string, LiveRun>();
+
+function announceRun(ctx: CommandContext, live: LiveRun): void {
+  ctx.host.emit('api.changed', { workspaceId: live.workspaceId, reason: 'run', runId: live.run.id });
+}
+
+/** A copy that later changes to the live run do not reach. */
+function snapshot(run: ApiRun): ApiRun {
+  return { ...run, items: run.items.map((item) => ({ ...item })) };
+}
+
+function wait(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const timer = setTimeout(resolve, ms);
+    signal.addEventListener('abort', () => (clearTimeout(timer), resolve()), { once: true });
+  });
+}
+
+/** Send the run's requests one after another, each seeing what the captures before it wrote. */
+async function executeRun(ctx: CommandContext, live: LiveRun, options: { environmentId?: string | null; stopOnFail: boolean; delayMs: number }): Promise<void> {
+  const { run, controller } = live;
+  const w = ws(ctx);
+  for (let i = 0; i < run.items.length; i++) {
+    const item = run.items[i];
+    if (controller.signal.aborted) break;
+    item.status = 'running';
+    announceRun(ctx, live);
+    let entry: HistoryEntry | undefined;
+    try {
+      const response = await sendRequest(ctx, { requestId: item.requestId, environmentId: options.environmentId }, controller.signal, (e) => (entry = e));
+      item.httpStatus = response.status;
+      item.durationMs = Math.round(response.timings.total);
+      if (response.checks) item.checks = response.checks;
+      const captured = response.captured?.filter((c) => c.ok).map((c) => c.variable);
+      if (captured?.length) item.captured = captured;
+      item.status = response.checks?.some((c) => !c.ok) ? 'failed' : 'passed';
+    } catch (err) {
+      const cancelled = controller.signal.aborted;
+      item.status = cancelled ? 'cancelled' : 'error';
+      item.error = entry?.error ?? (err instanceof Error ? err.message : String(err));
+    }
+    item.url = entry?.url ?? null;
+    if (item.status === 'passed') run.passed++;
+    else if (item.status === 'failed' || item.status === 'error') run.failed++;
+    announceRun(ctx, live);
+    if (options.stopOnFail && (item.status === 'failed' || item.status === 'error')) {
+      for (const rest of run.items.slice(i + 1)) rest.status = 'skipped';
+      break;
+    }
+    if (options.delayMs && i < run.items.length - 1) await wait(options.delayMs, controller.signal);
+  }
+  if (controller.signal.aborted) for (const item of run.items) if (item.status === 'pending' || item.status === 'running') item.status = 'cancelled';
+  run.status = controller.signal.aborted ? 'cancelled' : run.failed ? 'failed' : 'passed';
+  run.finishedAt = nowIso();
+  // Item URLs and errors are already masked like history entries; the log is a plain file.
+  await w.store.appendLog(RUNS_LOG, run);
+  ctx.host.emit('store.changed', { workspaceId: w.id, collection: RUNS_LOG });
+  announceRun(ctx, live);
+  const finished = [...runs.values()].filter((r) => r.workspaceId === live.workspaceId && r.run.finishedAt);
+  for (const old of finished.slice(0, Math.max(0, finished.length - KEPT_RUNS))) runs.delete(old.run.id);
+}
+
+const collectionRun = defineCommand({
+  id: 'api.collection.run',
+  title: 'Run API collection',
+  description:
+    'Sends the requests of a collection one after another, in their order (then its sub-collections\', by name, unless recursive is false), applying each request\'s captures before the next one is sent and running its checks. Returns { runId } at once; follow it with api.run.get, stop it with api.run.cancel. An item passes when a response came back and every check passed, fails when a check failed, and is an error when no response came back. With stopOnFail the run stops at the first failure or error. Every send is recorded in the history; the finished run is kept in api.run.list.',
+  scope: 'workspace',
+  input: z.object({
+    collectionId: z.string(),
+    environmentId: z.string().nullable().optional().describe('The environment to resolve variables from and write captures to; the active one when left out.'),
+    recursive: z.boolean().optional().describe('Include sub-collections (the default).'),
+    stopOnFail: z.boolean().optional(),
+    delayMs: z.number().int().min(0).max(60_000).optional().describe('A pause between requests.'),
+  }),
+  handler: async (input, ctx) => {
+    const w = ws(ctx);
+    const collections = await listCollections(w);
+    const collection = collections.find((c) => c.id === input.collectionId);
+    if (!collection) throw new QuiverError('NOT_FOUND', `Collection ${input.collectionId} not found`);
+    const requests = runOrder(collections, await w.store.list<ApiRequest>(COLLECTIONS.requests), collection.id, input.recursive ?? true);
+    if (!requests.length) throw new QuiverError('INVALID_INPUT', `${collection.name} has no requests to run`);
+    const run: ApiRun = {
+      id: newId(),
+      collectionId: collection.id,
+      collectionName: collection.name,
+      environmentId: input.environmentId === undefined ? await getActiveEnvironmentId(w) : input.environmentId,
+      startedAt: nowIso(),
+      finishedAt: null,
+      status: 'running',
+      stopOnFail: input.stopOnFail ?? false,
+      items: requests.map((r) => ({ requestId: r.id, name: r.name, method: r.method, url: null, status: 'pending', httpStatus: null, durationMs: null })),
+      passed: 0,
+      failed: 0,
+    };
+    const live: LiveRun = { run, workspaceId: w.id, controller: new AbortController() };
+    runs.set(run.id, live);
+    announceRun(ctx, live);
+    void executeRun(ctx, live, { environmentId: run.environmentId, stopOnFail: run.stopOnFail, delayMs: input.delayMs ?? 0 }).catch((err) => {
+      console.warn(`[quiver] collection run ${run.id} failed: ${(err as Error).message}`);
+      run.status = 'failed';
+      run.finishedAt ??= nowIso();
+      announceRun(ctx, live);
+    });
+    return { runId: run.id, requests: requests.length };
+  },
+});
+
+const runGet = defineCommand({
+  id: 'api.run.get',
+  title: 'Get a collection run',
+  description: 'A collection run, running or finished: each request with its status (pending, running, passed, failed, error, skipped, cancelled), HTTP status, time, checks and error, and the passed and failed counts.',
+  scope: 'workspace',
+  input: z.object({ runId: z.string() }),
+  handler: async ({ runId }, ctx) => {
+    const w = ws(ctx);
+    const live = runs.get(runId);
+    if (live && live.workspaceId === w.id) return snapshot(live.run);
+    const logged = (await w.store.readLog<ApiRun>(RUNS_LOG, 500)).find((r) => r.id === runId);
+    if (!logged) throw new QuiverError('NOT_FOUND', `Run ${runId} not found`);
+    return logged;
+  },
+});
+
+const runCancel = defineCommand({
+  id: 'api.run.cancel',
+  title: 'Stop a collection run',
+  description: 'Stops a running collection run: the request in flight is cancelled and the rest are not sent. Returns whether a running run was found.',
+  scope: 'workspace',
+  input: z.object({ runId: z.string() }),
+  handler: async ({ runId }, ctx) => {
+    const live = runs.get(runId);
+    const running = Boolean(live && live.workspaceId === ws(ctx).id && !live.run.finishedAt);
+    if (running) live!.controller.abort();
+    return { cancelled: running };
+  },
+});
+
+const runList = defineCommand({
+  id: 'api.run.list',
+  title: 'List collection runs',
+  description: 'Collection runs, newest first: the running ones, then the finished ones from the log, optionally of one collection.',
+  scope: 'workspace',
+  input: z.object({ collectionId: z.string().optional(), limit: z.number().int().min(1).max(200).default(20) }),
+  handler: async ({ collectionId, limit }, ctx) => {
+    const w = ws(ctx);
+    const running = [...runs.values()].filter((r) => r.workspaceId === w.id && !r.run.finishedAt).map((r) => snapshot(r.run));
+    const finished = await w.store.readLog<ApiRun>(RUNS_LOG, collectionId ? 500 : limit);
+    return [...running.reverse(), ...finished].filter((r) => !collectionId || r.collectionId === collectionId).slice(0, limit);
+  },
+});
+
+const collectionReorder = defineCommand({
+  id: 'api.collection.reorder',
+  title: 'Reorder requests in a collection',
+  description: 'Sets the order of requests in a collection (null for the top level), which the tree and collection runs follow. Every id must be a request in that collection; requests not listed keep no order and follow, by name.',
+  scope: 'workspace',
+  input: z.object({ collectionId: z.string().nullable(), requestIds: z.array(z.string()).min(1) }),
+  handler: async ({ collectionId, requestIds }, ctx) => {
+    const w = ws(ctx);
+    const all = await w.store.list<ApiRequest>(COLLECTIONS.requests);
+    const inCollection = all.filter((r) => (r.collectionId ?? null) === collectionId);
+    for (const id of requestIds) if (!inCollection.some((r) => r.id === id)) throw new QuiverError('INVALID_INPUT', `Request ${id} is not in that collection`);
+    for (const r of inCollection) {
+      const at = requestIds.indexOf(r.id);
+      const order = at >= 0 ? at : undefined;
+      if (r.order === order) continue;
+      const { order: _old, ...rest } = r;
+      await w.store.put(COLLECTIONS.requests, order === undefined ? rest : { ...rest, order });
+    }
+    return { ordered: requestIds.length };
+  },
+});
+
 // ---------- import / export ----------
 
 const importCurl = defineCommand({
@@ -1094,6 +1305,7 @@ export const apiModule = defineModule({
   },
   onWorkspaceClose: (w) => {
     historyReady.delete(w.id);
+    for (const live of runs.values()) if (live.workspaceId === w.id) live.controller.abort();
   },
   commands: [
     requestList,
@@ -1134,6 +1346,11 @@ export const apiModule = defineModule({
     variablesDefine,
     historyList,
     historyClear,
+    collectionRun,
+    collectionReorder,
+    runGet,
+    runCancel,
+    runList,
     importCurl,
     importOpenApiCommand,
     importPostmanCommand,

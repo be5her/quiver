@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { newApiRequest, type HistoryEntry } from './api';
-import { canMoveCollection, collectionAncestors, collectionPath, collectionsWithMatches, historyStatusLabel, matchesHistory, matchesRequest } from './api-tree';
+import { canMoveCollection, collectionAncestors, collectionPath, collectionsWithMatches, compareRequests, historyStatusLabel, matchesHistory, matchesRequest, runOrder } from './api-tree';
 
 const collections = [
   { id: 'a', name: 'Payments', parentId: null },
@@ -68,5 +68,21 @@ describe('collectionsWithMatches', () => {
       { name: 'refund at root', method: 'GET' as const, url: '/x', collectionId: null },
     ];
     expect([...collectionsWithMatches(collections, requests, 'refund')].sort()).toEqual(['a', 'b', 'c']);
+  });
+});
+
+describe('runOrder', () => {
+  const requests = [
+    { name: 'b', order: undefined, collectionId: 'a' },
+    { name: 'z first', order: 0, collectionId: 'a' },
+    { name: 'a', order: undefined, collectionId: 'a' },
+    { name: 'deep', order: undefined, collectionId: 'c' },
+    { name: 'refund', order: 1, collectionId: 'b' },
+    { name: 'list', order: undefined, collectionId: 'd' },
+  ];
+  it('puts ordered requests first, then the rest by name, then sub-collections depth first', () => {
+    expect([...requests].filter((r) => r.collectionId === 'a').sort(compareRequests).map((r) => r.name)).toEqual(['z first', 'a', 'b']);
+    expect(runOrder(collections, requests, 'a').map((r) => r.name)).toEqual(['z first', 'a', 'b', 'refund', 'deep']);
+    expect(runOrder(collections, requests, 'a', false).map((r) => r.name)).toEqual(['z first', 'a', 'b']);
   });
 });
