@@ -1,6 +1,19 @@
 import { Component, computed, effect, inject, input, linkedSignal, resource, signal, untracked } from '@angular/core';
 import { FormField, form } from '@angular/forms/signals';
-import { HttpMethodSchema, newApiRequest, newId, toErrorPayload, type ApiRequest, type ApiResponse, type Environment, type RequestOptions } from '@quiver/core';
+import {
+  HttpMethodSchema,
+  inheritedAuth,
+  inheritedBaseUrl,
+  inheritedHeaders,
+  newApiRequest,
+  newId,
+  toErrorPayload,
+  type ApiCollection,
+  type ApiRequest,
+  type ApiResponse,
+  type Environment,
+  type RequestOptions,
+} from '@quiver/core';
 import {
   Button,
   CodeEditor,
@@ -22,7 +35,7 @@ import {
 } from '@quiver/ui';
 import { Copy, Save, Send, Square } from 'lucide';
 import { ApiVariables } from './api-variables';
-import { AuthEditor } from './auth-editor';
+import { AuthEditor, type InheritedAuthInfo } from './auth-editor';
 import { BodyEditor } from './body-editor';
 import { RequestSettings } from './request-settings';
 import { ResponsePane } from './response-pane';
@@ -91,13 +104,32 @@ export class RequestTab implements TabComponent {
   protected readonly environments = invokeResource<Environment[]>('api.environment.list', () => ({}), { refreshOn: ['environments'] });
   private readonly active = invokeResource<{ id: string | null }>('api.environment.active', () => ({}), { refreshOnState: ['api.activeEnvironment'] });
   protected readonly activeEnvironmentId = computed(() => this.active.value()?.id ?? null);
+  private readonly collections = invokeResource<ApiCollection[]>('api.collection.list', () => ({}), { refreshOn: ['collections'] });
+  /** The headers the collections above add, struck through where the request sets its own of that name. */
+  protected readonly inheritedHeaders = computed(() => {
+    const request = this.request();
+    const own = new Set(request.headers.filter((h) => h.enabled && h.key.trim()).map((h) => h.key.trim().toLowerCase()));
+    return inheritedHeaders(this.collections.value() ?? [], request.collectionId).map((row) => ({ ...row, overridden: own.has(row.header.key.trim().toLowerCase()) }));
+  });
+  /** What "Inherit from collection" means for this request; offered only inside a collection. */
+  protected readonly authInheritance = computed<InheritedAuthInfo | null>(() => {
+    const request = this.request();
+    if (!request.collectionId && request.auth.type !== 'inherit') return null;
+    const { auth, from } = inheritedAuth(this.collections.value() ?? [], request.collectionId);
+    return { resolved: auth, from: from?.name ?? null, label: 'collection' };
+  });
+  /** The base URL a URL starting with `/` gets, shown under the URL. */
+  protected readonly baseUrlHint = computed(() => {
+    const request = this.request();
+    return request.url.trim().startsWith('/') ? inheritedBaseUrl(this.collections.value() ?? [], request.collectionId) : null;
+  });
   protected readonly counts = computed(() => {
     const request = this.request();
     return {
       params: request.params.filter((p) => p.enabled && p.key).length,
-      headers: request.headers.filter((h) => h.enabled && h.key).length,
+      headers: request.headers.filter((h) => h.enabled && h.key).length + this.inheritedHeaders().filter((h) => !h.overridden).length,
       body: request.body.type === 'none' ? 0 : 1,
-      auth: request.auth.type === 'none' ? 0 : 1,
+      auth: request.auth.type === 'none' || (request.auth.type === 'inherit' && !this.authInheritance()?.from) ? 0 : 1,
       settings: Object.keys(request.options ?? {}).length,
       notes: request.description?.trim() ? 1 : 0,
     };

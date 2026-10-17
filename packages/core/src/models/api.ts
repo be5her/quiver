@@ -51,6 +51,14 @@ export const RequestAuthSchema = z.discriminatedUnion('type', [
 ]);
 export type RequestAuth = z.infer<typeof RequestAuthSchema>;
 
+/**
+ * The auth of an API request or collection: one of the shared kinds, or `inherit`, which takes the
+ * auth of the nearest collection above that sets one (none at the top level). Realtime connections
+ * and MCP servers keep `RequestAuthSchema`, since they sit in no collection.
+ */
+export const ApiAuthSchema = z.discriminatedUnion('type', [...RequestAuthSchema.options, z.object({ type: z.literal('inherit') })]);
+export type ApiAuth = z.infer<typeof ApiAuthSchema>;
+
 export const SendOptionsSchema = z.object({
   followRedirects: z.boolean().default(true),
   timeoutMs: z.number().int().positive().default(30_000),
@@ -96,7 +104,7 @@ export const ApiRequestSchema = z.object({
   params: z.array(KeyValueSchema).default([]),
   headers: z.array(KeyValueSchema).default([]),
   body: RequestBodySchema.default({ type: 'none' }),
-  auth: RequestAuthSchema.default({ type: 'none' }),
+  auth: ApiAuthSchema.default({ type: 'none' }),
   description: z.string().optional(),
   /** Send options this request overrides (timeout, redirects, TLS, body cap). */
   options: RequestOptionsSchema.optional(),
@@ -109,6 +117,13 @@ export const ApiCollectionSchema = z.object({
   id: z.string(),
   name: z.string(),
   parentId: z.string().nullable().default(null),
+  /** Prefixed to the URL of requests inside that start with `/`; the nearest non-empty one wins. */
+  baseUrl: z.string().default(''),
+  /** Sent with every request inside, below the collections above it; a request's own header of the same name wins. */
+  headers: z.array(KeyValueSchema).default([]),
+  /** Used by requests inside whose auth is `inherit`; `inherit` here passes on the parent's. */
+  auth: ApiAuthSchema.default({ type: 'inherit' }),
+  description: z.string().optional(),
   createdAt: z.string(),
 });
 export type ApiCollection = z.infer<typeof ApiCollectionSchema>;
@@ -190,7 +205,7 @@ export function newApiRequest(partial: Partial<ApiRequest> = {}): ApiRequest {
 }
 
 export function newCollection(name: string, parentId: string | null = null): ApiCollection {
-  return { id: newId(), name, parentId, createdAt: nowIso() };
+  return { id: newId(), name, parentId, baseUrl: '', headers: [], auth: { type: 'inherit' }, createdAt: nowIso() };
 }
 
 export function newEnvironment(name: string): Environment {

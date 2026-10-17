@@ -1,5 +1,6 @@
 import {
   DEFINABLE_VARIABLE_NAME,
+  ApiCollectionSchema,
   ApiRequestSchema,
   EnvironmentSchema,
   QuiverError,
@@ -9,6 +10,7 @@ import {
   canMoveCollection,
   defineCommand,
   defineModule,
+  effectiveRequest,
   effectiveSendOptions,
   findUnresolved,
   newApiRequest,
@@ -18,6 +20,7 @@ import {
   nowIso,
   parseCurl,
   redactHistoryEntry,
+  redactRequest,
   redactSent,
   redactUrl,
   requestSecretValues,
@@ -79,9 +82,23 @@ async function requireRequest(w: WorkspaceApi, id: string): Promise<ApiRequest> 
   return req;
 }
 
+/** Collections as stored, with the defaults of fields added after older files were written. */
+async function listCollections(w: WorkspaceApi): Promise<ApiCollection[]> {
+  const stored = await w.store.list<ApiCollection>(COLLECTIONS.collections);
+  return stored.map((c) => {
+    const parsed = ApiCollectionSchema.safeParse(c);
+    return parsed.success ? parsed.data : c;
+  });
+}
+
+/** The request with what its collections add: inherited headers, auth and base URL (see `effectiveRequest`). */
+async function withInheritance(w: WorkspaceApi, request: ApiRequest): Promise<ApiRequest> {
+  return effectiveRequest(request, await listCollections(w));
+}
+
 async function resolveRequest(ctx: CommandContext, request: ApiRequest, environmentId?: string | null) {
   const vars = await resolveVariableMap(ws(ctx), ctx.host, environmentId);
-  const resolved = resolveDeep(request, vars);
+  const resolved = resolveDeep(await withInheritance(ws(ctx), request), vars);
   const probe = [resolved.url, ...resolved.headers.map((h) => (h.enabled ? h.value : '')), JSON.stringify(resolved.auth)].join('\n');
   const missing = findUnresolved(probe, vars);
   if (missing.length) {
@@ -126,10 +143,16 @@ const requestList = defineCommand({
 const requestGet = defineCommand({
   id: 'api.request.get',
   title: 'Get API request',
-  description: 'Returns one saved request by id.',
+  description:
+    'Returns one saved request by id. With `effective: true` it also returns `effective`: the request as it will be sent, with the headers, auth and base URL its collections add and `inherit` auth resolved, before variables (credentials typed into it are masked for agents).',
   scope: 'workspace',
-  input: z.object({ id: z.string() }),
-  handler: async ({ id }, ctx) => requireRequest(ws(ctx), id),
+  input: z.object({ id: z.string(), effective: z.boolean().optional() }),
+  handler: async ({ id, effective }, ctx) => {
+    const request = await requireRequest(ws(ctx), id);
+    if (!effective) return request;
+    const sent = await withInheritance(ws(ctx), request);
+    return { ...request, effective: ctx.caller === 'mcp' ? redactRequest(sent) : sent };
+  },
 });
 
 const requestCreate = defineCommand({
@@ -151,6 +174,8 @@ const requestCreate = defineCommand({
       url: input.url ?? '',
       collectionId: input.collectionId ?? null,
       body: input.body ?? { type: 'none' },
+      // Inside a collection a new request takes the collection's auth until it sets its own.
+      auth: input.collectionId ? { type: 'inherit' } : { type: 'none' },
     });
     return ws(ctx).store.put(COLLECTIONS.requests, req);
   },
@@ -353,7 +378,7 @@ const graphqlSchema = defineCommand({
     if (input.url) return readSchema(ws(ctx), graphqlEndpoint(input.url));
     const request = await requestFrom(ctx, input);
     const vars = await resolveVariableMap(ws(ctx), ctx.host, input.environmentId);
-    const resolved = resolveDeep(request, vars);
+    const resolved = resolveDeep(await withInheritance(ws(ctx), request), vars);
     const doc = await readSchema(ws(ctx), graphqlEndpoint(prepareRequest(resolved).url));
     return doc && ctx.caller === 'mcp' ? { ...doc, url: redactUrl(doc.url, await knownSecrets(ctx, resolved, input.environmentId)) } : doc;
   },
@@ -364,10 +389,40 @@ const graphqlSchema = defineCommand({
 const collectionList = defineCommand({
   id: 'api.collection.list',
   title: 'List API collections',
-  description: 'Lists request collections (folders).',
+  description: 'Lists request collections (folders) with what they pass on to the requests inside: base URL, headers and auth.',
   scope: 'workspace',
   input: z.object({}),
-  handler: async (_i, ctx) => (await ws(ctx).store.list<ApiCollection>(COLLECTIONS.collections)).sort((a, b) => a.name.localeCompare(b.name)),
+  handler: async (_i, ctx) => (await listCollections(ws(ctx))).sort((a, b) => a.name.localeCompare(b.name)),
+});
+
+const collectionGet = defineCommand({
+  id: 'api.collection.get',
+  title: 'Get API collection',
+  description: 'Returns one collection by id, with its base URL, headers, auth and description.',
+  scope: 'workspace',
+  input: z.object({ id: z.string() }),
+  handler: async ({ id }, ctx) => {
+    const col = (await listCollections(ws(ctx))).find((c) => c.id === id);
+    if (!col) throw new QuiverError('NOT_FOUND', `Collection ${id} not found`);
+    return col;
+  },
+});
+
+const collectionSave = defineCommand({
+  id: 'api.collection.save',
+  title: 'Save API collection',
+  description:
+    'Saves a collection: name, parent, and what the requests inside inherit. `baseUrl` prefixes request URLs that start with "/" (the nearest non-empty one wins); `headers` are sent below those of the collections above, a request\'s own header of the same name winning; `auth` is used by requests whose auth is `inherit` (`inherit` here passes on the parent\'s).',
+  scope: 'workspace',
+  input: z.object({ collection: ApiCollectionSchema }),
+  handler: async ({ collection }, ctx) => {
+    const w = ws(ctx);
+    const collections = await listCollections(w);
+    const parentId = collection.parentId ?? null;
+    if (parentId !== null && !collections.some((c) => c.id === parentId)) throw new QuiverError('NOT_FOUND', `Collection ${parentId} not found`);
+    if (!canMoveCollection(collections, collection.id, parentId)) throw new QuiverError('INVALID_INPUT', `"${collection.name}" cannot go inside itself or one of its own sub-collections`);
+    return w.store.put(COLLECTIONS.collections, { ...collection, parentId });
+  },
 });
 
 const collectionCreate = defineCommand({
@@ -617,7 +672,7 @@ const exportCurl = defineCommand({
     const request = input.request ?? (input.requestId ? await requireRequest(ws(ctx), input.requestId) : null);
     if (!request) throw new QuiverError('INVALID_INPUT', 'Provide requestId or request');
     const vars = await resolveVariableMap(ws(ctx), ctx.host, input.environmentId);
-    const resolved = resolveDeep(request, vars);
+    const resolved = resolveDeep(await withInheritance(ws(ctx), request), vars);
     const prepared = prepareRequest(resolved);
     const form = request.body.type === 'form' ? request.body.fields.filter((f) => f.enabled).map((f) => [f.key, f.value] as [string, string]) : undefined;
     const body = typeof prepared.body === 'string' ? prepared.body : null;
@@ -674,6 +729,8 @@ export const apiModule = defineModule({
     graphqlIntrospect,
     graphqlSchema,
     collectionList,
+    collectionGet,
+    collectionSave,
     collectionCreate,
     collectionRename,
     collectionMove,

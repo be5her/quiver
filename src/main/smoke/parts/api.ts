@@ -470,6 +470,59 @@ export default definePart({
       await run('api.collection.delete', { id: inner.id }, ws.id);
     }
 
+    // Collection defaults: a request inherits the base URL, headers and auth of the collections above it; its own settings win.
+    {
+      const kv = (key: string, value: string) => ({ id: `${key}-${value}`, key, value, enabled: true });
+      const outerNew = await run<ApiCollection>('api.collection.create', { name: 'inherit outer' }, ws.id);
+      const outerCol = await run<ApiCollection>('api.collection.save', { collection: { ...outerNew, baseUrl: '{{baseUrl}}/', headers: [kv('X-Tenant', 'acme'), kv('X-Outer', '1')], auth: { type: 'bearer', token: 'coll-token-777' } } }, ws.id);
+      const innerNew = await run<ApiCollection>('api.collection.create', { name: 'inherit inner', parentId: outerCol.id }, ws.id);
+      const innerCol = await run<ApiCollection>('api.collection.save', { collection: { ...innerNew, headers: [kv('x-tenant', 'beta')] } }, ws.id);
+      const created = await run<ApiRequest>('api.request.create', { name: 'inherits', url: '/inherit?x=1', collectionId: innerCol.id }, ws.id);
+      const child = await run<ApiRequest>('api.request.save', { request: { ...created, headers: [kv('X-Own', 'yes')] } }, ws.id);
+      const sent = await run<ApiResponse>('api.request.send', { requestId: child.id }, ws.id);
+      const echoed = JSON.parse(sent.body) as { url: string; headers: Record<string, string> };
+      check(
+        'collections: a request inside gets the nearest base URL, the merged headers (deeper wins) and the inherited bearer',
+        created.auth.type === 'inherit' && echoed.url === '/inherit?x=1' && echoed.headers['x-tenant'] === 'beta' && echoed.headers['x-outer'] === '1' && echoed.headers['x-own'] === 'yes' && echoed.headers.authorization === 'Bearer coll-token-777',
+        { auth: created.auth.type, url: echoed.url, tenant: echoed.headers['x-tenant'], outer: echoed.headers['x-outer'], authorization: echoed.headers.authorization },
+      );
+      const overridden = await run<ApiResponse>('api.request.send', { request: { ...child, headers: [kv('X-Tenant', 'mine')], auth: { type: 'basic', username: 'u', password: 'p' } } }, ws.id);
+      const overEcho = JSON.parse(overridden.body) as { headers: Record<string, string> };
+      check(
+        'collections: a request\'s own header and auth win over the inherited ones',
+        overEcho.headers['x-tenant'] === 'mine' && overEcho.headers.authorization?.startsWith('Basic ') === true && overEcho.headers['x-outer'] === '1',
+        { tenant: overEcho.headers['x-tenant'], authorization: overEcho.headers.authorization },
+      );
+      const asAgent = await host.invoke('api.request.get', { id: child.id, effective: true }, { caller: 'mcp', workspaceId: ws.id });
+      const asUi = await run<ApiRequest & { effective: ApiRequest }>('api.request.get', { id: child.id, effective: true }, ws.id);
+      const agentEffective = asAgent.ok ? (asAgent.result as { effective: ApiRequest }).effective : null;
+      const agentSend = await host.invoke('api.request.send', { requestId: child.id }, { caller: 'mcp', workspaceId: ws.id });
+      const agentSent = agentSend.ok ? JSON.stringify((agentSend.result as ApiResponse).sent) : '';
+      check(
+        'api.request.get effective: what will be sent, with an inherited token masked for agents; an agent\'s send masks it too',
+        asUi.effective.url === '{{baseUrl}}/inherit?x=1' && asUi.effective.auth.type === 'bearer' && (asUi.effective.auth as { token: string }).token === 'coll-token-777' &&
+          agentEffective?.auth.type === 'bearer' && (agentEffective.auth as { token: string }).token === REDACTED && agentSend.ok && !agentSent.includes('coll-token-777'),
+        { ui: asUi.effective.url, agentToken: agentEffective?.auth.type === 'bearer' ? (agentEffective.auth as { token: string }).token : null },
+      );
+      const inheritedCurl = await run<{ command: string }>('api.export.curl', { requestId: child.id }, ws.id);
+      check(
+        'api.export.curl: carries the inherited base URL, headers and auth',
+        inheritedCurl.command.includes(`http://127.0.0.1:${echoPort}/inherit?x=1`) && inheritedCurl.command.includes('x-tenant: beta') && inheritedCurl.command.includes('Bearer coll-token-777'),
+        inheritedCurl.command.slice(0, 200),
+      );
+      await fs.writeFile(path.join(folder, '.quiver', 'collections', 'legacycollection.json'), JSON.stringify({ id: 'legacycollection', name: 'legacy collection', parentId: null, createdAt: '2026-01-01T00:00:00.000Z' }, null, 2));
+      let legacy: ApiCollection | undefined;
+      await until(async () => Boolean((legacy = (await run<ApiCollection[]>('api.collection.list', {}, ws.id)).find((c) => c.id === 'legacycollection'))), 3000);
+      check('api.collection.list: a collection saved before collections had defaults reads with them', legacy?.baseUrl === '' && Array.isArray(legacy.headers) && legacy.auth.type === 'inherit', legacy);
+      // Let the watcher finish with the hand-written file before removing it, then make sure it stays gone.
+      await new Promise((r) => setTimeout(r, 600));
+      await run('api.collection.delete', { id: 'legacycollection' }, ws.id);
+      const legacyGone = await until(async () => !(await run<ApiCollection[]>('api.collection.list', {}, ws.id)).some((c) => c.id === 'legacycollection'), 3000);
+      await new Promise((r) => setTimeout(r, 800));
+      const stillGone = !(await run<ApiCollection[]>('api.collection.list', {}, ws.id)).some((c) => c.id === 'legacycollection');
+      check('api.collection.delete: a collection written by hand and then deleted stays deleted', legacyGone && stillGone, { legacyGone, stillGone });
+    }
+
     return {
       ui: async (u) => {
         const { win, js, wait, shot } = u;
@@ -796,6 +849,46 @@ export default definePart({
           await js(`(() => { for (const tab of document.querySelectorAll('[data-testid=tab]')) if (!/^echo/.test(tab.getAttribute('data-title') ?? '')) tab.querySelector('[aria-label="Close tab"]')?.click(); })()`);
           await wait(300);
           await run('api.collection.delete', { id: target.id }, ws.id);
+          await js(`[...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('echo'))?.click()`);
+          await wait(600);
+        }
+
+        // Collections: the settings tab, and a request inside showing what it inherits.
+        {
+          const outerCol = (await run<ApiCollection[]>('api.collection.list', {}, ws.id)).find((c) => c.name === 'inherit outer');
+          await js(`document.querySelector('[data-testid=api-collection][data-name="inherit outer"] [data-testid=api-collection-settings]')?.click()`);
+          await wait(900);
+          const collectionName = await js(`${visible('[data-testid=api-collection-name]')}?.value ?? null`);
+          const collectionAuth = await js(`${visible('[data-testid=api-auth-type]')}?.value ?? null`);
+          const baseUrlShown = await js(`${visible('[data-testid=api-collection-base-url]')}?.textContent ?? ''`);
+          await shot('03t-collection-tab-light');
+          check(
+            'ui: the collection tab shows its name, base URL and auth',
+            collectionName === 'inherit outer' && collectionAuth === 'bearer' && String(baseUrlShown).includes('{{baseUrl}}'),
+            { collectionName, collectionAuth, baseUrlShown },
+          );
+          await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+          await wait(300);
+          await js(`[...document.querySelectorAll('[data-testid=api-request-row]')].find((r) => r.getAttribute('data-name') === 'inherits')?.click()`);
+          await wait(900);
+          await js(`[...document.querySelectorAll('button')].find((b) => b.offsetParent !== null && b.textContent.trim().startsWith('Headers'))?.click()`);
+          await wait(300);
+          const inheritedRows = (await js(`[...(${visible('[data-testid=api-inherited-headers]')}?.querySelectorAll('tr') ?? [])].map((r) => r.textContent.replace(/\\s+/g, ' ').trim())`)) as string[];
+          const hint = await js(`${visible('[data-testid=api-base-url-hint]')}?.textContent.replace(/\\s+/g, ' ').trim() ?? null`);
+          await shot('03u-inherited-headers-light');
+          await js(`[...document.querySelectorAll('button')].find((b) => b.offsetParent !== null && b.textContent.trim().startsWith('Auth'))?.click()`);
+          await wait(300);
+          const authType = await js(`${visible('[data-testid=api-auth-type]')}?.value ?? null`);
+          const authLine = await js(`${visible('[data-testid=api-auth-inherited]')}?.textContent.trim() ?? null`);
+          check(
+            'ui: a request inside shows the inherited headers with their collection, the base URL it gets, and what its inherited auth is',
+            inheritedRows.length === 2 && inheritedRows.some((r) => r.includes('x-tenant') && r.includes('beta') && r.includes('inherit inner')) && inheritedRows.some((r) => r.includes('X-Outer') && r.includes('inherit outer')) &&
+              typeof hint === 'string' && hint.includes('/inherit?x=1') && hint.includes('inherit outer') && authType === 'inherit' && typeof authLine === 'string' && authLine.includes('bearer token') && authLine.includes('inherit outer'),
+            { inheritedRows, hint, authType, authLine },
+          );
+          await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+          await wait(300);
+          if (outerCol) await run('api.collection.delete', { id: outerCol.id }, ws.id);
           await js(`[...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('echo'))?.click()`);
           await wait(600);
         }

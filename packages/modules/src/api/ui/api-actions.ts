@@ -127,6 +127,11 @@ export class ApiActions {
     await this.host.invoke('api.collection.delete', { id: collection.id });
   }
 
+  /** What a collection passes on to its requests: base URL, headers, auth, notes. */
+  openCollectionTab(collection: Pick<ApiCollection, 'id' | 'name'>): void {
+    this.tabs.openTab(untracked(this.app.scope), { type: 'api.collection', title: collection.name, data: { id: collection.id } }, { singletonKey: `api.collection:${collection.id}` });
+  }
+
   /** The full request history in a tab of its own. */
   openHistoryTab(): void {
     this.tabs.openTab(untracked(this.app.scope), { type: 'api.history', title: 'Request history', data: {} }, { singletonKey: 'api.history' });
@@ -180,6 +185,8 @@ export class ApiActions {
   collectionMenu(event: MouseEvent, collection: ApiCollection): void {
     const at = { x: event.clientX, y: event.clientY };
     this.contextMenu.open(event, [
+      { label: 'Settings…', select: () => this.openCollectionTab(collection), testId: 'api-menu-collection-settings' },
+      'separator',
       { label: 'New request', select: () => this.run(this.createRequest(collection.id)) },
       { label: 'New GraphQL request', select: () => this.run(this.createGraphqlRequest(collection.id)) },
       { label: 'New sub-collection…', select: () => this.run(this.newCollection(collection.id)) },

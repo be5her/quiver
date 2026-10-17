@@ -3,6 +3,7 @@ import { AppState, defineModuleUI } from '@quiver/ui';
 import { Globe } from 'lucide';
 import { ApiActions } from './api-actions';
 import { ApiSidebar } from './api-sidebar';
+import { CollectionTab } from './collection-tab';
 import { EnvironmentTab } from './environment-tab';
 import { HistoryTab } from './history-tab';
 import { RequestTab } from './request-tab';
@@ -23,6 +24,7 @@ export const apiModuleUI = defineModuleUI({
   tabs: {
     'api.request': RequestTab,
     'api.environment': EnvironmentTab,
+    'api.collection': CollectionTab,
     'api.graphql.schema': SchemaTab,
     'api.history': HistoryTab,
   },

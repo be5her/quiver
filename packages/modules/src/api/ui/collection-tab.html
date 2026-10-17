@@ -1,0 +1,51 @@
+@if (loadError(); as error) {
+  <div class="p-4 text-sm text-danger">{{ error }}</div>
+} @else if (!loaded()) {
+  <div class="flex items-center justify-center h-full"><svg qSpinner></svg></div>
+} @else {
+  @let current = collection();
+  <div class="flex flex-col h-full min-h-0">
+    <div class="flex items-center gap-2 px-3 py-2 border-b border-edge shrink-0">
+      <div class="w-64 shrink-0"><input qInput [formField]="collectionForm.name" class="h-7 font-medium" placeholder="Collection name" data-testid="api-collection-name" /></div>
+      @if (path(); as path) {
+        <span class="text-xs text-muted truncate">in {{ path }}</span>
+      }
+      <div class="flex-1"></div>
+      <button qButton size="sm" [variant]="dirty() ? 'primary' : 'ghost'" [icon]="saveIcon" title="Ctrl+S" data-testid="api-collection-save" (click)="save()">Save{{ dirty() ? '*' : '' }}</button>
+    </div>
+    <div class="flex-1 overflow-auto p-3 flex flex-col gap-5 max-w-3xl">
+      <p class="text-xs text-muted">
+        Requests in this collection, and in collections inside it, inherit what is set here. A request's own header of the same name wins, and only requests
+        whose auth is "Inherit from collection" use the auth below.
+      </p>
+
+      <section class="flex flex-col gap-1">
+        <h3 class="text-xs font-semibold text-muted uppercase tracking-wide">Base URL</h3>
+        <q-variable-input [formField]="collectionForm.baseUrl" [placeholder]="parentBaseUrl()?.baseUrl ?? baseUrlPlaceholder" inputClass="font-mono" data-testid="api-collection-base-url" />
+        <p class="text-[11px] text-muted">
+          Put in front of request URLs that start with <code class="font-mono">/</code>.
+          @if (!current.baseUrl.trim() && parentBaseUrl(); as parent) {
+            Empty here, so requests use {{ parent.from.name }}'s.
+          }
+        </p>
+      </section>
+
+      <section class="flex flex-col gap-1">
+        <h3 class="text-xs font-semibold text-muted uppercase tracking-wide">Headers</h3>
+        <q-key-value-editor [formField]="collectionForm.headers" keyPlaceholder="Header" data-testid="api-collection-headers" />
+      </section>
+
+      <section class="flex flex-col gap-1">
+        <h3 class="text-xs font-semibold text-muted uppercase tracking-wide">Auth</h3>
+        <q-auth-editor [formField]="collectionForm.auth" [inherit]="authInheritance()" />
+      </section>
+
+      <section class="flex flex-col gap-1 min-h-[120px]">
+        <h3 class="text-xs font-semibold text-muted uppercase tracking-wide">Notes</h3>
+        <div class="h-28">
+          <q-code-editor [value]="current.description ?? ''" (valueChange)="setDescription($event)" language="text" wrap [placeholder]="descriptionPlaceholder" />
+        </div>
+      </section>
+    </div>
+  </div>
+}

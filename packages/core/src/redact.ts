@@ -1,4 +1,4 @@
-import type { ApiRequest, ApiResponse, HistoryEntry, KeyValue, RequestAuth } from './models/api';
+import type { ApiAuth, ApiRequest, ApiResponse, HistoryEntry, KeyValue } from './models/api';
 import { findVariableSpans } from './variables';
 
 /** What a masked credential reads as. The same marker environments use for secrets shown to agents. */
@@ -39,7 +39,7 @@ function redactHeaderValue(name: string, value: string): string {
   return /^(proxy-)?authorization$/i.test(name.trim()) ? redactAuthorization(value) : redactLiteral(value);
 }
 
-function redactAuth(auth: RequestAuth): RequestAuth {
+function redactAuth(auth: ApiAuth): ApiAuth {
   switch (auth?.type) {
     case 'bearer':
       return { ...auth, token: redactLiteral(auth.token ?? '') };

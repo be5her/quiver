@@ -32,6 +32,11 @@
       }
     </div>
 
+    @if (baseUrlHint(); as hint) {
+      <div class="px-3 -mt-1 pb-1 pl-[8.5rem] text-[11px] text-muted truncate shrink-0" data-testid="api-base-url-hint" [title]="hint.baseUrl + current.url.trim()">
+        <span class="font-mono">{{ hint.baseUrl }}{{ current.url.trim() }}</span> · base URL from {{ hint.from.name }}
+      </div>
+    }
     <div class="flex flex-col flex-1 min-h-0">
       <div class="flex flex-col min-h-[140px] border-b border-edge" [class]="current.body.type === 'graphql' && section() === 'body' ? 'basis-[60%]' : 'basis-[45%]'">
         <q-segmented [(value)]="section" class="px-3 shrink-0">
@@ -48,13 +53,29 @@
               <q-key-value-editor [formField]="requestForm.params" keyPlaceholder="Parameter" />
             }
             @case ('headers') {
+              @if (inheritedHeaders().length) {
+                <div class="mb-2 text-xs" data-testid="api-inherited-headers">
+                  <div class="text-muted mb-1">From the collections above</div>
+                  <table class="w-full table-fixed">
+                    <tbody>
+                      @for (row of inheritedHeaders(); track row.header.id + row.from.id) {
+                        <tr class="text-muted border-b border-edge/40" [title]="row.overridden ? 'This request sets its own ' + row.header.key : 'Set on ' + row.from.name">
+                          <td class="py-1 pl-7 pr-3 font-mono truncate" [class.line-through]="row.overridden">{{ row.header.key }}</td>
+                          <td class="py-1 pr-3 font-mono truncate" [class.line-through]="row.overridden">{{ row.header.value }}</td>
+                          <td class="py-1 pr-2 text-right truncate w-40">{{ row.overridden ? 'replaced here' : row.from.name }}</td>
+                        </tr>
+                      }
+                    </tbody>
+                  </table>
+                </div>
+              }
               <q-key-value-editor [formField]="requestForm.headers" keyPlaceholder="Header" />
             }
             @case ('body') {
               <q-body-editor [formField]="requestForm.body" [request]="current" />
             }
             @case ('auth') {
-              <q-auth-editor [formField]="requestForm.auth" />
+              <q-auth-editor [formField]="requestForm.auth" [inherit]="authInheritance()" />
             }
             @case ('settings') {
               <q-request-settings [value]="current.options" (valueChange)="setOptions($event)" />

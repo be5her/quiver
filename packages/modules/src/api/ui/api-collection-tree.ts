@@ -1,7 +1,7 @@
 import { Component, computed, inject, input } from '@angular/core';
 import { collectionsWithMatches, matchesRequest, type ApiCollection, type ApiRequest } from '@quiver/core';
 import { AppState, Icon, IconButton, METHOD_COLORS, TabsState, TreeState } from '@quiver/ui';
-import { ChevronDown, ChevronRight, Ellipsis } from 'lucide';
+import { ChevronDown, ChevronRight, Ellipsis, Settings2 } from 'lucide';
 import { ApiActions } from './api-actions';
 import { ApiRow } from './api-row';
 import { ApiTreeDrag } from './api-tree-drag';
@@ -30,7 +30,7 @@ export class ApiCollectionTree {
   readonly depth = input(0);
   readonly filter = input('');
 
-  protected readonly icons = { ChevronDown, ChevronRight, Ellipsis };
+  protected readonly icons = { ChevronDown, ChevronRight, Ellipsis, Settings2 };
   protected readonly methodColors = METHOD_COLORS;
   private readonly filtering = computed(() => this.filter().trim().length > 0);
   private readonly kept = computed(() => (this.filtering() ? collectionsWithMatches(this.collections(), this.requests(), this.filter()) : null));
@@ -67,6 +67,11 @@ export class ApiCollectionTree {
 
   protected requestMenu(event: MouseEvent, request: ApiRequest): void {
     this.api.requestMenu(event, request);
+  }
+
+  protected openSettings(event: MouseEvent, collection: ApiCollection): void {
+    event.stopPropagation();
+    this.api.openCollectionTab(collection);
   }
 
   protected collectionMenu(event: MouseEvent, collection: ApiCollection): void {

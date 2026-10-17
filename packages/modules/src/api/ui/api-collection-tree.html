@@ -19,6 +19,7 @@
       (contextmenu)="collectionMenu($event, collection)"
     >
       <svg rowPrefix [qIcon]="open ? icons.ChevronDown : icons.ChevronRight" class="size-3.5 text-muted"></svg>
+      <button qIconButton label="Collection settings" size="sm" data-testid="api-collection-settings" (click)="openSettings($event, collection)"><svg [qIcon]="icons.Settings2" class="size-3.5"></svg></button>
       <button qIconButton label="More actions" size="sm" data-testid="api-collection-menu" (click)="collectionMenu($event, collection)"><svg [qIcon]="icons.Ellipsis" class="size-3.5"></svg></button>
     </div>
     @if (open) {

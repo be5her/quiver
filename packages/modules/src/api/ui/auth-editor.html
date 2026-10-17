@@ -1,14 +1,20 @@
 @let auth = value();
 <div>
   <label qLabel>Type</label>
-  <select qSelect [value]="auth.type" (change)="setType($event)">
-    <option value="none">No auth</option>
-    <option value="bearer">Bearer token</option>
-    <option value="basic">Basic</option>
-    <option value="apikey">API key</option>
+  <select qSelect [value]="auth.type" (change)="setType($event)" data-testid="api-auth-type">
+    @if (inherit() || auth.type === 'inherit') {
+      <option value="inherit" [selected]="auth.type === 'inherit'">Inherit from {{ inherit()?.label ?? 'collection' }}</option>
+    }
+    <option value="none" [selected]="auth.type === 'none'">No auth</option>
+    <option value="bearer" [selected]="auth.type === 'bearer'">Bearer token</option>
+    <option value="basic" [selected]="auth.type === 'basic'">Basic</option>
+    <option value="apikey" [selected]="auth.type === 'apikey'">API key</option>
   </select>
 </div>
 @switch (auth.type) {
+  @case ('inherit') {
+    <p class="text-xs text-muted" data-testid="api-auth-inherited">{{ inheritedText() }}</p>
+  }
   @case ('bearer') {
     <div>
       <label qLabel>Token</label>
