@@ -26,7 +26,7 @@
     "preview": "npm run build -w @quiver/renderer && electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && npm run typecheck -w @quiver/renderer",
     "test": "vitest run",
-    "smoke": "npm run build && cross-env QUIVER_SMOKE=1 electron .",
+    "smoke": "node scripts/smoke.mjs",
     "package": "npm run build && electron-builder --publish never",
     "icon": "electron scripts/render-icon.cjs",
     "release:plan": "node scripts/release/plan.mjs stable"

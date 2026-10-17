@@ -38,3 +38,7 @@ Two things to know when styling: `cn` joins class names without Tailwind merging
 - `defineModuleUI`, the renderer half of a module: id, title, icon, sidebar component, tab components by type, and palette actions created in an injection context.
 - Controls as directives on native elements (`button[qButton]`, `button[qIconButton]`, `input[qInput]`, `select[qSelect]`, `input[qCheckbox]`, `span[qBadge]`, `svg[qSpinner]`, `[qAutofocus]`), and components: the segmented tabs, section header, empty state, the key/value editor, the CodeMirror editor, the variable input with its hover card, and the toast, dialog and context menu hosts.
 - `VariableSource`, the injection token the variable input and hover read `{{variables}}` from; `[qVariables]` provides one, and the API module's `ApiVariables` directive provides the active environment's.
+
+## Verified by
+
+The smoke's `shell` part ([`src/main/smoke/parts/shell.ts`](../main/smoke/parts/shell.ts)) checks the updater state of a dev build, that the default palette applies and a saved one recolours the window in both modes, and in the UI the tab strip (scrolling, dragging, Escape during a drag, middle click, the right-click menus), dragging workspaces, hiding and reordering modules in the activity bar, and the About and palette sections of the settings. `npm run smoke -- shell --shots` runs it alone with its UI checks.

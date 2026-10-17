@@ -13,3 +13,5 @@ Listing, saving, `realtime_connect`, `realtime_send` and `realtime_message_wait`
 ## Verified by
 
 The smoke runs a `ws` server (subprotocols, binary frames, reconnect after a server close) and an SSE endpoint (retry hint, `Last-Event-ID` resume, POST bodies, error answers), and checks that auth and variables reach the server. In the UI it checks the connection rows, the connected status with the subprotocol, the live log, sending from the composer, and keeping a composed message as an unsaved saved message.
+
+The smoke checks are in [`src/main/smoke/parts/realtime.ts`](../../../../src/main/smoke/parts/realtime.ts); `npm run smoke -- realtime` runs them alone, with `--shots` for the UI checks.

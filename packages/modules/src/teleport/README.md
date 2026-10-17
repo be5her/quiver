@@ -23,3 +23,5 @@ Every run is recorded per machine as its cluster, operation and parameters (neve
 ## Verified by
 
 The smoke runs against a fake `tsh` script that answers status, login, db and kube listing, opens real local tunnels and answers `tsh kubectl` from canned cluster data, logging every argv it receives, so the checks can prove which flags were passed and that nothing else was. The UI checks also switch the terminal's kube context from a kube row and from the host while the cluster is collapsed, and expect the Pinned tick and the "terminal" mark to move with it.
+
+The smoke checks are in [`src/main/smoke/parts/teleport.ts`](../../../../src/main/smoke/parts/teleport.ts); `npm run smoke -- teleport` runs them alone, with `--shots` for the UI checks.

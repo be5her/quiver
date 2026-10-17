@@ -6,7 +6,7 @@ import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mc
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
-import { findNode } from './smoke-tsh';
+import { findNode } from './fake-tsh';
 
 export interface FakeMcpStdio {
   /** Absolute path of the node binary, usable as the server command. */

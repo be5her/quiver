@@ -1,0 +1,734 @@
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { REDACTED } from '@quiver/core';
+import type { ApiRequest, ApiResponse, GraphqlSchemaDoc, Environment, HistoryEntry, WorkspaceInfo } from '@quiver/core';
+import { definePart, until } from '../part';
+
+export default definePart({
+  name: 'api',
+  summary: 'API client: environments, variables, requests, history masking, curl, GraphQL, agents over MCP, the request UI',
+  async run(t) {
+    const { host, check, run, ws, folder, env, rpc, toolNames: names } = t;
+    const { echoPort, gqlPort, gqlState } = t.fixtures;
+
+    check('environment secret round-trips', env.variables[1].value === 's3cret');
+    const onDisk = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'environments', `${env.id}.json`), 'utf8')) as Environment;
+    check('secret not written to committed file', onDisk.variables[1].value === '');
+
+    type VarList = { environment: { name: string } | null; variables: { name: string; value: string | null; secret: boolean; source: string }[] };
+    const varsForUi = await run<VarList>('api.variables.list', {}, ws.id);
+    const varsForAgent = await host.invoke('api.variables.list', {}, { caller: 'mcp', workspaceId: ws.id });
+    const agentToken = varsForAgent.ok ? (varsForAgent.result as VarList).variables.find((v) => v.name === 'token') : undefined;
+    check(
+      'api.variables.list: the active environment and built-ins, secrets shown to the UI and masked for agents',
+      varsForUi.environment?.name === 'local' &&
+        varsForUi.variables.find((v) => v.name === 'baseUrl')?.source === 'environment' &&
+        varsForUi.variables.find((v) => v.name === 'token')?.value === 's3cret' &&
+        varsForUi.variables.find((v) => v.name === '$uuid')?.source === 'dynamic' &&
+        agentToken?.value === '••••••••' && agentToken.secret,
+      { ui: varsForUi.variables.map((v) => `${v.name}:${v.source}`), agentToken },
+    );
+
+    // api.variables.set changes a value where it is defined, keeping secrets encrypted; globals are gated for agents.
+    const globalsBefore = host.config.get().globalVariables;
+    await run('config.update', { patch: { globalVariables: [...globalsBefore, { id: 'g1', key: 'region', value: 'eu', enabled: true }] } }, null);
+    const setSecret = await run<{ source: string }>('api.variables.set', { name: 'token', value: 'n3w' }, ws.id);
+    const tokenAfterSet = (await run<VarList>('api.variables.list', {}, ws.id)).variables.find((v) => v.name === 'token');
+    const diskAfterSet = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'environments', `${env.id}.json`), 'utf8')) as Environment;
+    check(
+      'api.variables.set: updates the active environment and keeps a secret out of the committed file',
+      setSecret.source === 'environment' && tokenAfterSet?.value === 'n3w' && tokenAfterSet.secret && diskAfterSet.variables[1].value === '' && diskAfterSet.variables[1].secret === true,
+      { setSecret, tokenAfterSet, disk: diskAfterSet.variables[1] },
+    );
+    await run('api.variables.set', { name: 'token', value: 's3cret' }, ws.id);
+    const agentSetEnv = await host.invoke('api.variables.set', { name: 'baseUrl', value: `http://127.0.0.1:${echoPort}` }, { caller: 'mcp', workspaceId: ws.id });
+    const agentSetGlobal = await host.invoke('api.variables.set', { name: 'region', value: 'us' }, { caller: 'mcp', workspaceId: ws.id });
+    const uiSetGlobal = await run<{ source: string }>('api.variables.set', { name: 'region', value: 'us' }, ws.id);
+    const unknownSet = await host.invoke('api.variables.set', { name: 'nope', value: 'x' }, { caller: 'ui', workspaceId: ws.id });
+    check(
+      'api.variables.set: agents may change an environment value, a global one needs mutations, unknown names are refused',
+      agentSetEnv.ok &&
+        !agentSetGlobal.ok && agentSetGlobal.error.code === 'MUTATION_BLOCKED' &&
+        uiSetGlobal.source === 'global' && host.config.get().globalVariables.find((v) => v.key === 'region')?.value === 'us' &&
+        !unknownSet.ok && unknownSet.error.code === 'NOT_FOUND',
+      { agentSetEnv: agentSetEnv.ok, agentSetGlobal: agentSetGlobal.ok ? 'ok?' : agentSetGlobal.error.code, uiSetGlobal, unknownSet: unknownSet.ok ? 'ok?' : unknownSet.error.code },
+    );
+    await run('config.update', { patch: { globalVariables: globalsBefore } }, null);
+
+    // api.variables.define adds a missing variable to a chosen environment (secret or not) or the globals.
+    const defined = await run<{ environmentName?: string }>('api.variables.define', { name: 'partner', value: 'acme', target: { kind: 'environment', id: env.id }, secret: true }, ws.id);
+    await run('api.variables.define', { name: 'partner', value: 'acme2', target: { kind: 'environment', id: env.id }, secret: true }, ws.id);
+    const listAfterDefine = await run<VarList & { environments: { id: string; name: string }[] }>('api.variables.list', {}, ws.id);
+    const diskAfterDefine = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'environments', `${env.id}.json`), 'utf8')) as Environment;
+    const partnerRows = diskAfterDefine.variables.filter((v) => v.key === 'partner');
+    check(
+      'api.variables.define: adds to the chosen environment once, a secret stays out of the committed file',
+      defined.environmentName === 'local' &&
+        listAfterDefine.variables.find((v) => v.name === 'partner')?.value === 'acme2' &&
+        partnerRows.length === 1 && partnerRows[0].value === '' && partnerRows[0].secret === true &&
+        listAfterDefine.environments.some((e) => e.id === env.id && e.name === 'local'),
+      { defined, partnerRows, environments: listAfterDefine.environments },
+    );
+    const agentDefineGlobal = await host.invoke('api.variables.define', { name: 'partner', value: 'x', target: { kind: 'global' } }, { caller: 'mcp', workspaceId: ws.id });
+    const secretGlobal = await host.invoke('api.variables.define', { name: 'partner', value: 'x', target: { kind: 'global' }, secret: true }, { caller: 'ui', workspaceId: ws.id });
+    const builtinName = await host.invoke('api.variables.define', { name: '$uuid', value: 'x', target: { kind: 'environment', id: env.id } }, { caller: 'ui', workspaceId: ws.id });
+    await run('api.variables.define', { name: 'shared', value: 'yes', target: { kind: 'global' } }, ws.id);
+    check(
+      'api.variables.define: a global needs mutations for agents, cannot be secret, and built-in names are refused',
+      !agentDefineGlobal.ok && agentDefineGlobal.error.code === 'MUTATION_BLOCKED' &&
+        !secretGlobal.ok && secretGlobal.error.code === 'INVALID_INPUT' &&
+        !builtinName.ok && builtinName.error.code === 'INVALID_INPUT' &&
+        host.config.get().globalVariables.find((v) => v.key === 'shared')?.value === 'yes',
+      { agentDefineGlobal: agentDefineGlobal.ok || agentDefineGlobal.error.code, secretGlobal: secretGlobal.ok || secretGlobal.error.code, builtinName: builtinName.ok || builtinName.error.code },
+    );
+    // Defining a name that is already a secret, without asking for a secret, keeps it encrypted.
+    await run('api.variables.define', { name: 'partner', value: 'acme3', target: { kind: 'environment', id: env.id }, secret: false }, ws.id);
+    const partnerKept = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'environments', `${env.id}.json`), 'utf8')) as Environment;
+    const partnerRow = partnerKept.variables.find((v) => v.key === 'partner');
+    check(
+      'api.variables.define: an existing secret stays secret and out of the committed file',
+      partnerRow?.secret === true && partnerRow.value === '' && (await run<Environment>('api.environment.get', { id: env.id }, ws.id)).variables.find((v) => v.key === 'partner')?.value === 'acme3',
+      partnerRow,
+    );
+    const envWithPartner = await run<Environment>('api.environment.get', { id: env.id }, ws.id);
+    await run('api.environment.save', { environment: { ...envWithPartner, variables: envWithPartner.variables.filter((v) => v.key !== 'partner') } }, ws.id);
+    await run('config.update', { patch: { globalVariables: globalsBefore } }, null);
+
+    const created = await run<ApiRequest>('api.request.create', { name: 'echo', method: 'POST', url: '{{baseUrl}}/things?x=1' }, ws.id);
+    const saved = await run<ApiRequest>(
+      'api.request.save',
+      {
+        request: {
+          ...created,
+          headers: [{ id: 'h1', key: 'X-Test', value: '{{$uuid}}', enabled: true }],
+          auth: { type: 'bearer', token: '{{token}}' },
+          body: { type: 'json', content: '{"hello":"world"}' },
+        },
+      },
+      ws.id,
+    );
+    const response = await run<ApiResponse>('api.request.send', { requestId: saved.id }, ws.id);
+    const echoed = JSON.parse(response.body) as { headers: Record<string, string>; body: string; url: string };
+    check('request.send status', response.status === 200, response.status);
+    check('bearer token resolved from secret', echoed.headers.authorization === 'Bearer s3cret');
+    check('json body sent', echoed.body === '{"hello":"world"}');
+    check('query param kept', echoed.url === '/things?x=1', echoed.url);
+    check('dynamic variable resolved', /^[0-9a-f-]{36}$/.test(echoed.headers['x-test'] ?? ''));
+
+    const history = await run<HistoryEntry[]>('api.history.list', { limit: 5 }, ws.id);
+    check('history recorded', history.length === 1 && history[0].status === 200);
+
+    // History is a plain file: credentials typed straight into a request, and secrets its URL resolves to, are masked before they reach it.
+    {
+      const historyFile = path.join(folder, '.quiver', 'local', 'history.jsonl');
+      const latest = async () => (await run<HistoryEntry[]>('api.history.list', { limit: 1 }, ws.id))[0];
+      const tokenOf = (e: HistoryEntry) => (e.request.auth.type === 'bearer' ? e.request.auth.token : null);
+      check('history: a request that only references variables is stored as it was written', tokenOf(history[0]) === '{{token}}' && !(await fs.readFile(historyFile, 'utf8')).includes('s3cret'), history[0].request.auth);
+      const typed = await run<ApiResponse>(
+        'api.request.send',
+        {
+          request: {
+            ...saved,
+            id: '',
+            name: 'typed token',
+            url: '{{baseUrl}}/login?api_key=query-key-123&ref={{token}}&page=2',
+            headers: [
+              { id: 'h1', key: 'Authorization', value: 'Bearer header-token-456', enabled: true },
+              { id: 'h2', key: 'X-Trace', value: 'keep-me', enabled: true },
+            ],
+            auth: { type: 'bearer', token: 'typed-token-789' },
+          },
+        },
+        ws.id,
+      );
+      const typedEcho = JSON.parse(typed.body) as { headers: Record<string, string>; url: string };
+      check('history: typed credentials still go on the wire as typed', typedEcho.headers.authorization === 'Bearer header-token-456' && typedEcho.url === '/login?api_key=query-key-123&ref=s3cret&page=2', typedEcho.url);
+      const typedEntry = await latest();
+      check(
+        'history: a typed token, an Authorization header, a key parameter and a resolved secret are masked',
+        tokenOf(typedEntry) === REDACTED &&
+          typedEntry.request.headers[0].value === `Bearer ${REDACTED}` &&
+          typedEntry.request.headers[1].value === 'keep-me' &&
+          typedEntry.request.url === `{{baseUrl}}/login?api_key=${REDACTED}&ref={{token}}&page=2` &&
+          typedEntry.url === `http://127.0.0.1:${echoPort}/login?api_key=${REDACTED}&ref=${REDACTED}&page=2` &&
+          typedEntry.status === 200,
+        { url: typedEntry.url, request: typedEntry.request.url, auth: typedEntry.request.auth, headers: typedEntry.request.headers.map((h) => h.value) },
+      );
+      await run('api.request.send', { request: { ...saved, id: '', name: 'basic', url: '{{baseUrl}}/b', headers: [], auth: { type: 'basic', username: 'ada', password: 'hunter2-pw' } } }, ws.id);
+      const basicEntry = await latest();
+      await run('api.request.send', { request: { ...saved, id: '', name: 'key', url: '{{baseUrl}}/k', headers: [], auth: { type: 'apikey', key: 'appid', value: 'app-key-321', in: 'query' } } }, ws.id);
+      const keyEntry = await latest();
+      check(
+        'history: a basic password and an API key are masked, the user and the key name kept',
+        basicEntry.request.auth.type === 'basic' &&
+          basicEntry.request.auth.username === 'ada' &&
+          basicEntry.request.auth.password === REDACTED &&
+          keyEntry.request.auth.type === 'apikey' &&
+          keyEntry.request.auth.key === 'appid' &&
+          keyEntry.request.auth.value === REDACTED &&
+          keyEntry.url === `http://127.0.0.1:${echoPort}/k?appid=${REDACTED}`,
+        { basic: basicEntry.request.auth, key: keyEntry.request.auth, url: keyEntry.url },
+      );
+      const down = await host.invoke('api.request.send', { request: { ...saved, id: '', name: 'down', url: 'http://127.0.0.1:1/down', headers: [], auth: { type: 'bearer', token: 'down-token-654' } }, options: { timeoutMs: 3000 } }, { caller: 'ui', workspaceId: ws.id });
+      const downEntry = await latest();
+      check('history: a send that fails is masked as well', !down.ok && downEntry.error !== null && tokenOf(downEntry) === REDACTED, downEntry.error);
+      const historyText = await fs.readFile(historyFile, 'utf8');
+      const leaked = ['typed-token-789', 'header-token-456', 'query-key-123', 'hunter2-pw', 'app-key-321', 'down-token-654', 's3cret'].filter((s) => historyText.includes(s));
+      check('history: none of it is in the file on disk', leaked.length === 0 && historyText.trim().split('\n').length === 5, leaked);
+
+      // A log written by an older version still holds its credentials; it is rewritten when the workspace opens.
+      const legacyFolder = await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-smoke-legacy-'));
+      const legacyFile = path.join(legacyFolder, '.quiver', 'local', 'history.jsonl');
+      await fs.mkdir(path.dirname(legacyFile), { recursive: true });
+      const legacy: HistoryEntry[] = [
+        {
+          id: 'old1',
+          at: '2026-09-01T10:00:00.000Z',
+          requestId: null,
+          method: 'POST',
+          url: 'https://merchant.example.com/login?api_key=old-key-111',
+          status: 200,
+          durationMs: 5,
+          error: null,
+          request: { ...saved, url: 'https://merchant.example.com/login?api_key=old-key-111', headers: [{ id: 'h', key: 'authorization', value: 'Bearer old-token-333', enabled: true }], auth: { type: 'bearer', token: 'old-token-222' } },
+        },
+        { id: 'old2', at: '2026-09-02T10:00:00.000Z', requestId: saved.id, method: 'POST', url: 'https://merchant.example.com/things', status: 204, durationMs: 7, error: null, request: saved },
+      ];
+      await fs.writeFile(legacyFile, legacy.map((e) => JSON.stringify(e)).join('\n') + '\n');
+      const legacyWs = await run<WorkspaceInfo>('workspace.open', { path: legacyFolder }, null);
+      const legacyList = await run<HistoryEntry[]>('api.history.list', { limit: 10 }, legacyWs.id);
+      const legacyText = await fs.readFile(legacyFile, 'utf8');
+      check(
+        'history: entries written before masking are cleaned when the workspace opens, in the same order',
+        legacyList.map((e) => e.id).join() === 'old2,old1' &&
+          tokenOf(legacyList[1]) === REDACTED &&
+          legacyList[1].request.headers[0].value === `Bearer ${REDACTED}` &&
+          legacyList[1].url === `https://merchant.example.com/login?api_key=${REDACTED}` &&
+          tokenOf(legacyList[0]) === '{{token}}' &&
+          !/old-(token|key)-\d/.test(legacyText) &&
+          legacyText.trim().split('\n').length === 2,
+        { ids: legacyList.map((e) => e.id), onDisk: legacyText.match(/old-(token|key)-\d+/g) },
+      );
+      await run('workspace.close', { id: legacyWs.id }, null);
+      await run('workspace.forgetRecent', { path: legacyFolder }, null);
+      await fs.rm(legacyFolder, { recursive: true, force: true }).catch(() => {});
+    }
+
+    const imported = await run<ApiRequest>('api.import.curl', { command: `curl -X PUT '{{baseUrl}}/a?b=c' -H 'X-A: 1' -d '{"k":1}'` }, ws.id);
+    check('curl import', imported.method === 'PUT' && imported.body.type === 'json');
+    const curl = await run<{ command: string }>('api.export.curl', { requestId: imported.id }, ws.id);
+    check('curl export resolves variables', curl.command.includes(`http://127.0.0.1:${echoPort}/a?b=c`), curl.command);
+
+    // Chrome's "Copy as cURL (cmd)" escapes with carets; none may reach the saved request or the wire.
+    {
+      const cmdCurl = [
+        `curl ^"http://127.0.0.1:${echoPort}/x?merchantId=376^" ^`,
+        '  -H ^"accept: application/json^" ^',
+        '  -H ^"sec-ch-ua: ^\\^"Chromium^\\^";v=^\\^"154^\\^"^" ^',
+        '  -b ^"session=a%^2Fb^" ^',
+        '  --data-raw ^"null^"',
+      ].join('\r\n');
+      const fromCmd = await run<ApiRequest>('api.import.curl', { command: cmdCurl }, ws.id);
+      const sent = await run<ApiResponse>('api.request.send', { requestId: fromCmd.id }, ws.id);
+      const echoedCmd = JSON.parse(sent.body) as { method: string; headers: Record<string, string>; body: string; url: string };
+      check(
+        'curl import: cmd.exe carets are removed and the request sends as copied',
+        sent.status === 200 &&
+          echoedCmd.method === 'POST' &&
+          echoedCmd.url === '/x?merchantId=376' &&
+          echoedCmd.headers.accept === 'application/json' &&
+          echoedCmd.headers['sec-ch-ua'] === '"Chromium";v="154"' &&
+          echoedCmd.headers.cookie === 'session=a%2Fb' &&
+          echoedCmd.body === 'null',
+        echoedCmd,
+      );
+      const before = (await run<ApiRequest[]>('api.request.list', {}, ws.id)).length;
+      const broken = await host.invoke('api.import.curl', { command: 'curl ^"https://x.test/a ^\r\n  -H ^"a: b^"' }, { caller: 'ui', workspaceId: ws.id });
+      const forced = await host.invoke('api.import.curl', { command: cmdCurl, dialect: 'posix' }, { caller: 'ui', workspaceId: ws.id });
+      const after = (await run<ApiRequest[]>('api.request.list', {}, ws.id)).length;
+      check(
+        'curl import: an unterminated quote or the wrong shell is refused and nothing is saved',
+        !broken.ok && /cmd\.exe: unterminated/.test(broken.error.message) && !forced.ok && /bash\/zsh: .*cmd\.exe/.test(forced.error.message) && after === before,
+        { broken: broken.ok ? 'ok?' : broken.error.message, forced: forced.ok ? 'ok?' : forced.error.message, before, after },
+      );
+      await run('api.request.delete', { id: fromCmd.id }, ws.id);
+    }
+
+    const missing = await host.invoke('api.request.send', { request: { ...saved, url: '{{nope}}/x' } }, { caller: 'ui', workspaceId: ws.id });
+    check('unresolved variable is reported', !missing.ok && missing.error.code === 'UNRESOLVED_VARIABLES');
+
+    // ---------- GraphQL: body type over POST and GET, variables, operation names, introspection cache ----------
+    const gqlReq = await run<ApiRequest>(
+      'api.request.create',
+      { name: 'smoke graphql', method: 'POST', url: `http://127.0.0.1:${gqlPort}/graphql`, body: { type: 'graphql', query: 'query Hello($name: String) {\n  hello(name: $name)\n}', variables: '{"name":"{{token}}"}' } },
+      ws.id,
+    );
+    check('graphql: request created with a graphql body', gqlReq.body.type === 'graphql');
+    const gqlSaved = await run<ApiRequest>('api.request.save', { request: { ...gqlReq, auth: { type: 'bearer', token: '{{token}}' } } }, ws.id);
+    const gqlRes = await run<ApiResponse>('api.request.send', { requestId: gqlSaved.id }, ws.id);
+    const gqlData = JSON.parse(gqlRes.body) as { data?: { hello?: string } };
+    check('graphql: POST sends query and variables as JSON with variables resolved', gqlRes.status === 200 && gqlData.data?.hello === 'Hello, s3cret' && gqlState.lastMethod === 'POST' && gqlState.authSeen === 'Bearer s3cret', gqlRes.body);
+    check('graphql: sent request shows the JSON payload', (gqlRes.sent.bodyPreview ?? '').includes('"query"') && gqlRes.sent.headers.some(([k, v]) => k === 'Content-Type' && v === 'application/json'));
+    const gqlGet = await run<ApiResponse>('api.request.send', { request: { ...gqlSaved, method: 'GET' } }, ws.id);
+    check(
+      'graphql: GET puts query and variables in the URL',
+      gqlGet.status === 200 && (JSON.parse(gqlGet.body) as typeof gqlData).data?.hello === 'Hello, s3cret' && gqlState.lastMethod === 'GET' && gqlGet.sent.url.includes('query=') && gqlGet.sent.bodyPreview === null,
+      gqlGet.sent.url.slice(0, 120),
+    );
+    const gqlMulti = 'query A { hello } query B($id: ID!) { user(id: $id) { name } }';
+    const gqlOp = await run<ApiResponse>('api.request.send', { request: { ...gqlSaved, body: { type: 'graphql', query: gqlMulti, variables: '{"id":"2"}', operationName: 'B' } } }, ws.id);
+    check('graphql: operationName picks the operation', (JSON.parse(gqlOp.body) as { data?: { user?: { name: string } } }).data?.user?.name === 'Linus', gqlOp.body);
+    const gqlBadVars = await host.invoke('api.request.send', { request: { ...gqlSaved, body: { type: 'graphql', query: '{ hello }', variables: '{not json' } } }, { caller: 'ui', workspaceId: ws.id });
+    check('graphql: invalid variables JSON is refused before sending', !gqlBadVars.ok && gqlBadVars.error.code === 'INVALID_INPUT', gqlBadVars.ok ? 'ok?' : gqlBadVars.error.message);
+    check('graphql: no schema before introspection', (await run<GraphqlSchemaDoc | null>('api.graphql.schema', { requestId: gqlSaved.id }, ws.id)) === null);
+    const schemaDoc = await run<GraphqlSchemaDoc>('api.graphql.introspect', { requestId: gqlSaved.id }, ws.id);
+    check(
+      'graphql: introspection caches the schema as SDL',
+      schemaDoc.url === `http://127.0.0.1:${gqlPort}/graphql` && schemaDoc.typeCount >= 3 && schemaDoc.sdl.includes('type User') && schemaDoc.sdl.includes('A person') && schemaDoc.sdl.includes('@deprecated'),
+      { types: schemaDoc.typeCount, sdl: schemaDoc.sdl.slice(0, 80) },
+    );
+    const cachedSchema = await run<GraphqlSchemaDoc | null>('api.graphql.schema', { requestId: gqlSaved.id }, ws.id);
+    check('graphql: cached schema is read back from .quiver/local', cachedSchema?.sdl === schemaDoc.sdl && (await fs.readdir(path.join(folder, '.quiver', 'local'))).some((f) => f.startsWith('graphql-schema-')));
+    const gqlCurl = await run<{ command: string }>('api.export.curl', { requestId: gqlSaved.id }, ws.id);
+    check('graphql: curl export carries the JSON payload and auth', gqlCurl.command.includes('--data-raw') && gqlCurl.command.includes('"query"') && gqlCurl.command.includes('Bearer s3cret'), gqlCurl.command.slice(0, 160));
+
+    check('mcp lists api tools', names.includes('api_request_send') && names.includes('api_export_curl'), names.length);
+
+    const call = await rpc('tools/call', { name: 'api_request_send', arguments: { requestId: saved.id } });
+    const called = JSON.parse(call.result?.content?.[0]?.text ?? '{}') as ApiResponse;
+    check('mcp tools/call sends request', called.status === 200, call.error ?? called.status);
+    const blocked = await rpc('tools/call', { name: 'api_request_delete', arguments: { id: imported.id } });
+    check('mcp blocks mutations by default', blocked.result?.isError === true && (blocked.result.content?.[0]?.text ?? '').includes('MUTATION_BLOCKED'));
+    const masked = await rpc('tools/call', { name: 'api_environment_get', arguments: { id: env.id } });
+    check('mcp masks secrets', !(masked.result?.content?.[0]?.text ?? '').includes('s3cret'));
+    // What an agent reads back about a request it sent has the secrets masked; the UI still sees what went on the wire.
+    {
+      const viaSecret = { ...saved, id: '', url: '{{baseUrl}}/agent?ref={{token}}&page=1', headers: [{ id: 'h1', key: 'X-Note', value: 'note-{{token}}', enabled: true }], body: { type: 'json', content: '{"t":"{{token}}"}' } };
+      const agentSend = await rpc('tools/call', { name: 'api_request_send', arguments: { request: viaSecret, record: false } });
+      const agentGot = JSON.parse(agentSend.result?.content?.[0]?.text ?? '{}') as Partial<ApiResponse>;
+      const headerOf = (r: Partial<ApiResponse>, name: string) => r.sent?.headers.find(([k]) => k.toLowerCase() === name)?.[1];
+      check(
+        'mcp: what a send reports as sent has credentials and secret variables masked',
+        agentGot.status === 200 &&
+          headerOf(agentGot, 'authorization') === `Bearer ${REDACTED}` &&
+          headerOf(agentGot, 'x-note') === `note-${REDACTED}` &&
+          agentGot.sent?.url === `http://127.0.0.1:${echoPort}/agent?ref=${REDACTED}&page=1` &&
+          agentGot.sent.bodyPreview === `{"t":"${REDACTED}"}` &&
+          agentGot.url === agentGot.sent.url &&
+          !JSON.stringify(agentGot.sent).includes('s3cret'),
+        agentGot.sent,
+      );
+      const uiGot = await run<ApiResponse>('api.request.send', { request: viaSecret, record: false }, ws.id);
+      check('mcp: the UI still sees the request as it went out', uiGot.sent.headers.some(([k, v]) => k === 'Authorization' && v === 'Bearer s3cret') && uiGot.sent.url.endsWith('/agent?ref=s3cret&page=1') && uiGot.sent.bodyPreview === '{"t":"s3cret"}');
+      const agentDown = await rpc('tools/call', { name: 'api_request_send', arguments: { request: { ...saved, id: '', url: 'http://127.0.0.1:1/down?ref={{token}}' }, record: false, options: { timeoutMs: 3000 } } });
+      const agentDownText = agentDown.result?.content?.[0]?.text ?? '';
+      check('mcp: a failed send does not name the secret either', agentDown.result?.isError === true && agentDownText.includes(`ref=${REDACTED}`) && !agentDownText.includes('s3cret'), agentDownText.slice(0, 200));
+      const agentCurl = (await rpc('tools/call', { name: 'api_export_curl', arguments: { requestId: saved.id } })).result?.content?.[0]?.text ?? '';
+      const uiCurl = await run<{ command: string }>('api.export.curl', { requestId: saved.id }, ws.id);
+      check('mcp: curl export masks the secret for agents and keeps it for the UI', agentCurl.includes(`Bearer ${REDACTED}`) && !agentCurl.includes('s3cret') && uiCurl.command.includes('Bearer s3cret'), agentCurl.slice(0, 200));
+    }
+
+    check(
+      'mcp lists graphql tools',
+      ['api_graphql_introspect', 'api_graphql_schema'].every((n) => names.includes(n)),
+      names.filter((n) => n.startsWith('api_graphql')),
+    );
+    const mcpSchema = await rpc('tools/call', { name: 'api_graphql_schema', arguments: { requestId: gqlSaved.id } });
+    check('mcp reads the cached graphql schema as SDL', (mcpSchema.result?.content?.[0]?.text ?? '').includes('type User'), mcpSchema.result?.content?.[0]?.text?.slice(0, 80));
+
+    return {
+      ui: async (u) => {
+        const { win, js, wait, shot } = u;
+        await js(`document.querySelector('[data-testid=activity-item][data-drag-id=api]').click()`);
+        // The request opens in the dark theme, as the welcome screen before it.
+        await js(`document.documentElement.classList.add('dark')`);
+        const clickedRow = await js(
+          `(() => { const row = [...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('echo')); if (row) row.click(); return Boolean(row); })()`,
+        );
+        check('ui: request row clickable', clickedRow === true);
+        await wait(800);
+        const clickedSend = await js(
+          `(() => { const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Send'); if (btn) btn.click(); return Boolean(btn); })()`,
+        );
+        check('ui: send button present', clickedSend === true);
+        await wait(1500);
+        const status = await js(`(() => { const el = [...document.querySelectorAll('span')].find((s) => /^200 /.test(s.textContent)); return el ? el.textContent : null; })()`);
+        check('ui: response rendered', typeof status === 'string' && status.startsWith('200'), status);
+        await shot('02-request-dark');
+        await js(`document.documentElement.classList.remove('dark')`);
+        await wait(300);
+        await shot('03-request-light');
+        // The sidebar's history follows each send without leaving the module.
+        {
+          const historyTitles = () => js(`[...document.querySelectorAll('[data-testid=api-history-entry]')].map((b) => b.title)`) as Promise<string[]>;
+          if (!(await historyTitles()).length) await js(`[...document.querySelectorAll('aside button')].find((b) => b.textContent.trim() === 'History')?.click()`);
+          await wait(300);
+          const before = await historyTitles();
+          await js(`[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Send')?.click()`);
+          await wait(1500);
+          const after = await historyTitles();
+          check('ui: a send shows up in the history right away', before.length > 0 && after.length > 0 && after[0] !== before[0] && after.slice(1).includes(before[0]), { before: before.slice(0, 2), after: after.slice(0, 2) });
+        }
+
+        // Import from curl: the dialog says which shell it will read the paste as, and the shell can be picked.
+        {
+          const opened = await js(`(() => { const b = document.querySelector('button[aria-label="Import from curl"]'); if (b) b.click(); return Boolean(b); })()`);
+          await wait(300);
+          const typed = await js(
+            `(() => { const ta = document.querySelector('textarea'); if (!ta) return false; const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; set.call(ta, ${JSON.stringify('curl ^"https://example.test/x?merchantId=376^" ^\n  -H ^"accept: application/json^" ^\n  --data-raw ^"null^"')}); ta.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`,
+          );
+          await wait(200);
+          const dialog = (await js(
+            `(() => { const s = document.querySelector('select[aria-label="Shell"]'); return s ? { options: [...s.options].map((o) => o.textContent), hint: s.parentElement.querySelector('span')?.textContent ?? null } : null; })()`,
+          )) as { options: string[]; hint: string | null } | null;
+          check(
+            'ui: curl import offers the shells and reads a Chrome cmd copy as cmd.exe',
+            opened === true && typed === true && dialog?.options.join() === 'Detect,bash/zsh,cmd.exe,PowerShell' && dialog.hint === 'Reads as cmd.exe',
+            dialog,
+          );
+          await shot('03a-curl-import-light');
+          await js(`(() => { const b = [...document.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Cancel'); if (b) b.click(); })()`);
+          await wait(200);
+        }
+
+        // Variables: {{name}} is marked in inputs and editors, and hovering shows the value, with secrets masked until revealed.
+        const hoverVariable = (inputSelector: string, name: string) =>
+          js(
+            `(() => { const pane = [...document.querySelectorAll('[data-tab-type="api.request"]')].find((el) => !el.classList.contains('hidden')) ?? document; const input = [...pane.querySelectorAll(${JSON.stringify(inputSelector)})].find((i) => (i.getAttribute('data-variables') || '').split(',').includes(${JSON.stringify(name)})); if (!input) return 'no input'; const chip = input.parentElement.querySelector('[data-var-name="${name}"]'); if (!chip) return 'no chip'; const r = chip.getBoundingClientRect(); input.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 })); return 'ok'; })()`,
+          );
+        const card = () =>
+          js(
+            `(() => { const c = document.querySelector('[data-testid=variable-card]'); return c ? { name: c.getAttribute('data-name'), source: c.querySelector('[data-testid=variable-card-source]')?.textContent, value: c.querySelector('[data-testid=variable-card-value]')?.textContent ?? null } : null; })()`,
+          ) as Promise<{ name: string; source: string; value: string | null } | null>;
+        const hoveredUrl = await hoverVariable('input', 'baseUrl');
+        await wait(250);
+        const urlCard = await card();
+        check(
+          'ui: hovering {{baseUrl}} in the URL shows its value and environment',
+          hoveredUrl === 'ok' && urlCard?.name === 'baseUrl' && urlCard.value === `http://127.0.0.1:${echoPort}` && urlCard.source === 'Environment · local',
+          { hoveredUrl, urlCard },
+        );
+        await shot('03b-variable-hover-light');
+        await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+        await js(
+          `(() => { const pane = [...document.querySelectorAll('[data-tab-type="api.request"]')].find((el) => !el.classList.contains('hidden')); const tab = pane && [...pane.querySelectorAll('[role=tab]')].find((b) => b.textContent.startsWith('Auth')); if (tab) tab.click(); })()`,
+        );
+        await wait(300);
+        const hoveredToken = await hoverVariable('input', 'token');
+        await wait(250);
+        const tokenMasked = await card();
+        await js(`document.querySelector('[data-testid=variable-card-reveal]')?.click()`);
+        await wait(150);
+        const tokenRevealed = await card();
+        check(
+          'ui: a secret variable is masked in the card until revealed',
+          hoveredToken === 'ok' && tokenMasked?.value === '••••••••' && tokenRevealed?.value === 's3cret',
+          { hoveredToken, tokenMasked, tokenRevealed },
+        );
+        await js(`document.documentElement.classList.add('dark')`);
+        await wait(200);
+        await shot('03c-variable-secret-dark');
+        await js(`document.documentElement.classList.remove('dark')`);
+        await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+        const typeUrl = (value: string) =>
+          js(
+            `(() => { const pane = [...document.querySelectorAll('[data-tab-type="api.request"]')].find((el) => !el.classList.contains('hidden')); const input = [...pane.querySelectorAll('input')].find((i) => i.value.startsWith('{{baseUrl}}')); if (!input) return false; const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; setter.call(input, ${JSON.stringify(value)}); input.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`,
+          );
+        await typeUrl('{{baseUrl}}/things?x=1&k={{nope}}');
+        await wait(200);
+        const hoveredMissing = await hoverVariable('input', 'nope');
+        await wait(250);
+        const missingCard = await card();
+        const missingChip = await js(`document.querySelector('[data-var-name=nope]')?.className ?? ''`);
+        check(
+          'ui: an undefined variable is marked and its card says so',
+          hoveredMissing === 'ok' && missingCard?.source === 'Not defined' && typeof missingChip === 'string' && missingChip.includes('bg-danger'),
+          { hoveredMissing, missingCard, missingChip },
+        );
+        await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+
+        // A long value scrolls inside the card without closing it, and the card edits the value where it is defined.
+        const globalsBeforeUi = host.config.get().globalVariables;
+        const longValue = Array.from({ length: 60 }, (_, i) => `segment-${i}`).join('/');
+        await run('config.update', { patch: { globalVariables: [...globalsBeforeUi, { id: 'glong', key: 'long', value: longValue, enabled: true }] } }, null);
+        await typeUrl('{{baseUrl}}/things?x=1&l={{long}}');
+        await wait(400);
+        const hoveredLong = await hoverVariable('input', 'long');
+        await wait(250);
+        const valueBox = (await js(
+          `(() => { const el = document.querySelector('[data-testid=variable-card-value]'); if (!el) return null; const r = el.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), overflow: el.scrollHeight > el.clientHeight }; })()`,
+        )) as { x: number; y: number; overflow: boolean } | null;
+        if (valueBox) {
+          win.webContents.sendInputEvent({ type: 'mouseMove', x: valueBox.x, y: valueBox.y });
+          await wait(100);
+          for (let i = 0; i < 3; i++) {
+            win.webContents.sendInputEvent({ type: 'mouseWheel', x: valueBox.x, y: valueBox.y, deltaX: 0, deltaY: -120 });
+            await wait(80);
+          }
+        }
+        await wait(300);
+        const afterWheel = await js(`(() => { const el = document.querySelector('[data-testid=variable-card-value]'); return el ? el.scrollTop : null; })()`);
+        const longCard = await card();
+        check(
+          'ui: the wheel scrolls a long value inside the card and the card stays open',
+          hoveredLong === 'ok' && valueBox?.overflow === true && typeof afterWheel === 'number' && afterWheel > 0 && longCard?.name === 'long',
+          { hoveredLong, valueBox, afterWheel, longCard: longCard?.name },
+        );
+        await shot('03e-variable-long-scrolled-light');
+
+        await js(`document.querySelector('[data-testid=variable-card-edit]')?.click()`);
+        await wait(150);
+        const editor = await js(
+          `(() => { const t = document.querySelector('[data-testid=variable-card-input]'); return t ? { focused: document.activeElement === t, value: t.value } : null; })()`,
+        ) as { focused: boolean; value: string } | null;
+        await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+        await wait(150);
+        const afterCancel = await js(
+          `(() => { const c = document.querySelector('[data-testid=variable-card]'); return c ? { editing: c.hasAttribute('data-editing'), input: Boolean(c.querySelector('[data-testid=variable-card-input]')) } : null; })()`,
+        ) as { editing: boolean; input: boolean } | null;
+        check(
+          'ui: the card edits a value in place, and Escape backs out of the edit without closing it',
+          editor?.focused === true && editor.value === longValue && afterCancel?.editing === false && afterCancel.input === false,
+          { editor: editor && { focused: editor.focused, same: editor.value === longValue }, afterCancel },
+        );
+        await js(`document.querySelector('[data-testid=variable-card-edit]')?.click()`);
+        await wait(150);
+        await js(
+          `(() => { const t = document.querySelector('[data-testid=variable-card-input]'); const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; setter.call(t, 'short/value'); t.dispatchEvent(new Event('input', { bubbles: true })); })()`,
+        );
+        await js(`document.documentElement.classList.add('dark')`);
+        await wait(200);
+        await shot('03f-variable-editing-dark');
+        await js(`document.documentElement.classList.remove('dark')`);
+        win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
+        win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+        await wait(500);
+        const edited = await card();
+        const editedFlag = await js(`document.querySelector('[data-testid=variable-card]')?.hasAttribute('data-editing') ?? null`);
+        check(
+          'ui: Enter saves the edited value to where it is defined and the card shows it',
+          edited?.value === 'short/value' && editedFlag === false && host.config.get().globalVariables.find((v) => v.key === 'long')?.value === 'short/value',
+          { edited, editedFlag, stored: host.config.get().globalVariables.find((v) => v.key === 'long')?.value },
+        );
+        await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+        await run('config.update', { patch: { globalVariables: globalsBeforeUi } }, null);
+        await wait(400);
+
+        // With {{long}} gone from the globals, its card offers to define it, here as a secret of the active environment.
+        await hoverVariable('input', 'long');
+        await wait(250);
+        await js(`document.querySelector('[data-testid=variable-card-define]')?.click()`);
+        await wait(150);
+        const defineForm = await js(
+          `(() => { const s = document.querySelector('[data-testid=variable-card-target]'); return s ? { target: s.value, options: [...s.options].map((o) => o.textContent), focused: document.activeElement?.getAttribute('data-testid') } : null; })()`,
+        ) as { target: string; options: string[]; focused: string } | null;
+        await js(
+          `(() => { const s = document.querySelector('[data-testid=variable-card-target]'); const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set; set.call(s, 'global'); s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); })()`,
+        );
+        await wait(100);
+        const secretDisabledForGlobal = await js(`document.querySelector('[data-testid=variable-card-secret]')?.disabled`);
+        await js(
+          `(() => { const s = document.querySelector('[data-testid=variable-card-target]'); const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set; set.call(s, ${JSON.stringify(env.id)}); s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); })()`,
+        );
+        await wait(100);
+        await js(`document.querySelector('[data-testid=variable-card-secret]')?.click()`);
+        await js(
+          `(() => { const t = document.querySelector('[data-testid=variable-card-input]'); const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; setter.call(t, 'l0ng-secret'); t.dispatchEvent(new Event('input', { bubbles: true })); t.focus(); })()`,
+        );
+        await js(`document.documentElement.classList.add('dark')`);
+        await wait(200);
+        await shot('03g-variable-define-dark');
+        await js(`document.documentElement.classList.remove('dark')`);
+        win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
+        win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+        await wait(600);
+        const definedCard = await card();
+        const definedChip = await js(`document.querySelector('[data-var-name=long]')?.className ?? ''`);
+        const definedRow = (await run<Environment>('api.environment.get', { id: env.id }, ws.id)).variables.find((v) => v.key === 'long');
+        check(
+          'ui: an undefined variable can be defined from its card, in the chosen environment and as a secret',
+          defineForm?.target === env.id && defineForm.options[0] === 'local (active)' && defineForm.options.includes('Global variables') && defineForm.focused === 'variable-card-input' &&
+            secretDisabledForGlobal === true &&
+            definedCard?.source === 'Environment · local' && definedCard.value === '••••••••' &&
+            typeof definedChip === 'string' && !definedChip.includes('bg-danger') &&
+            definedRow?.value === 'l0ng-secret' && definedRow.secret === true,
+          { defineForm, secretDisabledForGlobal, definedCard, definedChip, definedRow },
+        );
+        await shot('03h-variable-defined-light');
+        await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+        const envWithLong = await run<Environment>('api.environment.get', { id: env.id }, ws.id);
+        await run('api.environment.save', { environment: { ...envWithLong, variables: envWithLong.variables.filter((v) => v.key !== 'long') } }, ws.id);
+        await typeUrl('{{baseUrl}}/things?x=1');
+        await wait(200);
+        check('ui: restoring the URL leaves the request unmodified', (await js(`document.querySelector('[data-testid=tab][aria-selected=true]')?.textContent.includes('echo') && !document.querySelector('[data-testid=tab][aria-selected=true] .bg-warning')`)) === true);
+
+        // A clean request tab follows the file when it changes on disk (an agent, a git pull).
+        const saveLabel = () =>
+          js(`(() => { const pane = [...document.querySelectorAll('[data-tab-type="api.request"]')].find((el) => !el.classList.contains('hidden')); return [...(pane?.querySelectorAll('button') ?? [])].find((b) => b.textContent.startsWith('Save'))?.textContent ?? null; })()`);
+        const labelBefore = await saveLabel();
+        const echoes = (await run<ApiRequest[]>('api.request.list', {}, ws.id)).filter((r) => r.name === 'echo');
+        const echoReq = echoes[0];
+        const echoFile = path.join(folder, '.quiver', 'requests', `${echoReq.id}.json`);
+        const echoOriginal = await fs.readFile(echoFile, 'utf8');
+        await fs.writeFile(echoFile, JSON.stringify({ ...echoReq, url: '{{baseUrl}}/changed-on-disk' }, null, 2) + '\n');
+        await wait(1200);
+        const tabUrl = await js(
+          `(() => { const pane = [...document.querySelectorAll('[data-tab-type="api.request"]')].find((el) => !el.classList.contains('hidden')); return [...(pane?.querySelectorAll('input') ?? [])].find((i) => i.value.startsWith('{{baseUrl}}'))?.value ?? null; })()`,
+        );
+        const labelAfter = await saveLabel();
+        check('ui: an open request tab without edits picks up a change made on disk', tabUrl === '{{baseUrl}}/changed-on-disk' && labelAfter === 'Save', { tabUrl, labelBefore, labelAfter, echoes: echoes.map((r) => r.url) });
+        await fs.writeFile(echoFile, echoOriginal);
+        await wait(1200);
+
+        const bodyVars = await run<ApiRequest>('api.request.create', { name: 'vars in body', method: 'POST', url: '{{baseUrl}}/b', body: { type: 'json', content: '{\n  "auth": "{{token}}",\n  "other": "{{nope}}"\n}' } }, ws.id);
+        await wait(500);
+        await js(`(() => { const row = [...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('vars in body')); if (row) row.click(); })()`);
+        await wait(800);
+        await js(
+          `(() => { const pane = [...document.querySelectorAll('[data-tab-type="api.request"]')].find((el) => !el.classList.contains('hidden')); const tab = pane && [...pane.querySelectorAll('[role=tab]')].find((b) => b.textContent.startsWith('Body')); if (tab) tab.click(); })()`,
+        );
+        await wait(500);
+        const editorMarks = await js(
+          `(() => { const pane = [...document.querySelectorAll('[data-tab-type="api.request"]')].find((el) => !el.classList.contains('hidden')); return [...pane.querySelectorAll('.cm-content [data-var-name]')].map((el) => el.getAttribute('data-var-name') + ':' + el.className); })()`,
+        );
+        await js(
+          `(() => { const pane = [...document.querySelectorAll('[data-tab-type="api.request"]')].find((el) => !el.classList.contains('hidden')); const el = pane.querySelector('.cm-content [data-var-name=token]'); if (!el) return; const r = el.getBoundingClientRect(); el.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: r.left + 2, clientY: r.top + 2 })); })()`,
+        );
+        await wait(250);
+        const editorCard = await card();
+        check(
+          'ui: the body editor marks known and unknown variables and shows the card on hover',
+          Array.isArray(editorMarks) && editorMarks.some((m: string) => m.startsWith('token:') && m.includes('cm-variable') && !m.includes('missing')) && editorMarks.some((m: string) => m.startsWith('nope:') && m.includes('cm-variable-missing')) && editorCard?.name === 'token' && editorCard.value === '••••••••',
+          { editorMarks, editorCard },
+        );
+        await shot('03d-variable-body-light');
+        await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+        await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+        await run('api.request.delete', { id: bodyVars.id }, ws.id);
+        await wait(300);
+        await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }))`);
+        await wait(400);
+        await shot('04-palette-light');
+        await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+        await wait(200);
+
+        // GraphQL: request row label, body editor with schema status, docs explorer.
+        const clickedApi = await js(
+          `(() => { const btn = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.title || '') === 'API client'); if (btn) btn.click(); return Boolean(btn); })()`,
+        );
+        check('ui: api module button', clickedApi === true);
+        await wait(500);
+
+        // API sidebar: a collapsed collection stays collapsed after leaving the module, and the choice is saved per machine.
+        const foldCollection = await run<{ id: string }>('api.collection.create', { name: 'smoke folder' }, ws.id);
+        await run('api.request.create', { name: 'inside folder', collectionId: foldCollection.id }, ws.id);
+        await wait(600);
+        const folderOpen = () => js(`document.querySelector('[data-testid=api-collection][data-name="smoke folder"]')?.getAttribute('data-open') ?? null`);
+        const openedByDefault = await folderOpen();
+        await js(`document.querySelector('[data-testid=api-collection][data-name="smoke folder"] [role=button]').click()`);
+        await wait(200);
+        const collapsed = await folderOpen();
+        const hiddenChild = await js(`[...document.querySelectorAll('[role=button]')].some((r) => r.textContent.includes('inside folder'))`);
+        await js(`[...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.title || '') === 'Databases').click()`);
+        await wait(400);
+        await js(`[...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.title || '') === 'API client').click()`);
+        await wait(600);
+        const afterReturn = await folderOpen();
+        const savedTree = await run<{ value: Record<string, boolean> | null }>('workspace.state.get', { key: 'ui.tree' }, ws.id);
+        check(
+          'ui: a collapsed API collection stays collapsed after switching modules and is saved',
+          openedByDefault === 'true' && collapsed === 'false' && hiddenChild === false && afterReturn === 'false' && savedTree.value?.[`api/collection/${foldCollection.id}`] === false,
+          { openedByDefault, collapsed, hiddenChild, afterReturn, saved: savedTree.value },
+        );
+        await run('api.collection.delete', { id: foldCollection.id }, ws.id).catch(() => {});
+        await wait(300);
+
+        // API sidebar: requests added by an agent show up without a restart, through MCP or written straight to disk.
+        const viaMcp = await host.invoke('api.request.create', { name: 'added over mcp' }, { caller: 'mcp', workspaceId: ws.id });
+        const onDiskId = 'smokeexternal01';
+        await fs.writeFile(
+          path.join(folder, '.quiver', 'requests', `${onDiskId}.json`),
+          JSON.stringify({ ...(viaMcp.ok ? (viaMcp.result as object) : {}), id: onDiskId, name: 'written to disk', collectionId: null }, null, 2),
+        );
+        await wait(1200);
+        const sidebarRows = await js(`[...document.querySelectorAll('[role=button]')].map((r) => r.textContent)`);
+        const sawDiskRow = Array.isArray(sidebarRows) && sidebarRows.some((t: string) => t.includes('written to disk'));
+        check(
+          'ui: requests created over MCP or written to .quiver by hand appear in the sidebar without a restart',
+          viaMcp.ok && Array.isArray(sidebarRows) && sidebarRows.some((t: string) => t.includes('added over mcp')) && sidebarRows.some((t: string) => t.includes('written to disk')),
+          viaMcp.ok ? 'ok' : viaMcp.error.message,
+        );
+        await fs.rm(path.join(folder, '.quiver', 'requests', `${onDiskId}.json`));
+        await wait(600);
+        const goneRow = await js(`[...document.querySelectorAll('[role=button]')].some((r) => r.textContent.includes('written to disk'))`);
+        check('ui: a request file deleted on disk disappears from the sidebar', sawDiskRow && goneRow === false);
+        if (viaMcp.ok) await run('api.request.delete', { id: (viaMcp.result as { id: string }).id }, ws.id).catch(() => {});
+        await wait(300);
+        const gqlRowLabel = await js(
+          `(() => { const row = [...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('smoke graphql')); if (!row) return null; const label = row.textContent.slice(0, 3); row.click(); return label; })()`,
+        );
+        check('ui: graphql request row is labelled GQL', gqlRowLabel === 'GQL', gqlRowLabel);
+        await wait(1000);
+        const clickedBodyTab = await js(
+          `(() => { const pane = [...document.querySelectorAll('[data-tab-type="api.request"]')].find((el) => !el.classList.contains('hidden')); const btn = pane && [...pane.querySelectorAll('[role=tab]')].find((b) => b.textContent.startsWith('Body')); if (btn) btn.click(); return Boolean(btn); })()`,
+        );
+        check('ui: body section tab', clickedBodyTab === true);
+        await wait(1500);
+        const gqlQueryText = await js(`document.querySelector('[data-testid=graphql-query] .cm-content')?.textContent ?? ''`);
+        check('ui: graphql editor shows the query', typeof gqlQueryText === 'string' && gqlQueryText.includes('hello(name: $name)'), gqlQueryText);
+        const gqlStatus = await js(`document.querySelector('[data-testid=graphql-schema-status]')?.textContent ?? ''`);
+        check('ui: schema status shows the cached schema', typeof gqlStatus === 'string' && /Schema: \d+ types/.test(gqlStatus), gqlStatus);
+        await shot('17-graphql-light');
+        const clickedDocs = await js(`(() => { const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Docs'); if (btn) btn.click(); return Boolean(btn); })()`);
+        check('ui: docs button opens the schema explorer', clickedDocs === true);
+        await wait(1000);
+        const typeNames = await js(`[...document.querySelectorAll('[data-testid=graphql-type]')].map((b) => b.textContent)`);
+        check('ui: schema explorer lists root and object types', Array.isArray(typeNames) && typeNames.includes('Query') && typeNames.includes('Mutation') && typeNames.includes('User'), typeNames);
+        const clickedUser = await js(`(() => { const btn = [...document.querySelectorAll('[data-testid=graphql-type]')].find((b) => b.textContent === 'User'); if (btn) btn.click(); return Boolean(btn); })()`);
+        await wait(400);
+        const userDetail = await js(`document.querySelector('[data-testid=graphql-type-detail]')?.textContent ?? ''`);
+        check(
+          'ui: type detail shows fields, description and deprecation',
+          clickedUser === true && typeof userDetail === 'string' && userDetail.includes('A person') && userDetail.includes('name') && userDetail.includes('Deprecated'),
+          String(userDetail).slice(0, 160),
+        );
+        await shot('18-graphql-schema-light');
+
+        // Status bar: the environment picker is a themed menu above the bar, not a native select.
+        // A second environment to switch to, whichever other parts ran.
+        const staging = await run<Environment>('api.environment.create', { name: 'staging' }, ws.id);
+        const environmentCount = (await run<Environment[]>('api.environment.list', {}, ws.id)).length;
+        await wait(300);
+        const pickerLabel = await js(`document.querySelector('[data-testid=env-picker]')?.textContent ?? null`);
+        check('ui: status bar names the active environment', pickerLabel === 'local', pickerLabel);
+        await js(`document.querySelector('[data-testid=env-picker]').click()`);
+        await wait(300);
+        const pickerOptions = await js(`[...document.querySelectorAll('[data-testid=env-picker-option]')].map((b) => b.textContent + ':' + b.getAttribute('aria-checked'))`);
+        check(
+          'ui: the environment menu lists none plus every environment and marks the active one',
+          Array.isArray(pickerOptions) && pickerOptions[0] === 'No environment:false' && pickerOptions.includes('local:true') && pickerOptions.includes('staging:false') && pickerOptions.length === environmentCount + 1,
+          { pickerOptions, environmentCount },
+        );
+        await shot('24b-env-picker-light');
+        await js(`document.documentElement.classList.add('dark')`);
+        await wait(200);
+        await shot('24c-env-picker-dark');
+        await js(`document.documentElement.classList.remove('dark')`);
+        await js(`[...document.querySelectorAll('[data-testid=env-picker-option]')].find((b) => b.textContent !== 'local' && b.getAttribute('data-env-id')).click()`);
+        await wait(600);
+        const pickedLabel = await js(`document.querySelector('[data-testid=env-picker]')?.textContent ?? null`);
+        const pickedActive = await run<{ id: string | null }>('api.environment.active', {}, ws.id);
+        check('ui: picking an environment closes the menu and activates it', pickedLabel !== 'local' && pickedActive.id !== null && pickedActive.id !== env.id && (await js(`Boolean(document.querySelector('[data-testid=env-picker-menu]'))`)) === false, { pickedLabel, pickedActive });
+        await js(`document.querySelector('[data-testid=env-picker]').click()`);
+        await wait(200);
+        await js(`document.querySelector('[data-testid=env-picker-menu]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+        await wait(200);
+        check('ui: Escape closes the environment menu', (await js(`Boolean(document.querySelector('[data-testid=env-picker-menu]'))`)) === false);
+        await run('api.environment.setActive', { id: env.id }, ws.id);
+        await run('api.environment.delete', { id: staging.id }, ws.id);
+        await wait(300);
+      },
+    };
+  },
+});
