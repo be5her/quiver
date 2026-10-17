@@ -76,7 +76,7 @@
               <q-body-editor [formField]="requestForm.body" [request]="current" />
             }
             @case ('auth') {
-              <q-auth-editor [formField]="requestForm.auth" [inherit]="authInheritance()" />
+              <q-auth-editor [formField]="requestForm.auth" [inherit]="authInheritance()" oauth />
             }
             @case ('capture') {
               <q-capture-editor [value]="current.capture" (valueChange)="setCapture($event)" />

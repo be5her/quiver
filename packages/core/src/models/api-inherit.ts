@@ -1,4 +1,4 @@
-import type { ApiAuth, ApiCollection, ApiRequest, KeyValue, RequestAuth } from './api';
+import type { ApiAuth, ApiCollection, ApiRequest, ConcreteAuth, KeyValue } from './api';
 
 /**
  * Collections as they are read from disk: files written before collections had defaults lack
@@ -50,7 +50,7 @@ export function inheritedHeaders(collections: CollectionLike[], collectionId: st
 }
 
 /** The auth `inherit` resolves to from inside `collectionId`, and the collection it comes from; none at the top level. */
-export function inheritedAuth(collections: CollectionLike[], collectionId: string | null | undefined): { auth: RequestAuth; from: CollectionRef | null } {
+export function inheritedAuth(collections: CollectionLike[], collectionId: string | null | undefined): { auth: ConcreteAuth; from: CollectionRef | null } {
   const chain = collectionChain(collections, collectionId);
   for (let i = chain.length - 1; i >= 0; i--) {
     const auth = chain[i].auth;
@@ -70,7 +70,7 @@ export function inheritedBaseUrl(collections: CollectionLike[], collectionId: st
 }
 
 /** Concrete auth: an `inherit` replaced by what it resolves to. */
-export function resolveAuth(auth: ApiAuth | undefined, collections: CollectionLike[], collectionId: string | null | undefined): RequestAuth {
+export function resolveAuth(auth: ApiAuth | undefined, collections: CollectionLike[], collectionId: string | null | undefined): ConcreteAuth {
   if (!auth || auth.type === 'inherit') return inheritedAuth(collections, collectionId).auth;
   return auth;
 }

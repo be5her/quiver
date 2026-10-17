@@ -2,6 +2,7 @@ import {
   DEFINABLE_VARIABLE_NAME,
   ApiCollectionSchema,
   ApiRequestSchema,
+  OAuth2AuthSchema,
   EnvironmentSchema,
   QuiverError,
   REDACTED,
@@ -15,6 +16,7 @@ import {
   effectiveRequest,
   extractCapture,
   effectiveSendOptions,
+  resolveAuth,
   findUnresolved,
   newApiRequest,
   newCollection,
@@ -32,6 +34,7 @@ import {
   toCurl,
   type ApiCollection,
   type ApiRequest,
+  type ApiAuth,
   type ApiResponse,
   type CapturedValue,
   type CurlFormField,
@@ -60,6 +63,7 @@ import {
 } from './env';
 import { graphqlEndpoint, introspect, readSchema } from './graphql';
 import { prepareRequest, sendPrepared } from './http';
+import { clearOAuthToken, getOAuthToken, oauthStatus } from './oauth';
 
 const HISTORY_LOG = 'history';
 
@@ -153,6 +157,28 @@ async function runCaptures(ctx: CommandContext, request: ApiRequest, response: A
     return fail(`The environment could not be saved: ${(err as Error).message}`);
   }
   return results;
+}
+
+/**
+ * An OAuth 2.0 request with its token in place: a bearer (or the header prefix the auth sets). The UI
+ * signs in when it has to; agents get a cached, refreshed or client credentials token only. With
+ * `optional` a request whose token cannot be had without a sign-in goes without auth (curl export).
+ */
+async function applyOAuth(ctx: CommandContext, request: ApiRequest, mode: 'send' | 'optional'): Promise<ApiRequest> {
+  if (request.auth.type !== 'oauth2') return request;
+  const auth = request.auth;
+  let accessToken: string;
+  try {
+    accessToken = (await getOAuthToken(ws(ctx), ctx.host, auth, { interactive: mode === 'send' && ctx.caller === 'ui' })).token.accessToken;
+  } catch (err) {
+    if (mode === 'optional') return { ...request, auth: { type: 'none' } };
+    throw err;
+  }
+  const prefix = auth.headerPrefix?.trim() || 'Bearer';
+  return {
+    ...request,
+    auth: prefix.toLowerCase() === 'bearer' ? { type: 'bearer', token: accessToken } : { type: 'apikey', key: 'Authorization', value: `${prefix} ${accessToken}`, in: 'header' },
+  };
 }
 
 /** Secrets are masked for agents everywhere, so an error that names the URL it failed on must not carry them either. */
@@ -283,9 +309,11 @@ const requestSend = defineCommand({
     if (!request) throw new QuiverError('INVALID_INPUT', 'Provide requestId or request');
     const options = effectiveSendOptions(request.options, input.options);
     const { resolved } = await resolveRequest(ctx, request, input.environmentId);
-    const prepared = await prepareRequest(resolved, { baseDir: w.path, agent: ctx.caller === 'mcp' });
-    // Known before sending, so a failed send is recorded just as carefully.
+    const sendable = await applyOAuth(ctx, resolved, 'send');
+    const prepared = await prepareRequest(sendable, { baseDir: w.path, agent: ctx.caller === 'mcp' });
+    // Known before sending, so a failed send is recorded just as carefully; an OAuth token too.
     const secrets = await knownSecrets(ctx, resolved, input.environmentId);
+    secrets.values = [...(secrets.values ?? []), ...requestSecretValues(sendable)];
     const forAgent = ctx.caller === 'mcp';
 
     const entry: HistoryEntry = {
@@ -373,6 +401,77 @@ const responseSave = defineCommand({
   },
 });
 
+// ---------- OAuth 2.0 ----------
+
+const OAuthRefInput = z.object({
+  requestId: z.string().optional().describe('A saved request whose auth (its own or inherited) is OAuth 2.0'),
+  collectionId: z.string().optional().describe('A collection whose auth (its own or inherited) is OAuth 2.0'),
+  auth: OAuth2AuthSchema.optional().describe('An OAuth 2.0 auth given directly'),
+  environmentId: z.string().nullable().optional(),
+});
+
+/** The OAuth 2.0 auth a request, a collection or the input names, with variables resolved. */
+async function oauthFor(ctx: CommandContext, input: z.infer<typeof OAuthRefInput>) {
+  const w = ws(ctx);
+  let auth: ApiAuth | undefined = input.auth;
+  if (!auth && input.requestId) auth = (await withInheritance(w, await requireRequest(w, input.requestId))).auth;
+  if (!auth && input.collectionId) {
+    const collections = await listCollections(w);
+    const col = collections.find((c) => c.id === input.collectionId);
+    if (!col) throw new QuiverError('NOT_FOUND', `Collection ${input.collectionId} not found`);
+    auth = resolveAuth(col.auth, collections, col.parentId);
+  }
+  if (!auth) throw new QuiverError('INVALID_INPUT', 'Provide requestId, collectionId or auth');
+  if (auth.type !== 'oauth2') throw new QuiverError('INVALID_INPUT', `That auth is ${auth.type}, not OAuth 2.0`);
+  const vars = await resolveVariableMap(w, ctx.host, input.environmentId);
+  const resolved = resolveDeep(auth, vars);
+  const missing = findUnresolved(JSON.stringify(resolved), vars);
+  if (missing.length) throw new QuiverError('UNRESOLVED_VARIABLES', `Unresolved variables: ${missing.join(', ')}`, { missing });
+  return resolved;
+}
+
+const oauthToken = defineCommand({
+  id: 'api.oauth2.token',
+  title: 'Get an OAuth 2.0 token',
+  description:
+    'Gets the token an OAuth 2.0 auth uses (a request\'s, a collection\'s or one given): the cached one while fresh, else a refresh, else a new one by client credentials. The authorization code grant needs a sign-in in the Quiver window, which agents cannot do: they get SIGN_IN_REQUIRED unless a token is cached or can be refreshed. The token is masked for agents. `force` skips the cache.',
+  scope: 'workspace',
+  input: OAuthRefInput.extend({ force: z.boolean().optional() }),
+  handler: async (input, ctx) => {
+    const auth = await oauthFor(ctx, input);
+    const { token, source } = await getOAuthToken(ws(ctx), ctx.host, auth, { interactive: ctx.caller === 'ui', force: input.force });
+    return {
+      source,
+      tokenType: token.tokenType,
+      expiresAt: token.expiresAt,
+      scope: token.scope ?? null,
+      refreshable: Boolean(token.refreshToken),
+      token: ctx.caller === 'mcp' ? REDACTED : token.accessToken,
+    };
+  },
+});
+
+const oauthStatusCommand = defineCommand({
+  id: 'api.oauth2.status',
+  title: 'OAuth 2.0 token status',
+  description: 'Whether a token is cached for an OAuth 2.0 auth, when it expires and whether it can be refreshed, without asking the server.',
+  scope: 'workspace',
+  input: OAuthRefInput,
+  handler: async (input, ctx) => oauthStatus(ws(ctx), ctx.host, await oauthFor(ctx, input)),
+});
+
+const oauthClear = defineCommand({
+  id: 'api.oauth2.clear',
+  title: 'Forget an OAuth 2.0 token',
+  description: 'Forgets the cached token of an OAuth 2.0 auth and the session of its sign-in window, so the next token is got again.',
+  scope: 'workspace',
+  input: OAuthRefInput,
+  handler: async (input, ctx) => {
+    await clearOAuthToken(ws(ctx), ctx.host, await oauthFor(ctx, input));
+    return { cleared: true };
+  },
+});
+
 // ---------- GraphQL ----------
 
 const RequestRefInput = z.object({
@@ -396,9 +495,11 @@ const graphqlIntrospect = defineCommand({
   input: RequestRefInput,
   handler: async (input, ctx) => {
     const request = await requestFrom(ctx, input);
-    const { resolved } = await resolveRequest(ctx, request, input.environmentId);
+    const { resolved: written } = await resolveRequest(ctx, request, input.environmentId);
+    const resolved = await applyOAuth(ctx, written, 'send');
     if (ctx.caller !== 'mcp') return introspect(ws(ctx), resolved);
-    const secrets = await knownSecrets(ctx, resolved, input.environmentId);
+    const secrets = await knownSecrets(ctx, written, input.environmentId);
+    secrets.values = [...(secrets.values ?? []), ...requestSecretValues(resolved)];
     try {
       const doc = await introspect(ws(ctx), resolved);
       return { ...doc, url: redactUrl(doc.url, secrets) };
@@ -712,7 +813,9 @@ const exportCurl = defineCommand({
     const request = input.request ?? (input.requestId ? await requireRequest(ws(ctx), input.requestId) : null);
     if (!request) throw new QuiverError('INVALID_INPUT', 'Provide requestId or request');
     const vars = await resolveVariableMap(ws(ctx), ctx.host, input.environmentId);
-    const resolved = resolveDeep(await withInheritance(ws(ctx), request), vars);
+    const written = resolveDeep(await withInheritance(ws(ctx), request), vars);
+    // A cached or client credentials token goes in the command; a sign-in is never opened for a copy.
+    const resolved = await applyOAuth(ctx, written, 'optional');
     const prepared = await prepareRequest(resolved);
     const form: CurlFormField[] | undefined =
       resolved.body.type === 'form'
@@ -792,6 +895,9 @@ export const apiModule = defineModule({
     requestSend,
     requestCancel,
     responseSave,
+    oauthToken,
+    oauthStatusCommand,
+    oauthClear,
     graphqlIntrospect,
     graphqlSchema,
     collectionList,

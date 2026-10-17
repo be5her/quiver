@@ -72,8 +72,36 @@ export type RequestAuth = z.infer<typeof RequestAuthSchema>;
  * auth of the nearest collection above that sets one (none at the top level). Realtime connections
  * and MCP servers keep `RequestAuthSchema`, since they sit in no collection.
  */
-export const ApiAuthSchema = z.discriminatedUnion('type', [...RequestAuthSchema.options, z.object({ type: z.literal('inherit') })]);
+/**
+ * OAuth 2.0: the request carries a token got from \`tokenUrl\`, by client credentials or by a sign-in
+ * in a Quiver window (authorization code, PKCE by default). Tokens are cached per machine, encrypted.
+ */
+export const OAuth2AuthSchema = z.object({
+  type: z.literal('oauth2'),
+  grant: z.enum(['client_credentials', 'authorization_code']),
+  tokenUrl: z.string(),
+  /** The authorize page, for the authorization code grant. */
+  authUrl: z.string().optional(),
+  clientId: z.string(),
+  /** Empty for a public client; reference a secret variable rather than typing it. */
+  clientSecret: z.string(),
+  /** Space-separated. */
+  scopes: z.string(),
+  audience: z.string().optional(),
+  /** How the client authenticates at the token URL: an HTTP Basic header, or client_id and client_secret in the body. */
+  clientAuth: z.enum(['basic', 'body']),
+  pkce: z.boolean(),
+  /** The callback listens on http://127.0.0.1:<port>/callback; a free port when absent. Set one to register a fixed redirect URI. */
+  callbackPort: z.number().int().min(1).max(65535).optional(),
+  /** Put before the token in the Authorization header; Bearer when absent. */
+  headerPrefix: z.string().optional(),
+});
+export type OAuth2Auth = z.infer<typeof OAuth2AuthSchema>;
+
+export const ApiAuthSchema = z.discriminatedUnion('type', [...RequestAuthSchema.options, OAuth2AuthSchema, z.object({ type: z.literal('inherit') })]);
 export type ApiAuth = z.infer<typeof ApiAuthSchema>;
+/** Auth that says how to authenticate itself: anything but \`inherit\`. */
+export type ConcreteAuth = Exclude<ApiAuth, { type: 'inherit' }>;
 
 export const SendOptionsSchema = z.object({
   followRedirects: z.boolean().default(true),

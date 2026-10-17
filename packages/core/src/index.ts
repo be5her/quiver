@@ -35,3 +35,4 @@ export * from './cookies';
 export * from './redirect';
 export * from './response-file';
 export * from './capture';
+export * from './oauth';

@@ -627,6 +627,67 @@ export default definePart({
       await run('api.request.delete', { id: binaryBack.id }, ws.id);
     }
 
+    // OAuth 2.0: client credentials fetched once and reused, a sign-in with PKCE in a (hidden) window, a refresh, all masked.
+    {
+      const oauth = t.fixtures.fakeOAuth;
+      const cc = { type: 'oauth2' as const, grant: 'client_credentials' as const, tokenUrl: `${oauth.url}/token`, clientId: 'quiver', clientSecret: 'cc-secret', scopes: 'read', clientAuth: 'basic' as const, pkce: false };
+      const ccReqNew = await run<ApiRequest>('api.request.create', { name: 'oauth cc', url: '{{baseUrl}}/oauth' }, ws.id);
+      const ccReq = await run<ApiRequest>('api.request.save', { request: { ...ccReqNew, auth: cc } }, ws.id);
+      const first = JSON.parse((await run<ApiResponse>('api.request.send', { requestId: ccReq.id }, ws.id)).body) as { headers: Record<string, string> };
+      const second = JSON.parse((await run<ApiResponse>('api.request.send', { requestId: ccReq.id }, ws.id)).body) as { headers: Record<string, string> };
+      const ccToken = (first.headers.authorization ?? '').replace(/^Bearer /, '');
+      const tokensFile = await fs.readFile(path.join(folder, '.quiver', 'local', 'oauth-tokens.json'), 'utf8');
+      const historyText = await fs.readFile(path.join(folder, '.quiver', 'local', 'history.jsonl'), 'utf8');
+      const agentCc = await host.invoke('api.request.send', { requestId: ccReq.id }, { caller: 'mcp', workspaceId: ws.id });
+      const agentSent = agentCc.ok ? JSON.stringify((agentCc.result as ApiResponse).sent) : '';
+      check(
+        'oauth: client credentials get a token once, reuse it, keep it encrypted, and keep it and the client secret out of the history and away from agents',
+        ccToken.startsWith('cc-') && second.headers.authorization === first.headers.authorization && oauth.seen.clientCredentials === 1 && oauth.seen.lastClientAuth === 'basic' &&
+          !tokensFile.includes(ccToken) && !historyText.includes(ccToken) && !historyText.includes('cc-secret') && agentCc.ok && !agentSent.includes(ccToken),
+        { ccToken, calls: oauth.seen.clientCredentials, inFile: tokensFile.includes(ccToken), inHistory: historyText.includes(ccToken) || historyText.includes('cc-secret') },
+      );
+      const bodyAuth = await run<{ source: string; token: string }>('api.oauth2.token', { auth: { ...cc, clientAuth: 'body', scopes: 'read write' } }, ws.id);
+      const bodyClientAuth = oauth.seen.lastClientAuth;
+      const ccCurl = await run<{ command: string }>('api.export.curl', { requestId: ccReq.id }, ws.id);
+      const wrong = await host.invoke('api.request.send', { request: { ...ccReq, auth: { ...cc, clientSecret: 'nope', scopes: 'other' } } }, { caller: 'ui', workspaceId: ws.id });
+      check(
+        'oauth: the client can authenticate in the body, curl export carries the token, and a refused client says why',
+        bodyAuth.source === 'new' && bodyAuth.token.startsWith('cc-') && bodyClientAuth === 'body' && ccCurl.command.includes(`Bearer ${ccToken}`) &&
+          !wrong.ok && wrong.error.message.includes('invalid_client'),
+        { bodyAuth: bodyAuth.source, lastClientAuth: bodyClientAuth, wrong: wrong.ok ? 'ok?' : wrong.error.message },
+      );
+
+      const ac = { type: 'oauth2' as const, grant: 'authorization_code' as const, tokenUrl: `${oauth.url}/token`, authUrl: `${oauth.url}/authorize`, clientId: 'web', clientSecret: '', scopes: 'profile', clientAuth: 'basic' as const, pkce: true };
+      const agentBefore = await host.invoke('api.oauth2.token', { auth: ac }, { caller: 'mcp', workspaceId: ws.id });
+      const signedIn = await run<{ source: string; token: string; refreshable: boolean }>('api.oauth2.token', { auth: ac }, ws.id);
+      const agentAfter = await host.invoke('api.oauth2.token', { auth: ac }, { caller: 'mcp', workspaceId: ws.id });
+      check(
+        'oauth: a sign-in in the Quiver window (PKCE) gets a token for the UI; an agent gets SIGN_IN_REQUIRED before it and the cached token, masked, after',
+        !agentBefore.ok && agentBefore.error.code === 'SIGN_IN_REQUIRED' && signedIn.source === 'new' && signedIn.token.startsWith('ac-') && signedIn.refreshable && oauth.seen.pkceOk === true && oauth.seen.authorize === 1 &&
+          agentAfter.ok && (agentAfter.result as { source: string; token: string }).source === 'cache' && (agentAfter.result as { token: string }).token === REDACTED,
+        { agentBefore: agentBefore.ok ? 'ok?' : agentBefore.error.code, signedIn, pkce: oauth.seen.pkceOk, agentAfter: agentAfter.ok ? agentAfter.result : agentAfter.error.code },
+      );
+      oauth.state.expiresIn = 10;
+      const shortLived = await run<{ source: string }>('api.oauth2.token', { auth: ac, force: true }, ws.id);
+      const refreshed = await host.invoke('api.oauth2.token', { auth: ac }, { caller: 'mcp', workspaceId: ws.id });
+      oauth.state.expiresIn = 3600;
+      const status = await run<{ hasToken: boolean; refreshable: boolean }>('api.oauth2.status', { auth: ac }, ws.id);
+      await run('api.oauth2.clear', { auth: ac }, ws.id);
+      const cleared = await run<{ hasToken: boolean }>('api.oauth2.status', { auth: ac }, ws.id);
+      check(
+        'oauth: a token near its expiry is refreshed with the refresh token, also for an agent, and Forget clears it',
+        shortLived.source === 'new' && refreshed.ok && (refreshed.result as { source: string }).source === 'refresh' && oauth.seen.refreshes === 1 && status.hasToken && status.refreshable && !cleared.hasToken,
+        { shortLived: shortLived.source, refreshed: refreshed.ok ? refreshed.result : refreshed.error.message, status, cleared },
+      );
+
+      const oauthCol = await run<ApiCollection>('api.collection.create', { name: 'oauth collection' }, ws.id);
+      await run('api.collection.save', { collection: { ...oauthCol, auth: cc } }, ws.id);
+      const inheritsNew = await run<ApiRequest>('api.request.create', { name: 'oauth inherits', url: '{{baseUrl}}/oauth-inherit', collectionId: oauthCol.id }, ws.id);
+      const inheritsEcho = JSON.parse((await run<ApiResponse>('api.request.send', { requestId: inheritsNew.id }, ws.id)).body) as { headers: Record<string, string> };
+      check('oauth: a request inheriting OAuth 2.0 from its collection shares the cached token', inheritsEcho.headers.authorization === `Bearer ${ccToken}` && oauth.seen.clientCredentials === 2, inheritsEcho.headers.authorization);
+      await run('api.collection.delete', { id: oauthCol.id }, ws.id);
+    }
+
     return {
       ui: async (u) => {
         const { win, js, wait, shot } = u;
@@ -1055,6 +1116,30 @@ export default definePart({
           await wait(300);
           for (const r of [fileBody, fileUpload]) if (r) await run('api.request.delete', { id: r.id }, ws.id);
           await fs.rm(path.join(folder, 'uploads'), { recursive: true, force: true });
+          await js(`[...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('echo'))?.click()`);
+          await wait(600);
+        }
+
+        // OAuth 2.0 in the UI: the Auth segment's fields and the cached token's state.
+        {
+          const ccReq = (await run<ApiRequest[]>('api.request.list', {}, ws.id)).find((r) => r.name === 'oauth cc');
+          await js(`[...document.querySelectorAll('[data-testid=api-request-row]')].find((r) => r.getAttribute('data-name') === 'oauth cc')?.click()`);
+          await wait(900);
+          await js(`[...document.querySelectorAll('button')].find((b) => b.offsetParent !== null && b.textContent.trim().startsWith('Auth'))?.click()`);
+          await wait(600);
+          const authType = await js(`${visible('[data-testid=api-auth-type]')}?.value ?? null`);
+          const grant = await js(`${visible('[data-testid=api-oauth-grant]')}?.value ?? null`);
+          const statusLine = await js(`${visible('[data-testid=api-oauth-status]')}?.textContent.trim() ?? null`);
+          const getLabel = await js(`${visible('[data-testid=api-oauth-get]')}?.textContent.trim() ?? null`);
+          await shot('03y-oauth-auth-light');
+          check(
+            'ui: an OAuth 2.0 request shows its grant and the cached token\'s expiry, with Get new token',
+            authType === 'oauth2' && grant === 'client_credentials' && typeof statusLine === 'string' && statusLine.startsWith('Token expires') && getLabel === 'Get new token',
+            { authType, grant, statusLine, getLabel },
+          );
+          await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+          await wait(300);
+          if (ccReq) await run('api.request.delete', { id: ccReq.id }, ws.id);
           await js(`[...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('echo'))?.click()`);
           await wait(600);
         }

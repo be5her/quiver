@@ -6,6 +6,7 @@ import { buildSchema, graphql as executeGraphql } from 'graphql';
 import type { WebSocket as WsSocket } from 'ws';
 import { startFakeGrafana } from './fake-grafana';
 import { startFakeMcpHttp, writeFakeMcpStdio } from './fake-mcp';
+import { startFakeOAuth } from './fake-oauth';
 import { startFakeRedis } from './fake-redis';
 import { writeFakeTsh } from './fake-tsh';
 
@@ -200,6 +201,7 @@ export async function startFixtures() {
   const mcpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-smoke-mcp-'));
   const fakeStdio = await writeFakeMcpStdio(mcpDir);
   const fakeMcp = await startFakeMcpHttp();
+  const fakeOAuth = await startFakeOAuth();
 
   return {
     echoPort,
@@ -216,6 +218,7 @@ export async function startFixtures() {
     mcpDir,
     fakeStdio,
     fakeMcp,
+    fakeOAuth,
     async close() {
       echo.close();
       gql.close();
@@ -228,6 +231,7 @@ export async function startFixtures() {
       await fakeRedis.close();
       await fakeGrafana.close();
       await fakeMcp.close();
+      await fakeOAuth.close();
       if (previousKubeconfig === undefined) delete process.env.KUBECONFIG;
       else process.env.KUBECONFIG = previousKubeconfig;
       await fs.rm(tshDir, { recursive: true, force: true }).catch(() => {});
