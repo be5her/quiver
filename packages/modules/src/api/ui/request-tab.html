@@ -44,6 +44,7 @@
           <button qSegment="headers"><span class="flex items-center gap-1">Headers@if (counts().headers) {<span class="text-[10px] rounded-full bg-elevated px-1.5 text-muted">{{ counts().headers }}</span>}</span></button>
           <button qSegment="body"><span class="flex items-center gap-1">Body@if (counts().body) {<span class="text-[10px] rounded-full bg-elevated px-1.5 text-muted">{{ counts().body }}</span>}</span></button>
           <button qSegment="auth"><span class="flex items-center gap-1">Auth@if (counts().auth) {<span class="text-[10px] rounded-full bg-elevated px-1.5 text-muted">{{ counts().auth }}</span>}</span></button>
+          <button qSegment="capture" data-testid="api-section-capture"><span class="flex items-center gap-1">Capture@if (counts().capture) {<span class="text-[10px] rounded-full bg-elevated px-1.5 text-muted">{{ counts().capture }}</span>}</span></button>
           <button qSegment="settings" data-testid="api-section-settings"><span class="flex items-center gap-1">Settings@if (counts().settings) {<span class="text-[10px] rounded-full bg-elevated px-1.5 text-muted">{{ counts().settings }}</span>}</span></button>
           <button qSegment="notes" data-testid="api-section-notes"><span class="flex items-center gap-1">Notes@if (counts().notes) {<span class="size-1.5 rounded-full bg-accent" title="Has a description"></span>}</span></button>
         </q-segmented>
@@ -76,6 +77,9 @@
             }
             @case ('auth') {
               <q-auth-editor [formField]="requestForm.auth" [inherit]="authInheritance()" />
+            }
+            @case ('capture') {
+              <q-capture-editor [value]="current.capture" (valueChange)="setCapture($event)" />
             }
             @case ('settings') {
               <q-request-settings [value]="current.options" (valueChange)="setOptions($event)" />

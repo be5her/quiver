@@ -523,6 +523,42 @@ export default definePart({
       check('api.collection.delete: a collection written by hand and then deleted stays deleted', legacyGone && stillGone, { legacyGone, stillGone });
     }
 
+    // Captures: a login writes its token, session cookie and user id into the environment; the next request uses them.
+    {
+      const cap = (variable: string, from: 'body' | 'header' | 'cookie' | 'status', path: string, secret = false) => ({ id: `cap-${variable}`, enabled: true, variable, from, path, secret });
+      const loginNew = await run<ApiRequest>('api.request.create', { name: 'capture login', method: 'POST', url: '{{baseUrl}}/auth/login' }, ws.id);
+      const login = await run<ApiRequest>('api.request.save', {
+        request: { ...loginNew, capture: [cap('capToken', 'body', '$.token', true), cap('capSession', 'cookie', 'session'), cap('capUser', 'body', '$.user.id'), cap('capReq', 'header', 'X-Request-Id'), cap('capMissing', 'header', 'X-Nope')] },
+      }, ws.id);
+      const loggedIn = await run<ApiResponse>('api.request.send', { requestId: login.id }, ws.id);
+      const byName = Object.fromEntries((loggedIn.captured ?? []).map((c) => [c.variable, c]));
+      const envAfter = await run<Environment>('api.environment.get', { id: env.id }, ws.id);
+      const envDisk = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'environments', `${env.id}.json`), 'utf8')) as Environment;
+      const valueOf = (name: string) => envAfter.variables.find((v) => v.key === name);
+      check(
+        'captures: a send writes what it reads into the active environment, a secret one encrypted, and reports a capture that read nothing',
+        byName.capToken?.ok && byName.capToken.value === 'cap-tok-123' && byName.capSession?.value === 'sess-9' && byName.capUser?.value === '7' && byName.capReq?.value === 'req-42' &&
+          byName.capMissing?.ok === false && (byName.capMissing.error ?? '').includes('X-Nope') &&
+          valueOf('capToken')?.value === 'cap-tok-123' && valueOf('capToken')?.secret === true && valueOf('capSession')?.value === 'sess-9' &&
+          envDisk.variables.find((v) => v.key === 'capToken')?.value === '' && !JSON.stringify(envDisk).includes('cap-tok-123'),
+        { captured: loggedIn.captured, onDisk: envDisk.variables.find((v) => v.key === 'capToken') },
+      );
+      const chained = await run<ApiResponse>('api.request.send', { request: { ...saved, id: '', name: 'chained', url: '{{baseUrl}}/me?user={{capUser}}', headers: [], auth: { type: 'bearer', token: '{{capToken}}' } } }, ws.id);
+      const chainedEcho = JSON.parse(chained.body) as { url: string; headers: Record<string, string> };
+      check('captures: the next request resolves the captured variables', chainedEcho.url === '/me?user=7' && chainedEcho.headers.authorization === 'Bearer cap-tok-123', { url: chainedEcho.url, authorization: chainedEcho.headers.authorization });
+      const agentLogin = await host.invoke('api.request.send', { requestId: login.id }, { caller: 'mcp', workspaceId: ws.id });
+      const agentCaptured = agentLogin.ok ? ((agentLogin.result as ApiResponse).captured ?? []) : [];
+      const noEnv = await run<ApiResponse>('api.request.send', { request: { ...login, url: `http://127.0.0.1:${echoPort}/auth/login` }, environmentId: null }, ws.id);
+      check(
+        'captures: an agent sees secret captures masked, and without an environment the captures fail but the send does not',
+        agentCaptured.find((c) => c.variable === 'capToken')?.value === REDACTED && agentCaptured.find((c) => c.variable === 'capUser')?.value === '7' &&
+          noEnv.status === 200 && (noEnv.captured ?? []).every((c) => !c.ok && c.value === null) && (noEnv.captured ?? []).filter((c) => (c.error ?? '').includes('No environment')).length === 4,
+        { agent: agentCaptured.map((c) => `${c.variable}=${c.value}`), noEnv: noEnv.captured?.[0]?.error },
+      );
+      const cleaned = await run<Environment>('api.environment.get', { id: env.id }, ws.id);
+      await run('api.environment.save', { environment: { ...cleaned, variables: cleaned.variables.filter((v) => !v.key.startsWith('cap')) } }, ws.id);
+    }
+
     return {
       ui: async (u) => {
         const { win, js, wait, shot } = u;
@@ -889,6 +925,33 @@ export default definePart({
           await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
           await wait(300);
           if (outerCol) await run('api.collection.delete', { id: outerCol.id }, ws.id);
+          await js(`[...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('echo'))?.click()`);
+          await wait(600);
+        }
+
+        // Captures in the UI: the Capture segment lists them, and a send shows what was captured.
+        {
+          const loginReq = (await run<ApiRequest[]>('api.request.list', {}, ws.id)).find((r) => r.name === 'capture login');
+          await js(`[...document.querySelectorAll('[data-testid=api-request-row]')].find((r) => r.getAttribute('data-name') === 'capture login')?.click()`);
+          await wait(900);
+          await js(`${visible('[data-testid=api-section-capture]')}?.click()`);
+          await wait(300);
+          const segmentLabel = await js(`${visible('[data-testid=api-section-capture]')}?.textContent.trim() ?? null`);
+          const captureRows = await js(`[...document.querySelectorAll('[data-testid=api-capture-row]')].filter((r) => r.offsetParent !== null).length`);
+          await js(`[...document.querySelectorAll('button')].find((b) => b.offsetParent !== null && b.textContent.trim() === 'Send')?.click()`);
+          await wait(1500);
+          const strip = (await js(`[...document.querySelectorAll('[data-testid=api-response-captured-item]')].filter((e) => e.offsetParent !== null).map((e) => e.textContent.replace(/\\s+/g, ' ').trim())`)) as string[];
+          await shot('03v-request-capture-light');
+          check(
+            'ui: the Capture segment lists the captures, and the response shows each captured value (secret ones masked) or why it failed',
+            segmentLabel === 'Capture5' && captureRows === 5 && strip.some((s) => s.startsWith('capToken') && s.includes('••••••••') && !s.includes('cap-tok-123')) && strip.some((s) => s === 'capUser = 7') && strip.some((s) => s.startsWith('capMissing:')),
+            { segmentLabel, captureRows, strip },
+          );
+          await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+          await wait(300);
+          if (loginReq) await run('api.request.delete', { id: loginReq.id }, ws.id);
+          const cleaned = await run<Environment>('api.environment.get', { id: env.id }, ws.id);
+          await run('api.environment.save', { environment: { ...cleaned, variables: cleaned.variables.filter((v) => !v.key.startsWith('cap')) } }, ws.id);
           await js(`[...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('echo'))?.click()`);
           await wait(600);
         }

@@ -11,6 +11,7 @@ import {
   type ApiCollection,
   type ApiRequest,
   type ApiResponse,
+  type Capture,
   type Environment,
   type RequestOptions,
 } from '@quiver/core';
@@ -37,10 +38,11 @@ import { Copy, Save, Send, Square } from 'lucide';
 import { ApiVariables } from './api-variables';
 import { AuthEditor, type InheritedAuthInfo } from './auth-editor';
 import { BodyEditor } from './body-editor';
+import { CaptureEditor } from './capture-editor';
 import { RequestSettings } from './request-settings';
 import { ResponsePane } from './response-pane';
 
-type Section = 'params' | 'headers' | 'body' | 'auth' | 'settings' | 'notes';
+type Section = 'params' | 'headers' | 'body' | 'auth' | 'capture' | 'settings' | 'notes';
 
 /**
  * One request: name, method and URL, then params, headers, body and auth, and the last response.
@@ -49,7 +51,7 @@ type Section = 'params' | 'headers' | 'body' | 'auth' | 'settings' | 'notes';
  */
 @Component({
   selector: 'q-request-tab',
-  imports: [AuthEditor, BodyEditor, Button, CodeEditor, FormField, Input, KeyValueEditor, RequestSettings, ResponsePane, Segment, Segmented, Select, Spinner, VariableInput],
+  imports: [AuthEditor, BodyEditor, Button, CaptureEditor, CodeEditor, FormField, Input, KeyValueEditor, RequestSettings, ResponsePane, Segment, Segmented, Select, Spinner, VariableInput],
   hostDirectives: [ApiVariables],
   templateUrl: './request-tab.html',
   host: { class: 'contents', '(keydown)': 'shortcut($event)' },
@@ -130,6 +132,7 @@ export class RequestTab implements TabComponent {
       headers: request.headers.filter((h) => h.enabled && h.key).length + this.inheritedHeaders().filter((h) => !h.overridden).length,
       body: request.body.type === 'none' ? 0 : 1,
       auth: request.auth.type === 'none' || (request.auth.type === 'inherit' && !this.authInheritance()?.from) ? 0 : 1,
+      capture: (request.capture ?? []).filter((c) => c.enabled).length,
       settings: Object.keys(request.options ?? {}).length,
       notes: request.description?.trim() ? 1 : 0,
     };
@@ -215,6 +218,15 @@ export class RequestTab implements TabComponent {
     this.request.update((request) => {
       const next: ApiRequest = { ...request, options };
       if (!options) delete next.options;
+      return next;
+    });
+  }
+
+  /** No captures means no `capture` key, so a request stays equal to the saved one. */
+  protected setCapture(capture: Capture[] | undefined): void {
+    this.request.update((request) => {
+      const next: ApiRequest = { ...request, capture };
+      if (!capture) delete next.capture;
       return next;
     });
   }

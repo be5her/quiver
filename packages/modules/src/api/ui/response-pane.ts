@@ -189,6 +189,12 @@ export class ResponsePane {
     }
   }
 
+  /** A captured value short enough for the strip; the full one is in the environment. */
+  protected shorten(value: string | null): string {
+    if (value === null) return '';
+    return value.length > 40 ? `${value.slice(0, 40)}…` : value;
+  }
+
   protected showHeaders(): void {
     this.view.set('headers');
   }

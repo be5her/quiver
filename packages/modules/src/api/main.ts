@@ -4,13 +4,16 @@ import {
   ApiRequestSchema,
   EnvironmentSchema,
   QuiverError,
+  REDACTED,
   RequestBodySchema,
   RequestOptionsSchema,
   defaultRequestName,
   canMoveCollection,
   defineCommand,
+  defineVariableIn,
   defineModule,
   effectiveRequest,
+  extractCapture,
   effectiveSendOptions,
   findUnresolved,
   newApiRequest,
@@ -30,6 +33,7 @@ import {
   type ApiCollection,
   type ApiRequest,
   type ApiResponse,
+  type CapturedValue,
   type CommandContext,
   type HistoryEntry,
   type RedactUrlOptions,
@@ -116,6 +120,38 @@ async function knownSecrets(ctx: CommandContext, resolved: ApiRequest, environme
     names: resolved.auth.type === 'apikey' && resolved.auth.in === 'query' ? [resolved.auth.key] : [],
     values: [...requestSecretValues(resolved), ...(await secretVariableValues(ws(ctx), ctx.host, environmentId))],
   };
+}
+
+/**
+ * Run a request's captures on its response and write what they read into the environment (the given
+ * one, else the active one) in a single save. A capture that reads nothing, or a send without an
+ * environment, is reported as failed and the send still succeeds. An existing secret stays secret.
+ */
+async function runCaptures(ctx: CommandContext, request: ApiRequest, response: ApiResponse, environmentId?: string | null): Promise<CapturedValue[] | undefined> {
+  const captures = (request.capture ?? []).filter((c) => c.enabled && c.variable.trim());
+  if (!captures.length) return undefined;
+  const w = ws(ctx);
+  const envId = environmentId === undefined ? await getActiveEnvironmentId(w) : environmentId;
+  const env = envId ? await getEnvironment(w, ctx.host, envId) : undefined;
+  const results: CapturedValue[] = captures.map((capture) => {
+    const variable = capture.variable.trim();
+    const secret = capture.secret || Boolean(env?.variables.some((v) => v.enabled && v.key.trim() === variable && v.secret));
+    const read = extractCapture(capture, response);
+    return read.ok ? { variable, value: read.value, ok: true, secret } : { variable, value: null, ok: false, error: read.error, secret };
+  });
+  const fail = (error: string) => results.map((r) => (r.ok ? { ...r, value: null, ok: false, error } : r));
+  if (!env) return fail('No environment is active, so there is nowhere to write it');
+  let variables = env.variables;
+  results.forEach((r, i) => {
+    if (r.ok && r.value !== null) variables = defineVariableIn(variables, r.variable, r.value, newId(), captures[i].secret);
+  });
+  if (variables === env.variables) return results;
+  try {
+    await saveEnvironment(w, ctx.host, { ...env, variables });
+  } catch (err) {
+    return fail(`The environment could not be saved: ${(err as Error).message}`);
+  }
+  return results;
 }
 
 /** Secrets are masked for agents everywhere, so an error that names the URL it failed on must not carry them either. */
@@ -229,7 +265,7 @@ const requestSend = defineCommand({
   id: 'api.request.send',
   title: 'Send API request',
   description:
-    'Sends an HTTP request and returns status, headers, body and timings. Pass a saved requestId or an inline request. Variables like {{baseUrl}} resolve from global variables and the active (or given) environment. Send options are the defaults, then the request\'s own `options`, then the `options` given here. Pass a `sendId` to be able to stop the send with api.request.cancel. For agents, the credentials and secret variables in `sent` (what went on the wire) are masked.',
+    'Sends an HTTP request and returns status, headers, body and timings. Pass a saved requestId or an inline request. A request\'s `capture` entries write values from the response (a JSON path into the body, a header, a cookie, the status) into the environment; `captured` reports each, secret ones masked for agents. Variables like {{baseUrl}} resolve from global variables and the active (or given) environment. Send options are the defaults, then the request\'s own `options`, then the `options` given here. Pass a `sendId` to be able to stop the send with api.request.cancel. For agents, the credentials and secret variables in `sent` (what went on the wire) are masked.',
   scope: 'workspace',
   input: z.object({
     requestId: z.string().optional(),
@@ -270,11 +306,14 @@ const requestSend = defineCommand({
       const response = await sendPrepared(prepared, options, controller.signal);
       entry.status = response.status;
       entry.durationMs = Math.round(response.timings.total);
+      const captured = await runCaptures(ctx, request, response, input.environmentId);
+      if (captured) response.captured = captured;
       // The response is the server's own; `sent` and the final URL are what Quiver adds, with the secrets resolved into them.
       if (!forAgent) return response;
       // Each hop's URL is one Quiver sent, so it can carry a secret the request resolved to, like `sent`.
       const redirects = response.redirects.map((hop) => ({ ...hop, url: redactUrl(hop.url, secrets), location: redactUrl(hop.location, secrets) }));
-      return { ...response, url: redactUrl(response.url, secrets), redirects, sent: redactSent(response.sent, secrets) };
+      const maskedCaptures = response.captured?.map((c) => (c.secret && c.value !== null ? { ...c, value: REDACTED } : c));
+      return { ...response, url: redactUrl(response.url, secrets), redirects, sent: redactSent(response.sent, secrets), ...(maskedCaptures ? { captured: maskedCaptures } : {}) };
     } catch (err) {
       entry.error = err instanceof Error ? err.message : String(err);
       throw forAgent ? errorForAgent(err, secrets) : err;

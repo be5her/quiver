@@ -32,6 +32,20 @@
         <div class="bg-success" [style.width]="timing.download"></div>
       </div>
     }
+    @if (response.captured?.length) {
+      <div class="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1 text-xs border-b border-edge/60 shrink-0" data-testid="api-response-captured">
+        <span class="text-muted">Captured</span>
+        @for (c of response.captured; track $index) {
+          <span class="font-mono" [class]="c.ok ? 'text-fg' : 'text-danger'" [title]="c.ok ? 'Written to ' + c.variable + ' in the environment' : (c.error ?? '')" data-testid="api-response-captured-item">
+            @if (c.ok) {
+              {{ c.variable }} <span class="text-muted">=</span> {{ c.secret ? '••••••••' : shorten(c.value) }}
+            } @else {
+              {{ c.variable }}: {{ c.error }}
+            }
+          </span>
+        }
+      </div>
+    }
     <div class="flex-1 min-h-0 p-2">
       @switch (view()) {
         @case ('body') {

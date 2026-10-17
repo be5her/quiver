@@ -95,6 +95,34 @@ export function requestOptionOverrides(options?: RequestOptions): RequestOptions
   return Object.keys(kept).length ? kept : undefined;
 }
 
+export const CaptureSourceSchema = z.enum(['body', 'header', 'cookie', 'status']);
+export type CaptureSource = z.infer<typeof CaptureSourceSchema>;
+
+/**
+ * One value a send takes from its response into a variable of the environment: from the body by a
+ * JSON path (empty for the whole body), a header or a cookie by name, or the status code.
+ */
+export const CaptureSchema = z.object({
+  id: z.string(),
+  enabled: z.boolean(),
+  variable: z.string(),
+  from: CaptureSourceSchema,
+  path: z.string(),
+  /** Stored encrypted on this machine like other secret variables, and masked for agents. */
+  secret: z.boolean(),
+});
+export type Capture = z.infer<typeof CaptureSchema>;
+
+/** What a capture did on a send. */
+export interface CapturedValue {
+  variable: string;
+  /** The value written; masked for agents when the variable is secret. Null when nothing was written. */
+  value: string | null;
+  ok: boolean;
+  error?: string;
+  secret: boolean;
+}
+
 export const ApiRequestSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -108,6 +136,8 @@ export const ApiRequestSchema = z.object({
   description: z.string().optional(),
   /** Send options this request overrides (timeout, redirects, TLS, body cap). */
   options: RequestOptionsSchema.optional(),
+  /** Values taken from the response into environment variables after each send; absent when there are none. */
+  capture: z.array(CaptureSchema).optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -166,6 +196,8 @@ export interface ApiResponse {
   redirects: RedirectHop[];
   /** The final response's Set-Cookie headers, one per cookie (the joined `set-cookie` header cannot be split safely). */
   setCookies: string[];
+  /** What the request's captures wrote into the environment, when it has any. */
+  captured?: CapturedValue[];
   /** The request after variable resolution and auth application. */
   sent: { method: HttpMethod; url: string; headers: [string, string][]; bodyPreview: string | null };
 }

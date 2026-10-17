@@ -1,0 +1,58 @@
+@if (rows().length) {
+  <table class="w-full" data-testid="api-capture-table">
+    <thead class="text-xs text-muted text-left">
+      <tr>
+        <th class="w-7"></th>
+        <th class="font-medium pb-1 pr-2">Variable</th>
+        <th class="font-medium pb-1 pr-2 w-28">From</th>
+        <th class="font-medium pb-1 pr-2">Path or name</th>
+        <th class="font-medium pb-1 pr-2 w-14 text-center" title="Stored encrypted on this machine and masked for agents">Secret</th>
+        <th class="w-8"></th>
+      </tr>
+    </thead>
+    <tbody>
+      @for (row of rows(); track row.id) {
+        <tr data-testid="api-capture-row">
+          <td class="py-0.5"><input qCheckbox [checked]="row.enabled" title="Capture this on every send" (change)="update(row.id, { enabled: checked($event) })" /></td>
+          <td class="py-0.5 pr-2">
+            <input
+              class="w-full h-7 rounded-md border border-edge bg-surface px-2 text-xs font-mono text-fg placeholder:text-muted/70 focus:outline-none focus:border-accent"
+              placeholder="token"
+              spellcheck="false"
+              data-testid="api-capture-variable"
+              [value]="row.variable"
+              (input)="update(row.id, { variable: text($event) })"
+            />
+          </td>
+          <td class="py-0.5 pr-2">
+            <select qSelect class="h-7 w-full text-xs" data-testid="api-capture-from" (change)="update(row.id, { from: source($event) })">
+              @for (s of sources; track s.value) {
+                <option [value]="s.value" [selected]="row.from === s.value">{{ s.label }}</option>
+              }
+            </select>
+          </td>
+          <td class="py-0.5 pr-2">
+            <input
+              class="w-full h-7 rounded-md border border-edge bg-surface px-2 text-xs font-mono text-fg placeholder:text-muted/70 focus:outline-none focus:border-accent disabled:opacity-50"
+              spellcheck="false"
+              data-testid="api-capture-path"
+              [disabled]="row.from === 'status'"
+              [placeholder]="placeholder(row.from)"
+              [value]="row.path"
+              (input)="update(row.id, { path: text($event) })"
+            />
+          </td>
+          <td class="py-0.5 pr-2 text-center"><input qCheckbox [checked]="row.secret" (change)="update(row.id, { secret: checked($event) })" /></td>
+          <td class="py-0.5 text-right">
+            <button qIconButton label="Remove capture" size="sm" (click)="remove(row.id)"><svg [qIcon]="icons.Trash2" class="size-3.5"></svg></button>
+          </td>
+        </tr>
+      }
+    </tbody>
+  </table>
+}
+<button qButton size="sm" variant="ghost" [icon]="icons.Plus" class="mt-1" data-testid="api-capture-add" (click)="add()">Add capture</button>
+<p class="text-xs text-muted mt-2 max-w-xl">
+  After each send, the values read here are written to the active environment, so a later request can use them as {{ variableSyntax }}: a login's
+  token, an id the server made. A variable that is already secret stays secret.
+</p>

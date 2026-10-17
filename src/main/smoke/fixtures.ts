@@ -36,6 +36,14 @@ export async function startFixtures() {
       res.end('{"cookies":2}');
       return;
     }
+    if (route.pathname === '/auth/login') {
+      req.resume();
+      // A login: a token in the body and a session cookie, for captures.
+      res.setHeader('set-cookie', ['session=sess-9; Path=/; HttpOnly']);
+      res.writeHead(200, { 'content-type': 'application/json', 'x-request-id': 'req-42' });
+      res.end(JSON.stringify({ token: 'cap-tok-123', user: { id: 7, roles: ['admin'] } }));
+      return;
+    }
     if (route.pathname === '/image.png') {
       req.resume();
       res.writeHead(200, { 'content-type': 'image/png' });
