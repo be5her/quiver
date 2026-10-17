@@ -13,6 +13,7 @@ export * from './shell';
 export * from './json';
 export * from './time';
 export * from './models/api';
+export * from './models/api-tree';
 export * from './models/db';
 export * from './models/teleport';
 export * from './models/kube';

@@ -1,6 +1,18 @@
 import { Service, inject, untracked } from '@angular/core';
-import { SHELL_DIALECT_LABELS, SHELL_DIALECTS, detectShellDialect, type ApiCollection, type ApiRequest, type Environment } from '@quiver/core';
-import { AppState, Dialogs, HostBridge, TabsState, Toasts } from '@quiver/ui';
+import {
+  SHELL_DIALECT_LABELS,
+  SHELL_DIALECTS,
+  canMoveCollection,
+  collectionPath,
+  detectShellDialect,
+  newId,
+  nowIso,
+  type ApiCollection,
+  type ApiRequest,
+  type Environment,
+  type HistoryEntry,
+} from '@quiver/core';
+import { AppState, ContextMenu, Dialogs, HostBridge, TabsState, Toasts, TreeState, type ContextMenuItem } from '@quiver/ui';
 
 /** What the API client does from the sidebar, the palette and its tabs. */
 @Service()
@@ -10,6 +22,8 @@ export class ApiActions {
   private readonly tabs = inject(TabsState);
   private readonly dialogs = inject(Dialogs);
   private readonly toasts = inject(Toasts);
+  private readonly contextMenu = inject(ContextMenu);
+  private readonly tree = inject(TreeState);
 
   openRequestTab(request: Pick<ApiRequest, 'id' | 'name'>, draft?: ApiRequest): void {
     this.tabs.openTab(
@@ -111,6 +125,93 @@ export class ApiActions {
   async deleteCollection(collection: ApiCollection): Promise<void> {
     if (!(await this.dialogs.confirm({ title: `Delete "${collection.name}" and everything inside?`, danger: true, confirmLabel: 'Delete' }))) return;
     await this.host.invoke('api.collection.delete', { id: collection.id });
+  }
+
+  /** The full request history in a tab of its own. */
+  openHistoryTab(): void {
+    this.tabs.openTab(untracked(this.app.scope), { type: 'api.history', title: 'Request history', data: {} }, { singletonKey: 'api.history' });
+  }
+
+  /** A past request opens as an unsaved draft, with the credentials that were typed into it still masked. */
+  openHistoryEntry(entry: HistoryEntry): void {
+    const id = `history-${entry.id}`;
+    this.openRequestTab({ id, name: entry.request.name }, { ...entry.request, id });
+  }
+
+  /** Keeps a past request as a new saved request, at the root, masks and all. */
+  async saveHistoryEntry(entry: HistoryEntry): Promise<void> {
+    const ts = nowIso();
+    const saved = await this.host.invoke<ApiRequest>('api.request.save', { request: { ...entry.request, id: newId(), collectionId: null, createdAt: ts, updatedAt: ts } });
+    this.openRequestTab(saved);
+    this.toasts.notify(`Saved ${saved.name} from the history`, 'success');
+  }
+
+  async copyCurl(request: ApiRequest): Promise<void> {
+    const { command } = await this.host.invoke<{ command: string }>('api.export.curl', { requestId: request.id });
+    await navigator.clipboard.writeText(command);
+    this.toasts.notify('Copied curl command', 'success');
+  }
+
+  async moveRequest(request: Pick<ApiRequest, 'id' | 'name'>, collectionId: string | null): Promise<void> {
+    await this.host.invoke('api.request.move', { id: request.id, collectionId });
+    if (collectionId) this.tree.expand(`api/collection/${collectionId}`);
+  }
+
+  async moveCollection(collection: Pick<ApiCollection, 'id'>, parentId: string | null): Promise<void> {
+    await this.host.invoke('api.collection.move', { id: collection.id, parentId });
+    if (parentId) this.tree.expand(`api/collection/${parentId}`);
+  }
+
+  /** Right-click, or the row's … button, on a request. */
+  requestMenu(event: MouseEvent, request: ApiRequest): void {
+    const at = { x: event.clientX, y: event.clientY };
+    this.contextMenu.open(event, [
+      { label: 'Open', select: () => this.openRequestTab(request), testId: 'api-menu-open' },
+      { label: 'Rename…', select: () => this.run(this.renameRequest(request)), testId: 'api-menu-rename' },
+      { label: 'Duplicate', select: () => this.run(this.duplicateRequest(request)) },
+      { label: 'Copy as curl', select: () => this.run(this.copyCurl(request)) },
+      { label: 'Move to…', select: () => this.run(this.moveMenu(at, request.collectionId ?? null, (target) => this.moveRequest(request, target))), testId: 'api-menu-move' },
+      'separator',
+      { label: 'Delete', danger: true, select: () => this.run(this.deleteRequest(request)) },
+    ]);
+  }
+
+  /** Right-click, or the row's … button, on a collection. */
+  collectionMenu(event: MouseEvent, collection: ApiCollection): void {
+    const at = { x: event.clientX, y: event.clientY };
+    this.contextMenu.open(event, [
+      { label: 'New request', select: () => this.run(this.createRequest(collection.id)) },
+      { label: 'New GraphQL request', select: () => this.run(this.createGraphqlRequest(collection.id)) },
+      { label: 'New sub-collection…', select: () => this.run(this.newCollection(collection.id)) },
+      { label: 'Import from curl here…', select: () => this.run(this.importCurl(collection.id)) },
+      'separator',
+      { label: 'Rename…', select: () => this.run(this.renameCollection(collection)) },
+      {
+        label: 'Move to…',
+        select: () => this.run(this.moveMenu(at, collection.parentId ?? null, (target) => this.moveCollection(collection, target), collection.id)),
+      },
+      'separator',
+      { label: 'Delete', danger: true, select: () => this.run(this.deleteCollection(collection)) },
+    ]);
+  }
+
+  /** A second menu of where to move to: the root, then every collection by path, the current place disabled. */
+  private async moveMenu(at: { x: number; y: number }, current: string | null, move: (target: string | null) => Promise<void>, movingCollection?: string): Promise<void> {
+    const collections = await this.host.invoke<ApiCollection[]>('api.collection.list', {});
+    const choices = collections
+      .filter((c) => !movingCollection || canMoveCollection(collections, movingCollection, c.id))
+      .map((c) => ({ id: c.id, path: collectionPath(collections, c.id) }))
+      .sort((a, b) => a.path.localeCompare(b.path));
+    const items: ContextMenuItem[] = [
+      { label: 'Top level', disabled: current === null, select: () => this.run(move(null)), testId: 'api-move-root' },
+      ...(choices.length ? (['separator'] as const) : []),
+      ...choices.map((c) => ({ label: c.path, disabled: c.id === current, select: () => this.run(move(c.id)), testId: `api-move-${c.id}` })),
+    ];
+    this.contextMenu.open(new MouseEvent('contextmenu', { clientX: at.x, clientY: at.y }), items);
+  }
+
+  private run(action: Promise<unknown>): void {
+    action.catch((err) => this.toasts.error(err));
   }
 
   async setActiveEnvironment(id: string | null): Promise<void> {

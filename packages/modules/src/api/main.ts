@@ -6,6 +6,7 @@ import {
   RequestBodySchema,
   RequestOptionsSchema,
   defaultRequestName,
+  canMoveCollection,
   defineCommand,
   defineModule,
   effectiveSendOptions,
@@ -391,6 +392,23 @@ const collectionRename = defineCommand({
   },
 });
 
+const collectionMove = defineCommand({
+  id: 'api.collection.move',
+  title: 'Move API collection',
+  description: 'Moves a collection, with everything inside it, under another collection (parentId null for the root). A move into itself or one of its own sub-collections is refused.',
+  scope: 'workspace',
+  input: z.object({ id: z.string(), parentId: z.string().nullable() }),
+  handler: async ({ id, parentId }, ctx) => {
+    const w = ws(ctx);
+    const collections = await w.store.list<ApiCollection>(COLLECTIONS.collections);
+    const col = collections.find((c) => c.id === id);
+    if (!col) throw new QuiverError('NOT_FOUND', `Collection ${id} not found`);
+    if (parentId !== null && !collections.some((c) => c.id === parentId)) throw new QuiverError('NOT_FOUND', `Collection ${parentId} not found`);
+    if (!canMoveCollection(collections, id, parentId)) throw new QuiverError('INVALID_INPUT', `"${col.name}" cannot go inside itself or one of its own sub-collections`);
+    return w.store.put(COLLECTIONS.collections, { ...col, parentId });
+  },
+});
+
 const collectionDelete = defineCommand({
   id: 'api.collection.delete',
   title: 'Delete API collection',
@@ -658,6 +676,7 @@ export const apiModule = defineModule({
     collectionList,
     collectionCreate,
     collectionRename,
+    collectionMove,
     collectionDelete,
     environmentList,
     environmentGet,

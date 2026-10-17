@@ -4,6 +4,7 @@ import { Globe } from 'lucide';
 import { ApiActions } from './api-actions';
 import { ApiSidebar } from './api-sidebar';
 import { EnvironmentTab } from './environment-tab';
+import { HistoryTab } from './history-tab';
 import { RequestTab } from './request-tab';
 import { SchemaTab } from './schema-tab';
 
@@ -23,6 +24,7 @@ export const apiModuleUI = defineModuleUI({
     'api.request': RequestTab,
     'api.environment': EnvironmentTab,
     'api.graphql.schema': SchemaTab,
+    'api.history': HistoryTab,
   },
   actions: () => {
     const api = inject(ApiActions);
@@ -33,6 +35,7 @@ export const apiModuleUI = defineModuleUI({
       { id: 'api.request.newGraphql', title: 'New GraphQL request', group: 'API', run: () => api.createGraphqlRequest(), when: hasWorkspace },
       { id: 'api.import.curl', title: 'Import request from curl', group: 'API', run: () => api.importCurl(), when: hasWorkspace },
       { id: 'api.environment.new', title: 'New environment', group: 'API', run: () => api.createEnvironment(), when: hasWorkspace },
+      { id: 'api.history.show', title: 'Show request history', group: 'API', run: () => api.openHistoryTab(), when: hasWorkspace },
     ];
   },
 });

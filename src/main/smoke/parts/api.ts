@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { REDACTED } from '@quiver/core';
-import type { ApiRequest, ApiResponse, GraphqlSchemaDoc, Environment, HistoryEntry, WorkspaceInfo } from '@quiver/core';
+import type { ApiCollection, ApiRequest, ApiResponse, GraphqlSchemaDoc, Environment, HistoryEntry, WorkspaceInfo } from '@quiver/core';
 import { definePart, until } from '../part';
 
 export default definePart({
@@ -452,6 +452,24 @@ export default definePart({
       await fs.rm(path.join(folder, 'saved'), { recursive: true, force: true });
     }
 
+    // Moving collections: under another one or to the top level, never into itself or its own sub-collections.
+    {
+      const outer = await run<ApiCollection>('api.collection.create', { name: 'move outer' }, ws.id);
+      const inner = await run<ApiCollection>('api.collection.create', { name: 'move inner', parentId: outer.id }, ws.id);
+      const intoChild = await host.invoke('api.collection.move', { id: outer.id, parentId: inner.id }, { caller: 'ui', workspaceId: ws.id });
+      const intoSelf = await host.invoke('api.collection.move', { id: outer.id, parentId: outer.id }, { caller: 'ui', workspaceId: ws.id });
+      const unknown = await host.invoke('api.collection.move', { id: inner.id, parentId: 'nope' }, { caller: 'ui', workspaceId: ws.id });
+      const toRoot = await host.invoke('api.collection.move', { id: inner.id, parentId: null }, { caller: 'mcp', workspaceId: ws.id });
+      const listed = await run<ApiCollection[]>('api.collection.list', {}, ws.id);
+      check(
+        'api.collection.move: refuses a move into itself or a sub-collection, and an agent may move one to the top level',
+        !intoChild.ok && intoChild.error.code === 'INVALID_INPUT' && !intoSelf.ok && !unknown.ok && unknown.error.code === 'NOT_FOUND' && toRoot.ok && listed.find((c) => c.id === inner.id)?.parentId === null,
+        { intoChild: intoChild.ok ? 'ok?' : intoChild.error.code, intoSelf: intoSelf.ok ? 'ok?' : intoSelf.error.code, unknown: unknown.ok ? 'ok?' : unknown.error.code, toRoot: toRoot.ok },
+      );
+      await run('api.collection.delete', { id: outer.id }, ws.id);
+      await run('api.collection.delete', { id: inner.id }, ws.id);
+    }
+
     return {
       ui: async (u) => {
         const { win, js, wait, shot } = u;
@@ -648,6 +666,136 @@ export default definePart({
           await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
           await wait(300);
           await run('api.request.delete', { id: probe.id }, ws.id);
+          await js(`[...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('echo'))?.click()`);
+          await wait(600);
+        }
+
+        // The tree: drag a request into a collection and back out, the row menu (Move to…, Rename…), the filter, the history tab.
+        {
+          const target = await run<ApiCollection>('api.collection.create', { name: 'drop target' }, ws.id);
+          const dragged = await run<ApiRequest>('api.request.create', { name: 'drag me', url: '{{baseUrl}}/drag' }, ws.id);
+          await wait(900);
+          const centre = (selector: string) =>
+            js(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return null; el.scrollIntoView({ block: 'nearest' }); const r = el.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; })()`) as Promise<{ x: number; y: number } | null>;
+          const dragTo = async (fromSel: string, toSel: string, shotName?: string) => {
+            const from = await centre(fromSel);
+            const to = await centre(toSel);
+            if (!from || !to) return `missing ${JSON.stringify({ from, to })}`;
+            win.webContents.sendInputEvent({ type: 'mouseMove', x: from.x, y: from.y });
+            await wait(120);
+            win.webContents.sendInputEvent({ type: 'mouseDown', x: from.x, y: from.y, button: 'left', clickCount: 1 });
+            for (let step = 1; step <= 8; step++) {
+              win.webContents.sendInputEvent({ type: 'mouseMove', x: Math.round(from.x + ((to.x - from.x) * step) / 8), y: Math.round(from.y + ((to.y - from.y) * step) / 8), button: 'left', modifiers: ['leftbuttondown'] });
+              await wait(30);
+            }
+            await wait(150);
+            const label = await js(
+              `document.querySelector('[data-testid=api-drag-label]')?.textContent.replace(/\\s+/g, ' ').trim() ?? ('no drag; under the start: ' + (document.elementFromPoint(${from.x}, ${from.y})?.outerHTML.slice(0, 200) ?? '-') + ' ' + ${JSON.stringify(JSON.stringify({ from, to }))})`,
+            );
+            if (shotName) await shot(shotName);
+            win.webContents.sendInputEvent({ type: 'mouseUp', x: to.x, y: to.y, button: 'left', clickCount: 1 });
+            await wait(900);
+            return label;
+          };
+          const collectionOf = async () => (await run<ApiRequest>('api.request.get', { id: dragged.id }, ws.id)).collectionId;
+          const rowSel = '[data-testid=api-request-row][data-name="drag me"]';
+          const targetSel = '[data-testid=api-collection][data-name="drop target"] [role=button]';
+          const intoLabel = await dragTo(rowSel, targetSel, '03p-tree-drag-light');
+          const afterInto = await collectionOf();
+          const outLabel = await dragTo(rowSel, '[data-testid=api-tree-root] [data-testid=section-header], [data-testid=api-tree-root] > *:first-child');
+          const afterOut = await collectionOf();
+          check(
+            'ui: dragging a request onto a collection moves it there, and onto the top level moves it back',
+            typeof intoLabel === 'string' && intoLabel.includes('drag me') && intoLabel.includes('drop target') && afterInto === target.id && typeof outLabel === 'string' && outLabel.includes('top level') && afterOut === null,
+            { intoLabel, afterInto, outLabel, afterOut },
+          );
+
+          const openMenu = (selector: string) =>
+            js(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return false; const r = el.getBoundingClientRect(); el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 40, clientY: r.top + 10 })); return true; })()`);
+          const menuItems = () => js(`[...document.querySelectorAll('[data-testid=context-menu] button')].map((b) => (b.disabled ? '(x) ' : '') + b.textContent.trim())`) as Promise<string[]>;
+          await openMenu(rowSel);
+          await wait(250);
+          const requestItems = await menuItems();
+          await shot('03q-tree-menu-light');
+          await js(`document.querySelector('[data-testid=api-menu-move]')?.click()`);
+          await wait(500);
+          const moveItems = await menuItems();
+          await js(`document.querySelector('[data-testid=api-move-${target.id}]')?.click()`);
+          await wait(800);
+          const afterMenuMove = await collectionOf();
+          check(
+            'ui: the request menu offers the row actions, and Move to… lists the top level (here, disabled) and the collections',
+            ['Open', 'Rename…', 'Duplicate', 'Copy as curl', 'Move to…', 'Delete'].every((l) => requestItems.includes(l)) && moveItems.includes('(x) Top level') && moveItems.includes('drop target') && afterMenuMove === target.id,
+            { requestItems, moveItems, afterMenuMove },
+          );
+          await openMenu(rowSel);
+          await wait(250);
+          await js(`document.querySelector('[data-testid=api-menu-rename]')?.click()`);
+          await wait(300);
+          await js(`(() => { const i = document.querySelector('div.fixed form input'); if (!i) return; const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(i, 'dragged and renamed'); i.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('div.fixed form button[type=submit]')?.click(); })()`);
+          await wait(800);
+          const renamed = (await run<ApiRequest>('api.request.get', { id: dragged.id }, ws.id)).name;
+          const collectionMenuItems = await (async () => {
+            await js(`document.querySelector('[data-testid=api-collection][data-name="drop target"] [data-testid=api-collection-menu]')?.click()`);
+            await wait(250);
+            const items = await menuItems();
+            await js(`document.querySelector('[data-testid=context-menu]')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+            await wait(150);
+            return items;
+          })();
+          check(
+            'ui: Rename… from the menu renames the request, and the collection menu offers its actions',
+            renamed === 'dragged and renamed' && ['New request', 'New GraphQL request', 'New sub-collection…', 'Import from curl here…', 'Rename…', 'Move to…', 'Delete'].every((l) => collectionMenuItems.includes(l)),
+            { renamed, collectionMenuItems },
+          );
+
+          const typeFilter = (value: string) =>
+            js(`(() => { const i = document.querySelector('[data-testid=api-filter]'); i.value = ${JSON.stringify('VALUE')}; i.dispatchEvent(new Event('input', { bubbles: true })); })()`.replace(JSON.stringify('VALUE'), JSON.stringify(value)));
+          const visibleRows = () => js(`[...document.querySelectorAll('[data-testid=api-request-row]')].map((r) => r.getAttribute('data-name'))`) as Promise<string[]>;
+          await typeFilter('renamed');
+          await wait(300);
+          const filteredRows = await visibleRows();
+          const targetOpen = await js(`document.querySelector('[data-testid=api-collection][data-name="drop target"]')?.getAttribute('data-open') ?? null`);
+          await shot('03r-tree-filter-light');
+          await typeFilter('no-such-request-xyz');
+          await wait(300);
+          const emptyShown = await js(`Boolean(document.querySelector('[data-testid=api-filter-empty]'))`);
+          await typeFilter('things');
+          await wait(300);
+          const historyFiltered = (await js(`[...document.querySelectorAll('[data-testid=api-history-entry]')].map((b) => b.title)`)) as string[];
+          check(
+            'ui: the filter keeps matching requests and opens their collections, says when nothing matches, and narrows the history',
+            filteredRows.length === 1 && filteredRows[0] === 'dragged and renamed' && targetOpen === 'true' && emptyShown === true && historyFiltered.length > 0 && historyFiltered.every((t) => t.includes('things')),
+            { filteredRows, targetOpen, emptyShown, historyFiltered: historyFiltered.length },
+          );
+
+          await js(`document.querySelector('[data-testid=api-history-show-all]')?.click()`);
+          await wait(900);
+          await typeFilter('');
+          await wait(200);
+          const historyRows = () => js(`[...document.querySelectorAll('[data-testid=api-history-row]')].map((r) => r.textContent.replace(/\\s+/g, ' ').trim())`) as Promise<string[]>;
+          const allRows = await historyRows();
+          await js(`(() => { const s = document.querySelector('[data-testid=api-history-status]'); s.value = 'cancelled'; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+          await wait(300);
+          const cancelledRows = await historyRows();
+          await shot('03s-history-tab-light');
+          await js(`(() => { const s = document.querySelector('[data-testid=api-history-status]'); s.value = 'all'; s.dispatchEvent(new Event('change', { bubbles: true })); const i = document.querySelector('[data-testid=api-history-search]'); i.value = 'image.png'; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+          await wait(300);
+          const imageRows = await historyRows();
+          const before = (await run<ApiRequest[]>('api.request.list', {}, ws.id)).length;
+          await js(`document.querySelector('[data-testid=api-history-save-row]')?.click()`);
+          await wait(900);
+          const afterList = await run<ApiRequest[]>('api.request.list', {}, ws.id);
+          const kept = afterList.find((r) => r.url.includes('/image.png'));
+          check(
+            'ui: the history tab lists every send, filters by status and search, and saves an entry as a request',
+            allRows.length > 20 && cancelledRows.length > 0 && cancelledRows.every((r) => r.includes('STOP')) && imageRows.length > 0 && imageRows.every((r) => r.includes('image.png')) && afterList.length === before + 1 && kept?.collectionId === null,
+            { all: allRows.length, cancelled: cancelledRows.length, image: imageRows.length, saved: kept?.name ?? null },
+          );
+          if (kept) await run('api.request.delete', { id: kept.id }, ws.id);
+          await js(`(() => { for (const tab of document.querySelectorAll('[data-testid=tab]')) if (!/^echo/.test(tab.getAttribute('data-title') ?? '')) tab.querySelector('[aria-label="Close tab"]')?.click(); })()`);
+          await wait(300);
+          await run('api.collection.delete', { id: target.id }, ws.id);
           await js(`[...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('echo'))?.click()`);
           await wait(600);
         }

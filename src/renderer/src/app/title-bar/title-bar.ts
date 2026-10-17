@@ -1,9 +1,7 @@
 import { Component, ElementRef, computed, inject, untracked, viewChild } from '@angular/core';
 import { moveItem, type WorkspaceInfo } from '@quiver/core';
-import { AppState, ContextMenu, HostBridge, Icon, IconButton, Kbd, TabsState, Toasts } from '@quiver/ui';
+import { AppState, ContextMenu, DropMarker, HostBridge, Icon, IconButton, Kbd, TabsState, Toasts, dragReorder } from '@quiver/ui';
 import { FolderOpen, Search, Settings, X } from 'lucide';
-import { DropMarker } from '../drop-marker';
-import { dragReorder } from '../drag-reorder';
 import { QuiverMark } from '../quiver-mark';
 import { ShellActions } from '../shell-actions';
 
