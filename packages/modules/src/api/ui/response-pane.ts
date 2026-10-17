@@ -2,6 +2,7 @@ import { Component, computed, inject, input, signal, viewChild } from '@angular/
 import { cookieExpiry, jsonPath, parseSetCookie, responseFileName, toErrorPayload, type ApiResponse, type SetCookie } from '@quiver/core';
 import { Button, CodeEditor, EmptyState, HostBridge, Input, Segment, Segmented, Spinner, Toasts, formatBytes, formatMs, statusColor, type CodeLanguage } from '@quiver/ui';
 import { ChevronRight, Copy, Download, Search } from 'lucide';
+import { ApiActions } from './api-actions';
 import { HeaderTable } from './header-table';
 
 type View = 'body' | 'headers' | 'cookies' | 'request';
@@ -48,6 +49,9 @@ function imageSource(response: ApiResponse): string | null {
 interface CookieRow extends SetCookie {
   expiry: string;
   flags: string;
+  /** What the cookie jar did with it: kept, deleted (an expiry in the past), refused, or not used. */
+  jar: string;
+  jarReason: string;
 }
 
 /**
@@ -65,6 +69,7 @@ interface CookieRow extends SetCookie {
 export class ResponsePane {
   private readonly host = inject(HostBridge);
   private readonly toasts = inject(Toasts);
+  private readonly api = inject(ApiActions);
   private readonly editor = viewChild<CodeEditor>('bodyEditor');
 
   readonly response = input<ApiResponse | null>(null);
@@ -137,7 +142,10 @@ export class ResponsePane {
       if (!cookie) return [];
       const at = cookieExpiry(cookie, now);
       const flags = [cookie.secure ? 'Secure' : '', cookie.httpOnly ? 'HttpOnly' : '', cookie.sameSite ? `SameSite=${cookie.sameSite}` : ''].filter(Boolean).join(' · ');
-      return [{ ...cookie, flags, expiry: at === null ? 'Session' : at <= now ? 'Expired (deletes it)' : new Date(at).toLocaleString() }];
+      const report = this.response()?.cookieJar;
+      const refused = report?.rejected.find((r) => r.name === cookie.name);
+      const jar = !report ? 'not used' : refused ? 'refused' : report.deleted.includes(cookie.name) ? 'deleted' : report.stored.includes(cookie.name) ? 'kept' : '';
+      return [{ ...cookie, flags, jar, jarReason: refused?.reason ?? (report ? '' : 'The cookie jar is off for this request'), expiry: at === null ? 'Session' : at <= now ? 'Expired (deletes it)' : new Date(at).toLocaleString() }];
     });
   });
 
@@ -193,6 +201,10 @@ export class ResponsePane {
   protected shorten(value: string | null): string {
     if (value === null) return '';
     return value.length > 40 ? `${value.slice(0, 40)}…` : value;
+  }
+
+  protected openJar(): void {
+    this.api.openCookieJar();
   }
 
   protected showHeaders(): void {

@@ -3,7 +3,7 @@ import { ApiRequestSchema, RequestOptionsSchema, effectiveSendOptions, newApiReq
 
 describe('effectiveSendOptions', () => {
   it('starts from the defaults', () => {
-    expect(effectiveSendOptions()).toEqual({ followRedirects: true, timeoutMs: 30_000, insecure: false, maxBodyBytes: 10 * 1024 * 1024 });
+    expect(effectiveSendOptions()).toEqual({ followRedirects: true, timeoutMs: 30_000, insecure: false, maxBodyBytes: 10 * 1024 * 1024, cookies: true });
   });
 
   it('lets the request override the defaults and the call override the request', () => {

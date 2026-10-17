@@ -4,6 +4,7 @@ import { Globe } from 'lucide';
 import { ApiActions } from './api-actions';
 import { ApiSidebar } from './api-sidebar';
 import { CollectionTab } from './collection-tab';
+import { CookieJarTab } from './cookie-jar-tab';
 import { EnvironmentTab } from './environment-tab';
 import { HistoryTab } from './history-tab';
 import { RequestTab } from './request-tab';
@@ -27,6 +28,7 @@ export const apiModuleUI = defineModuleUI({
     'api.collection': CollectionTab,
     'api.graphql.schema': SchemaTab,
     'api.history': HistoryTab,
+    'api.cookies': CookieJarTab,
   },
   actions: () => {
     const api = inject(ApiActions);
@@ -38,6 +40,7 @@ export const apiModuleUI = defineModuleUI({
       { id: 'api.import.curl', title: 'Import request from curl', group: 'API', run: () => api.importCurl(), when: hasWorkspace },
       { id: 'api.environment.new', title: 'New environment', group: 'API', run: () => api.createEnvironment(), when: hasWorkspace },
       { id: 'api.history.show', title: 'Show request history', group: 'API', run: () => api.openHistoryTab(), when: hasWorkspace },
+      { id: 'api.cookies.show', title: 'Show cookie jar', group: 'API', run: () => api.openCookieJar(), when: hasWorkspace },
     ];
   },
 });

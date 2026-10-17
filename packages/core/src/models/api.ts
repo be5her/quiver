@@ -110,6 +110,8 @@ export const SendOptionsSchema = z.object({
   insecure: z.boolean().default(false),
   /** Cap on the body kept in memory and returned to the UI. */
   maxBodyBytes: z.number().int().positive().default(10 * 1024 * 1024),
+  /** Send the workspace cookie jar's cookies and keep the ones responses set. */
+  cookies: z.boolean().default(true),
 });
 export type SendOptions = z.infer<typeof SendOptionsSchema>;
 
@@ -122,6 +124,7 @@ export const RequestOptionsSchema = z.object({
   timeoutMs: z.number().int().positive().optional(),
   insecure: z.boolean().optional(),
   maxBodyBytes: z.number().int().positive().optional(),
+  cookies: z.boolean().optional(),
 });
 export type RequestOptions = z.infer<typeof RequestOptionsSchema>;
 
@@ -240,6 +243,8 @@ export interface ApiResponse {
   redirects: RedirectHop[];
   /** The final response's Set-Cookie headers, one per cookie (the joined `set-cookie` header cannot be split safely). */
   setCookies: string[];
+  /** What the cookie jar did on this send, when it was used: the names sent, stored, deleted and rejected (with why). */
+  cookieJar?: { sent: string[]; stored: string[]; deleted: string[]; rejected: { name: string; reason: string }[] };
   /** What the request's captures wrote into the environment, when it has any. */
   captured?: CapturedValue[];
   /** The request after variable resolution and auth application. */

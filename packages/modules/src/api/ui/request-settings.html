@@ -22,6 +22,12 @@
     <span class="text-xs" [class]="current.insecure ? 'text-warning' : 'text-muted'">{{ current.insecure ? 'self-signed and expired certificates are accepted' : 'default' }}</span>
   </div>
 
+  <label for="api-option-cookies" class="text-xs font-medium text-muted">Use the cookie jar</label>
+  <div class="flex items-center gap-2">
+    <input qCheckbox id="api-option-cookies" data-testid="api-option-cookies" [checked]="current.cookies" (change)="set('cookies', checked($event))" />
+    <span class="text-xs text-muted">{{ isSet('cookies') ? 'off: no jar cookies sent, none kept' : 'default: sends matching cookies and keeps the ones set' }}</span>
+  </div>
+
   <label for="api-option-body" class="text-xs font-medium text-muted">Max response body (MB)</label>
   <div class="flex items-center gap-2">
     <div class="w-28 shrink-0"><input qInput id="api-option-body" data-testid="api-option-body" type="number" min="0.01" step="any" [value]="megabytes()" [placeholder]="defaultMegabytes + ''" (change)="setNumber($event, 'maxBodyBytes', 1048576)" /></div>

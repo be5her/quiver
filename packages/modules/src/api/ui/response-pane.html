@@ -126,7 +126,8 @@
                   <th class="py-1 pr-3 font-medium">Domain</th>
                   <th class="py-1 pr-3 font-medium">Path</th>
                   <th class="py-1 pr-3 font-medium">Expires</th>
-                  <th class="py-1 font-medium">Flags</th>
+                  <th class="py-1 pr-3 font-medium">Flags</th>
+                  <th class="py-1 font-medium">Jar</th>
                 </tr>
               </thead>
               <tbody class="font-mono">
@@ -137,18 +138,25 @@
                     <td class="py-1 pr-3 text-muted">{{ cookie.domain ?? 'this host' }}</td>
                     <td class="py-1 pr-3 text-muted">{{ cookie.path ?? '/' }}</td>
                     <td class="py-1 pr-3 text-muted whitespace-nowrap">{{ cookie.expiry }}</td>
-                    <td class="py-1 text-muted whitespace-nowrap">
+                    <td class="py-1 pr-3 text-muted whitespace-nowrap">
                       {{ cookie.flags }}
+                    </td>
+                    <td class="py-1 whitespace-nowrap font-sans" [class]="cookie.jar === 'kept' ? 'text-success' : cookie.jar === 'refused' ? 'text-danger' : 'text-muted'" [title]="cookie.jarReason" data-testid="api-response-cookie-jar">
+                      {{ cookie.jar }}
                     </td>
                   </tr>
                 }
               </tbody>
             </table>
+            <button type="button" class="mt-2 text-xs text-accent hover:underline" (click)="openJar()">Open the cookie jar</button>
           </div>
         }
         @case ('request') {
           <div class="flex flex-col h-full gap-2 text-xs">
             <div class="font-mono break-all"><span class="font-semibold">{{ response.sent.method }}</span> {{ response.sent.url }}</div>
+            @if (response.cookieJar?.sent?.length) {
+              <div class="text-muted" data-testid="api-response-jar-sent">From the cookie jar: <span class="font-mono">{{ response.cookieJar!.sent.join(', ') }}</span></div>
+            }
             <q-header-table [headers]="response.sent.headers" />
             @if (response.sent.bodyPreview) {
               <div class="flex-1 min-h-[80px]">

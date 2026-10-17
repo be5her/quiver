@@ -144,6 +144,11 @@ export class ApiActions {
     return info.relative ?? path;
   }
 
+  /** The workspace's cookie jar. */
+  openCookieJar(): void {
+    this.tabs.openTab(untracked(this.app.scope), { type: 'api.cookies', title: 'Cookie jar', data: {} }, { singletonKey: 'api.cookies' });
+  }
+
   /** The full request history in a tab of its own. */
   openHistoryTab(): void {
     this.tabs.openTab(untracked(this.app.scope), { type: 'api.history', title: 'Request history', data: {} }, { singletonKey: 'api.history' });

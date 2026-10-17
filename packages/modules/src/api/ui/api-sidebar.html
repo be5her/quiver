@@ -27,6 +27,7 @@
     <button qIconButton label="New GraphQL request" size="sm" (click)="api.createGraphqlRequest()"><svg [qIcon]="icons.Braces" class="size-3.5"></svg></button>
     <button qIconButton label="New collection" size="sm" (click)="api.newCollection(null)"><svg [qIcon]="icons.FolderPlus" class="size-3.5"></svg></button>
     <button qIconButton label="Import from curl" size="sm" (click)="api.importCurl()"><svg [qIcon]="icons.Import" class="size-3.5"></svg></button>
+    <button qIconButton label="Cookie jar" size="sm" data-testid="api-open-cookies" (click)="api.openCookieJar()"><svg [qIcon]="icons.Cookie" class="size-3.5"></svg></button>
   </q-section-header>
   <q-api-collection-tree [collections]="collections.value() ?? []" [requests]="requests.value() ?? []" [filter]="filter()" />
   @if (empty()) {

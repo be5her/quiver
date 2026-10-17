@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { REDACTED } from '@quiver/core';
-import type { ApiCollection, ApiRequest, ApiResponse, GraphqlSchemaDoc, Environment, HistoryEntry, WorkspaceInfo } from '@quiver/core';
+import type { ApiCollection, ApiRequest, ApiResponse, JarCookie, GraphqlSchemaDoc, Environment, HistoryEntry, WorkspaceInfo } from '@quiver/core';
 import { definePart, until } from '../part';
 
 export default definePart({
@@ -688,6 +688,57 @@ export default definePart({
       await run('api.collection.delete', { id: oauthCol.id }, ws.id);
     }
 
+    // The cookie jar: cookies responses set are kept and sent to the requests they match, redirect hops included.
+    {
+      await run('api.cookie.clear', {}, ws.id);
+      const setUrl = (cookies: string[], to?: string) => `{{baseUrl}}/setcookie?${cookies.map((c) => `c=${encodeURIComponent(c)}`).join('&')}${to ? `&to=${encodeURIComponent(to)}` : ''}`;
+      const base = { ...saved, id: '', name: 'jar', method: 'GET' as const, headers: [], auth: { type: 'none' as const }, body: { type: 'none' as const } };
+      const send = (url: string, extra: object = {}) => run<ApiResponse>('api.request.send', { request: { ...base, url, ...extra } }, ws.id);
+      const cookieSent = async (url: string, extra: object = {}) => (JSON.parse((await send(url, extra)).body) as { headers: Record<string, string> }).headers.cookie ?? null;
+      const login = await send(setUrl(['jsid=j1; Path=/', 'scoped=s1; Path=/admin', 'far=f; Domain=elsewhere.test']));
+      const atMe = await cookieSent('{{baseUrl}}/me');
+      const atAdmin = await cookieSent('{{baseUrl}}/admin/x');
+      const own = await cookieSent('{{baseUrl}}/me', { headers: [{ id: 'c', key: 'Cookie', value: 'jsid=mine', enabled: true }] });
+      check(
+        'cookie jar: a response\'s cookies are kept (a foreign Domain refused) and sent where host and path match, longest path first, a request\'s own Cookie winning',
+        JSON.stringify(login.cookieJar?.stored) === '["jsid","scoped"]' && login.cookieJar?.rejected[0]?.name === 'far' && atMe === 'jsid=j1' && atAdmin === 'scoped=s1; jsid=j1' && own === 'jsid=mine',
+        { jar: login.cookieJar, atMe, atAdmin, own },
+      );
+      const hop = await send(setUrl(['hop=h1; Path=/'], '/after'));
+      const hopEcho = JSON.parse(hop.body) as { url: string; headers: Record<string, string> };
+      const logout = await send(setUrl(['jsid=; Max-Age=0; Path=/']));
+      const afterLogout = await cookieSent('{{baseUrl}}/me');
+      check(
+        'cookie jar: a redirect hop\'s cookie is kept and sent on the next hop, and Max-Age=0 deletes a cookie',
+        hopEcho.url === '/after' && (hopEcho.headers.cookie ?? '').includes('hop=h1') && hop.cookieJar?.stored.includes('hop') === true &&
+          logout.cookieJar?.deleted.includes('jsid') === true && afterLogout === 'hop=h1',
+        { hopCookie: hopEcho.headers.cookie, logout: logout.cookieJar, afterLogout },
+      );
+      const off = await send(setUrl(['off=1; Path=/']), { options: { cookies: false } });
+      const offSent = await cookieSent('{{baseUrl}}/me', { options: { cookies: false } });
+      const listed = await run<JarCookie[]>('api.cookie.list', {}, ws.id);
+      check(
+        'cookie jar: a request with the jar off sends none and keeps none',
+        off.cookieJar === undefined && offSent === null && !listed.some((c) => c.name === 'off'),
+        { offSent, names: listed.map((c) => c.name) },
+      );
+      const agentList = await host.invoke('api.cookie.list', {}, { caller: 'mcp', workspaceId: ws.id });
+      const agentSend = await host.invoke('api.request.send', { request: { ...base, url: '{{baseUrl}}/me' } }, { caller: 'mcp', workspaceId: ws.id });
+      const agentCookieHeader = agentSend.ok ? (agentSend.result as ApiResponse).sent.headers.find(([k]) => k.toLowerCase() === 'cookie')?.[1] : null;
+      const agentDelete = await host.invoke('api.cookie.delete', { domain: '127.0.0.1', path: '/', name: 'hop' }, { caller: 'mcp', workspaceId: ws.id });
+      await run('api.cookie.set', { url: `http://127.0.0.1:${echoPort}/`, cookie: 'manual=m; Path=/' }, ws.id);
+      const jarFile = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'local', 'cookies.json'), 'utf8')) as JarCookie[];
+      await run('api.cookie.delete', { domain: '127.0.0.1', path: '/', name: 'hop' }, ws.id);
+      const afterDelete = await run<JarCookie[]>('api.cookie.list', {}, ws.id);
+      check(
+        'cookie jar: agents see values masked and cannot delete, cookies can be set by hand, and the jar is a local file',
+        agentList.ok && (agentList.result as JarCookie[]).every((c) => c.value === REDACTED) && (agentList.result as JarCookie[]).length >= 2 &&
+          agentCookieHeader === REDACTED && !agentDelete.ok && agentDelete.error.code === 'MUTATION_BLOCKED' &&
+          jarFile.some((c) => c.name === 'manual') && afterDelete.some((c) => c.name === 'manual') && !afterDelete.some((c) => c.name === 'hop'),
+        { agentList: agentList.ok ? (agentList.result as JarCookie[]).map((c) => `${c.name}=${c.value}`) : agentList.error.code, agentCookieHeader, agentDelete: agentDelete.ok ? 'ok?' : agentDelete.error.code },
+      );
+    }
+
     return {
       ui: async (u) => {
         const { win, js, wait, shot } = u;
@@ -1140,6 +1191,35 @@ export default definePart({
           await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
           await wait(300);
           if (ccReq) await run('api.request.delete', { id: ccReq.id }, ws.id);
+          await js(`[...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('echo'))?.click()`);
+          await wait(600);
+        }
+
+        // The cookie jar in the UI: the response's Cookies view says what was kept, and the jar tab lists the cookies.
+        {
+          const jarReq = await run<ApiRequest>('api.request.create', { name: 'jar probe', url: `{{baseUrl}}/setcookie?c=${encodeURIComponent('uiCookie=u1; Path=/; Max-Age=3600')}&c=${encodeURIComponent('bad=1; Domain=nowhere.test')}` }, ws.id);
+          await wait(600);
+          await js(`[...document.querySelectorAll('[data-testid=api-request-row]')].find((r) => r.getAttribute('data-name') === 'jar probe')?.click()`);
+          await wait(900);
+          await js(`[...document.querySelectorAll('button')].find((b) => b.offsetParent !== null && b.textContent.trim() === 'Send')?.click()`);
+          await wait(1200);
+          await js(`${visible('[data-testid=api-response-cookies-tab]')}?.click()`);
+          await wait(300);
+          const jarMarks = (await js(`[...document.querySelectorAll('[data-testid=api-response-cookie-jar]')].filter((e) => e.offsetParent !== null).map((e) => e.textContent.trim())`)) as string[];
+          await shot('03z-response-cookie-jar-light');
+          await js(`document.querySelector('[data-testid=api-open-cookies]')?.click()`);
+          await wait(900);
+          const jarRows = (await js(`[...document.querySelectorAll('[data-testid=api-cookie-row]')].filter((e) => e.offsetParent !== null).map((e) => e.textContent.replace(/\\s+/g, ' ').trim())`)) as string[];
+          await shot('03za-cookie-jar-tab-light');
+          check(
+            'ui: the response says which cookies the jar kept or refused, and the jar tab lists them by domain',
+            jarMarks.length === 2 && jarMarks[0] === 'kept' && jarMarks[1] === 'refused' && jarRows.some((r) => r.startsWith('uiCookie') && r.includes('u1')),
+            { jarMarks, jarRows },
+          );
+          await js(`(() => { for (const tab of document.querySelectorAll('[data-testid=tab]')) if (!/^echo/.test(tab.getAttribute('data-title') ?? '')) tab.querySelector('[aria-label="Close tab"]')?.click(); })()`);
+          await wait(300);
+          await run('api.request.delete', { id: jarReq.id }, ws.id);
+          await run('api.cookie.clear', {}, ws.id);
           await js(`[...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('echo'))?.click()`);
           await wait(600);
         }

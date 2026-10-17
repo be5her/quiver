@@ -5,10 +5,12 @@ import {
   REDIRECT_STATUSES,
   baseName,
   contentTypeFor,
+  mergeCookieHeader,
   nextRequest,
   type ApiRequest,
   type ApiResponse,
   type HttpMethod,
+  type JarCookie,
   type RedirectHop,
   type RequestBody,
   type SendOptions,
@@ -27,6 +29,22 @@ export type WireBody = string | Buffer | StreamBody;
 
 export function isStreamBody(body: WireBody | null | undefined): body is StreamBody {
   return typeof body === 'object' && body !== null && !Buffer.isBuffer(body) && 'open' in body;
+}
+
+/** A cookie jar for one send: what each hop carries, and what each answer sets (redirects too). */
+export interface CookieHooks {
+  cookiesFor(url: string): Pick<JarCookie, 'name' | 'value'>[];
+  store(url: string, setCookies: string[]): void;
+}
+
+/** The headers with the jar's cookies merged into the Cookie header; a name the request sets keeps its value. */
+function withJarCookies(headers: [string, string][], cookies: Pick<JarCookie, 'name' | 'value'>[]): [string, string][] {
+  if (!cookies.length) return headers;
+  const at = headers.findIndex(([k]) => k.toLowerCase() === 'cookie');
+  const merged = mergeCookieHeader(at >= 0 ? headers[at][1] : null, cookies);
+  if (merged === null) return headers;
+  if (at < 0) return [...headers, ['Cookie', merged]];
+  return headers.map((h, i) => (i === at ? [h[0], merged] : h));
 }
 
 /** Where a request's files are read from, and whether the caller is an agent (kept inside the project). */
@@ -253,7 +271,7 @@ function headerList(headers: { forEach(cb: (value: string, key: string) => void)
  * is known (status, headers, time) and the browser rules apply: see `nextRequest`. Aborting
  * `signal` stops the send, also while the body downloads, with REQUEST_CANCELLED.
  */
-export async function sendPrepared(prepared: PreparedRequest, options: SendOptions, signal?: AbortSignal): Promise<ApiResponse> {
+export async function sendPrepared(prepared: PreparedRequest, options: SendOptions, signal?: AbortSignal, cookies?: CookieHooks): Promise<ApiResponse> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error(`Timed out after ${options.timeoutMs} ms`)), options.timeoutMs);
   const onCancel = () => controller.abort(new Error('Cancelled'));
@@ -262,20 +280,25 @@ export async function sendPrepared(prepared: PreparedRequest, options: SendOptio
   const started = performance.now();
   let current: WireRequest<WireBody> = { method: prepared.method, url: prepared.url, headers: prepared.headers, body: prepared.body };
   const redirects: RedirectHop[] = [];
+  /** The first hop's headers as they went out, jar cookies included: what `sent` shows. */
+  let firstHeaders: [string, string][] | null = null;
 
   try {
     for (;;) {
       const hopStarted = performance.now();
       const stream = isStreamBody(current.body) ? current.body : null;
+      const hopHeaders = cookies ? withJarCookies(current.headers, cookies.cookiesFor(current.url)) : current.headers;
+      firstHeaders ??= hopHeaders;
       const res = await undiciFetch(current.url, {
         method: current.method,
-        headers: stream && !current.headers.some(([k]) => k.toLowerCase() === 'content-length') ? [...current.headers, ['Content-Length', String(stream.length)]] : current.headers,
+        headers: stream && !hopHeaders.some(([k]) => k.toLowerCase() === 'content-length') ? [...hopHeaders, ['Content-Length', String(stream.length)]] : hopHeaders,
         body: stream ? stream.open() : ((current.body as string | Buffer | null) ?? undefined),
         ...(stream ? { duplex: 'half' as const } : {}),
         redirect: 'manual',
         signal: controller.signal,
         dispatcher: options.insecure ? getInsecureAgent() : undefined,
       });
+      cookies?.store(current.url, res.headers.getSetCookie());
       const location = res.headers.get('location');
       const next = options.followRedirects && REDIRECT_STATUSES.has(res.status) && location ? nextRequest(current, res.status, location) : null;
       if (next) {
@@ -308,7 +331,7 @@ export async function sendPrepared(prepared: PreparedRequest, options: SendOptio
         timings: { total, ttfb, download: total - ttfb },
         redirects,
         setCookies: res.headers.getSetCookie(),
-        sent: { method: prepared.method, url: prepared.url, headers: prepared.headers, bodyPreview: prepared.bodyPreview },
+        sent: { method: prepared.method, url: prepared.url, headers: firstHeaders ?? prepared.headers, bodyPreview: prepared.bodyPreview },
       };
     }
   } catch (err) {

@@ -14,8 +14,10 @@ import {
   defineVariableIn,
   defineModule,
   effectiveRequest,
+  storeCookies,
   extractCapture,
   effectiveSendOptions,
+  cookiesFor,
   resolveAuth,
   findUnresolved,
   newApiRequest,
@@ -35,6 +37,7 @@ import {
   type ApiCollection,
   type ApiRequest,
   type ApiAuth,
+  type JarCookie,
   type ApiResponse,
   type CapturedValue,
   type CurlFormField,
@@ -64,6 +67,7 @@ import {
 import { graphqlEndpoint, introspect, readSchema } from './graphql';
 import { prepareRequest, sendPrepared } from './http';
 import { clearOAuthToken, getOAuthToken, oauthStatus } from './oauth';
+import { jarSession, readJar, writeJar } from './cookies';
 
 const HISTORY_LOG = 'history';
 
@@ -332,7 +336,13 @@ const requestSend = defineCommand({
     const controller = new AbortController();
     if (key) inflight.set(key, controller);
     try {
-      const response = await sendPrepared(prepared, options, controller.signal);
+      // The cookie jar, unless the request or the call turns it off: cookies go out on every hop and answers' cookies are kept.
+      const jar = options.cookies ? jarSession(await readJar(w)) : null;
+      const response = await sendPrepared(prepared, options, controller.signal, jar?.hooks);
+      if (jar) {
+        response.cookieJar = jar.report;
+        if (jar.changed()) await writeJar(w, ctx.host, jar.jar());
+      }
       entry.status = response.status;
       entry.durationMs = Math.round(response.timings.total);
       const captured = await runCaptures(ctx, request, response, input.environmentId);
@@ -469,6 +479,75 @@ const oauthClear = defineCommand({
   handler: async (input, ctx) => {
     await clearOAuthToken(ws(ctx), ctx.host, await oauthFor(ctx, input));
     return { cleared: true };
+  },
+});
+
+// ---------- cookie jar ----------
+
+function jarForCaller(ctx: CommandContext, jar: JarCookie[]): JarCookie[] {
+  return ctx.caller === 'mcp' ? jar.map((c) => ({ ...c, value: REDACTED })) : jar;
+}
+
+const cookieList = defineCommand({
+  id: 'api.cookie.list',
+  title: 'List cookies',
+  description:
+    'The cookies in the workspace cookie jar (kept on this machine), sorted by domain, path and name; with `url`, only those a request to it carries, in the order they are sent. Values are masked for agents.',
+  scope: 'workspace',
+  input: z.object({ url: z.string().optional() }),
+  handler: async ({ url }, ctx) => {
+    const jar = await readJar(ws(ctx));
+    const list = url ? cookiesFor(jar, url, Date.now()) : [...jar].sort((a, b) => a.domain.localeCompare(b.domain) || a.path.localeCompare(b.path) || a.name.localeCompare(b.name));
+    return jarForCaller(ctx, list);
+  },
+});
+
+const cookieSet = defineCommand({
+  id: 'api.cookie.set',
+  title: 'Set a cookie',
+  description: 'Puts a cookie in the jar as if a response to `url` had set it: `cookie` is a Set-Cookie value such as "sid=abc; Path=/; Max-Age=3600". Max-Age=0 deletes it.',
+  scope: 'workspace',
+  input: z.object({ url: z.string().min(1), cookie: z.string().min(1) }),
+  handler: async ({ url, cookie }, ctx) => {
+    const w = ws(ctx);
+    const result = storeCookies(await readJar(w), url, [cookie], Date.now());
+    if (result.rejected.length) throw new QuiverError('INVALID_INPUT', result.rejected[0].reason);
+    if (!result.stored.length && !result.deleted.length) throw new QuiverError('INVALID_INPUT', `"${cookie}" is not a cookie (name=value) or ${url} is not a URL`);
+    await writeJar(w, ctx.host, result.jar);
+    return { stored: result.stored, deleted: result.deleted };
+  },
+});
+
+const cookieDelete = defineCommand({
+  id: 'api.cookie.delete',
+  title: 'Delete a cookie',
+  description: 'Removes one cookie from the jar by its domain, path and name.',
+  scope: 'workspace',
+  mutating: true,
+  input: z.object({ domain: z.string(), path: z.string(), name: z.string() }),
+  handler: async ({ domain, path: cookiePath, name }, ctx) => {
+    const w = ws(ctx);
+    const jar = await readJar(w);
+    const kept = jar.filter((c) => !(c.domain === domain.toLowerCase() && c.path === cookiePath && c.name === name));
+    if (kept.length !== jar.length) await writeJar(w, ctx.host, kept);
+    return { deleted: jar.length - kept.length };
+  },
+});
+
+const cookieClear = defineCommand({
+  id: 'api.cookie.clear',
+  title: 'Clear the cookie jar',
+  description: 'Removes every cookie from the jar, or those of one domain (and its subdomains).',
+  scope: 'workspace',
+  mutating: true,
+  input: z.object({ domain: z.string().optional() }),
+  handler: async ({ domain }, ctx) => {
+    const w = ws(ctx);
+    const jar = await readJar(w);
+    const d = domain?.trim().toLowerCase().replace(/^\./, '');
+    const kept = d ? jar.filter((c) => c.domain !== d && !c.domain.endsWith(`.${d}`)) : [];
+    await writeJar(w, ctx.host, kept);
+    return { cleared: jar.length - kept.length };
   },
 });
 
@@ -895,6 +974,10 @@ export const apiModule = defineModule({
     requestSend,
     requestCancel,
     responseSave,
+    cookieList,
+    cookieSet,
+    cookieDelete,
+    cookieClear,
     oauthToken,
     oauthStatusCommand,
     oauthClear,

@@ -37,6 +37,20 @@ export async function startFixtures() {
       res.end('{"cookies":2}');
       return;
     }
+    if (route.pathname === '/setcookie') {
+      // Sets every `c` as a Set-Cookie header, then redirects to `to` when given: the cookie jar's checks.
+      req.resume();
+      res.setHeader('set-cookie', route.searchParams.getAll('c'));
+      const to = route.searchParams.get('to');
+      if (to) {
+        res.writeHead(302, { location: to });
+        res.end();
+      } else {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{"set":true}');
+      }
+      return;
+    }
     if (route.pathname === '/auth/login') {
       req.resume();
       // A login: a token in the body and a session cookie, for captures.
