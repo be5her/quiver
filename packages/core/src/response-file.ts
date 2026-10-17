@@ -16,6 +16,41 @@ const EXTENSIONS: [RegExp, string][] = [
   [/octet-stream/i, 'bin'],
 ];
 
+const TYPES: Record<string, string> = {
+  json: 'application/json',
+  txt: 'text/plain',
+  csv: 'text/csv',
+  html: 'text/html',
+  htm: 'text/html',
+  xml: 'application/xml',
+  js: 'text/javascript',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  svg: 'image/svg+xml',
+  pdf: 'application/pdf',
+  zip: 'application/zip',
+  gz: 'application/gzip',
+  mp4: 'video/mp4',
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+  yaml: 'application/yaml',
+  yml: 'application/yaml',
+};
+
+/** The content type a file is usually sent with, by its extension; `application/octet-stream` when unknown. */
+export function contentTypeFor(fileName: string): string {
+  const ext = /\.([A-Za-z0-9]+)$/.exec(fileName.trim())?.[1]?.toLowerCase();
+  return (ext && TYPES[ext]) || 'application/octet-stream';
+}
+
+/** The last segment of a path, with either slash. */
+export function baseName(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+}
+
 /** The extension a content type is usually saved with, or null when unknown. */
 export function extensionFor(contentType: string | null): string | null {
   if (!contentType) return null;

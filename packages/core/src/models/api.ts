@@ -16,13 +16,29 @@ export const VariableSchema = KeyValueSchema.extend({
   secret: z.boolean().optional(),
 });
 
+/**
+ * A multipart field: text, or (`kind: 'file'`) a file whose path is `value`, relative to the project
+ * folder when the file is inside it so the committed request works for everyone. Fields saved before
+ * files existed have no `kind` and are text.
+ */
+export const FormFieldSchema = KeyValueSchema.extend({
+  kind: z.enum(['text', 'file']).optional(),
+  /** The file name sent for a file field; the file's own name when absent. */
+  fileName: z.string().optional(),
+  /** The part's content type; guessed from the file name when absent. */
+  contentType: z.string().optional(),
+});
+export type FormField = z.infer<typeof FormFieldSchema>;
+
 export const RequestBodySchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('none') }),
   z.object({ type: z.literal('json'), content: z.string() }),
   z.object({ type: z.literal('text'), content: z.string() }),
   z.object({ type: z.literal('xml'), content: z.string() }),
   z.object({ type: z.literal('urlencoded'), fields: z.array(KeyValueSchema) }),
-  z.object({ type: z.literal('form'), fields: z.array(KeyValueSchema) }),
+  z.object({ type: z.literal('form'), fields: z.array(FormFieldSchema) }),
+  /** A file sent as the body as it is; `path` is relative to the project folder when the file is inside it. */
+  z.object({ type: z.literal('binary'), path: z.string(), contentType: z.string().optional() }),
   /** Sent as `{"query","variables","operationName"}` JSON (or query parameters for GET). `variables` is JSON text. */
   z.object({ type: z.literal('graphql'), query: z.string(), variables: z.string(), operationName: z.string().optional() }),
 ]);

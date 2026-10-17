@@ -27,7 +27,7 @@ export async function introspect(ws: WorkspaceApi, resolved: ApiRequest): Promis
     method: 'POST',
     body: { type: 'json', content: JSON.stringify({ query: getIntrospectionQuery({ descriptions: true, specifiedByUrl: true, directiveIsRepeatable: true }) }) },
   };
-  const prepared = prepareRequest(probe);
+  const prepared = await prepareRequest(probe);
   const endpoint = graphqlEndpoint(prepared.url);
   // The request's own timeout and TLS choice apply; schemas get a larger body cap than responses.
   const response = await sendPrepared(prepared, effectiveSendOptions(resolved.options, { maxBodyBytes: 64 * 1024 * 1024 }));

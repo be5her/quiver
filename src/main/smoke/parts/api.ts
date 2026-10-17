@@ -559,6 +559,74 @@ export default definePart({
       await run('api.environment.save', { environment: { ...cleaned, variables: cleaned.variables.filter((v) => !v.key.startsWith('cap')) } }, ws.id);
     }
 
+    // Files: a multipart upload and a binary body read from disk, re-read on a redirect; agents only inside the project.
+    {
+      await fs.mkdir(path.join(folder, 'uploads'), { recursive: true });
+      await fs.writeFile(path.join(folder, 'uploads', 'hello.txt'), 'hello file');
+      const outsideFile = path.join(t.hooksFolder, 'outside-upload.txt');
+      await fs.writeFile(outsideFile, 'from outside');
+      type Echo = { method: string; url: string; body: string; headers: Record<string, string> };
+      const base = { ...saved, id: '', name: 'upload', headers: [], auth: { type: 'none' as const } };
+      const multipart = await run<ApiResponse>('api.request.send', {
+        request: {
+          ...base,
+          url: '{{baseUrl}}/upload',
+          body: { type: 'form', fields: [{ id: 'f1', key: 'note', value: 'hi', enabled: true }, { id: 'f2', key: 'doc', value: 'uploads/hello.txt', enabled: true, kind: 'file' }, { id: 'f3', key: 'named', value: 'uploads/hello.txt', enabled: true, kind: 'file', fileName: 'greeting.md', contentType: 'text/markdown' }] },
+        },
+      }, ws.id);
+      const mp = JSON.parse(multipart.body) as Echo;
+      const boundary = /boundary=(\S+)/.exec(mp.headers['content-type'] ?? '')?.[1] ?? '';
+      check(
+        'files: a multipart upload sends text fields and files with their file name and type, with its length known',
+        boundary.length > 0 && mp.body.includes(`--${boundary}\r\nContent-Disposition: form-data; name="note"\r\n\r\nhi\r\n`) &&
+          mp.body.includes('name="doc"; filename="hello.txt"\r\nContent-Type: text/plain\r\n\r\nhello file\r\n') &&
+          mp.body.includes('name="named"; filename="greeting.md"\r\nContent-Type: text/markdown\r\n\r\nhello file\r\n') &&
+          mp.body.endsWith(`--${boundary}--\r\n`) && mp.headers['content-length'] === String(Buffer.byteLength(mp.body)) && mp.headers['transfer-encoding'] === undefined &&
+          (multipart.sent.bodyPreview ?? '').includes('<file hello.txt, 10 bytes>'),
+        { contentType: mp.headers['content-type'], length: mp.headers['content-length'], chunked: mp.headers['transfer-encoding'] ?? null, preview: multipart.sent.bodyPreview?.slice(0, 160) },
+      );
+      const binary = await run<ApiResponse>('api.request.send', { request: { ...base, method: 'PUT', url: '{{baseUrl}}/redirect/307?to=/after', body: { type: 'binary', path: 'uploads/hello.txt' } } }, ws.id);
+      const bin = JSON.parse(binary.body) as Echo;
+      check(
+        'files: a binary body is the file as it is, with a type from its name, and is read again when a 307 repeats the request',
+        bin.method === 'PUT' && bin.url === '/after' && bin.body === 'hello file' && bin.headers['content-type'] === 'text/plain' && bin.headers['content-length'] === '10' && binary.redirects.length === 1,
+        { method: bin.method, url: bin.url, body: bin.body, type: bin.headers['content-type'], length: bin.headers['content-length'] },
+      );
+      const uiOutside = await host.invoke('api.request.send', { request: { ...base, method: 'POST', url: '{{baseUrl}}/up', body: { type: 'binary', path: outsideFile } } }, { caller: 'ui', workspaceId: ws.id });
+      const agentOutside = await host.invoke('api.request.send', { request: { ...base, method: 'POST', url: '{{baseUrl}}/up', body: { type: 'binary', path: outsideFile } } }, { caller: 'mcp', workspaceId: ws.id });
+      const agentClimb = await host.invoke('api.request.send', { request: { ...base, method: 'POST', url: '{{baseUrl}}/up', body: { type: 'form', fields: [{ id: 'f', key: 'f', value: '../outside.txt', enabled: true, kind: 'file' }] } } }, { caller: 'mcp', workspaceId: ws.id });
+      const agentInside = await host.invoke('api.request.send', { request: { ...base, method: 'POST', url: '{{baseUrl}}/up', body: { type: 'binary', path: 'uploads/hello.txt' } } }, { caller: 'mcp', workspaceId: ws.id });
+      const missing = await host.invoke('api.request.send', { request: { ...base, method: 'POST', url: '{{baseUrl}}/up', body: { type: 'binary', path: 'uploads/nope.bin' } } }, { caller: 'ui', workspaceId: ws.id });
+      check(
+        'files: the UI may send any file, an agent only one inside the project, and a missing file is refused',
+        uiOutside.ok && (JSON.parse((uiOutside.result as ApiResponse).body) as Echo).body === 'from outside' &&
+          !agentOutside.ok && agentOutside.error.code === 'INVALID_INPUT' && agentOutside.error.message.includes('inside the project folder') &&
+          !agentClimb.ok && agentClimb.error.code === 'INVALID_INPUT' && agentInside.ok &&
+          !missing.ok && missing.error.message.includes('does not exist'),
+        { agentOutside: agentOutside.ok ? 'ok?' : agentOutside.error.message, agentClimb: agentClimb.ok ? 'ok?' : agentClimb.error.code, agentInside: agentInside.ok, missing: missing.ok ? 'ok?' : missing.error.message },
+      );
+      const uploadReq = await run<ApiRequest>('api.request.create', { name: 'file upload', method: 'POST', url: '{{baseUrl}}/upload' }, ws.id);
+      await run('api.request.save', {
+        request: { ...uploadReq, body: { type: 'form', fields: [{ id: 'u1', key: 'doc', value: 'uploads/hello.txt', enabled: true, kind: 'file', contentType: 'text/plain' }, { id: 'u2', key: 'note', value: 'hi', enabled: true }] } },
+      }, ws.id);
+      const uploadCurl = await run<{ command: string }>('api.export.curl', { requestId: uploadReq.id }, ws.id);
+      const reimported = await run<ApiRequest>('api.import.curl', { command: uploadCurl.command }, ws.id);
+      const binaryReq = await run<ApiRequest>('api.request.create', { name: 'file body', method: 'PUT', url: '{{baseUrl}}/put' }, ws.id);
+      await run('api.request.save', { request: { ...binaryReq, body: { type: 'binary', path: 'uploads/hello.txt' } } }, ws.id);
+      const binaryCurl = await run<{ command: string }>('api.export.curl', { requestId: binaryReq.id }, ws.id);
+      const binaryBack = await run<ApiRequest>('api.import.curl', { command: binaryCurl.command }, ws.id);
+      const fields = reimported.body.type === 'form' ? reimported.body.fields : [];
+      check(
+        'files: curl export writes -F name=@file and --data-binary @file, and importing it gives the same body back',
+        uploadCurl.command.includes("-F 'doc=@uploads/hello.txt;type=text/plain'") && uploadCurl.command.includes("-F 'note=hi'") &&
+          fields[0]?.kind === 'file' && fields[0].value === 'uploads/hello.txt' && fields[0].contentType === 'text/plain' && fields[1]?.value === 'hi' &&
+          binaryCurl.command.includes("--data-binary '@uploads/hello.txt'") && binaryBack.body.type === 'binary' && binaryBack.method === 'PUT',
+        { uploadCurl: uploadCurl.command, binaryCurl: binaryCurl.command, reimported: reimported.body },
+      );
+      await run('api.request.delete', { id: reimported.id }, ws.id);
+      await run('api.request.delete', { id: binaryBack.id }, ws.id);
+    }
+
     return {
       ui: async (u) => {
         const { win, js, wait, shot } = u;
@@ -952,6 +1020,41 @@ export default definePart({
           if (loginReq) await run('api.request.delete', { id: loginReq.id }, ws.id);
           const cleaned = await run<Environment>('api.environment.get', { id: env.id }, ws.id);
           await run('api.environment.save', { environment: { ...cleaned, variables: cleaned.variables.filter((v) => !v.key.startsWith('cap')) } }, ws.id);
+          await js(`[...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('echo'))?.click()`);
+          await wait(600);
+        }
+
+        // Files in the UI: a binary body shows its file and size, a multipart row its File toggle.
+        {
+          const requests = await run<ApiRequest[]>('api.request.list', {}, ws.id);
+          const fileBody = requests.find((r) => r.name === 'file body');
+          const fileUpload = requests.find((r) => r.name === 'file upload');
+          const openBody = async (name: string) => {
+            await js(`[...document.querySelectorAll('[data-testid=api-request-row]')].find((r) => r.getAttribute('data-name') === ${JSON.stringify(name)})?.click()`);
+            await wait(900);
+            await js(`[...document.querySelectorAll('button')].find((b) => b.offsetParent !== null && b.textContent.trim().startsWith('Body'))?.click()`);
+            await wait(500);
+          };
+          await openBody('file body');
+          const binaryPath = await js(`${visible('[data-testid=api-binary-path]')}?.value ?? null`);
+          const binaryInfo = await js(`${visible('[data-testid=api-binary-info]')}?.textContent.replace(/\\s+/g, ' ').trim() ?? null`);
+          await shot('03w-binary-body-light');
+          await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+          await wait(300);
+          await openBody('file upload');
+          const toggles = await js(`[...document.querySelectorAll('[data-testid=api-form-file-toggle]')].filter((e) => e.offsetParent !== null).map((e) => e.checked)`);
+          const browse = await js(`[...document.querySelectorAll('[data-testid=api-form-file-browse]')].filter((e) => e.offsetParent !== null).length`);
+          await shot('03x-multipart-files-light');
+          check(
+            'ui: a binary body shows its path and size, and a multipart file row its ticked File toggle and a Choose button',
+            binaryPath === 'uploads/hello.txt' && typeof binaryInfo === 'string' && binaryInfo.includes('10 B') && binaryInfo.includes('in the project') &&
+              Array.isArray(toggles) && toggles[0] === true && toggles[1] === false && browse === 1,
+            { binaryPath, binaryInfo, toggles, browse },
+          );
+          await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+          await wait(300);
+          for (const r of [fileBody, fileUpload]) if (r) await run('api.request.delete', { id: r.id }, ws.id);
+          await fs.rm(path.join(folder, 'uploads'), { recursive: true, force: true });
           await js(`[...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('echo'))?.click()`);
           await wait(600);
         }

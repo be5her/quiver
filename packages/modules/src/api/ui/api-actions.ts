@@ -132,6 +132,18 @@ export class ApiActions {
     this.tabs.openTab(untracked(this.app.scope), { type: 'api.collection', title: collection.name, data: { id: collection.id } }, { singletonKey: `api.collection:${collection.id}` });
   }
 
+  /**
+   * Pick a file for a request body: the path relative to the project folder when the file is inside
+   * it, so the committed request works for everyone, else absolute. Null when cancelled.
+   */
+  async pickRequestFile(title: string): Promise<string | null> {
+    const workspacePath = untracked(this.app.activeWorkspace)?.path ?? '';
+    const { path } = await this.host.invoke<{ path: string | null }>('app.pickFile', { title, defaultPath: workspacePath || undefined });
+    if (!path) return null;
+    const info = await this.host.invoke<{ relative: string | null }>('api.file.stat', { path });
+    return info.relative ?? path;
+  }
+
   /** The full request history in a tab of its own. */
   openHistoryTab(): void {
     this.tabs.openTab(untracked(this.app.scope), { type: 'api.history', title: 'Request history', data: {} }, { singletonKey: 'api.history' });

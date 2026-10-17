@@ -34,6 +34,7 @@ import {
   type ApiRequest,
   type ApiResponse,
   type CapturedValue,
+  type CurlFormField,
   type CommandContext,
   type HistoryEntry,
   type RedactUrlOptions,
@@ -282,7 +283,7 @@ const requestSend = defineCommand({
     if (!request) throw new QuiverError('INVALID_INPUT', 'Provide requestId or request');
     const options = effectiveSendOptions(request.options, input.options);
     const { resolved } = await resolveRequest(ctx, request, input.environmentId);
-    const prepared = prepareRequest(resolved);
+    const prepared = await prepareRequest(resolved, { baseDir: w.path, agent: ctx.caller === 'mcp' });
     // Known before sending, so a failed send is recorded just as carefully.
     const secrets = await knownSecrets(ctx, resolved, input.environmentId);
     const forAgent = ctx.caller === 'mcp';
@@ -418,7 +419,7 @@ const graphqlSchema = defineCommand({
     const request = await requestFrom(ctx, input);
     const vars = await resolveVariableMap(ws(ctx), ctx.host, input.environmentId);
     const resolved = resolveDeep(await withInheritance(ws(ctx), request), vars);
-    const doc = await readSchema(ws(ctx), graphqlEndpoint(prepareRequest(resolved).url));
+    const doc = await readSchema(ws(ctx), graphqlEndpoint((await prepareRequest(resolved)).url));
     return doc && ctx.caller === 'mcp' ? { ...doc, url: redactUrl(doc.url, await knownSecrets(ctx, resolved, input.environmentId)) } : doc;
   },
 });
@@ -712,8 +713,14 @@ const exportCurl = defineCommand({
     if (!request) throw new QuiverError('INVALID_INPUT', 'Provide requestId or request');
     const vars = await resolveVariableMap(ws(ctx), ctx.host, input.environmentId);
     const resolved = resolveDeep(await withInheritance(ws(ctx), request), vars);
-    const prepared = prepareRequest(resolved);
-    const form = request.body.type === 'form' ? request.body.fields.filter((f) => f.enabled).map((f) => [f.key, f.value] as [string, string]) : undefined;
+    const prepared = await prepareRequest(resolved);
+    const form: CurlFormField[] | undefined =
+      resolved.body.type === 'form'
+        ? resolved.body.fields
+            .filter((f) => f.enabled && f.key.trim())
+            .map((f) => (f.kind === 'file' ? { name: f.key.trim(), file: f.value.trim(), type: f.contentType?.trim() || undefined, fileName: f.fileName?.trim() || undefined } : ([f.key, f.value] as [string, string])))
+        : undefined;
+    const bodyFile = resolved.body.type === 'binary' ? resolved.body.path.trim() : undefined;
     const body = typeof prepared.body === 'string' ? prepared.body : null;
     // A command an agent asks for is one it reads, not one the user pastes into a terminal.
     const wire = { method: prepared.method, url: prepared.url, headers: prepared.headers, bodyPreview: body };
@@ -726,10 +733,30 @@ const exportCurl = defineCommand({
         body: shown.bodyPreview,
         bodyType: form ? 'form' : 'raw',
         formFields: form,
+        bodyFile,
         // curl's own defaults differ from Quiver's: it follows no redirects and has no time limit, so say what this request does.
         options: { ...effectiveSendOptions(request.options), timeoutMs: request.options?.timeoutMs },
       }),
     };
+  },
+});
+
+const fileStat = defineCommand({
+  id: 'api.file.stat',
+  title: 'Look up a file for a request',
+  description: 'Resolves a file path the way a request body does (relative to the workspace), with its size, and the path relative to the workspace when the file is inside it.',
+  scope: 'workspace',
+  hidden: true,
+  input: z.object({ path: z.string() }),
+  handler: async ({ path: given }, ctx) => {
+    const w = ws(ctx);
+    const trimmed = given.trim();
+    if (!trimmed) return { exists: false, size: null, relative: null, abs: null };
+    const abs = path.isAbsolute(trimmed) ? path.normalize(trimmed) : path.resolve(w.path, trimmed);
+    const back = path.relative(w.path, abs);
+    const inside = Boolean(back) && !back.startsWith('..') && !path.isAbsolute(back);
+    const stat = await fs.stat(abs).catch(() => null);
+    return { exists: Boolean(stat?.isFile()), size: stat?.isFile() ? stat.size : null, relative: inside ? back.split(path.sep).join('/') : null, abs };
   },
 });
 
@@ -788,6 +815,7 @@ export const apiModule = defineModule({
     historyClear,
     importCurl,
     exportCurl,
+    fileStat,
     suggestName,
   ],
 });

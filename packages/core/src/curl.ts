@@ -1,4 +1,4 @@
-import { keyValue, newApiRequest, type ApiRequest, type HttpMethod, type KeyValue, type RequestAuth } from './models/api';
+import { keyValue, newApiRequest, type ApiRequest, type FormField, type HttpMethod, type KeyValue, type RequestAuth } from './models/api';
 import { SHELL_DIALECT_LABELS, ShellSyntaxError, detectShellDialect, tokenizeShellDialect, type ShellDialect, type ShellToken } from './shell';
 
 /** Split a shell command line into argv, honoring single/double quotes and backslash-newline. */
@@ -164,16 +164,28 @@ export function parseCurl(command: string, options: ParseCurlOptions = {}): ApiR
   let cookieHeader: KeyValue | null = null;
   const cookies: string[] = [];
   let data: string | null = null;
+  /** A body read from a file (-d @file, --data-binary @file, --json @file), sent as it is. */
+  let dataFile: { path: string; at: ShellToken } | null = null;
   let urlencoded = false;
   let json = false;
-  const form: KeyValue[] = [];
+  const form: FormField[] = [];
   let auth: RequestAuth = { type: 'none' };
 
   const addData = (text: string, separator: string) => {
     data = data === null ? text : data + separator + text;
   };
-  const refuseFile = (flag: string, at: ShellToken) => {
-    if (at.value.startsWith('@')) throw fail(at, `${flag} ${at.value} reads the body from a file, which cannot be imported (paste the content with --data-raw)`);
+  /** `@file` makes the body that file; returns true when it did. */
+  const takeFile = (flag: string, at: ShellToken): boolean => {
+    if (!at.value.startsWith('@')) return false;
+    const path = at.value.slice(1);
+    if (!path || path === '-') throw fail(at, `${flag} ${at.value} reads the body from standard input, which cannot be imported`);
+    if (dataFile || data !== null) throw fail(at, `${flag} ${at.value} joins a file with other data, which cannot be imported as one body`);
+    dataFile = { path, at };
+    return true;
+  };
+  const addText = (text: string, separator: string, at: ShellToken) => {
+    if (dataFile) throw fail(at, `the command joins data with the file ${(dataFile as { path: string }).path}, which cannot be imported as one body`);
+    addData(text, separator);
   };
   const addCookie = (value: string, key: string) => {
     if (!cookieHeader) {
@@ -237,27 +249,35 @@ export function parseCurl(command: string, options: ParseCurlOptions = {}): ApiR
       case 'data':
       case 'data-ascii':
       case 'data-binary':
-        refuseFile(flag, at);
-        addData(value, '&');
+        if (!takeFile(flag, at)) addText(value, '&', at);
         break;
       case 'data-raw':
-        addData(value, '&');
+        addText(value, '&', at);
         break;
       case 'data-urlencode':
         urlencoded = true;
-        addData(encodeDataUrlencode(flag, at, fail), '&');
+        addText(encodeDataUrlencode(flag, at, fail), '&', at);
         break;
       case 'json':
-        refuseFile(flag, at);
         json = true;
         // Several --json pieces are concatenated without a separator.
-        addData(value, '');
+        if (!takeFile(flag, at)) addText(value, '', at);
         break;
       case 'form':
       case 'form-string': {
         const eq = value.indexOf('=');
         if (eq <= 0) throw fail(at, `${flag} needs name=content, got "${value}"`);
-        form.push(keyValue(value.slice(0, eq), value.slice(eq + 1)));
+        const fieldName = value.slice(0, eq);
+        const content = value.slice(eq + 1);
+        if (name === 'form-string') {
+          form.push(keyValue(fieldName, content));
+        } else if (content.startsWith('@')) {
+          form.push(formFile(fieldName, content.slice(1), flag, at, fail));
+        } else if (content.startsWith('<')) {
+          throw fail(at, `${flag} ${value} reads the field's text from a file, which cannot be imported (use name=@file to upload it)`);
+        } else {
+          form.push(keyValue(fieldName, content));
+        }
         break;
       }
     }
@@ -317,7 +337,9 @@ export function parseCurl(command: string, options: ParseCurlOptions = {}): ApiR
   const cookieKv = cookieHeader as KeyValue | null;
   let body = data as string | null;
   if (!urlToken) throw new Error('No URL found in curl command');
-  if (form.length && body !== null) throw fail(urlToken, 'the command combines -F with -d, which curl refuses too');
+  const fileToken = dataFile as { path: string; at: ShellToken } | null;
+  if (form.length && (body !== null || fileToken)) throw fail(urlToken, 'the command combines -F with -d, which curl refuses too');
+  if (get && fileToken) throw fail(fileToken.at, '-G puts the data in the query string, which a file cannot be');
   if (/^["'`^]|["'`^]$/.test(urlToken.value)) {
     throw fail(urlToken, `the URL ${urlToken.value} still contains shell quoting; is ${SHELL_DIALECT_LABELS[dialect]} the right shell?`);
   }
@@ -367,6 +389,8 @@ export function parseCurl(command: string, options: ParseCurlOptions = {}): ApiR
 
   if (form.length) {
     req.body = { type: 'form', fields: form };
+  } else if (fileToken) {
+    req.body = { type: 'binary', path: fileToken.path };
   } else if (body !== null) {
     const contentType = req.headers.find((h) => h.key.toLowerCase() === 'content-type')?.value ?? '';
     const looksJson = json || /json/i.test(contentType) || /^\s*[[{]/.test(body);
@@ -377,11 +401,37 @@ export function parseCurl(command: string, options: ParseCurlOptions = {}): ApiR
     else req.body = { type: 'text', content: body };
   }
 
-  const resolvedMethod = method ?? (head ? 'HEAD' : form.length || body !== null ? 'POST' : 'GET');
+  const resolvedMethod = method ?? (head ? 'HEAD' : form.length || body !== null || fileToken ? 'POST' : 'GET');
   if (!METHODS.includes(resolvedMethod as HttpMethod)) throw new Error(`Unsupported method ${resolvedMethod}`);
   req.method = resolvedMethod as HttpMethod;
   req.name = defaultRequestName(req);
   return req;
+}
+
+/** -F name=@path[;type=…][;filename=…]: a file field. The path may be quoted to hold ; or ,. */
+function formFile(name: string, spec: string, flag: string, at: ShellToken, fail: (at: ShellToken, message: string) => Error): FormField {
+  let rest = spec;
+  let path: string;
+  if (rest.startsWith('"')) {
+    const end = rest.indexOf('"', 1);
+    if (end < 0) throw fail(at, `${flag} ${name}=@${spec} has an unterminated quoted file name`);
+    path = rest.slice(1, end);
+    rest = rest.slice(end + 1);
+  } else {
+    const semi = rest.indexOf(';');
+    path = semi < 0 ? rest : rest.slice(0, semi);
+    rest = semi < 0 ? '' : rest.slice(semi);
+  }
+  if (!path || path === '-') throw fail(at, `${flag} ${name}=@${spec} reads standard input, which cannot be imported`);
+  const field: FormField = { ...keyValue(name, path), kind: 'file' };
+  for (const attribute of rest.split(';').filter(Boolean)) {
+    const eq = attribute.indexOf('=');
+    const key = (eq < 0 ? attribute : attribute.slice(0, eq)).trim().toLowerCase();
+    const val = eq < 0 ? '' : attribute.slice(eq + 1).trim().replace(/^"(.*)"$/, '$1');
+    if (key === 'type' && val) field.contentType = val;
+    else if (key === 'filename' && val) field.fileName = val;
+  }
+  return field;
 }
 
 /** A line-continuation character left as an argument, or an argument still wrapped in cmd.exe's ^…^, means the wrong shell was assumed. */
@@ -446,13 +496,18 @@ function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
+/** A multipart field for curl: text as [name, value], or a file. */
+export type CurlFormField = [string, string] | { name: string; file: string; type?: string; fileName?: string };
+
 export interface CurlInput {
   method: HttpMethod;
   url: string;
   headers: [string, string][];
   body: string | null;
   bodyType?: 'raw' | 'urlencoded' | 'form';
-  formFields?: [string, string][];
+  formFields?: CurlFormField[];
+  /** A body sent from a file: `--data-binary @file`. */
+  bodyFile?: string;
   /** How curl should send it: `-L` to follow redirects, `-k` for invalid certificates, `--max-time` in seconds. */
   options?: { followRedirects?: boolean; insecure?: boolean; timeoutMs?: number };
 }
@@ -464,7 +519,17 @@ export function toCurl(input: CurlInput): string {
   if (flags.length) lines.push(flags.join(' '));
   for (const [k, v] of input.headers) lines.push(`-H ${shellQuote(`${k}: ${v}`)}`);
   if (input.bodyType === 'form' && input.formFields) {
-    for (const [k, v] of input.formFields) lines.push(`-F ${shellQuote(`${k}=${v}`)}`);
+    for (const field of input.formFields) {
+      if (Array.isArray(field)) {
+        lines.push(`-F ${shellQuote(`${field[0]}=${field[1]}`)}`);
+      } else {
+        const file = /[;,"]/.test(field.file) ? `"${field.file.replace(/"/g, '\\"')}"` : field.file;
+        const extras = [field.type ? `;type=${field.type}` : '', field.fileName ? `;filename=${field.fileName}` : ''].join('');
+        lines.push(`-F ${shellQuote(`${field.name}=@${file}${extras}`)}`);
+      }
+    }
+  } else if (input.bodyFile) {
+    lines.push(`--data-binary ${shellQuote(`@${input.bodyFile}`)}`);
   } else if (input.body !== null && input.body !== '') {
     lines.push(`--data-raw ${shellQuote(input.body)}`);
   }

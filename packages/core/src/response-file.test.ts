@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extensionFor, responseFileName } from './response-file';
+import { baseName, contentTypeFor, extensionFor, responseFileName } from './response-file';
 
 describe('responseFileName', () => {
   it('uses the last path segment, adding the extension of the content type', () => {
@@ -15,6 +15,20 @@ describe('responseFileName', () => {
 
   it('keeps a name without a known type and replaces characters a file name cannot hold', () => {
     expect(responseFileName('https://x.test/a%3Ab', null)).toBe('a_b');
+  });
+});
+
+describe('contentTypeFor', () => {
+  it('guesses by extension, without case, and falls back to octet-stream', () => {
+    expect(contentTypeFor('photo.JPG')).toBe('image/jpeg');
+    expect(contentTypeFor('data.json')).toBe('application/json');
+    expect(contentTypeFor('archive.tar.gz')).toBe('application/gzip');
+    expect(contentTypeFor('Makefile')).toBe('application/octet-stream');
+  });
+
+  it('takes the base name of a path with either slash', () => {
+    expect(baseName('C:\\data\\in.csv')).toBe('in.csv');
+    expect(baseName('fixtures/upload/a.txt')).toBe('a.txt');
   });
 });
 

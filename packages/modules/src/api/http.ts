@@ -1,11 +1,66 @@
-import { QuiverError, REDIRECT_STATUSES, nextRequest, type ApiRequest, type ApiResponse, type HttpMethod, type RedirectHop, type RequestBody, type SendOptions, type WireRequest } from '@quiver/core';
+import { createReadStream, promises as fs } from 'node:fs';
+import path from 'node:path';
+import {
+  QuiverError,
+  REDIRECT_STATUSES,
+  baseName,
+  contentTypeFor,
+  nextRequest,
+  type ApiRequest,
+  type ApiResponse,
+  type HttpMethod,
+  type RedirectHop,
+  type RequestBody,
+  type SendOptions,
+  type WireRequest,
+} from '@quiver/core';
 import { Agent, fetch as undiciFetch, type Dispatcher } from 'undici';
+
+/** A body read from files as it is sent, so a large upload never sits in memory. Opened again for each redirect hop. */
+export interface StreamBody {
+  /** Bytes in total, sent as Content-Length. */
+  length: number;
+  open(): AsyncIterable<Uint8Array>;
+}
+
+export type WireBody = string | Buffer | StreamBody;
+
+export function isStreamBody(body: WireBody | null | undefined): body is StreamBody {
+  return typeof body === 'object' && body !== null && !Buffer.isBuffer(body) && 'open' in body;
+}
+
+/** Where a request's files are read from, and whether the caller is an agent (kept inside the project). */
+export interface FileAccess {
+  baseDir: string;
+  agent: boolean;
+}
+
+/** A file a request names, resolved against the project folder; agents may only reach inside it. */
+async function resolveFile(files: FileAccess, given: string, what: string): Promise<{ abs: string; size: number }> {
+  const trimmed = given.trim();
+  if (!trimmed) throw new QuiverError('INVALID_INPUT', `Pick a file for ${what}`);
+  const abs = path.isAbsolute(trimmed) ? path.normalize(trimmed) : path.resolve(files.baseDir, trimmed);
+  if (files.agent) {
+    const back = path.relative(files.baseDir, abs);
+    if (!back || back.startsWith('..') || path.isAbsolute(back)) throw new QuiverError('INVALID_INPUT', `Agents may only send files inside the project folder; ${trimmed} is outside it`);
+  }
+  const stat = await fs.stat(abs).catch(() => null);
+  if (!stat) throw new QuiverError('INVALID_INPUT', `The file ${trimmed} for ${what} does not exist`);
+  if (!stat.isFile()) throw new QuiverError('INVALID_INPUT', `${trimmed} for ${what} is not a file`);
+  return { abs, size: stat.size };
+}
+
+/** A multipart header value: quotes and line breaks percent-encoded, as browsers do. */
+function quoted(value: string): string {
+  return value.replace(/"/g, '%22').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+}
 
 export interface PreparedRequest {
   method: HttpMethod;
   url: string;
   headers: [string, string][];
-  body: string | Buffer | null;
+  /** Null when there is no body, or when files were only described (no `FileAccess`). */
+  body: WireBody | null;
   bodyPreview: string | null;
 }
 
@@ -47,8 +102,12 @@ export function graphqlPayload(body: Extract<RequestBody, { type: 'graphql' }>):
   return payload;
 }
 
-/** Turn an already variable-resolved request into what goes on the wire. */
-export function prepareRequest(req: ApiRequest): PreparedRequest {
+/**
+ * Turn an already variable-resolved request into what goes on the wire. Files (multipart file fields
+ * and binary bodies) are read through `files`; without it they are only described in the preview,
+ * as curl export needs.
+ */
+export async function prepareRequest(req: ApiRequest, files?: FileAccess): Promise<PreparedRequest> {
   const headers: [string, string][] = req.headers.filter((h) => h.enabled && h.key.trim()).map((h) => [h.key.trim(), h.value]);
   const query: [string, string][] = req.params.filter((p) => p.enabled && p.key.trim()).map((p) => [p.key.trim(), p.value]);
 
@@ -70,7 +129,7 @@ export function prepareRequest(req: ApiRequest): PreparedRequest {
       break;
   }
 
-  let body: string | Buffer | null = null;
+  let body: WireBody | null = null;
   let bodyPreview: string | null = null;
   if (req.body.type === 'graphql') {
     // GraphQL over HTTP: JSON by POST, or query parameters for GET.
@@ -111,14 +170,58 @@ export function prepareRequest(req: ApiRequest): PreparedRequest {
       }
       case 'form': {
         const boundary = `----QuiverBoundary${Math.random().toString(16).slice(2)}`;
-        const parts: string[] = [];
+        // Text parts become buffers; a file part is its header, the file read as it is sent, and a line break.
+        const chunks: (Buffer | { abs: string; size: number })[] = [];
+        const preview: string[] = [];
         for (const f of req.body.fields) {
           if (!f.enabled || !f.key.trim()) continue;
-          parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="${f.key.trim()}"\r\n\r\n${f.value}\r\n`);
+          const name = quoted(f.key.trim());
+          if (f.kind === 'file') {
+            const fileName = f.fileName?.trim() || baseName(f.value.trim());
+            const type = f.contentType?.trim() || contentTypeFor(fileName);
+            const head = `--${boundary}\r\nContent-Disposition: form-data; name="${name}"; filename="${quoted(fileName)}"\r\nContent-Type: ${type}\r\n\r\n`;
+            if (files) {
+              const found = await resolveFile(files, f.value, `the form field ${f.key.trim()}`);
+              chunks.push(Buffer.from(head, 'utf8'), found, Buffer.from('\r\n'));
+              preview.push(`${head}<file ${fileName}, ${found.size} bytes>\r\n`);
+            } else {
+              preview.push(`${head}<file ${f.value.trim()}>\r\n`);
+            }
+          } else {
+            const part = `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${f.value}\r\n`;
+            chunks.push(Buffer.from(part, 'utf8'));
+            preview.push(part);
+          }
         }
-        body = Buffer.from(parts.join('') + `--${boundary}--\r\n`, 'utf8');
-        bodyPreview = parts.join('') + `--${boundary}--`;
+        chunks.push(Buffer.from(`--${boundary}--\r\n`, 'utf8'));
+        bodyPreview = preview.join('') + `--${boundary}--`;
+        const hasFiles = req.body.fields.some((f) => f.enabled && f.key.trim() && f.kind === 'file');
+        if (!hasFiles) body = Buffer.concat(chunks as Buffer[]);
+        else if (files) {
+          const parts = chunks;
+          body = {
+            length: parts.reduce((n, c) => n + (Buffer.isBuffer(c) ? c.length : c.size), 0),
+            async *open() {
+              for (const c of parts) {
+                if (Buffer.isBuffer(c)) yield c;
+                else for await (const piece of createReadStream(c.abs)) yield piece as Buffer;
+              }
+            },
+          };
+        }
         headers.push(['Content-Type', `multipart/form-data; boundary=${boundary}`]);
+        break;
+      }
+      case 'binary': {
+        const given = req.body.path.trim();
+        if (!hasHeader(headers, 'content-type')) headers.push(['Content-Type', req.body.contentType?.trim() || contentTypeFor(given)]);
+        if (files) {
+          const found = await resolveFile(files, given, 'the body');
+          body = { length: found.size, open: () => createReadStream(found.abs) as AsyncIterable<Uint8Array> };
+          bodyPreview = `<file ${baseName(given)}, ${found.size} bytes>`;
+        } else {
+          bodyPreview = `<file ${given}>`;
+        }
         break;
       }
       default:
@@ -157,16 +260,18 @@ export async function sendPrepared(prepared: PreparedRequest, options: SendOptio
   if (signal?.aborted) onCancel();
   else signal?.addEventListener('abort', onCancel, { once: true });
   const started = performance.now();
-  let current: WireRequest<string | Buffer> = { method: prepared.method, url: prepared.url, headers: prepared.headers, body: prepared.body };
+  let current: WireRequest<WireBody> = { method: prepared.method, url: prepared.url, headers: prepared.headers, body: prepared.body };
   const redirects: RedirectHop[] = [];
 
   try {
     for (;;) {
       const hopStarted = performance.now();
+      const stream = isStreamBody(current.body) ? current.body : null;
       const res = await undiciFetch(current.url, {
         method: current.method,
-        headers: current.headers,
-        body: current.body ?? undefined,
+        headers: stream && !current.headers.some(([k]) => k.toLowerCase() === 'content-length') ? [...current.headers, ['Content-Length', String(stream.length)]] : current.headers,
+        body: stream ? stream.open() : ((current.body as string | Buffer | null) ?? undefined),
+        ...(stream ? { duplex: 'half' as const } : {}),
         redirect: 'manual',
         signal: controller.signal,
         dispatcher: options.insecure ? getInsecureAgent() : undefined,
