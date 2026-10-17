@@ -1,4 +1,4 @@
-import type { ApiRequest, ApiResponse, HistoryEntry, KeyValue, RequestAuth } from './models/api';
+import type { ApiAuth, ApiRequest, ApiResponse, HistoryEntry, KeyValue } from './models/api';
 import { findVariableSpans } from './variables';
 
 /** What a masked credential reads as. The same marker environments use for secrets shown to agents. */
@@ -39,7 +39,7 @@ function redactHeaderValue(name: string, value: string): string {
   return /^(proxy-)?authorization$/i.test(name.trim()) ? redactAuthorization(value) : redactLiteral(value);
 }
 
-function redactAuth(auth: RequestAuth): RequestAuth {
+function redactAuth(auth: ApiAuth): ApiAuth {
   switch (auth?.type) {
     case 'bearer':
       return { ...auth, token: redactLiteral(auth.token ?? '') };
@@ -47,6 +47,8 @@ function redactAuth(auth: RequestAuth): RequestAuth {
       return { ...auth, password: redactLiteral(auth.password ?? '') };
     case 'apikey':
       return { ...auth, value: redactLiteral(auth.value ?? '') };
+    case 'oauth2':
+      return { ...auth, clientSecret: redactLiteral(auth.clientSecret ?? '') };
     default:
       return auth;
   }
@@ -163,6 +165,7 @@ export function requestSecretValues(resolved: ApiRequest): string[] {
   if (auth.type === 'bearer') out.push(auth.token);
   if (auth.type === 'basic') out.push(auth.password);
   if (auth.type === 'apikey') out.push(auth.value);
+  if (auth.type === 'oauth2' && auth.clientSecret) out.push(auth.clientSecret);
   for (const header of resolved.headers) {
     if (!isSecretName(header.key)) continue;
     // Without the scheme: `Bearer abc` holds the secret `abc`.

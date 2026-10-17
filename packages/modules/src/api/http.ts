@@ -1,11 +1,84 @@
-import { QuiverError, type ApiRequest, type ApiResponse, type HttpMethod, type RequestBody, type SendOptions } from '@quiver/core';
+import { createReadStream, promises as fs } from 'node:fs';
+import path from 'node:path';
+import {
+  QuiverError,
+  REDIRECT_STATUSES,
+  baseName,
+  contentTypeFor,
+  mergeCookieHeader,
+  nextRequest,
+  type ApiRequest,
+  type ApiResponse,
+  type HttpMethod,
+  type JarCookie,
+  type RedirectHop,
+  type RequestBody,
+  type SendOptions,
+  type WireRequest,
+} from '@quiver/core';
 import { Agent, fetch as undiciFetch, type Dispatcher } from 'undici';
+
+/** A body read from files as it is sent, so a large upload never sits in memory. Opened again for each redirect hop. */
+export interface StreamBody {
+  /** Bytes in total, sent as Content-Length. */
+  length: number;
+  open(): AsyncIterable<Uint8Array>;
+}
+
+export type WireBody = string | Buffer | StreamBody;
+
+export function isStreamBody(body: WireBody | null | undefined): body is StreamBody {
+  return typeof body === 'object' && body !== null && !Buffer.isBuffer(body) && 'open' in body;
+}
+
+/** A cookie jar for one send: what each hop carries, and what each answer sets (redirects too). */
+export interface CookieHooks {
+  cookiesFor(url: string): Pick<JarCookie, 'name' | 'value'>[];
+  store(url: string, setCookies: string[]): void;
+}
+
+/** The headers with the jar's cookies merged into the Cookie header; a name the request sets keeps its value. */
+function withJarCookies(headers: [string, string][], cookies: Pick<JarCookie, 'name' | 'value'>[]): [string, string][] {
+  if (!cookies.length) return headers;
+  const at = headers.findIndex(([k]) => k.toLowerCase() === 'cookie');
+  const merged = mergeCookieHeader(at >= 0 ? headers[at][1] : null, cookies);
+  if (merged === null) return headers;
+  if (at < 0) return [...headers, ['Cookie', merged]];
+  return headers.map((h, i) => (i === at ? [h[0], merged] : h));
+}
+
+/** Where a request's files are read from, and whether the caller is an agent (kept inside the project). */
+export interface FileAccess {
+  baseDir: string;
+  agent: boolean;
+}
+
+/** A file a request names, resolved against the project folder; agents may only reach inside it. */
+async function resolveFile(files: FileAccess, given: string, what: string): Promise<{ abs: string; size: number }> {
+  const trimmed = given.trim();
+  if (!trimmed) throw new QuiverError('INVALID_INPUT', `Pick a file for ${what}`);
+  const abs = path.isAbsolute(trimmed) ? path.normalize(trimmed) : path.resolve(files.baseDir, trimmed);
+  if (files.agent) {
+    const back = path.relative(files.baseDir, abs);
+    if (!back || back.startsWith('..') || path.isAbsolute(back)) throw new QuiverError('INVALID_INPUT', `Agents may only send files inside the project folder; ${trimmed} is outside it`);
+  }
+  const stat = await fs.stat(abs).catch(() => null);
+  if (!stat) throw new QuiverError('INVALID_INPUT', `The file ${trimmed} for ${what} does not exist`);
+  if (!stat.isFile()) throw new QuiverError('INVALID_INPUT', `${trimmed} for ${what} is not a file`);
+  return { abs, size: stat.size };
+}
+
+/** A multipart header value: quotes and line breaks percent-encoded, as browsers do. */
+function quoted(value: string): string {
+  return value.replace(/"/g, '%22').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+}
 
 export interface PreparedRequest {
   method: HttpMethod;
   url: string;
   headers: [string, string][];
-  body: string | Buffer | null;
+  /** Null when there is no body, or when files were only described (no `FileAccess`). */
+  body: WireBody | null;
   bodyPreview: string | null;
 }
 
@@ -47,8 +120,12 @@ export function graphqlPayload(body: Extract<RequestBody, { type: 'graphql' }>):
   return payload;
 }
 
-/** Turn an already variable-resolved request into what goes on the wire. */
-export function prepareRequest(req: ApiRequest): PreparedRequest {
+/**
+ * Turn an already variable-resolved request into what goes on the wire. Files (multipart file fields
+ * and binary bodies) are read through `files`; without it they are only described in the preview,
+ * as curl export needs.
+ */
+export async function prepareRequest(req: ApiRequest, files?: FileAccess): Promise<PreparedRequest> {
   const headers: [string, string][] = req.headers.filter((h) => h.enabled && h.key.trim()).map((h) => [h.key.trim(), h.value]);
   const query: [string, string][] = req.params.filter((p) => p.enabled && p.key.trim()).map((p) => [p.key.trim(), p.value]);
 
@@ -70,7 +147,7 @@ export function prepareRequest(req: ApiRequest): PreparedRequest {
       break;
   }
 
-  let body: string | Buffer | null = null;
+  let body: WireBody | null = null;
   let bodyPreview: string | null = null;
   if (req.body.type === 'graphql') {
     // GraphQL over HTTP: JSON by POST, or query parameters for GET.
@@ -111,14 +188,58 @@ export function prepareRequest(req: ApiRequest): PreparedRequest {
       }
       case 'form': {
         const boundary = `----QuiverBoundary${Math.random().toString(16).slice(2)}`;
-        const parts: string[] = [];
+        // Text parts become buffers; a file part is its header, the file read as it is sent, and a line break.
+        const chunks: (Buffer | { abs: string; size: number })[] = [];
+        const preview: string[] = [];
         for (const f of req.body.fields) {
           if (!f.enabled || !f.key.trim()) continue;
-          parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="${f.key.trim()}"\r\n\r\n${f.value}\r\n`);
+          const name = quoted(f.key.trim());
+          if (f.kind === 'file') {
+            const fileName = f.fileName?.trim() || baseName(f.value.trim());
+            const type = f.contentType?.trim() || contentTypeFor(fileName);
+            const head = `--${boundary}\r\nContent-Disposition: form-data; name="${name}"; filename="${quoted(fileName)}"\r\nContent-Type: ${type}\r\n\r\n`;
+            if (files) {
+              const found = await resolveFile(files, f.value, `the form field ${f.key.trim()}`);
+              chunks.push(Buffer.from(head, 'utf8'), found, Buffer.from('\r\n'));
+              preview.push(`${head}<file ${fileName}, ${found.size} bytes>\r\n`);
+            } else {
+              preview.push(`${head}<file ${f.value.trim()}>\r\n`);
+            }
+          } else {
+            const part = `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${f.value}\r\n`;
+            chunks.push(Buffer.from(part, 'utf8'));
+            preview.push(part);
+          }
         }
-        body = Buffer.from(parts.join('') + `--${boundary}--\r\n`, 'utf8');
-        bodyPreview = parts.join('') + `--${boundary}--`;
+        chunks.push(Buffer.from(`--${boundary}--\r\n`, 'utf8'));
+        bodyPreview = preview.join('') + `--${boundary}--`;
+        const hasFiles = req.body.fields.some((f) => f.enabled && f.key.trim() && f.kind === 'file');
+        if (!hasFiles) body = Buffer.concat(chunks as Buffer[]);
+        else if (files) {
+          const parts = chunks;
+          body = {
+            length: parts.reduce((n, c) => n + (Buffer.isBuffer(c) ? c.length : c.size), 0),
+            async *open() {
+              for (const c of parts) {
+                if (Buffer.isBuffer(c)) yield c;
+                else for await (const piece of createReadStream(c.abs)) yield piece as Buffer;
+              }
+            },
+          };
+        }
         headers.push(['Content-Type', `multipart/form-data; boundary=${boundary}`]);
+        break;
+      }
+      case 'binary': {
+        const given = req.body.path.trim();
+        if (!hasHeader(headers, 'content-type')) headers.push(['Content-Type', req.body.contentType?.trim() || contentTypeFor(given)]);
+        if (files) {
+          const found = await resolveFile(files, given, 'the body');
+          body = { length: found.size, open: () => createReadStream(found.abs) as AsyncIterable<Uint8Array> };
+          bodyPreview = `<file ${baseName(given)}, ${found.size} bytes>`;
+        } else {
+          bodyPreview = `<file ${given}>`;
+        }
         break;
       }
       default:
@@ -136,50 +257,92 @@ function getInsecureAgent(): Dispatcher {
   return insecureAgent;
 }
 
-export async function sendPrepared(prepared: PreparedRequest, options: SendOptions): Promise<ApiResponse> {
+/** Redirects followed before giving up, as browsers do. */
+export const MAX_REDIRECTS = 20;
+
+function headerList(headers: { forEach(cb: (value: string, key: string) => void): void }): [string, string][] {
+  const list: [string, string][] = [];
+  headers.forEach((value, key) => list.push([key, value]));
+  return list;
+}
+
+/**
+ * Send what `prepareRequest` built. Redirects are followed here rather than by fetch, so every hop
+ * is known (status, headers, time) and the browser rules apply: see `nextRequest`. Aborting
+ * `signal` stops the send, also while the body downloads, with REQUEST_CANCELLED.
+ */
+export async function sendPrepared(prepared: PreparedRequest, options: SendOptions, signal?: AbortSignal, cookies?: CookieHooks): Promise<ApiResponse> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error(`Timed out after ${options.timeoutMs} ms`)), options.timeoutMs);
+  const onCancel = () => controller.abort(new Error('Cancelled'));
+  if (signal?.aborted) onCancel();
+  else signal?.addEventListener('abort', onCancel, { once: true });
   const started = performance.now();
+  let current: WireRequest<WireBody> = { method: prepared.method, url: prepared.url, headers: prepared.headers, body: prepared.body };
+  const redirects: RedirectHop[] = [];
+  /** The first hop's headers as they went out, jar cookies included: what `sent` shows. */
+  let firstHeaders: [string, string][] | null = null;
 
   try {
-    const res = await undiciFetch(prepared.url, {
-      method: prepared.method,
-      headers: prepared.headers,
-      body: prepared.body ?? undefined,
-      redirect: options.followRedirects ? 'follow' : 'manual',
-      signal: controller.signal,
-      dispatcher: options.insecure ? getInsecureAgent() : undefined,
-    });
-    const ttfb = performance.now() - started;
+    for (;;) {
+      const hopStarted = performance.now();
+      const stream = isStreamBody(current.body) ? current.body : null;
+      const hopHeaders = cookies ? withJarCookies(current.headers, cookies.cookiesFor(current.url)) : current.headers;
+      firstHeaders ??= hopHeaders;
+      const res = await undiciFetch(current.url, {
+        method: current.method,
+        headers: stream && !hopHeaders.some(([k]) => k.toLowerCase() === 'content-length') ? [...hopHeaders, ['Content-Length', String(stream.length)]] : hopHeaders,
+        body: stream ? stream.open() : ((current.body as string | Buffer | null) ?? undefined),
+        ...(stream ? { duplex: 'half' as const } : {}),
+        redirect: 'manual',
+        signal: controller.signal,
+        dispatcher: options.insecure ? getInsecureAgent() : undefined,
+      });
+      cookies?.store(current.url, res.headers.getSetCookie());
+      const location = res.headers.get('location');
+      const next = options.followRedirects && REDIRECT_STATUSES.has(res.status) && location ? nextRequest(current, res.status, location) : null;
+      if (next) {
+        if (redirects.length >= MAX_REDIRECTS) {
+          await res.body?.cancel();
+          throw new QuiverError('REQUEST_FAILED', `Stopped after ${MAX_REDIRECTS} redirects`, { url: prepared.url, redirects: redirects.map((r) => r.url) });
+        }
+        redirects.push({ method: current.method, url: current.url, status: res.status, statusText: res.statusText, location: next.url, headers: headerList(res.headers), durationMs: performance.now() - hopStarted });
+        await res.body?.cancel();
+        current = next;
+        continue;
+      }
+      const ttfb = performance.now() - started;
+      const { buffer, truncated } = await readBody(res.body, options.maxBodyBytes);
+      const total = performance.now() - started;
+      const contentType = res.headers.get('content-type');
+      const isText = contentType ? TEXT_TYPES.test(contentType) : !buffer.subarray(0, 512).includes(0);
 
-    const { buffer, truncated } = await readBody(res.body, options.maxBodyBytes);
-    const total = performance.now() - started;
-
-    const headers: [string, string][] = [];
-    res.headers.forEach((value, key) => headers.push([key, value]));
-    const contentType = res.headers.get('content-type');
-    const isText = contentType ? TEXT_TYPES.test(contentType) : !buffer.subarray(0, 512).includes(0);
-
-    return {
-      ok: res.ok,
-      status: res.status,
-      statusText: res.statusText,
-      url: res.url || prepared.url,
-      headers,
-      body: isText ? buffer.toString('utf8') : buffer.toString('base64'),
-      bodyEncoding: isText ? 'utf8' : 'base64',
-      contentType,
-      size: buffer.length,
-      truncated,
-      timings: { total, ttfb },
-      sent: { method: prepared.method, url: prepared.url, headers: prepared.headers, bodyPreview: prepared.bodyPreview },
-    };
+      return {
+        ok: res.ok,
+        status: res.status,
+        statusText: res.statusText,
+        url: current.url,
+        headers: headerList(res.headers),
+        body: isText ? buffer.toString('utf8') : buffer.toString('base64'),
+        bodyEncoding: isText ? 'utf8' : 'base64',
+        contentType,
+        size: buffer.length,
+        truncated,
+        timings: { total, ttfb, download: total - ttfb },
+        redirects,
+        setCookies: res.headers.getSetCookie(),
+        sent: { method: prepared.method, url: prepared.url, headers: firstHeaders ?? prepared.headers, bodyPreview: prepared.bodyPreview },
+      };
+    }
   } catch (err) {
+    if (signal?.aborted) throw new QuiverError('REQUEST_CANCELLED', 'Cancelled', { url: prepared.url });
+    if (err instanceof QuiverError) throw err;
     const cause = (err as { cause?: Error }).cause;
     const message = cause?.message ? `${(err as Error).message}: ${cause.message}` : (err as Error).message;
-    throw new QuiverError('REQUEST_FAILED', message, { url: prepared.url });
+    throw new QuiverError('REQUEST_FAILED', message, { url: current.url });
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', onCancel);
   }
 }
 

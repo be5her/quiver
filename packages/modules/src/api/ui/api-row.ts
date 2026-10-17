@@ -21,5 +21,5 @@ export class ApiRow {
   readonly bold = input(false, { transform: booleanAttribute });
   readonly active = input(false, { transform: booleanAttribute });
 
-  protected readonly classes = computed(() => cn('group flex items-center gap-1.5 pr-1 h-7 cursor-pointer hover:bg-elevated min-w-0', this.active() && 'bg-elevated'));
+  protected readonly classes = computed(() => cn('group flex items-center gap-1.5 pr-1 h-7 cursor-pointer select-none hover:bg-elevated min-w-0', this.active() && 'bg-elevated'));
 }

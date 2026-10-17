@@ -6,7 +6,7 @@ import { json } from '@codemirror/lang-json';
 import { MySQL, PostgreSQL, SQLite, StandardSQL, sql, type SQLNamespace } from '@codemirror/lang-sql';
 import { bracketMatching, defaultHighlightStyle, foldGutter, foldKeymap, indentOnInput, syntaxHighlighting } from '@codemirror/language';
 import { lintKeymap } from '@codemirror/lint';
-import { highlightSelectionMatches, searchKeymap } from '@codemirror/search';
+import { highlightSelectionMatches, search, searchKeymap } from '@codemirror/search';
 import { EditorState, Prec, RangeSetBuilder, type ChangeSpec, type Extension } from '@codemirror/state';
 import { oneDark } from '@codemirror/theme-one-dark';
 import {
@@ -38,6 +38,8 @@ export type { SQLNamespace };
 export interface EditorOptions {
   language: CodeLanguage;
   readOnly: boolean;
+  /** Read-only but focusable, so the text can be selected and searched with Mod-F. */
+  searchable?: boolean;
   placeholder: string;
   filled: boolean;
   wrap: boolean;
@@ -102,6 +104,14 @@ const baseTheme = EditorView.theme({
   '.cm-activeLineGutter': { backgroundColor: 'transparent' },
   '.cm-tooltip': { backgroundColor: 'var(--elevated)', border: '1px solid var(--edge)', color: 'var(--fg)' },
   '.cm-tooltip-autocomplete ul li[aria-selected]': { backgroundColor: 'var(--accent)', color: 'var(--accent-fg)' },
+  '.cm-panels': { backgroundColor: 'var(--elevated)', color: 'var(--fg)' },
+  '.cm-panels.cm-panels-top': { borderBottom: '1px solid var(--edge)' },
+  '.cm-panel.cm-search': { fontFamily: 'inherit', fontSize: '12px', padding: '4px 8px' },
+  '.cm-panel.cm-search input, .cm-panel.cm-search button': { fontSize: '12px', borderRadius: '4px' },
+  '.cm-panel.cm-search .cm-textfield': { backgroundColor: 'var(--surface)', border: '1px solid var(--edge)', color: 'var(--fg)', padding: '2px 6px' },
+  '.cm-panel.cm-search .cm-button': { backgroundImage: 'none', backgroundColor: 'var(--surface)', border: '1px solid var(--edge)', color: 'var(--fg)' },
+  '.cm-searchMatch': { backgroundColor: 'color-mix(in srgb, var(--warning) 30%, transparent)' },
+  '.cm-searchMatch-selected': { backgroundColor: 'color-mix(in srgb, var(--accent) 35%, transparent)' },
 });
 
 // Matches the text input: text-xs, px-2.5 and the muted placeholder; the scrollbar is hidden since the line scrolls with the cursor.
@@ -172,7 +182,8 @@ export function editorExtensions(options: EditorOptions): Extension[] {
   defaults.push(basicSetup(options));
   if (!singleLine) defaults.push(keymap.of([indentWithTab]));
   defaults.push(theme === 'dark' ? oneDark : lightTheme);
-  if (readOnly) defaults.push(EditorView.editable.of(false), EditorState.readOnly.of(true));
+  // A searchable view stays focusable (keys reach it, text can be selected) while edits are refused.
+  if (readOnly) defaults.push(EditorState.readOnly.of(true), ...(options.searchable ? [search({ top: true })] : [EditorView.editable.of(false)]));
 
   const own: Extension[] = [baseTheme, ...languageExtension(options)];
   if (wrap) own.push(EditorView.lineWrapping);

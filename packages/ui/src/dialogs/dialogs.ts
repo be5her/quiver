@@ -30,6 +30,8 @@ export interface ConfirmOptions {
   message?: string;
   confirmLabel?: string;
   danger?: boolean;
+  /** Only an OK button: something to read, not a choice. */
+  notice?: boolean;
 }
 
 export type PendingDialog =
@@ -68,6 +70,11 @@ export class Dialogs {
         },
       });
     });
+  }
+
+  /** A message with an OK button, resolved when it is closed. Line breaks in the message are kept. */
+  notice(options: Omit<ConfirmOptions, 'danger' | 'notice'>): Promise<void> {
+    return this.confirm({ ...options, notice: true }).then(() => undefined);
   }
 
   confirm(options: ConfirmOptions): Promise<boolean> {

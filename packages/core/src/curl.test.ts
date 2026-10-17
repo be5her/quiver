@@ -39,7 +39,7 @@ describe('parseCurl', () => {
   it('parses basic auth and form fields', () => {
     const req = parseCurl(`curl -u me:secret -F 'file=@a.txt' -F 'note=hi' https://x.test/upload`);
     expect(req.auth).toEqual({ type: 'basic', username: 'me', password: 'secret' });
-    expect(req.body).toMatchObject({ type: 'form', fields: [{ key: 'file', value: '@a.txt' }, { key: 'note', value: 'hi' }] });
+    expect(req.body).toMatchObject({ type: 'form', fields: [{ key: 'file', value: 'a.txt', kind: 'file' }, { key: 'note', value: 'hi' }] });
   });
 
   it('names requests whose URL starts with a variable by path', () => {
@@ -199,11 +199,61 @@ describe('parseCurl: shell dialects', () => {
     ['an unterminated ^"', 'curl ^"https://x.test/a ^\n  -H ^"a: b^"', /cmd\.exe: unterminated quote/],
     ["an unterminated '", "curl 'https://x.test/a \\\n  -H 'a: b'", /bash\/zsh: unterminated ' quote starting at line 2, column 11/],
     ['a second URL', 'curl https://x.test/a https://x.test/b', /second URL/],
-    ['a body read from a file', 'curl x.test -d @body.json', /reads the body from a file/],
+    ['a body read from standard input', 'curl x.test -d @-', /standard input/],
+    ['a file joined with other data', 'curl x.test -d a=1 -d @body.json', /joins a file with other data/],
+    ['-F reading a field from a file as text', "curl x.test -F 'note=<note.txt'", /reads the field's text from a file/],
+    ['-G with a file body', 'curl -G x.test -d @q.txt', /-G puts the data in the query string/],
     ['an unknown option', 'curl x.test --frobnicate', /unknown curl option --frobnicate/],
     ['malformed percent-encoding in the query', "curl 'x.test/?a=%E0%A4%A'", /malformed %-encoding/],
   ])('fails on %s', (_name, command, error) => {
     expect(() => parseCurl(command)).toThrow(error);
+  });
+});
+
+describe('parseCurl: files', () => {
+  it('turns -d @file, --data-binary @file and --json @file into a binary body', () => {
+    expect(parseCurl('curl x.test/up -d @body.json').body).toEqual({ type: 'binary', path: 'body.json' });
+    const put = parseCurl("curl -X PUT x.test/up --data-binary '@C:\\data\\in.bin'");
+    expect(put.method).toBe('PUT');
+    expect(put.body).toEqual({ type: 'binary', path: 'C:\\data\\in.bin' });
+    const json = parseCurl('curl x.test/up --json @payload.json');
+    expect(json.body).toEqual({ type: 'binary', path: 'payload.json' });
+    expect(json.headers.find((h) => h.key === 'Content-Type')?.value).toBe('application/json');
+  });
+
+  it('turns -F name=@file into a file field, with type and filename', () => {
+    const req = parseCurl('curl x.test/up -F "doc=@reports/q3.pdf;type=application/pdf;filename=report.pdf" -F note=hi --form-string "raw=@kept"');
+    expect(req.method).toBe('POST');
+    expect(req.body.type).toBe('form');
+    const fields = req.body.type === 'form' ? req.body.fields : [];
+    expect(fields.map((f) => ({ key: f.key, value: f.value, kind: f.kind, contentType: f.contentType, fileName: f.fileName }))).toEqual([
+      { key: 'doc', value: 'reports/q3.pdf', kind: 'file', contentType: 'application/pdf', fileName: 'report.pdf' },
+      { key: 'note', value: 'hi', kind: undefined, contentType: undefined, fileName: undefined },
+      { key: 'raw', value: '@kept', kind: undefined, contentType: undefined, fileName: undefined },
+    ]);
+  });
+
+  it('reads a quoted file name holding ; and refuses standard input', () => {
+    const fields = parseCurl('curl x.test -F \'f=@"a;b.txt";type=text/plain\'').body;
+    expect(fields.type === 'form' ? fields.fields[0] : null).toMatchObject({ value: 'a;b.txt', kind: 'file', contentType: 'text/plain' });
+    expect(() => parseCurl('curl x.test -F f=@-')).toThrow(/standard input/);
+  });
+
+  it('round-trips through toCurl', () => {
+    const out = toCurl({
+      method: 'POST',
+      url: 'https://x.test/up',
+      headers: [],
+      body: null,
+      bodyType: 'form',
+      formFields: [['note', 'hi'], { name: 'doc', file: 'a;b.pdf', type: 'application/pdf', fileName: 'r.pdf' }],
+    });
+    expect(out).toContain(`-F 'doc=@"a;b.pdf";type=application/pdf;filename=r.pdf'`);
+    const back = parseCurl(out).body;
+    expect(back.type === 'form' ? back.fields[1] : null).toMatchObject({ key: 'doc', value: 'a;b.pdf', kind: 'file', contentType: 'application/pdf', fileName: 'r.pdf' });
+    const binary = toCurl({ method: 'PUT', url: 'https://x.test/up', headers: [['Content-Type', 'image/png']], body: null, bodyFile: 'img/logo.png' });
+    expect(binary).toContain("--data-binary '@img/logo.png'");
+    expect(parseCurl(binary).body).toEqual({ type: 'binary', path: 'img/logo.png' });
   });
 });
 
@@ -237,6 +287,12 @@ describe('parseCurl: curl options', () => {
 });
 
 describe('toCurl', () => {
+  it('renders how the request is sent: -L, -k and --max-time', () => {
+    const out = toCurl({ method: 'GET', url: 'https://x.test/', headers: [], body: null, options: { followRedirects: true, insecure: true, timeoutMs: 1500 } });
+    expect(out.split(' \\\n  ')[1]).toBe('-L -k --max-time 1.5');
+    expect(toCurl({ method: 'GET', url: 'https://x.test/', headers: [], body: null, options: { followRedirects: false } })).toBe("curl -X GET 'https://x.test/'");
+  });
+
   it('quotes safely', () => {
     const out = toCurl({ method: 'POST', url: "https://x.test/it's", headers: [['A', 'b']], body: '{"q":1}' });
     expect(out).toBe(`curl -X POST 'https://x.test/it'\\''s' \\\n  -H 'A: b' \\\n  --data-raw '{"q":1}'`);
