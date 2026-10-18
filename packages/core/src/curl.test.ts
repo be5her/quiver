@@ -240,6 +240,14 @@ describe('parseCurl: files', () => {
     expect(() => parseCurl('curl x.test -F f=@-')).toThrow(/standard input/);
   });
 
+  it('reads quoted attribute values, with ; inside and \\" and \\\\ escapes, as curl does', () => {
+    const quoted = parseCurl('curl x.test -F \'doc=@a.pdf;filename="x;headers=X-Evil: 1";type="text/plain;charset=utf-8"\'').body;
+    expect(quoted.type === 'form' ? quoted.fields[0] : null).toMatchObject({ value: 'a.pdf', kind: 'file', fileName: 'x;headers=X-Evil: 1', contentType: 'text/plain;charset=utf-8' });
+    const escaped = parseCurl('curl x.test -F \'doc=@"q\\"uote.pdf";filename="n\\"a\\\\me"; type = text/plain \'').body;
+    expect(escaped.type === 'form' ? escaped.fields[0] : null).toMatchObject({ value: 'q"uote.pdf', kind: 'file', fileName: 'n"a\\me', contentType: 'text/plain' });
+    expect(() => parseCurl('curl x.test -F \'doc=@a.pdf;filename="open\'')).toThrow(/unterminated quote/);
+  });
+
   it('round-trips through toCurl', () => {
     const out = toCurl({
       method: 'POST',
@@ -260,6 +268,20 @@ describe('parseCurl: files', () => {
     const binary = toCurl({ method: 'PUT', url: 'https://x.test/up', headers: [['Content-Type', 'image/png']], body: null, bodyFile: 'img/logo.png' });
     expect(binary).toContain("--data-binary '@img/logo.png'");
     expect(parseCurl(binary).body).toEqual({ type: 'binary', path: 'img/logo.png' });
+  });
+
+  it('quotes a file name or type that could add a part header, and reads it back', () => {
+    const evil = { name: 'doc', file: 'a.pdf', fileName: 'x;headers=X-Evil: 1', type: 'text/plain;charset=utf-8' };
+    const out = toCurl({ method: 'POST', url: 'https://x.test/up', headers: [], body: null, bodyType: 'form', formFields: [evil, { name: 'q', file: 'q"uo\\te.pdf', fileName: 'n"a\\me' }, { name: 'nl', file: 'a.txt', fileName: 'two\r\nlines' }] });
+    expect(out).toContain(`-F 'doc=@a.pdf;type="text/plain;charset=utf-8";filename="x;headers=X-Evil: 1"'`);
+    expect(out).toContain(`-F 'q=@"q\\"uo\\\\te.pdf";filename="n\\"a\\\\me"'`);
+    expect(out).toContain(`-F 'nl=@a.txt;filename=two lines'`);
+    const back = parseCurl(out).body;
+    expect(back.type === 'form' ? back.fields.map((f) => [f.value, f.fileName, f.contentType]) : null).toEqual([
+      ['a.pdf', 'x;headers=X-Evil: 1', 'text/plain;charset=utf-8'],
+      ['q"uo\\te.pdf', 'n"a\\me', undefined],
+      ['a.txt', 'two lines', undefined],
+    ]);
   });
 });
 

@@ -714,7 +714,18 @@ export default definePart({
       );
       const uploadReq = await run<ApiRequest>('api.request.create', { name: 'file upload', method: 'POST', url: '{{baseUrl}}/upload' }, ws.id);
       await run('api.request.save', {
-        request: { ...uploadReq, body: { type: 'form', fields: [{ id: 'u1', key: 'doc', value: 'uploads/hello.txt', enabled: true, kind: 'file', contentType: 'text/plain' }, { id: 'u2', key: 'note', value: 'hi', enabled: true }] } },
+        request: {
+          ...uploadReq,
+          body: {
+            type: 'form',
+            fields: [
+              { id: 'u1', key: 'doc', value: 'uploads/hello.txt', enabled: true, kind: 'file', contentType: 'text/plain' },
+              { id: 'u2', key: 'note', value: 'hi', enabled: true },
+              // A file name or type holding ; (as a HAR can bring) is quoted, so it cannot add a part header to the curl command.
+              { id: 'u3', key: 'named', value: 'uploads/hello.txt', enabled: true, kind: 'file', fileName: 'report;headers=X-Evil: 1', contentType: 'text/markdown;charset=utf-8' },
+            ],
+          },
+        },
       }, ws.id);
       const uploadCurl = await run<{ command: string }>('api.export.curl', { requestId: uploadReq.id }, ws.id);
       const reimported = await run<ApiRequest>('api.import.curl', { command: uploadCurl.command }, ws.id);
@@ -724,9 +735,11 @@ export default definePart({
       const binaryBack = await run<ApiRequest>('api.import.curl', { command: binaryCurl.command }, ws.id);
       const fields = reimported.body.type === 'form' ? reimported.body.fields : [];
       check(
-        'files: curl export writes -F name=@file, --form-string for text and --data-binary @file, and importing it gives the same body back',
+        'files: curl export writes -F name=@file, --form-string for text and --data-binary @file, a file name or type holding ; quoted, and importing it gives the same body back',
         uploadCurl.command.includes("-F 'doc=@uploads/hello.txt;type=text/plain'") && uploadCurl.command.includes("--form-string 'note=hi'") &&
+          uploadCurl.command.includes(`-F 'named=@uploads/hello.txt;type="text/markdown;charset=utf-8";filename="report;headers=X-Evil: 1"'`) &&
           fields[0]?.kind === 'file' && fields[0].value === 'uploads/hello.txt' && fields[0].contentType === 'text/plain' && fields[1]?.value === 'hi' &&
+          fields[2]?.kind === 'file' && fields[2].fileName === 'report;headers=X-Evil: 1' && fields[2].contentType === 'text/markdown;charset=utf-8' &&
           binaryCurl.command.includes("--data-binary '@uploads/hello.txt'") && binaryBack.body.type === 'binary' && binaryBack.method === 'PUT',
         { uploadCurl: uploadCurl.command, binaryCurl: binaryCurl.command, reimported: reimported.body },
       );

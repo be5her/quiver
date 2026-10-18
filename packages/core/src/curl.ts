@@ -408,28 +408,49 @@ export function parseCurl(command: string, options: ParseCurlOptions = {}): ApiR
   return req;
 }
 
-/** -F name=@path[;type=…][;filename=…]: a file field. The path may be quoted to hold ; or ,. */
+/**
+ * -F name=@path[;type=…][;filename=…]: a file field. The path and each attribute value may be quoted
+ * ("…", with \" and \\ inside) to hold ; or , as curl reads them (`formWord` writes them that way).
+ */
 function formFile(name: string, spec: string, flag: string, at: ShellToken, fail: (at: ShellToken, message: string) => Error): FormField {
-  let rest = spec;
-  let path: string;
-  if (rest.startsWith('"')) {
-    const end = rest.indexOf('"', 1);
-    if (end < 0) throw fail(at, `${flag} ${name}=@${spec} has an unterminated quoted file name`);
-    path = rest.slice(1, end);
-    rest = rest.slice(end + 1);
-  } else {
-    const semi = rest.indexOf(';');
-    path = semi < 0 ? rest : rest.slice(0, semi);
-    rest = semi < 0 ? '' : rest.slice(semi);
-  }
+  /** The word at `from`: quoted, with its escapes undone, or up to the next `;`. `end` is at that `;` or the end. */
+  const word = (from: number): { value: string; end: number } => {
+    if (spec[from] !== '"') {
+      const semi = spec.indexOf(';', from);
+      return { value: spec.slice(from, semi < 0 ? spec.length : semi), end: semi < 0 ? spec.length : semi };
+    }
+    let value = '';
+    let i = from + 1;
+    for (; i < spec.length && spec[i] !== '"'; i++) {
+      if (spec[i] === '\\' && (spec[i + 1] === '\\' || spec[i + 1] === '"')) i++;
+      value += spec[i];
+    }
+    if (i >= spec.length) throw fail(at, `${flag} ${name}=@${spec} has an unterminated quote`);
+    // curl ignores what follows a closing quote up to the next ;.
+    const semi = spec.indexOf(';', i + 1);
+    return { value, end: semi < 0 ? spec.length : semi };
+  };
+  const first = word(0);
+  const path = first.value;
   if (!path || path === '-') throw fail(at, `${flag} ${name}=@${spec} reads standard input, which cannot be imported`);
   const field: FormField = { ...keyValue(name, path), kind: 'file' };
-  for (const attribute of rest.split(';').filter(Boolean)) {
-    const eq = attribute.indexOf('=');
-    const key = (eq < 0 ? attribute : attribute.slice(0, eq)).trim().toLowerCase();
-    const val = eq < 0 ? '' : attribute.slice(eq + 1).trim().replace(/^"(.*)"$/, '$1');
+  let i = first.end;
+  while (i < spec.length) {
+    i++; // past the ;
+    const eq = spec.indexOf('=', i);
+    const semi = spec.indexOf(';', i);
+    if (eq < 0 || (semi >= 0 && semi < eq)) {
+      i = semi < 0 ? spec.length : semi;
+      continue;
+    }
+    const key = spec.slice(i, eq).trim().toLowerCase();
+    let start = eq + 1;
+    while (spec[start] === ' ' || spec[start] === '\t') start++;
+    const attribute = word(start);
+    const val = spec[start] === '"' ? attribute.value : attribute.value.trim();
     if (key === 'type' && val) field.contentType = val;
     else if (key === 'filename' && val) field.fileName = val;
+    i = attribute.end;
   }
   return field;
 }
@@ -492,6 +513,16 @@ export function defaultRequestName(req: Pick<ApiRequest, 'method' | 'url'>): str
   }
 }
 
+/**
+ * A path or attribute value of `-F name=@path;type=…;filename=…`, quoted as curl reads it when it holds
+ * `;`, `,` or `"` (with `"` and `\` escaped); a line break in it would end the part's header line, so it
+ * becomes a space.
+ */
+function formWord(value: string): string {
+  const flat = value.replace(/[\r\n]+/g, ' ');
+  return /[;,"]/.test(flat) ? `"${flat.replace(/[\\"]/g, '\\$&')}"` : flat;
+}
+
 /** A multipart field for curl: text as [name, value], or a file. */
 export type CurlFormField = [string, string] | { name: string; file: string; type?: string; fileName?: string };
 
@@ -538,9 +569,9 @@ export function toCurl(input: CurlInput): string {
         // --form-string sends the value as it is; with -F, one starting with @ or < would read a file.
         lines.push(`--form-string ${quote(`${field[0]}=${field[1]}`)}`);
       } else {
-        const file = /[;,"]/.test(field.file) ? `"${field.file.replace(/"/g, '\\"')}"` : field.file;
-        const extras = [field.type ? `;type=${field.type}` : '', field.fileName ? `;filename=${field.fileName}` : ''].join('');
-        lines.push(`-F ${quote(`${field.name}=@${file}${extras}`)}`);
+        // Each value is quoted when it needs to be, so a file name holding `;headers=…` cannot add a part header.
+        const extras = [field.type ? `;type=${formWord(field.type)}` : '', field.fileName ? `;filename=${formWord(field.fileName)}` : ''].join('');
+        lines.push(`-F ${quote(`${field.name}=@${formWord(field.file)}${extras}`)}`);
       }
     }
   } else if (input.bodyFile) {

@@ -78,6 +78,25 @@ describe('toCode', () => {
     expect(outputs.curl).toContain("--form-string 'note=it'\\''s'");
   });
 
+  it('escapes a multipart file name and type that could add a part header, in curl and Go, and flattens line breaks everywhere', () => {
+    const evil: CodeInput = {
+      ...multipart,
+      body: { kind: 'form', fields: [{ name: 'doc', file: 'a.pdf', fileName: 'x;headers=X-Evil: 1', type: 'text/plain;charset=utf-8' }, { name: 'q"n', file: 'b.txt', fileName: 'x"y\\z' }, { name: 'nl', file: 'c.txt', fileName: 'two\nlines', type: 'text/plain\r\nX-Evil: 1' }] },
+    };
+    const curl = toCode('curl', evil);
+    expect(curl).toContain(`-F 'doc=@a.pdf;type="text/plain;charset=utf-8";filename="x;headers=X-Evil: 1"'`);
+    expect(curl).toContain(`-F 'nl=@c.txt;type=text/plain X-Evil: 1;filename=two lines'`);
+    const go = toCode('go-net-http', evil);
+    expect(go).toContain(`header.Set("Content-Disposition", ${JSON.stringify('form-data; name="doc"; filename="x;headers=X-Evil: 1"')})`);
+    expect(go).toContain(`header.Set("Content-Disposition", ${JSON.stringify('form-data; name="q\\"n"; filename="x\\"y\\\\z"')})`);
+    expect(go).toContain(`header.Set("Content-Type", "text/plain X-Evil: 1")`);
+    expect(go).toContain(`filename=\\"two lines\\"`);
+    for (const { value } of CODE_TARGETS) {
+      expect(toCode(value, evil), value).not.toMatch(/two\r?\nlines|plain\r?\nX-Evil/);
+    }
+    expect(toCode('python-requests', evil)).toContain('"nl": ("two lines", open("c.txt", "rb"), "text/plain X-Evil: 1"),');
+  });
+
   it('doubles every quote PowerShell reads as a single quote, so a value cannot close the literal', () => {
     const tricky: CodeInput = { ...json, headers: [['X-A', "a’; calc; ’ b‘‚‛'"]] };
     expect(toCode('powershell', tricky)).toContain("'X-A' = 'a’’; calc; ’’ b‘‘‚‚‛‛'''");

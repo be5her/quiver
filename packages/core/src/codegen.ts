@@ -47,13 +47,19 @@ function fileField(field: CurlFormField): field is Exclude<CurlFormField, [strin
   return !Array.isArray(field);
 }
 
+/** A file name or type goes on a part's header line in every target, where a line break would end it early. */
+const headerSafe = (s: string) => s.replace(/[\r\n]+/g, ' ');
+
 function fileName(field: Exclude<CurlFormField, [string, string]>): string {
-  return field.fileName || baseName(field.file);
+  return headerSafe(field.fileName || baseName(field.file));
 }
 
 function fileType(field: Exclude<CurlFormField, [string, string]>): string {
-  return field.type || contentTypeFor(fileName(field));
+  return headerSafe(field.type || contentTypeFor(fileName(field)));
 }
+
+/** A value inside a quoted-string of a MIME header, escaped as Go's mime/multipart does: `\` and `"` with a backslash. */
+const mimeQuoted = (s: string) => s.replace(/[\\"]/g, '\\$&');
 
 function hasFiles(input: CodeInput): boolean {
   return input.body.kind === 'file' || (input.body.kind === 'form' && input.body.fields.some(fileField));
@@ -168,7 +174,7 @@ function go(input: CodeInput): string {
           '\t\t\tpanic(err)',
           '\t\t}',
           '\t\theader := make(textproto.MIMEHeader)',
-          `\t\theader.Set("Content-Disposition", ${q(`form-data; name="${f.name}"; filename="${fileName(f)}"`)})`,
+          `\t\theader.Set("Content-Disposition", ${q(`form-data; name="${mimeQuoted(f.name)}"; filename="${mimeQuoted(fileName(f))}"`)})`,
           `\t\theader.Set("Content-Type", ${q(fileType(f))})`,
           '\t\tpart, _ := form.CreatePart(header)',
           '\t\tio.Copy(part, file)',
