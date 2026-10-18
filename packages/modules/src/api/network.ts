@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { rootCertificates } from 'node:tls';
 import { QuiverError, certificateFor, defaultNetworkConfig, proxyFor, type ClientCertificate, type HostApi, type NetworkConfig, type WorkspaceApi } from '@quiver/core';
 import { Agent, ProxyAgent, type Dispatcher } from 'undici';
 
@@ -93,7 +94,9 @@ export function dispatcherFor(url: string, insecure: boolean, network?: NetworkC
   const key = JSON.stringify([proxy?.uri ?? null, proxy?.token ?? null, certificate?.key ?? null, insecure]);
   let dispatcher = dispatchers.get(key);
   if (!dispatcher) {
-    const tls = { ...(certificate?.tls ?? {}), rejectUnauthorized: !insecure };
+    const own = certificate?.tls ?? {};
+    // A private CA joins the system roots rather than replacing them (Node's `ca` alone would): a host under the pattern with a public certificate still verifies.
+    const tls = { ...own, ...(own.ca ? { ca: [...rootCertificates, own.ca.toString('utf8')] } : {}), rejectUnauthorized: !insecure };
     dispatcher = proxy ? new ProxyAgent({ uri: proxy.uri, ...(proxy.token ? { token: proxy.token } : {}), requestTls: tls }) : new Agent({ connect: tls });
     // A long session with many proxies or certificates edited over and over: start again rather than grow.
     if (dispatchers.size > 50) {

@@ -84,7 +84,7 @@ export interface ClientCertificate {
   pfxPath: string;
   /** Encrypted per machine; empty when there is none. */
   passphraseCipher: string;
-  /** Extra CA certificates to trust for these hosts (a private CA). */
+  /** Extra CA certificates to trust for these hosts (a private CA), added to the system roots rather than put in their place. */
   caPath: string;
 }
 
