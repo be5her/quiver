@@ -104,6 +104,8 @@ export interface StoreApi {
   /** Append-only JSON lines logs under `.quiver/local`. */
   appendLog(name: string, entry: unknown): Promise<void>;
   readLog<T>(name: string, limit: number): Promise<T[]>;
+  /** Replaces a log with these entries, oldest first, in one step: a reader sees the old log or the new one, never part of either. */
+  writeLog(name: string, entries: unknown[]): Promise<void>;
   clearLog(name: string): Promise<void>;
 }
 

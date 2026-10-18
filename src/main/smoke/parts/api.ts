@@ -244,6 +244,28 @@ export default definePart({
       await run('workspace.close', { id: legacyWs.id }, null);
       await run('workspace.forgetRecent', { path: legacyFolder }, null);
       await fs.rm(legacyFolder, { recursive: true, force: true }).catch(() => {});
+
+      // A log over the cap is pruned in one rename when the workspace opens; a listing right after waits for that and reads the tidied log.
+      const bigFolder = await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-smoke-big-history-'));
+      const bigFile = path.join(bigFolder, '.quiver', 'local', 'history.jsonl');
+      await fs.mkdir(path.dirname(bigFile), { recursive: true });
+      const bigResponse = { status: 200, statusText: 'OK', headers: [] as [string, string][], contentType: 'text/plain', body: 'kept', bodyEncoding: 'utf8' as const, truncated: false };
+      const bigEntries: HistoryEntry[] = Array.from({ length: 1005 }, (_, i) => ({ ...legacy[1], id: `big${i}`, at: new Date(Date.UTC(2026, 8, 1, 0, 0, 0, i)).toISOString(), response: bigResponse }));
+      await fs.writeFile(bigFile, bigEntries.map((e) => JSON.stringify(e)).join('\n') + '\n');
+      const bigWs = await run<WorkspaceInfo>('workspace.open', { path: bigFolder }, null);
+      const bigList = await run<HistoryEntry[]>('api.history.list', { limit: 500 }, bigWs.id);
+      const bigLines = (await fs.readFile(bigFile, 'utf8')).trim().split('\n');
+      const parsedLines = bigLines.map((line) => JSON.parse(line) as HistoryEntry);
+      const bigSiblings = await fs.readdir(path.dirname(bigFile));
+      check(
+        'history: a log over the cap is pruned to the newest 1000 in one rename when the workspace opens, responses kept on the newest 200, and a listing right after reads the tidied log',
+        bigList.length === 500 && bigList[0].id === 'big1004' && bigList[199].hasResponse === true && bigList[200].hasResponse === undefined &&
+          bigLines.length === 1000 && parsedLines[0].id === 'big5' && parsedLines[999].id === 'big1004' && parsedLines.filter((e) => e.response).length === 200 && !bigSiblings.some((f) => f.endsWith('.tmp')),
+        { count: bigList.length, first: bigList[0]?.id, lines: bigLines.length, oldest: parsedLines[0]?.id, withResponse: parsedLines.filter((e) => e.response).length, siblings: bigSiblings },
+      );
+      await run('workspace.close', { id: bigWs.id }, null);
+      await run('workspace.forgetRecent', { path: bigFolder }, null);
+      await fs.rm(bigFolder, { recursive: true, force: true }).catch(() => {});
     }
 
     const imported = await run<ApiRequest>('api.import.curl', { command: `curl -X PUT '{{baseUrl}}/a?b=c' -H 'X-A: 1' -d '{"k":1}'` }, ws.id);

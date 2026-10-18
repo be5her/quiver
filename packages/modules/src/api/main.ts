@@ -120,6 +120,12 @@ function withHistory(w: WorkspaceApi, write: () => Promise<void>): Promise<void>
   });
 }
 
+/** Resolves once the tidy at open and every write under way (an append, or the tidy every fifty sends) are done, so a read sees the log whole and up to date. */
+async function historySettled(w: WorkspaceApi): Promise<void> {
+  await historyReady.get(w.id);
+  await historyWrites.get(w.id)?.catch(() => undefined);
+}
+
 /** The log is tidied after this many appends, so it never grows far past what `pruneHistory` keeps. */
 const TIDY_EVERY = 50;
 const appendsSinceTidy = new Map<string, number>();
@@ -133,8 +139,8 @@ async function tidyHistory(w: WorkspaceApi): Promise<void> {
   const entries = await w.store.readLog<HistoryEntry>(HISTORY_LOG, Number.MAX_SAFE_INTEGER);
   const pruned = pruneHistory(entries.map((entry) => redactHistoryEntry(entry)));
   if (!pruned.changed && JSON.stringify(pruned.entries) === JSON.stringify(entries)) return;
-  await w.store.clearLog(HISTORY_LOG);
-  for (const entry of [...pruned.entries].reverse()) await w.store.appendLog(HISTORY_LOG, entry);
+  // One rename puts the tidied log in place: a crash midway leaves the old log whole, and a listing meanwhile reads one or the other.
+  await w.store.writeLog(HISTORY_LOG, [...pruned.entries].reverse());
 }
 
 function ws(ctx: CommandContext): WorkspaceApi {
@@ -969,7 +975,7 @@ const historyList = defineCommand({
   scope: 'workspace',
   input: z.object({ limit: z.number().int().min(1).max(500).default(50), requestId: z.string().optional(), withResponses: z.boolean().optional() }),
   handler: async ({ limit, requestId, withResponses }, ctx) => {
-    await historyReady.get(ws(ctx).id);
+    await historySettled(ws(ctx));
     // A filtered listing reads further back, so a request sent among many others still has its past.
     const entries = (await ws(ctx).store.readLog<HistoryEntry>(HISTORY_LOG, requestId ? 2000 : limit)).filter((e) => !requestId || e.requestId === requestId).slice(0, limit);
     return entries.map((entry) => {
@@ -988,7 +994,7 @@ const historyGet = defineCommand({
   scope: 'workspace',
   input: z.object({ id: z.string() }),
   handler: async ({ id }, ctx) => {
-    await historyReady.get(ws(ctx).id);
+    await historySettled(ws(ctx));
     const entry = (await ws(ctx).store.readLog<HistoryEntry>(HISTORY_LOG, 5000)).find((e) => e.id === id);
     if (!entry) throw new QuiverError('NOT_FOUND', `History entry ${id} not found`);
     return redactHistoryEntry(entry);

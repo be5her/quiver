@@ -249,6 +249,13 @@ export class FileStore implements StoreApi {
     return out;
   }
 
+  async writeLog(name: string, entries: unknown[]): Promise<void> {
+    assertSafe(name, 'log');
+    await fs.mkdir(this.localDir, { recursive: true });
+    // Written beside the log and renamed over it, so a crash midway leaves the old log whole.
+    await writeAtomic(path.join(this.localDir, `${name}.jsonl`), entries.map((entry) => JSON.stringify(entry) + '\n').join(''));
+  }
+
   async clearLog(name: string): Promise<void> {
     assertSafe(name, 'log');
     await fs.rm(path.join(this.localDir, `${name}.jsonl`), { force: true });
