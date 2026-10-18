@@ -1,6 +1,7 @@
 import { parse as parseYaml } from 'yaml';
 import { newId } from '../ids';
-import { HttpMethodSchema, keyValue, newApiRequest, newCollection, newEnvironment, type ApiCollection, type ApiRequest, type Environment, type HttpMethod, type KeyValue } from '../models/api';
+import { HttpMethodSchema, keyValue, newApiRequest, newCollection, newEnvironment, type ApiCollection, type ApiRequest, type Environment, type HttpMethod, type KeyValue, type RequestBody } from '../models/api';
+import { isSecretName } from '../redact';
 
 /** What an import creates, ready to save: the first collection is the root, the rest sit under it. */
 export interface ImportResult {
@@ -91,6 +92,59 @@ export class Credentials {
     this.variables.push({ key, value, secret: true });
     this.skip(`The ${name} credential on ${where} was replaced with {{${key}}}; its value is a secret in the imported environment`);
     return `{{${key}}}`;
+  }
+}
+
+/** What replaces the literal value of a credential named `name`. */
+export type CredentialMask = (name: string, value: string) => string;
+
+const AUTH_SCHEME = /^(bearer|basic|token|digest|negotiate)\s+/i;
+
+/** The scheme an `Authorization` value starts with (`Bearer `), kept in front of the mask, and the rest. */
+export function splitAuthScheme(value: string): { scheme: string; rest: string } {
+  const scheme = AUTH_SCHEME.exec(value)?.[0] ?? '';
+  return { scheme, rest: value.slice(scheme.length) };
+}
+
+/** A mask that takes each literal credential on `where` into `creds`, so a header reads `Bearer {{authorization}}`. */
+export function credentialMask(creds: Credentials, where: string): CredentialMask {
+  return (name, value) => {
+    const { scheme, rest } = splitAuthScheme(value);
+    return scheme + creds.take(name, rest, where);
+  };
+}
+
+/** Headers, parameters or form fields with the literal values of credential-named rows (never files) masked. */
+export function maskCredentialRows<T extends KeyValue>(rows: T[], mask: CredentialMask): T[] {
+  return rows.map((row) => ((row as { kind?: string }).kind !== 'file' && row.value && isSecretName(row.key) ? { ...row, value: mask(row.key, row.value) } : row));
+}
+
+/**
+ * A body with its credentials masked: `password`, `client_secret`, `token` fields of a URL-encoded
+ * or multipart body, and of a JSON body at any depth. Other bodies are left as they are.
+ */
+export function maskCredentialBody(body: RequestBody, mask: CredentialMask): RequestBody {
+  if (body.type === 'urlencoded' || body.type === 'form') return { ...body, fields: maskCredentialRows(body.fields, mask) } as RequestBody;
+  if (body.type !== 'json') return body;
+  let changed = false;
+  const walk = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(walk);
+    if (!isRecord(value)) return value;
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (typeof v === 'string' && v && isSecretName(k)) {
+        const masked = mask(k, v);
+        if (masked !== v) changed = true;
+        out[k] = masked;
+      } else out[k] = walk(v);
+    }
+    return out;
+  };
+  try {
+    const masked = walk(JSON.parse(body.content));
+    return changed ? { type: 'json', content: JSON.stringify(masked, null, 2) } : body;
+  } catch {
+    return body;
   }
 }
 

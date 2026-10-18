@@ -1,6 +1,6 @@
 import { keyValue, type ApiAuth, type ApiCollection, type ApiRequest, type FormField, type KeyValue, type RequestBody } from '../models/api';
 import { isSecretName } from '../redact';
-import { Credentials, ImportBuilder, ImportError, arr, isRecord, method, parseStructured, rawBodyType, splitQuery, str, type ImportResult } from './common';
+import { Credentials, ImportBuilder, ImportError, arr, credentialMask, isRecord, maskCredentialBody, maskCredentialRows, method, parseStructured, rawBodyType, splitQuery, str, type ImportResult } from './common';
 
 type Json = Record<string, unknown>;
 
@@ -83,12 +83,18 @@ function requestOf(item: Json, pathVariables: { key: string; value: string }[], 
     skip(`${name} was not imported: Quiver does not send ${str(req['method'])}`);
     return null;
   }
-  const { url, params } = urlOf(req['url'], pathVariables);
-  const headers: KeyValue[] = arr(req['header'])
-    .filter(isRecord)
-    .map((h) => keyValue(str(h['key']), str(h['value']), h['disabled'] !== true));
+  // A credential typed into a header, a query parameter or a body field goes the way of one typed into an auth: a {{variable}}, its value a secret.
+  const take = credentialMask(creds, name);
+  const { url, params: rawParams } = urlOf(req['url'], pathVariables);
+  const params = maskCredentialRows(rawParams, take);
+  const headers: KeyValue[] = maskCredentialRows(
+    arr(req['header'])
+      .filter(isRecord)
+      .map((h) => keyValue(str(h['key']), str(h['value']), h['disabled'] !== true)),
+    take,
+  );
   const contentType = headers.find((h) => h.enabled && h.key.toLowerCase() === 'content-type')?.value ?? '';
-  const body = bodyOf(req['body'], contentType, name, skip);
+  const body = maskCredentialBody(bodyOf(req['body'], contentType, name, skip), take);
   const auth = authOf(req['auth'], skip, name, creds);
   const description = descriptionOf(req['description']);
   return { name, method: m, url, params, headers, body, auth: auth ?? { type: 'inherit' }, ...(description ? { description } : {}) };

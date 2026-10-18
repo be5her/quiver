@@ -229,6 +229,52 @@ describe('importPostman', () => {
     expect(JSON.stringify([keys.collections, keys.requests])).not.toMatch(/literal-1|k-9/);
   });
 
+  it('takes credentials typed into headers, query parameters and body fields out of the requests too', () => {
+    const doc = {
+      info: { name: 'Typed', schema: 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json' },
+      item: [
+        {
+          name: 'E',
+          request: {
+            method: 'POST',
+            url: 'https://k.test/e?api_key=q-1&page=2',
+            header: [{ key: 'Authorization', value: 'Bearer literal-1' }, { key: 'X-Api-Key', value: 'k-9' }, { key: 'Accept', value: 'json' }],
+            body: { mode: 'raw', raw: '{"user":"ada","password":"pw-1","nested":{"client_secret":"cs-0"}}', options: { raw: { language: 'json' } } },
+          },
+        },
+        {
+          name: 'F',
+          request: { method: 'POST', url: 'https://k.test/f', header: [{ key: 'Authorization', value: 'Bearer {{token}}' }], body: { mode: 'urlencoded', urlencoded: [{ key: 'client_secret', value: 'cs-1' }, { key: 'grant', value: 'cc' }] } },
+        },
+      ],
+    };
+    const typed = importPostman(JSON.stringify(doc));
+    const e = find(typed, 'E');
+    expect(e.headers.map((h) => [h.key, h.value])).toEqual([
+      ['Authorization', 'Bearer {{authorization}}'],
+      ['X-Api-Key', '{{x-api-key}}'],
+      ['Accept', 'json'],
+    ]);
+    expect(e.params.map((p) => [p.key, p.value])).toEqual([
+      ['api_key', '{{api_key}}'],
+      ['page', '2'],
+    ]);
+    expect(JSON.parse((e.body as { content: string }).content)).toEqual({ user: 'ada', password: '{{password}}', nested: { client_secret: '{{client_secret}}' } });
+    const f = find(typed, 'F');
+    expect(f.headers[0].value).toBe('Bearer {{token}}');
+    expect(f.body).toMatchObject({ type: 'urlencoded', fields: [{ key: 'client_secret', value: '{{client_secret_2}}' }, { key: 'grant', value: 'cc' }] });
+    expect(typed.environments[0].variables.map((v) => [v.key, v.value, Boolean(v.secret)])).toEqual([
+      ['api_key', 'q-1', true],
+      ['authorization', 'literal-1', true],
+      ['x-api-key', 'k-9', true],
+      ['password', 'pw-1', true],
+      ['client_secret', 'cs-0', true],
+      ['client_secret_2', 'cs-1', true],
+    ]);
+    expect(typed.skipped).toContain('The Authorization credential on E was replaced with {{authorization}}; its value is a secret in the imported environment');
+    expect(JSON.stringify([typed.collections, typed.requests])).not.toMatch(/literal-1|k-9|q-1|pw-1|cs-0|cs-1/);
+  });
+
   it('imports an environment file on its own, values named like a credential secret', () => {
     const env = importPostman(
       JSON.stringify({ name: 'Staging', values: [{ key: 'token', value: 't', type: 'secret', enabled: true }, { key: 'host', value: 'h', enabled: false }, { key: 'password', value: 'pw', enabled: true }], _postman_variable_scope: 'environment' }),
@@ -305,6 +351,42 @@ describe('importInsomnia', () => {
       'The X-Key credential on Upload was replaced with {{x-key}}; its value is a secret in the imported environment',
       'Live was not imported: WebSocket requests belong to other modules',
     ]);
+  });
+
+  it('takes credentials typed into headers, parameters and body fields out of the requests too', () => {
+    const doc = {
+      _type: 'export',
+      __export_format: 4,
+      resources: [
+        { _id: 'w', _type: 'workspace', name: 'Typed' },
+        {
+          _id: 'r',
+          _type: 'request',
+          parentId: 'w',
+          name: 'Go',
+          method: 'POST',
+          url: 'https://b.test/go?sid=q-1',
+          parameters: [{ name: 'sig', value: 's-1' }],
+          headers: [{ name: 'X-Api-Key', value: 'k-2' }, { name: 'Authorization', value: 'Bearer {{ _.token }}' }],
+          body: { mimeType: 'application/x-www-form-urlencoded', params: [{ name: 'password', value: 'pw-2' }, { name: 'user', value: 'ada' }] },
+        },
+      ],
+    };
+    const out = importInsomnia(JSON.stringify(doc));
+    const go = find(out, 'Go');
+    expect(go.headers.map((h) => [h.key, h.value])).toEqual([
+      ['X-Api-Key', '{{x-api-key}}'],
+      ['Authorization', 'Bearer {{token}}'],
+    ]);
+    expect(go.params.map((p) => [p.key, p.value])).toEqual([
+      ['sid', '{{sid}}'],
+      ['sig', '{{sig}}'],
+    ]);
+    expect(go.body).toMatchObject({ type: 'urlencoded', fields: [{ key: 'password', value: '{{password}}' }, { key: 'user', value: 'ada' }] });
+    expect(out.environments.map((e) => [e.name, e.variables.map((v) => [v.key, v.value, Boolean(v.secret)])])).toEqual([
+      ['Typed credentials', [['sid', 'q-1', true], ['sig', 's-1', true], ['x-api-key', 'k-2', true], ['password', 'pw-2', true]]],
+    ]);
+    expect(JSON.stringify(out.requests)).not.toMatch(/k-2|q-1|s-1|pw-2/);
   });
 
   it('makes an environment for the credentials when the export has none', () => {

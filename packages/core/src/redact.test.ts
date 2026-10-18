@@ -6,13 +6,16 @@ const M = REDACTED;
 
 describe('isSecretName', () => {
   it('knows credential headers and parameters', () => {
-    for (const name of ['Authorization', 'proxy-authorization', ' Cookie ', 'X-API-Key', 'apikey', 'api_key', 'X-Auth-Token', 'access_token', 'client_secret', 'password', 'passwd', 'key', 'sig', 'X-Amz-Signature', 'X-Access-Key']) {
+    for (const name of [
+      'Authorization', 'proxy-authorization', ' Cookie ', 'X-API-Key', 'apikey', 'api_key', 'X-Auth-Token', 'access_token', 'client_secret', 'password', 'passwd', 'key', 'sig', 'X-Amz-Signature', 'X-Access-Key',
+      'X-Auth', 'auth', 'sid', 'X-Session-Id', 'session', 'PHPSESSID', 'pass', 'pwd', 'passphrase', 'private_key', 'Ocp-Apim-Subscription-Key', 'client-key', 'app_key', 'license_key', 'jwt', 'otp', 'pin',
+    ]) {
       expect(isSecretName(name), name).toBe(true);
     }
   });
 
   it('leaves ordinary names alone', () => {
-    for (const name of ['Content-Type', 'Accept', 'X-Request-Id', 'page', 'keyword', 'author', 'monkey', 'q']) expect(isSecretName(name), name).toBe(false);
+    for (const name of ['Content-Type', 'Accept', 'X-Request-Id', 'page', 'keyword', 'author', 'monkey', 'q', 'pinned', 'passenger', 'keynote', 'authored', 'code']) expect(isSecretName(name), name).toBe(false);
   });
 });
 

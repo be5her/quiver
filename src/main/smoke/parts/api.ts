@@ -869,19 +869,38 @@ export default definePart({
           text: JSON.stringify({
             info: { name: 'Smoke Postman secret', schema: 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json' },
             auth: { type: 'bearer', bearer: [{ key: 'token', value: 'pm-literal-token-1' }] },
-            item: [{ name: 'Secret call', request: { method: 'GET', url: '{{baseUrl}}/pm/secret' } }],
+            item: [
+              {
+                name: 'Secret call',
+                request: {
+                  method: 'POST',
+                  url: '{{baseUrl}}/pm/secret?api_key=pm-literal-key-4',
+                  header: [{ key: 'X-Api-Key', value: 'pm-literal-key-2' }],
+                  body: { mode: 'raw', raw: '{"password":"pm-literal-pw-3"}', options: { raw: { language: 'json' } } },
+                },
+              },
+            ],
           }),
         },
       }, ws.id);
       const pmSecretCol = await run<ApiCollection>('api.collection.get', { id: pmSecret.collectionId! }, ws.id);
+      const pmSecretReq = (await under(pmSecret.collectionId!)).requests[0];
       const pmSecretEnv = await run<Environment>('api.environment.get', { id: pmSecret.environmentIds[0] }, ws.id);
-      const pmSecretFiles = (await Promise.all([fs.readFile(path.join(folder, '.quiver', 'collections', `${pmSecret.collectionId}.json`), 'utf8'), fs.readFile(path.join(folder, '.quiver', 'environments', `${pmSecret.environmentIds[0]}.json`), 'utf8')])).join('\n');
+      const pmSecretFiles = (
+        await Promise.all([
+          fs.readFile(path.join(folder, '.quiver', 'collections', `${pmSecret.collectionId}.json`), 'utf8'),
+          fs.readFile(path.join(folder, '.quiver', 'requests', `${pmSecretReq?.id}.json`), 'utf8'),
+          fs.readFile(path.join(folder, '.quiver', 'environments', `${pmSecret.environmentIds[0]}.json`), 'utf8'),
+        ])
+      ).join('\n');
+      const pmSecretVar = (key: string, value: string) => pmSecretEnv.variables.some((v) => v.key === key && v.value === value && v.secret === true);
       check(
-        'api.import.postman: a literal credential becomes a {{variable}} whose value is a secret in the imported environment, and no saved file holds it',
+        'api.import.postman: a credential typed into an auth, a header, a query parameter or a JSON body becomes a {{variable}} whose value is a secret in the imported environment, and no saved file holds it',
         pmSecretCol.auth.type === 'bearer' && pmSecretCol.auth.token === '{{token}}' &&
-          pmSecretEnv.variables.some((v) => v.key === 'token' && v.value === 'pm-literal-token-1' && v.secret === true) &&
-          !pmSecretFiles.includes('pm-literal-token-1') && pmSecret.skipped.some((s) => s.includes('token credential')),
-        { auth: pmSecretCol.auth, env: pmSecretEnv.variables, skipped: pmSecret.skipped },
+          pmSecretReq?.headers[0]?.value === '{{x-api-key}}' && pmSecretReq.params[0]?.value === '{{api_key}}' && (pmSecretReq.body as { content?: string }).content?.includes('"password": "{{password}}"') === true &&
+          pmSecretVar('token', 'pm-literal-token-1') && pmSecretVar('x-api-key', 'pm-literal-key-2') && pmSecretVar('api_key', 'pm-literal-key-4') && pmSecretVar('password', 'pm-literal-pw-3') &&
+          !pmSecretFiles.includes('pm-literal') && pmSecret.skipped.some((s) => s.includes('token credential')) && pmSecret.skipped.some((s) => s.includes('X-Api-Key credential on Secret call')),
+        { auth: pmSecretCol.auth, request: [pmSecretReq?.headers, pmSecretReq?.params, pmSecretReq?.body], env: pmSecretEnv.variables, skipped: pmSecret.skipped },
       );
 
       // Insomnia: {{ _.host }} templates as {{host}}, the sub-environment with the base merged in, and the request sent with it.

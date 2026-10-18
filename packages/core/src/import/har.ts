@@ -1,6 +1,5 @@
 import { keyValue, type ApiCollection, type ApiRequest, type FormField, type KeyValue, type RequestBody } from '../models/api';
-import { isSecretName } from '../redact';
-import { ImportBuilder, ImportError, arr, isRecord, method, parseStructured, rawBodyType, splitQuery, str, variableName, type ImportResult } from './common';
+import { ImportBuilder, ImportError, arr, isRecord, maskCredentialBody, maskCredentialRows, method, parseStructured, rawBodyType, splitAuthScheme, splitQuery, str, variableName, type CredentialMask, type ImportResult } from './common';
 
 type Json = Record<string, unknown>;
 
@@ -61,24 +60,22 @@ export function importHar(text: string, options: HarImportOptions = {}): ImportR
       filtered++;
       continue;
     }
-    const mask = (name: string, value: string) => {
+    // A recording's values are never kept: the variable is left for the user to define. The scheme of an Authorization header stays: `Bearer {{authorization}}`.
+    const mask: CredentialMask = (name, value) => {
       const variable = variableName(name);
       masked.set(name.toLowerCase(), variable);
-      // Keep the scheme of an Authorization header: `Bearer {{authorization}}`.
-      const scheme = /^(bearer|basic|token|digest|negotiate)\s+/i.exec(value)?.[0] ?? '';
-      return `${scheme}{{${variable}}}`;
+      return `${splitAuthScheme(value).scheme}{{${variable}}}`;
     };
-    const headers: KeyValue[] = arr(req['headers'])
-      .filter(isRecord)
-      .filter((h) => !DROPPED_HEADERS.test(str(h['name'])))
-      .map((h) => {
-        const name = str(h['name']);
-        const value = str(h['value']);
-        return keyValue(name, isSecretName(name) ? mask(name, value) : value);
-      });
+    const headers: KeyValue[] = maskCredentialRows(
+      arr(req['headers'])
+        .filter(isRecord)
+        .filter((h) => !DROPPED_HEADERS.test(str(h['name'])))
+        .map((h) => keyValue(str(h['name']), str(h['value']))),
+      mask,
+    );
     const split = splitQuery(`${parsed.origin}${parsed.pathname}${parsed.search}`);
-    const params = split.params.map((p) => (isSecretName(p.key) ? { ...p, value: mask(p.key, p.value) } : p));
-    const body = maskBody(bodyOf(req['postData'], headers), mask);
+    const params = maskCredentialRows(split.params, mask);
+    const body = maskCredentialBody(bodyOf(req['postData'], headers), mask);
     const key = JSON.stringify([m, split.url, params.map((p) => [p.key, p.value]), body]);
     if (seen.has(key)) {
       duplicates++;
@@ -128,33 +125,6 @@ function bodyOf(raw: unknown, headers: KeyValue[]): RequestBody {
   }
   if (!text) return { type: 'none' };
   return { type: rawBodyType(mime, text), content: text };
-}
-
-/** Credentials in a body (`password`, `client_secret`, `token` fields, at any depth of JSON) as variables. */
-function maskBody(body: RequestBody, mask: (name: string, value: string) => string): RequestBody {
-  if (body.type === 'urlencoded' || body.type === 'form') {
-    return { ...body, fields: body.fields.map((f: FormField) => (f.kind !== 'file' && isSecretName(f.key) && f.value ? { ...f, value: mask(f.key, f.value) } : f)) } as RequestBody;
-  }
-  if (body.type !== 'json') return body;
-  let changed = false;
-  const walk = (value: unknown): unknown => {
-    if (Array.isArray(value)) return value.map(walk);
-    if (!isRecord(value)) return value;
-    const out: Json = {};
-    for (const [k, v] of Object.entries(value)) {
-      if (typeof v === 'string' && v && isSecretName(k)) {
-        out[k] = mask(k, v);
-        changed = true;
-      } else out[k] = walk(v);
-    }
-    return out;
-  };
-  try {
-    const masked = walk(JSON.parse(body.content));
-    return changed ? { type: 'json', content: JSON.stringify(masked, null, 2) } : body;
-  } catch {
-    return body;
-  }
 }
 
 function decodeForm(text: string): string {

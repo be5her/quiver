@@ -1,6 +1,6 @@
 import { keyValue, type ApiAuth, type ApiCollection, type ApiRequest, type FormField, type KeyValue, type RequestBody } from '../models/api';
 import { isSecretName } from '../redact';
-import { Credentials, ImportBuilder, ImportError, arr, isRecord, method, parseStructured, rawBodyType, splitQuery, str, type ImportResult } from './common';
+import { Credentials, ImportBuilder, ImportError, arr, credentialMask, isRecord, maskCredentialBody, maskCredentialRows, method, parseStructured, rawBodyType, splitQuery, str, type ImportResult } from './common';
 
 type Json = Record<string, unknown>;
 type Skip = (line: string) => void;
@@ -150,12 +150,17 @@ function requestOf(r: Json, skip: Skip, creds: Credentials): Partial<ApiRequest>
     skip(`${name} was not imported: Quiver does not send ${str(r['method'])}`);
     return null;
   }
+  // A credential typed into a header, a parameter or a body field goes the way of one typed into an auth: a {{variable}}, its value a secret.
+  const take = credentialMask(creds, name);
   const split = splitQuery(template(str(r['url']), name, skip));
-  const params: KeyValue[] = [...split.params, ...arr(r['parameters']).filter(isRecord).map((p) => keyValue(str(p['name']), template(str(p['value']), name, skip), p['disabled'] !== true))];
-  const headers = arr(r['headers'])
-    .filter(isRecord)
-    .map((h) => keyValue(str(h['name']), template(str(h['value']), name, skip), h['disabled'] !== true));
-  const body = bodyOf(r['body'], name, skip);
+  const params: KeyValue[] = maskCredentialRows([...split.params, ...arr(r['parameters']).filter(isRecord).map((p) => keyValue(str(p['name']), template(str(p['value']), name, skip), p['disabled'] !== true))], take);
+  const headers = maskCredentialRows(
+    arr(r['headers'])
+      .filter(isRecord)
+      .map((h) => keyValue(str(h['name']), template(str(h['value']), name, skip), h['disabled'] !== true)),
+    take,
+  );
+  const body = maskCredentialBody(bodyOf(r['body'], name, skip), take);
   const auth = authOf(r['authentication'], name, skip, creds);
   const description = str(r['description']).trim();
   return { name, method: m, url: split.url, params, headers, body, auth: auth ?? { type: 'inherit' }, ...(description ? { description } : {}) };

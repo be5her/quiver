@@ -7,9 +7,13 @@ export const REDACTED = '••••••••';
 /** Shorter values are not scrubbed out of a text: they would match half of it. */
 const MIN_SCRUB_LENGTH = 4;
 
-const SECRET_NAME = /^(proxy-)?authorization$|^cookie$|^key$|^sig$|token|secret|passw(or)?d|api[-_]?key|access[-_]?key|signature|credential/i;
+const SECRET_NAME =
+  /^(proxy-)?authorization$|^cookie$|^key$|^sig$|^sid$|^auth$|^jwt$|^otp$|^pin$|^pass$|^x-auth|token|secret|passw(or)?d|passphrase|pwd|api[-_]?key|access[-_]?key|private[-_]?key|subscription[-_]?key|client[-_]?key|app[-_]?key|license[-_]?key|sess(ion|id)|signature|credential/i;
 
-/** Whether a header or parameter of this name carries a credential: `Authorization`, `X-API-Key`, `access_token`, `password`. */
+/**
+ * Whether a header, parameter, field or variable of this name carries a credential: `Authorization`,
+ * `X-API-Key`, `access_token`, `password`, `X-Auth`, `Ocp-Apim-Subscription-Key`, `session`, `sid`, `pwd`.
+ */
 export function isSecretName(name: string): boolean {
   return SECRET_NAME.test(name.trim());
 }
