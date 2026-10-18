@@ -27,8 +27,11 @@ export interface CodeInput {
 
 /** A double-quoted string literal that JavaScript, Python, Go and C# all read the same. */
 const q = (s: string) => JSON.stringify(s);
-/** A PowerShell single-quoted literal. */
-const ps = (s: string) => `'${s.replace(/'/g, "''")}'`;
+/**
+ * A PowerShell single-quoted literal. PowerShell closes such a literal on the curly quotes U+2018,
+ * U+2019, U+201A and U+201B as well as on `'`, so each of them is doubled, which it reads as that character.
+ */
+const ps = (s: string) => `'${s.replace(/['‘’‚‛]/g, (quote) => quote + quote)}'`;
 
 function contentType(headers: [string, string][]): string | null {
   return headers.find(([k]) => k.toLowerCase() === 'content-type')?.[1] ?? null;

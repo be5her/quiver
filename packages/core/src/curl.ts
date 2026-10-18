@@ -521,7 +521,8 @@ export function toCurl(input: CurlInput): string {
   if (input.bodyType === 'form' && input.formFields) {
     for (const field of input.formFields) {
       if (Array.isArray(field)) {
-        lines.push(`-F ${shellQuote(`${field[0]}=${field[1]}`)}`);
+        // --form-string sends the value as it is; with -F, one starting with @ or < would read a file.
+        lines.push(`--form-string ${shellQuote(`${field[0]}=${field[1]}`)}`);
       } else {
         const file = /[;,"]/.test(field.file) ? `"${field.file.replace(/"/g, '\\"')}"` : field.file;
         const extras = [field.type ? `;type=${field.type}` : '', field.fileName ? `;filename=${field.fileName}` : ''].join('');

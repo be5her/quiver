@@ -6,6 +6,8 @@ type Deref = (value: unknown, seen: string[]) => { value: unknown; seen: string[
 
 const METHODS: HttpMethod[] = ['GET', 'PUT', 'POST', 'DELETE', 'OPTIONS', 'HEAD', 'PATCH'];
 const MAX_DEPTH = 8;
+/** Nodes one example may hold in all: schemas that reference each other many times over would otherwise grow exponentially. */
+const MAX_NODES = 2000;
 
 /** Resolves `$ref`s inside the document; a reference to another file is noted and read as empty. */
 class Resolver {
@@ -45,12 +47,16 @@ class Resolver {
   }
 }
 
-/** A value shaped like the schema: its example, default or first enum value, else a placeholder of its type. */
-export function exampleFromSchema(schema: unknown, deref: Deref = (value) => ({ value, seen: [] }), seen: string[] = [], depth = 0): unknown {
+/**
+ * A value shaped like the schema: its example, default or first enum value, else a placeholder of its
+ * type. Null past MAX_DEPTH, and once the example holds MAX_NODES values (`budget` is shared by one walk).
+ */
+export function exampleFromSchema(schema: unknown, deref: Deref = (value) => ({ value, seen: [] }), seen: string[] = [], depth = 0, budget = { nodes: MAX_NODES }): unknown {
+  if (depth > MAX_DEPTH || --budget.nodes < 0) return null;
   const followed = deref(schema, seen);
   const s = followed.value;
-  if (!isRecord(s) || depth > MAX_DEPTH) return null;
-  const next = (child: unknown) => exampleFromSchema(child, deref, followed.seen, depth + 1);
+  if (!isRecord(s)) return null;
+  const next = (child: unknown) => exampleFromSchema(child, deref, followed.seen, depth + 1, budget);
   if ('example' in s) return s['example'];
   if (Array.isArray(s['examples']) && s['examples'].length) return s['examples'][0];
   if ('default' in s) return s['default'];

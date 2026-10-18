@@ -103,6 +103,29 @@ describe('importOpenApi', () => {
     expect(exampleFromSchema({ oneOf: [{ type: 'boolean' }, { type: 'string' }] })).toBe(true);
     expect(exampleFromSchema({ allOf: [{ properties: { a: { type: 'integer' } } }, { properties: { b: { const: 'k' } } }] })).toEqual({ a: 0, b: 'k' });
   });
+
+  it('keeps a body small when schemas reference each other many times over', () => {
+    // Six schemas, each with eight properties pointing at the next: 8^6 leaves without a cap.
+    const schemas: Record<string, unknown> = {};
+    for (let i = 0; i < 6; i++) {
+      const child = i < 5 ? { $ref: `#/components/schemas/S${i + 1}` } : { type: 'string' };
+      schemas[`S${i}`] = { type: 'object', properties: Object.fromEntries(Array.from({ length: 8 }, (_, k) => [`p${k}`, child])) };
+    }
+    const doc = {
+      openapi: '3.0.0',
+      info: { title: 'Web', version: '1' },
+      servers: [{ url: 'https://w.test' }],
+      paths: { '/x': { post: { requestBody: { content: { 'application/json': { schema: { $ref: '#/components/schemas/S0' } } } }, responses: {} } } },
+      components: { schemas },
+    };
+    const started = performance.now();
+    const body = (importOpenApi(JSON.stringify(doc)).requests[0].body as { content: string }).content;
+    expect(performance.now() - started).toBeLessThan(2000);
+    expect(body.length).toBeLessThan(100_000);
+    const parsed = JSON.parse(body) as Record<string, Record<string, unknown>>;
+    expect(Object.keys(parsed)).toHaveLength(8);
+    expect(Object.keys(parsed['p0'])).toHaveLength(8);
+  });
 });
 
 describe('importPostman', () => {

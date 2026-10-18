@@ -25,8 +25,10 @@ import {
   newEnvironment,
   newId,
   nowIso,
+  isSecretName,
   parseCurl,
   redactHistoryEntry,
+  redactLiteral,
   redactRequest,
   redactSent,
   redactUrl,
@@ -154,12 +156,18 @@ async function knownSecrets(ctx: CommandContext, resolved: ApiRequest, environme
   };
 }
 
+interface CaptureOutcome {
+  captured: CapturedValue[];
+  /** The values secret captures read, written or not: credentials to mask wherever the send is written down. */
+  secrets: string[];
+}
+
 /**
  * Run a request's captures on its response and write what they read into the environment (the given
  * one, else the active one) in a single save. A capture that reads nothing, or a send without an
  * environment, is reported as failed and the send still succeeds. An existing secret stays secret.
  */
-async function runCaptures(ctx: CommandContext, request: ApiRequest, response: ApiResponse, environmentId?: string | null): Promise<CapturedValue[] | undefined> {
+async function runCaptures(ctx: CommandContext, request: ApiRequest, response: ApiResponse, environmentId?: string | null): Promise<CaptureOutcome | undefined> {
   const captures = (request.capture ?? []).filter((c) => c.enabled && c.variable.trim());
   if (!captures.length) return undefined;
   const w = ws(ctx);
@@ -171,19 +179,21 @@ async function runCaptures(ctx: CommandContext, request: ApiRequest, response: A
     const read = extractCapture(capture, response);
     return read.ok ? { variable, value: read.value, ok: true, secret } : { variable, value: null, ok: false, error: read.error, secret };
   });
-  const fail = (error: string) => results.map((r) => (r.ok ? { ...r, value: null, ok: false, error } : r));
+  const secretsRead = results.filter((r) => r.ok && r.secret && r.value !== null).map((r) => r.value as string);
+  const done = (captured: CapturedValue[]): CaptureOutcome => ({ captured, secrets: secretsRead });
+  const fail = (error: string) => done(results.map((r) => (r.ok ? { ...r, value: null, ok: false, error } : r)));
   if (!env) return fail('No environment is active, so there is nowhere to write it');
   let variables = env.variables;
   results.forEach((r, i) => {
     if (r.ok && r.value !== null) variables = defineVariableIn(variables, r.variable, r.value, newId(), captures[i].secret);
   });
-  if (variables === env.variables) return results;
+  if (variables === env.variables) return done(results);
   try {
     await saveEnvironment(w, ctx.host, { ...env, variables });
   } catch (err) {
     return fail(`The environment could not be saved: ${(err as Error).message}`);
   }
-  return results;
+  return done(results);
 }
 
 /**
@@ -392,8 +402,12 @@ async function sendRequest(ctx: CommandContext, input: z.infer<typeof SendInput>
       if (!forAgent) return response;
       return { ...response, url: redactUrl(response.url, secrets), redirects: response.redirects.map((hop) => ({ ...hop, url: redactUrl(hop.url, secrets), location: redactUrl(hop.location, secrets) })), sent: redactSent(response.sent, secrets) };
     }
-    const captured = await runCaptures(ctx, request, response, input.environmentId);
-    if (captured) response.captured = captured;
+    const captures = await runCaptures(ctx, request, response, input.environmentId);
+    if (captures) {
+      response.captured = captures.captured;
+      // What a secret capture read is a credential now: masked wherever this send is written down or handed to an agent.
+      secrets.values = [...(secrets.values ?? []), ...captures.secrets];
+    }
     // Checks read the response as the server sent it; their expected values resolve with the variables the request was sent with.
     const checks = evaluateChecks(request.checks, response, (text) => resolveTemplate(text, vars));
     if (checks.length) {
@@ -1525,7 +1539,10 @@ async function exportInput(ctx: CommandContext, input: z.infer<typeof ExportInpu
   const resolved = await applyOAuth(ctx, written, 'optional');
   const prepared = await prepareRequest(resolved);
   const wire = { method: prepared.method, url: prepared.url, headers: prepared.headers, bodyPreview: typeof prepared.body === 'string' ? prepared.body : null };
-  const shown = ctx.caller === 'mcp' ? redactSent(wire, await knownSecrets(ctx, resolved, input.environmentId)) : wire;
+  const known = ctx.caller === 'mcp' ? await knownSecrets(ctx, resolved, input.environmentId) : null;
+  const shown = known ? redactSent(wire, known) : wire;
+  // A multipart text field is masked like a header: by its name, and wherever a secret the request resolved to appears.
+  const fieldValue = (name: string, value: string) => (!known ? value : isSecretName(name) ? redactLiteral(value) : scrubSecrets(value, known.values));
   const b = resolved.body;
   const body: CodeBody =
     b.type === 'form'
@@ -1533,7 +1550,7 @@ async function exportInput(ctx: CommandContext, input: z.infer<typeof ExportInpu
           kind: 'form',
           fields: b.fields
             .filter((f) => f.enabled && f.key.trim())
-            .map((f) => (f.kind === 'file' ? { name: f.key.trim(), file: f.value.trim(), type: f.contentType?.trim() || undefined, fileName: f.fileName?.trim() || undefined } : ([f.key, f.value] as [string, string]))),
+            .map((f) => (f.kind === 'file' ? { name: f.key.trim(), file: f.value.trim(), type: f.contentType?.trim() || undefined, fileName: f.fileName?.trim() || undefined } : ([f.key, fieldValue(f.key, f.value)] as [string, string]))),
         }
       : b.type === 'binary'
         ? { kind: 'file', path: b.path.trim() }

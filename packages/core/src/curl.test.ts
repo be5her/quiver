@@ -246,11 +246,16 @@ describe('parseCurl: files', () => {
       headers: [],
       body: null,
       bodyType: 'form',
-      formFields: [['note', 'hi'], { name: 'doc', file: 'a;b.pdf', type: 'application/pdf', fileName: 'r.pdf' }],
+      formFields: [['note', 'hi'], { name: 'doc', file: 'a;b.pdf', type: 'application/pdf', fileName: 'r.pdf' }, ['at', '@not-a-file']],
     });
     expect(out).toContain(`-F 'doc=@"a;b.pdf";type=application/pdf;filename=r.pdf'`);
+    // Text fields go as --form-string, so a value starting with @ stays text instead of naming a file.
+    expect(out).toContain("--form-string 'note=hi'");
+    expect(out).toContain("--form-string 'at=@not-a-file'");
     const back = parseCurl(out).body;
     expect(back.type === 'form' ? back.fields[1] : null).toMatchObject({ key: 'doc', value: 'a;b.pdf', kind: 'file', contentType: 'application/pdf', fileName: 'r.pdf' });
+    expect(back.type === 'form' ? back.fields[2] : null).toMatchObject({ key: 'at', value: '@not-a-file' });
+    expect(back.type === 'form' ? back.fields[2].kind : 'file').not.toBe('file');
     const binary = toCurl({ method: 'PUT', url: 'https://x.test/up', headers: [['Content-Type', 'image/png']], body: null, bodyFile: 'img/logo.png' });
     expect(binary).toContain("--data-binary '@img/logo.png'");
     expect(parseCurl(binary).body).toEqual({ type: 'binary', path: 'img/logo.png' });

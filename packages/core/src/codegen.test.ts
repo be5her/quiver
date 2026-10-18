@@ -66,6 +66,12 @@ describe('toCode', () => {
     expect(outputs.powershell).toContain("'note' = 'it''s'");
     expect(outputs.powershell).toContain("'doc' = Get-Item -LiteralPath 'uploads/a b.pdf'");
     expect(outputs.curl).toContain("-F 'doc=@uploads/a b.pdf;type=application/pdf'");
+    expect(outputs.curl).toContain("--form-string 'note=it'\\''s'");
+  });
+
+  it('doubles every quote PowerShell reads as a single quote, so a value cannot close the literal', () => {
+    const tricky: CodeInput = { ...json, headers: [['X-A', "a’; calc; ’ b‘‚‛'"]] };
+    expect(toCode('powershell', tricky)).toContain("'X-A' = 'a’’; calc; ’’ b‘‘‚‚‛‛'''");
   });
 
   it('writes a file body and the send options', () => {

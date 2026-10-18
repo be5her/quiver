@@ -134,6 +134,17 @@ export default definePart({
           agentCodes.every((r) => r.ok && !(r.result as { code: string }).code.includes('s3cret') && (r.result as { code: string }).code.includes(`Bearer ${REDACTED}`)),
         { fetch: codes['javascript-fetch'].slice(0, 160), agent: agentCodes.map((r) => (r.ok ? 'ok' : r.error.code)) },
       );
+      // A multipart text field holds a secret as readily as a header: agents get it masked by name and by value.
+      const formBody = { type: 'form' as const, fields: [{ id: 'f1', key: 'note', value: 'hi', enabled: true }, { id: 'f2', key: 'client_secret', value: '{{token}}', enabled: true }, { id: 'f3', key: 'password', value: 'typed-pw-1', enabled: true }] };
+      const formUi = (await run<{ code: string }>('api.export.code', { request: { ...saved, body: formBody }, target: 'curl' }, ws.id)).code;
+      const formAgent = await host.invoke('api.export.code', { request: { ...saved, body: formBody }, target: 'python-requests' }, { caller: 'mcp', workspaceId: ws.id });
+      const formAgentCode = formAgent.ok ? (formAgent.result as { code: string }).code : '';
+      check(
+        'api.export.code: multipart text fields reach the UI as they are and agents masked, by name and by secret value',
+        formUi.includes("--form-string 'client_secret=s3cret'") && formUi.includes("--form-string 'password=typed-pw-1'") &&
+          formAgent.ok && !formAgentCode.includes('s3cret') && !formAgentCode.includes('typed-pw-1') && formAgentCode.includes('"note": "hi"'),
+        { formUi, formAgent: formAgent.ok ? formAgentCode.slice(0, 300) : formAgent.error.message },
+      );
     }
 
     const history = await run<HistoryEntry[]>('api.history.list', { limit: 5 }, ws.id);
@@ -563,7 +574,13 @@ export default definePart({
           envDisk.variables.find((v) => v.key === 'capToken')?.value === '' && !JSON.stringify(envDisk).includes('cap-tok-123'),
         { captured: loggedIn.captured, onDisk: envDisk.variables.find((v) => v.key === 'capToken') },
       );
-      const chained = await run<ApiResponse>('api.request.send', { request: { ...saved, id: '', name: 'chained', url: '{{baseUrl}}/me?user={{capUser}}', headers: [], auth: { type: 'bearer', token: '{{capToken}}' } } }, ws.id);
+      const capHistory = await fs.readFile(path.join(folder, '.quiver', 'local', 'history.jsonl'), 'utf8');
+      check(
+        'captures: the response kept in the history has the secret capture masked and the rest as it was',
+        !capHistory.includes('cap-tok-123') && capHistory.includes('req-42'),
+        { tokenInHistory: capHistory.includes('cap-tok-123'), responseKept: capHistory.includes('req-42') },
+      );
+      const chained =await run<ApiResponse>('api.request.send', { request: { ...saved, id: '', name: 'chained', url: '{{baseUrl}}/me?user={{capUser}}', headers: [], auth: { type: 'bearer', token: '{{capToken}}' } } }, ws.id);
       const chainedEcho = JSON.parse(chained.body) as { url: string; headers: Record<string, string> };
       check('captures: the next request resolves the captured variables', chainedEcho.url === '/me?user=7' && chainedEcho.headers.authorization === 'Bearer cap-tok-123', { url: chainedEcho.url, authorization: chainedEcho.headers.authorization });
       const agentLogin = await host.invoke('api.request.send', { requestId: login.id }, { caller: 'mcp', workspaceId: ws.id });
@@ -637,8 +654,8 @@ export default definePart({
       const binaryBack = await run<ApiRequest>('api.import.curl', { command: binaryCurl.command }, ws.id);
       const fields = reimported.body.type === 'form' ? reimported.body.fields : [];
       check(
-        'files: curl export writes -F name=@file and --data-binary @file, and importing it gives the same body back',
-        uploadCurl.command.includes("-F 'doc=@uploads/hello.txt;type=text/plain'") && uploadCurl.command.includes("-F 'note=hi'") &&
+        'files: curl export writes -F name=@file, --form-string for text and --data-binary @file, and importing it gives the same body back',
+        uploadCurl.command.includes("-F 'doc=@uploads/hello.txt;type=text/plain'") && uploadCurl.command.includes("--form-string 'note=hi'") &&
           fields[0]?.kind === 'file' && fields[0].value === 'uploads/hello.txt' && fields[0].contentType === 'text/plain' && fields[1]?.value === 'hi' &&
           binaryCurl.command.includes("--data-binary '@uploads/hello.txt'") && binaryBack.body.type === 'binary' && binaryBack.method === 'PUT',
         { uploadCurl: uploadCurl.command, binaryCurl: binaryCurl.command, reimported: reimported.body },
