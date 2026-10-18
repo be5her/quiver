@@ -1,6 +1,6 @@
 import { jsonPath } from './json-path';
 import type { ApiResponse, Check, CheckOp, CheckResult, CheckTarget } from './models/api';
-import { scrubSecrets } from './redact';
+import { MIN_SCRUB_LENGTH, REDACTED, scrubSecrets } from './redact';
 
 /** The parts of a response checks read. */
 export type CheckSourceResponse = Pick<ApiResponse, 'status' | 'headers' | 'body' | 'bodyEncoding' | 'size' | 'timings'>;
@@ -249,7 +249,27 @@ export function evaluateChecks(checks: Check[] | undefined, response: CheckSourc
  */
 export function scrubCheckResults(results: CheckResult[], secretValues: string[]): CheckResult[] {
   if (!secretValues.length) return results;
-  return results.map((r) => ({ ...r, actual: r.actual === null ? null : scrubSecrets(r.actual, secretValues), message: scrubSecrets(r.message, secretValues) }));
+  return results.map((r) => ({ ...r, actual: r.actual === null ? null : scrubSecrets(r.actual, secretValues), message: scrubCut(scrubSecrets(r.message, secretValues), secretValues) }));
+}
+
+/**
+ * A message quotes a long value cut short with `…`, so a secret running past the cut is only there in
+ * part and scrubbing it whole misses it: the start of a token before each `…` is masked as well.
+ */
+function scrubCut(message: string, secretValues: string[]): string {
+  const secrets = [...new Set(secretValues)].filter((v) => v.length > MIN_SCRUB_LENGTH && v !== REDACTED).sort((a, b) => b.length - a.length);
+  return message
+    .split('…')
+    .map((part, i, parts) => {
+      if (i === parts.length - 1) return part;
+      for (const secret of secrets) {
+        for (let n = Math.min(secret.length - 1, part.length); n >= MIN_SCRUB_LENGTH; n--) {
+          if (part.endsWith(secret.slice(0, n))) return part.slice(0, part.length - n) + REDACTED;
+        }
+      }
+      return part;
+    })
+    .join('…');
 }
 
 /** Passed and total, for the history and the status line. */
