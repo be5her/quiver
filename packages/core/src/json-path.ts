@@ -83,29 +83,42 @@ function bracket(text: string, path: string): { segment: Segment; length: number
   throw new Error(`"[${inner}]" is not supported in ${path}: use an index, * or a quoted key`);
 }
 
+/** Values a path may select, at most: `$..*` on a big document would otherwise select every node of it. */
+export const MAX_JSON_PATH_RESULTS = 50_000;
+
 function children(value: unknown): unknown[] {
   if (Array.isArray(value)) return value;
   if (value && typeof value === 'object') return Object.values(value);
   return [];
 }
 
-function descendants(value: unknown, out: unknown[] = []): unknown[] {
-  for (const child of children(value)) {
-    out.push(child);
-    descendants(child, out);
-  }
-  return out;
-}
-
 function hasKey(value: unknown, key: string): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value) && Object.prototype.hasOwnProperty.call(value, key);
 }
 
-/** Every value the path selects, in document order. Throws on a path it cannot read. */
+/**
+ * Every value the path selects, in document order, each node once. Throws on a path it cannot
+ * read, or one that selects more than MAX_JSON_PATH_RESULTS values.
+ */
 export function jsonPath(root: unknown, path: string): unknown[] {
   let current: unknown[] = [root];
   for (const segment of parseJsonPath(path)) {
     const next: unknown[] = [];
+    // A `..` walks each object once, however many of the current values contain it: after `$..a` the
+    // current values nest in each other, and walking every one of them again would square the work.
+    const seen = new Set<object>();
+    const deep = (node: unknown, key: string | null, self: boolean): void => {
+      if (node !== null && typeof node === 'object') {
+        if (seen.has(node)) return;
+        seen.add(node);
+      }
+      if (key === null) {
+        if (!self) next.push(node);
+      } else if (hasKey(node, key)) {
+        next.push(node[key]);
+      }
+      for (const child of children(node)) deep(child, key, false);
+    };
     for (const value of current) {
       switch (segment.kind) {
         case 'key':
@@ -121,16 +134,11 @@ export function jsonPath(root: unknown, path: string): unknown[] {
           next.push(...children(value));
           break;
         case 'deep':
-          for (const node of [value, ...descendants(value)]) {
-            if (segment.key === null) {
-              if (node !== value) next.push(node);
-            } else if (hasKey(node, segment.key)) {
-              next.push(node[segment.key]);
-            }
-          }
+          deep(value, segment.key, true);
           break;
       }
     }
+    if (next.length > MAX_JSON_PATH_RESULTS) throw new Error(`${path} selects more than ${MAX_JSON_PATH_RESULTS} values`);
     current = next;
   }
   return current;

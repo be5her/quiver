@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { jsonPath } from './json-path';
+import { MAX_JSON_PATH_RESULTS, jsonPath } from './json-path';
 
 const doc = {
   store: {
@@ -36,6 +36,19 @@ describe('jsonPath', () => {
     expect(jsonPath(doc, '$..price')).toEqual([8, 12, 9, 20]);
     expect(jsonPath(doc, '$..name')).toEqual(['Ann']);
     expect(jsonPath({ a: [1, { b: 2 }] }, '$..*')).toEqual([[1, { b: 2 }], 1, { b: 2 }, 2]);
+  });
+
+  it('walks each node once in a chain of deep segments, quickly, and refuses a selection that is too big', () => {
+    let chain: unknown = { a: 1 };
+    for (let i = 0; i < 300; i++) chain = { a: chain };
+    const started = Date.now();
+    const found = jsonPath(chain, '$..a..a..a..a');
+    expect(Date.now() - started).toBeLessThan(500);
+    // 301 objects carry `a`; each deep segment after the first starts one level further down.
+    expect(found).toHaveLength(298);
+    expect(found[found.length - 1]).toBe(1);
+    expect(jsonPath({ x: { a: { a: 2 } } }, '$..a..a')).toEqual([2]);
+    expect(() => jsonPath({ a: Array.from({ length: MAX_JSON_PATH_RESULTS + 1 }, (_, i) => i) }, '$.a[*]')).toThrow(/more than 50000 values/);
   });
 
   it('accepts a path without the leading $', () => {
