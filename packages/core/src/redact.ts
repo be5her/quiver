@@ -4,7 +4,11 @@ import { findVariableSpans } from './variables';
 /** What a masked credential reads as. The same marker environments use for secrets shown to agents. */
 export const REDACTED = '••••••••';
 
-/** Shorter values are not scrubbed out of a text: they would match half of it. */
+/**
+ * Shorter values are not scrubbed out of a text by value: they would match half of it (`ab` is in
+ * `about`). Such a credential is still masked where it sits by name: in a credential header, parameter
+ * or auth field. The README's Agents section says so.
+ */
 const MIN_SCRUB_LENGTH = 4;
 
 const SECRET_NAME =
@@ -78,16 +82,23 @@ function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/** The value as it sits inside a JSON string: `"` and `\` escaped, control characters as `\n` or `\uXXXX`; some encoders write `/` as `\/` too. */
+function jsonForms(value: string): string[] {
+  const escaped = JSON.stringify(value).slice(1, -1);
+  return [escaped, escaped.replace(/\//g, '\\/')];
+}
+
 /**
- * Masks every occurrence of the given secret values in a text: as they are, URL-encoded and form-encoded.
- * Values of fewer than four characters are left alone.
+ * Masks every occurrence of the given secret values in a text: as they are, URL-encoded, form-encoded
+ * and as a JSON encoder writes them inside a string (a secret holding `"`, `\` or `/` appears escaped in
+ * a JSON body). Values of fewer than four characters are left alone (`MIN_SCRUB_LENGTH`).
  */
 export function scrubSecrets(text: string, values: string[] = []): string {
   if (!text) return text;
   const secrets = [...new Set(values)].filter((v) => v.length >= MIN_SCRUB_LENGTH && v !== REDACTED).sort((a, b) => b.length - a.length);
   let out = text;
   for (const value of secrets) {
-    const forms = new Set([value, encodeURIComponent(value), new URLSearchParams([['', value]]).toString().slice(1)]);
+    const forms = new Set([value, encodeURIComponent(value), new URLSearchParams([['', value]]).toString().slice(1), ...jsonForms(value)]);
     for (const form of forms) out = out.replace(new RegExp(escapeRegExp(form), 'g'), REDACTED);
   }
   return out;

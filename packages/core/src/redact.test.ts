@@ -43,6 +43,16 @@ describe('scrubSecrets', () => {
     expect(scrubSecrets('token token', ['token'])).toBe(`${M} ${M}`);
   });
 
+  it('masks a secret as a JSON encoder writes it inside a string, with / escaped or not', () => {
+    const secret = 'a"b\\c/d';
+    expect(scrubSecrets('{"t":"a\\"b\\\\c/d","u":1}', [secret])).toBe(`{"t":"${M}","u":1}`);
+    expect(scrubSecrets('{"t":"a\\"b\\\\c\\/d"}', [secret])).toBe(`{"t":"${M}"}`);
+    expect(scrubSecrets('{"t":"line\\nbreak\\u0001"}', ['line\nbreak\u0001'])).toBe(`{"t":"${M}"}`);
+    expect(scrubSecrets('plain a"b\\c/d too', [secret])).toBe(`plain ${M} too`);
+    // A secret with nothing to escape has one JSON form, its own.
+    expect(scrubSecrets('{"t":"s3cret"}', ['s3cret'])).toBe(`{"t":"${M}"}`);
+  });
+
   it('takes the longest secret first, skips short ones and leaves the rest of the text', () => {
     expect(scrubSecrets('abcdef abcd', ['abcd', 'abcdef'])).toBe(`${M} ${M}`);
     expect(scrubSecrets('a1 b1 c1', ['1', 'a1', ''])).toBe('a1 b1 c1');
