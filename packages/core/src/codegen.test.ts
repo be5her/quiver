@@ -51,6 +51,15 @@ describe('toCode', () => {
     expect(toCode('curl', json)).toContain("--data-raw '{\"name\":\"Ada \\\"L\\\"\"}'");
   });
 
+  it('writes curl for the shell it is labelled with', () => {
+    expect(CODE_TARGETS.slice(0, 3).map((t) => t.label)).toEqual(['curl (bash)', 'curl (cmd.exe)', 'curl (PowerShell)']);
+    expect(toCode('curl', json)).toMatch(/^curl -X POST 'https:\/\/api\.test\/users\?x=1' \\\n  -H 'Content-Type: application\/json'/);
+    expect(toCode('curl-cmd', json)).toMatch(/^curl -X POST \^"https:\/\/api\.test\/users\?x=1\^" \^\n  -H \^"Content-Type: application\/json\^"/);
+    expect(toCode('curl-cmd', json)).toContain('--data-raw ^"^{^\\^"name^\\^":^\\^"Ada ^\\^\\^\\^"L^\\^\\^\\^"^\\^"^}^"');
+    expect(toCode('curl-powershell', json)).toMatch(/^curl\.exe -X POST 'https:\/\/api\.test\/users\?x=1' `\n  -H 'Content-Type: application\/json'/);
+    expect(toCode('curl-powershell', json)).toContain("--data-raw '{\"name\":\"Ada \\\"L\\\"\"}'");
+  });
+
   it('writes multipart with files as file references, never the multipart Content-Type', () => {
     const outputs = Object.fromEntries(CODE_TARGETS.map(({ value }) => [value, toCode(value, multipart)]));
     for (const [target, code] of Object.entries(outputs)) {

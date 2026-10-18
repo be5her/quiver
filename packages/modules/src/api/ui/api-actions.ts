@@ -316,7 +316,7 @@ export class ApiActions {
       { label: 'Open', select: () => this.openRequestTab(request), testId: 'api-menu-open' },
       { label: 'Rename…', select: () => this.run(this.renameRequest(request)), testId: 'api-menu-rename' },
       { label: 'Duplicate', select: () => this.run(this.duplicateRequest(request)) },
-      { label: 'Copy as curl', select: () => this.run(this.copyCurl(request)) },
+      { label: 'Copy as curl (bash)', select: () => this.run(this.copyCurl(request)) },
       { label: 'Move to…', select: () => this.run(this.moveMenu(at, request.collectionId ?? null, (target) => this.moveRequest(request, target))), testId: 'api-menu-move' },
       'separator',
       { label: 'Delete', danger: true, select: () => this.run(this.deleteRequest(request)) },

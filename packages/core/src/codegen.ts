@@ -1,11 +1,15 @@
 import { toCurl, type CurlFormField } from './curl';
 import type { HttpMethod } from './models/api';
 import { baseName, contentTypeFor } from './response-file';
+import { quotePowerShell, type ShellDialect } from './shell';
 
-export type CodeTarget = 'curl' | 'javascript-fetch' | 'axios' | 'python-requests' | 'go-net-http' | 'csharp-httpclient' | 'powershell';
+export type CodeTarget = 'curl' | 'curl-cmd' | 'curl-powershell' | 'javascript-fetch' | 'axios' | 'python-requests' | 'go-net-http' | 'csharp-httpclient' | 'powershell';
 
+/** The languages and tools a request is rendered as. curl is written for a shell, since each quotes its own way (see `toCurl`). */
 export const CODE_TARGETS: { value: CodeTarget; label: string; language: 'javascript' | 'text' }[] = [
-  { value: 'curl', label: 'curl', language: 'text' },
+  { value: 'curl', label: 'curl (bash)', language: 'text' },
+  { value: 'curl-cmd', label: 'curl (cmd.exe)', language: 'text' },
+  { value: 'curl-powershell', label: 'curl (PowerShell)', language: 'text' },
   { value: 'javascript-fetch', label: 'JavaScript (fetch)', language: 'javascript' },
   { value: 'axios', label: 'JavaScript (axios)', language: 'javascript' },
   { value: 'python-requests', label: 'Python (requests)', language: 'text' },
@@ -27,11 +31,8 @@ export interface CodeInput {
 
 /** A double-quoted string literal that JavaScript, Python, Go and C# all read the same. */
 const q = (s: string) => JSON.stringify(s);
-/**
- * A PowerShell single-quoted literal. PowerShell closes such a literal on the curly quotes U+2018,
- * U+2019, U+201A and U+201B as well as on `'`, so each of them is doubled, which it reads as that character.
- */
-const ps = (s: string) => `'${s.replace(/['‘’‚‛]/g, (quote) => quote + quote)}'`;
+/** A PowerShell single-quoted literal (every quote PowerShell reads as a single quote doubled). */
+const ps = quotePowerShell;
 
 function contentType(headers: [string, string][]): string | null {
   return headers.find(([k]) => k.toLowerCase() === 'content-type')?.[1] ?? null;
@@ -58,7 +59,7 @@ function hasFiles(input: CodeInput): boolean {
   return input.body.kind === 'file' || (input.body.kind === 'form' && input.body.fields.some(fileField));
 }
 
-function curl(input: CodeInput): string {
+function curl(input: CodeInput, shell: ShellDialect): string {
   const body = input.body;
   return toCurl({
     method: input.method,
@@ -69,6 +70,7 @@ function curl(input: CodeInput): string {
     formFields: body.kind === 'form' ? body.fields : undefined,
     bodyFile: body.kind === 'file' ? body.path : undefined,
     options: input.options,
+    shell,
   });
 }
 
@@ -266,7 +268,11 @@ function powershell(input: CodeInput): string {
 export function toCode(target: CodeTarget, input: CodeInput): string {
   switch (target) {
     case 'curl':
-      return curl(input);
+      return curl(input, 'posix');
+    case 'curl-cmd':
+      return curl(input, 'cmd');
+    case 'curl-powershell':
+      return curl(input, 'powershell');
     case 'javascript-fetch':
       return fetchJs(input);
     case 'axios':

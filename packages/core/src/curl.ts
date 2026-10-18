@@ -1,5 +1,5 @@
 import { keyValue, newApiRequest, type ApiRequest, type FormField, type HttpMethod, type KeyValue, type RequestAuth } from './models/api';
-import { SHELL_DIALECT_LABELS, ShellSyntaxError, detectShellDialect, tokenizeShellDialect, type ShellDialect, type ShellToken } from './shell';
+import { SHELL_DIALECT_LABELS, ShellSyntaxError, detectShellDialect, quoteForShell, tokenizeShellDialect, type ShellDialect, type ShellToken } from './shell';
 
 /** Split a shell command line into argv, honoring single/double quotes and backslash-newline. */
 export function tokenizeShell(input: string): string[] {
@@ -492,10 +492,6 @@ export function defaultRequestName(req: Pick<ApiRequest, 'method' | 'url'>): str
   }
 }
 
-function shellQuote(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`;
-}
-
 /** A multipart field for curl: text as [name, value], or a file. */
 export type CurlFormField = [string, string] | { name: string; file: string; type?: string; fileName?: string };
 
@@ -510,29 +506,47 @@ export interface CurlInput {
   bodyFile?: string;
   /** How curl should send it: `-L` to follow redirects, `-k` for invalid certificates, `--max-time` in seconds. */
   options?: { followRedirects?: boolean; insecure?: boolean; timeoutMs?: number };
+  /** The shell the command is written for (bash and zsh unless given); see `toCurl`. */
+  shell?: ShellDialect;
 }
 
-/** Render a resolved request as a curl command. Uses single quotes, works in bash and zsh. */
+const CURL_SHELLS: Record<ShellDialect, { program: string; continuation: string }> = {
+  posix: { program: 'curl', continuation: ' \\\n  ' },
+  cmd: { program: 'curl', continuation: ' ^\n  ' },
+  // Plain curl is an alias of Invoke-WebRequest in Windows PowerShell.
+  powershell: { program: 'curl.exe', continuation: ' `\n  ' },
+};
+
+/**
+ * Render a resolved request as a curl command for a shell, quoted as that shell reads (`quoteForShell`):
+ * bash and zsh (single quotes, `\` continuations), cmd.exe (`^"…^"` arguments with cmd.exe's own
+ * characters caret-escaped, as Chrome copies them, and `^` continuations) or PowerShell (`curl.exe`,
+ * `'…'` literals and backtick continuations; PowerShell 7.3 or later, which passes quotes on to
+ * curl.exe as they are). Each is what `parseCurl` reads back.
+ */
 export function toCurl(input: CurlInput): string {
-  const lines: string[] = [`curl -X ${input.method} ${shellQuote(input.url)}`];
+  const shell = input.shell ?? 'posix';
+  const { program, continuation } = CURL_SHELLS[shell];
+  const quote = (value: string) => quoteForShell(shell, value);
+  const lines: string[] = [`${program} -X ${input.method} ${quote(input.url)}`];
   const flags = [input.options?.followRedirects ? '-L' : '', input.options?.insecure ? '-k' : '', input.options?.timeoutMs ? `--max-time ${input.options.timeoutMs / 1000}` : ''].filter(Boolean);
   if (flags.length) lines.push(flags.join(' '));
-  for (const [k, v] of input.headers) lines.push(`-H ${shellQuote(`${k}: ${v}`)}`);
+  for (const [k, v] of input.headers) lines.push(`-H ${quote(`${k}: ${v}`)}`);
   if (input.bodyType === 'form' && input.formFields) {
     for (const field of input.formFields) {
       if (Array.isArray(field)) {
         // --form-string sends the value as it is; with -F, one starting with @ or < would read a file.
-        lines.push(`--form-string ${shellQuote(`${field[0]}=${field[1]}`)}`);
+        lines.push(`--form-string ${quote(`${field[0]}=${field[1]}`)}`);
       } else {
         const file = /[;,"]/.test(field.file) ? `"${field.file.replace(/"/g, '\\"')}"` : field.file;
         const extras = [field.type ? `;type=${field.type}` : '', field.fileName ? `;filename=${field.fileName}` : ''].join('');
-        lines.push(`-F ${shellQuote(`${field.name}=@${file}${extras}`)}`);
+        lines.push(`-F ${quote(`${field.name}=@${file}${extras}`)}`);
       }
     }
   } else if (input.bodyFile) {
-    lines.push(`--data-binary ${shellQuote(`@${input.bodyFile}`)}`);
+    lines.push(`--data-binary ${quote(`@${input.bodyFile}`)}`);
   } else if (input.body !== null && input.body !== '') {
-    lines.push(`--data-raw ${shellQuote(input.body)}`);
+    lines.push(`--data-raw ${quote(input.body)}`);
   }
-  return lines.join(' \\\n  ');
+  return lines.join(continuation);
 }

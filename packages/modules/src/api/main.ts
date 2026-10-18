@@ -1647,7 +1647,7 @@ async function exportInput(ctx: CommandContext, input: z.infer<typeof ExportInpu
 const exportCurl = defineCommand({
   id: 'api.export.curl',
   title: 'Copy as curl',
-  description: 'Renders a request as a curl command with variables resolved. For agents, credentials and secret variables are masked in it.',
+  description: 'Renders a request as a curl command for bash or zsh with variables resolved (api.export.code has curl for cmd.exe and PowerShell). For agents, credentials and secret variables are masked in it.',
   scope: 'workspace',
   input: ExportInput,
   handler: async (input, ctx) => ({ command: toCode('curl', await exportInput(ctx, input)) }),

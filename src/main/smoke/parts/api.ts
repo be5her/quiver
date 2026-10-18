@@ -134,6 +134,21 @@ export default definePart({
           agentCodes.every((r) => r.ok && !(r.result as { code: string }).code.includes('s3cret') && (r.result as { code: string }).code.includes(`Bearer ${REDACTED}`)),
         { fetch: codes['javascript-fetch'].slice(0, 160), agent: agentCodes.map((r) => (r.ok ? 'ok' : r.error.code)) },
       );
+      // curl for cmd.exe and PowerShell is quoted as those shells read, and Import from curl reads each back as the same request as the bash one.
+      const shellCodes: Record<string, string> = { posix: codes.curl };
+      for (const target of ['curl-cmd', 'curl-powershell'] as const) shellCodes[target] = (await run<{ code: string }>('api.export.code', { requestId: saved.id, target }, ws.id)).code;
+      const reimported: ApiRequest[] = [];
+      for (const command of Object.values(shellCodes)) reimported.push(await run<ApiRequest>('api.import.curl', { command }, ws.id));
+      const essence = (r: ApiRequest) =>
+        JSON.stringify({ method: r.method, url: r.url, params: r.params.map((p) => [p.key, p.value]), headers: r.headers.filter((h) => h.key.toLowerCase() !== 'x-test').map((h) => [h.key, h.value]), auth: r.auth, body: r.body });
+      for (const r of reimported) await run('api.request.delete', { id: r.id }, ws.id);
+      check(
+        'api.export.code: curl for cmd.exe (^"…^" arguments, ^ continuations) and for PowerShell (curl.exe, \'…\', backtick continuations) import back as the same request as the bash one',
+        shellCodes['curl-cmd'].startsWith(`curl -X POST ^"${url}^" ^\n  `) && !shellCodes['curl-cmd'].includes("'") && shellCodes['curl-cmd'].includes('--data-raw ^"^{^\\^"hello^\\^":^\\^"world^\\^"^}^"') &&
+          shellCodes['curl-powershell'].startsWith(`curl.exe -X POST '${url}' \`\n  `) && shellCodes['curl-powershell'].includes(`--data-raw '{"hello":"world"}'`) &&
+          reimported.length === 3 && reimported.every((r) => essence(r) === essence(reimported[0])) && reimported[0].url === `http://127.0.0.1:${echoPort}/things` && reimported[0].body.type === 'json',
+        { cmd: shellCodes['curl-cmd'].slice(0, 160), powershell: shellCodes['curl-powershell'].slice(0, 160), essences: reimported.map(essence) },
+      );
       // A multipart text field holds a secret as readily as a header: agents get it masked by name and by value.
       const formBody = { type: 'form' as const, fields: [{ id: 'f1', key: 'note', value: 'hi', enabled: true }, { id: 'f2', key: 'client_secret', value: '{{token}}', enabled: true }, { id: 'f3', key: 'password', value: 'typed-pw-1', enabled: true }] };
       const formUi = (await run<{ code: string }>('api.export.code', { request: { ...saved, body: formBody }, target: 'curl' }, ws.id)).code;
@@ -1616,7 +1631,7 @@ export default definePart({
           const afterMenuMove = await collectionOf();
           check(
             'ui: the request menu offers the row actions, and Move to… lists the top level (here, disabled) and the collections',
-            ['Open', 'Rename…', 'Duplicate', 'Copy as curl', 'Move to…', 'Delete'].every((l) => requestItems.includes(l)) && moveItems.includes('(x) Top level') && moveItems.includes('drop target') && afterMenuMove === target.id,
+            ['Open', 'Rename…', 'Duplicate', 'Copy as curl (bash)', 'Move to…', 'Delete'].every((l) => requestItems.includes(l)) && moveItems.includes('(x) Top level') && moveItems.includes('drop target') && afterMenuMove === target.id,
             { requestItems, moveItems, afterMenuMove },
           );
           await openMenu(rowSel);
@@ -1866,7 +1881,7 @@ export default definePart({
           const backToResponse = await js(`Boolean(${visible('[data-testid=api-response-status]')}) || document.body.innerText.includes('No response yet')`);
           check(
             'ui: the Code menu offers every language and Show code, the code view shows the chosen one and remembers it, and closing it brings the response back',
-            menu.includes('Copy as curl') && menu.includes('Copy as Python (requests)') && menu.includes('Show code') && String(snippet).includes('requests.request(') && remembered.value === 'python-requests' && backToResponse === true,
+            menu.includes('Copy as curl (bash)') && menu.includes('Copy as curl (cmd.exe)') && menu.includes('Copy as curl (PowerShell)') && menu.includes('Copy as Python (requests)') && menu.includes('Show code') && String(snippet).includes('requests.request(') && remembered.value === 'python-requests' && backToResponse === true,
             { menu, snippet: String(snippet).slice(0, 80), remembered: remembered.value, backToResponse },
           );
         }

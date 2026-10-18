@@ -453,3 +453,66 @@ export function tokenizePowerShell(source: string): ShellToken[] {
   words.end();
   return words.tokens;
 }
+
+// ---------- Quoting, the other way round ----------
+
+/** An argument as bash and zsh read it: single-quoted, a quote inside written as '\''. */
+export function quotePosix(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * An argument as cmd.exe passes it to a program, written the way Chrome's "Copy as cURL (cmd)" does:
+ * wrapped in ^"…^" so that cmd.exe itself stays outside a quote, with every character it acts on
+ * (& | < > ^ " % and anything else but letters, digits, blanks and a few safe marks) escaped with a
+ * caret, and a `%` kept apart from a following name so no %VAR% is expanded; inside that, the MSVC
+ * rules the program reads the line with: a quote as \" and the backslashes in front of one (or at the
+ * end) doubled, other backslashes as they are. A line break is written as a caret, the line break and
+ * an empty line, which cmd.exe reads as a line break. `tokenizeCmd` reads all of this back.
+ */
+export function quoteCmd(value: string): string {
+  let msvc = '';
+  let i = 0;
+  while (i < value.length) {
+    if (value[i] === '\\') {
+      let k = i;
+      while (value[k] === '\\') k++;
+      const run = k - i;
+      if (k >= value.length) msvc += '\\'.repeat(run * 2);
+      else if (value[k] === '"') {
+        msvc += '\\'.repeat(run * 2 + 1) + '"';
+        k++;
+      } else msvc += '\\'.repeat(run);
+      i = k;
+      continue;
+    }
+    msvc += value[i] === '"' ? '\\"' : value[i];
+    i++;
+  }
+  const escaped = msvc
+    .replace(/[^a-zA-Z0-9\s_\-:=+~'\/.,?;()*`]/g, '^$&')
+    .replace(/%(?=[a-zA-Z0-9_])/g, '%^')
+    .replace(/\r?\n/g, '^\n\n');
+  return `^"${escaped}^"`;
+}
+
+/**
+ * An argument as PowerShell reads it: a single-quoted literal, in which nothing is expanded and only
+ * a quote needs doubling. PowerShell closes such a literal on the curly quotes U+2018, U+2019, U+201A
+ * and U+201B as well as on `'`, so each of them is doubled, which it reads as that character.
+ */
+export function quotePowerShell(value: string): string {
+  return `'${value.replace(/['‘’‚‛]/g, (quote) => quote + quote)}'`;
+}
+
+/** `value` quoted so that the shell hands the program exactly that: the inverse of `tokenizeShellDialect`. */
+export function quoteForShell(dialect: ShellDialect, value: string): string {
+  switch (dialect) {
+    case 'posix':
+      return quotePosix(value);
+    case 'cmd':
+      return quoteCmd(value);
+    case 'powershell':
+      return quotePowerShell(value);
+  }
+}

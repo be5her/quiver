@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { parseCurl, toCurl, tokenizeShell } from './curl';
+import { parseCurl, toCurl, tokenizeShell, type CurlInput } from './curl';
+import { detectShellDialect } from './shell';
 import type { ApiRequest } from './models/api';
 
 describe('tokenizeShell', () => {
@@ -301,5 +302,20 @@ describe('toCurl', () => {
   it('quotes safely', () => {
     const out = toCurl({ method: 'POST', url: "https://x.test/it's", headers: [['A', 'b']], body: '{"q":1}' });
     expect(out).toBe(`curl -X POST 'https://x.test/it'\\''s' \\\n  -H 'A: b' \\\n  --data-raw '{"q":1}'`);
+  });
+
+  it('writes the command for cmd.exe and PowerShell as those shells read it, and parseCurl reads each back', () => {
+    const input: CurlInput = { method: 'POST', url: 'https://x.test/a?b=1&c=2', headers: [['X-Note', 'it\'s "quoted" 100%']], body: '{"a":"it\'s"}', options: { followRedirects: true } };
+    const cmd = toCurl({ ...input, shell: 'cmd' });
+    expect(cmd).toBe(['curl -X POST ^"https://x.test/a?b=1^&c=2^"', '-L', '-H ^"X-Note: it\'s ^\\^"quoted^\\^" 100^%^"', '--data-raw ^"^{^\\^"a^\\^":^\\^"it\'s^\\^"^}^"'].join(' ^\n  '));
+    const powershell = toCurl({ ...input, shell: 'powershell' });
+    expect(powershell).toBe(["curl.exe -X POST 'https://x.test/a?b=1&c=2'", '-L', "-H 'X-Note: it''s \"quoted\" 100%'", "--data-raw '{\"a\":\"it''s\"}'"].join(' `\n  '));
+    for (const command of [toCurl(input), cmd, powershell]) {
+      const req = parseCurl(command);
+      expect(shape(req), command).toEqual({ method: 'POST', url: 'https://x.test/a', params: [['b', '1'], ['c', '2']], headers: [['X-Note', 'it\'s "quoted" 100%']], auth: { type: 'none' }, body: { type: 'json', content: '{"a":"it\'s"}' } });
+    }
+    // One for another shell is not mistaken for bash.
+    expect(detectShellDialect(cmd)).toBe('cmd');
+    expect(detectShellDialect(powershell)).toBe('powershell');
   });
 });
