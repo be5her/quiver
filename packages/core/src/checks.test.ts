@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { checkSummary, evaluateCheck, evaluateChecks, scrubCheckResults, type CheckSourceResponse } from './checks';
+import { MATCH_TEXT_LIMIT, checkSummary, evaluateCheck, evaluateChecks, hasNestedRepetition, scrubCheckResults, type CheckSourceResponse } from './checks';
 import type { Check } from './models/api';
 import { REDACTED } from './redact';
 
@@ -56,6 +56,22 @@ describe('evaluateCheck', () => {
     expect(run({ on: 'body', op: 'neq', expected: '' }).ok).toBe(true);
     expect(evaluateCheck(check({ on: 'jsonPath', path: '$', op: 'exists' }), { ...response, body: 'plain' }).message).toMatch(/not JSON/);
     expect(evaluateCheck(check({ on: 'body', op: 'contains', expected: 'x' }), { ...response, bodyEncoding: 'base64' }).message).toBe('The body is binary');
+  });
+
+  it('refuses a pattern that repeats a repeating group, and tests only the start of a long body', () => {
+    for (const pattern of ['^(a+)+$', '(.*)*x', '((\\d+)-)*', '(a{1,3})+', '(a|b+)*', '(a+){2,}']) expect(hasNestedRepetition(pattern), pattern).toBe(true);
+    for (const pattern of ['^a+$', '(a+)', '(a+){3}', '(ab)+', '[a+]+', '\\(a+\\)+', '(?:a|b)+c*', '(a+)?', '(a)+(b)*']) expect(hasNestedRepetition(pattern), pattern).toBe(false);
+    const started = Date.now();
+    const refused = run({ on: 'body', op: 'matches', expected: '^(a+)+$' });
+    expect(refused.ok).toBe(false);
+    expect(refused.message).toMatch(/repeats inside/);
+    expect(Date.now() - started).toBeLessThan(500);
+    const long = { ...response, body: `${'x'.repeat(MATCH_TEXT_LIMIT)}needle` };
+    expect(evaluateCheck(check({ on: 'body', op: 'matches', expected: 'x{3}' }), long).ok).toBe(true);
+    const miss = evaluateCheck(check({ on: 'body', op: 'matches', expected: 'needle' }), long);
+    expect(miss.ok).toBe(false);
+    expect(miss.message).toMatch(/in its first 64 KB/);
+    expect(evaluateCheck(check({ on: 'body', op: 'matches', expected: 'needle' }), { ...response, body: 'a needle' }).ok).toBe(true);
   });
 });
 

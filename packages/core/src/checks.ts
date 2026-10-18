@@ -5,6 +5,62 @@ import { scrubSecrets } from './redact';
 /** The parts of a response checks read. */
 export type CheckSourceResponse = Pick<ApiResponse, 'status' | 'headers' | 'body' | 'bodyEncoding' | 'size' | 'timings'>;
 
+/** How much of a text a regex check is tested on: a pattern is applied to the first 64 KB of a body. */
+export const MATCH_TEXT_LIMIT = 64 * 1024;
+
+/** The index of the `]` closing a character class that opens at `from`, or the end of the pattern. */
+function classEnd(pattern: string, from: number): number {
+  for (let i = from + 1; i < pattern.length; i++) {
+    if (pattern[i] === '\\') i++;
+    else if (pattern[i] === ']') return i;
+  }
+  return pattern.length;
+}
+
+/**
+ * Whether a pattern repeats a group that repeats inside (`(a+)+`, `(.*)*`, `((\d+)-)*`, `(a{1,3})+`):
+ * on text that does not match, such a pattern tries every way of splitting it and runs for ages, on
+ * the main process. A fixed count (`(a+){3}`) is left alone, as are classes and escapes.
+ */
+export function hasNestedRepetition(pattern: string): boolean {
+  /** For each open group, whether something inside it repeats. */
+  const open: boolean[] = [];
+  let closedHadRepeat = false;
+  let afterGroup = false;
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    if (c === '\\') {
+      i++;
+      afterGroup = false;
+      continue;
+    }
+    if (c === '[') {
+      i = classEnd(pattern, i);
+      afterGroup = false;
+      continue;
+    }
+    if (c === '(') {
+      open.push(false);
+      afterGroup = false;
+      continue;
+    }
+    if (c === ')') {
+      closedHadRepeat = open.pop() ?? false;
+      afterGroup = true;
+      continue;
+    }
+    const brace = c === '{' ? /^\{(\d+)(?:,(\d*))?\}/.exec(pattern.slice(i)) : null;
+    const repeats = c === '+' || c === '*' || (brace !== null && brace[2] !== undefined && brace[1] !== brace[2]);
+    if (repeats) {
+      if (afterGroup && closedHadRepeat) return true;
+      for (let d = 0; d < open.length; d++) open[d] = true;
+    }
+    if (brace) i += brace[0].length - 1;
+    afterGroup = false;
+  }
+  return false;
+}
+
 export const CHECK_TARGETS: { value: CheckTarget; label: string; path?: string }[] = [
   { value: 'status', label: 'Status' },
   { value: 'jsonPath', label: 'JSON path', path: '$.data.id' },
@@ -164,13 +220,17 @@ export function evaluateCheck(check: Check, response: CheckSourceResponse): Chec
     case 'contains':
       return result(Array.isArray(actual) ? actual.some((item) => equals(item, expected)) : asText(actual).includes(expected));
     case 'matches': {
+      if (hasNestedRepetition(expected)) return result(false, `/${expected}/ is not a regular expression Quiver runs: a repeated group that repeats inside, like (a+)+, can take forever on text that does not match`);
       let pattern: RegExp;
       try {
         pattern = new RegExp(expected);
       } catch (err) {
         return result(false, `/${expected}/ is not a regular expression: ${(err as Error).message}`);
       }
-      return result(pattern.test(asText(actual)));
+      // A body can be megabytes: the pattern is tried on its start only, and a miss says so.
+      const text = asText(actual);
+      const ok = pattern.test(text.length > MATCH_TEXT_LIMIT ? text.slice(0, MATCH_TEXT_LIMIT) : text);
+      return result(ok, ok || text.length <= MATCH_TEXT_LIMIT ? undefined : `Expected ${want} in its first ${MATCH_TEXT_LIMIT / 1024} KB, got ${shown(check, actual)}`);
     }
     case 'isType':
       return result(typeOf(actual) === expected.trim().toLowerCase(), `Expected ${want}, got ${typeOf(actual)}`);

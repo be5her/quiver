@@ -1014,6 +1014,8 @@ export default definePart({
             check6('time', '', 'lt', '10000'),
             check6('size', '', 'gt', '0'),
             check6('jsonPath', '$.url', 'eq', '/nope'),
+            // A pattern that would backtrack for ever on a body that does not match is refused rather than run.
+            check6('body', '', 'matches', '^(a+)+$'),
             { ...check6('status', '', 'eq', '500'), id: 'off', enabled: false },
           ] as ApiRequest['checks'],
         },
@@ -1023,14 +1025,15 @@ export default definePart({
       const agentChecked = await host.invoke('api.request.send', { requestId: checked.id }, { caller: 'mcp', workspaceId: ws.id });
       const results = checkedResponse.checks ?? [];
       check(
-        'checks: each enabled check runs on the response with what it read, the failing one says why, and the history counts them',
-        results.length === 6 &&
+        'checks: each enabled check runs on the response with what it read, the failing one says why, a runaway regex is refused, and the history counts them',
+        results.length === 7 &&
           results.filter((r) => r.ok).length === 5 &&
           results.find((r) => r.id.startsWith('jsonPath-eq-$.url'))?.message === 'Expected $.url to equal /nope, got "/checks?x=1"' &&
+          results.find((r) => r.id === 'body-matches-')?.message.includes('repeats inside') === true &&
           checkedEntry?.checks?.passed === 5 &&
-          checkedEntry.checks.total === 6 &&
+          checkedEntry.checks.total === 7 &&
           agentChecked.ok &&
-          ((agentChecked.result as ApiResponse).checks ?? []).length === 6,
+          ((agentChecked.result as ApiResponse).checks ?? []).length === 7,
         { results: results.map((r) => `${r.ok ? 'ok' : 'FAIL'} ${r.message}`), entry: checkedEntry?.checks },
       );
       await run('api.request.delete', { id: checked.id }, ws.id);
