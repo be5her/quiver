@@ -1164,6 +1164,25 @@ export default definePart({
         stopped.stopped === true && afterStop.done && afterStop.error === 'Stopped' && afterStop.items[0]?.data === 'hello stream' && agentRead.ok && (agentRead.result as StreamRead).items.length === 1,
         { stopped, error: afterStop.error, items: afterStop.items.map((i) => i.data) },
       );
+
+      // Limits: a body whose line never ends (256 KB chunks of x) closes the stream with an error, and past 20 open streams the oldest is closed.
+      const endlessLine = await run<StreamResponse>('api.request.send', { request: inline(`http://127.0.0.1:${echoPort}/big?chunks=6&ms=5`), stream: true }, ws.id);
+      let tooLong = null as StreamRead | null;
+      await until(async () => (tooLong = await run<StreamRead>('api.request.stream.read', { streamId: endlessLine.streamId! }, ws.id)).done, 5000);
+      const opened: string[] = [];
+      for (let i = 0; i < 21; i++) {
+        const one = await run<StreamResponse>('api.request.send', { request: inline(`http://127.0.0.1:${ssePort}/echo`, { method: 'POST', body: { type: 'text', content: `open ${i}` } }) }, ws.id);
+        opened.push(one.streamId!);
+      }
+      let oldest = null as StreamRead | null;
+      await until(async () => (oldest = await run<StreamRead>('api.request.stream.read', { streamId: opened[0] }, ws.id)).done, 5000);
+      const newest = await run<StreamRead>('api.request.stream.read', { streamId: opened[20] }, ws.id);
+      for (const id of opened.slice(1)) await run('api.request.stream.stop', { streamId: id }, ws.id);
+      check(
+        'streams: a line that never ends closes the stream with an error, and past 20 open streams the oldest is closed',
+        tooLong?.done === true && /more than 1 MB/.test(tooLong.error ?? '') && tooLong.items.length === 0 && oldest?.done === true && /more than 20 streams/.test(oldest.error ?? '') && !newest.done,
+        { tooLong: tooLong?.error, oldest: oldest?.error, newest: newest.done },
+      );
     }
 
     // Response history: small responses kept with their entry, Set-Cookie values masked in the file, the setting turning it off.

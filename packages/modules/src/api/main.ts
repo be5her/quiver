@@ -46,6 +46,7 @@ import {
   pruneHistory,
   createLineSplitter,
   createSseParser,
+  MAX_STREAM_LINE_BYTES,
   type StreamItem,
   type StreamKind,
   type StreamRead,
@@ -1011,6 +1012,10 @@ const historyClear = defineCommand({
 
 /** Items kept per stream; older ones are dropped, and a read says how many it missed. */
 const STREAM_BUFFER = 5000;
+/** Bytes of items kept per stream, whatever their count: a stream of long lines drops older ones sooner. */
+const STREAM_KEPT_BYTES = 16 * 1024 * 1024;
+/** Streams open at once per workspace; past it the oldest is closed. */
+const MAX_OPEN_STREAMS = 20;
 /** Finished streams kept per workspace for reading; older ones are forgotten. */
 const KEPT_STREAMS = 10;
 /** At most one `api.changed` per stream (or download) this often. */
@@ -1027,6 +1032,10 @@ interface LiveStream {
   done: boolean;
   error: string | null;
   bytes: number;
+  /** The size of the items kept, for STREAM_KEPT_BYTES. */
+  keptBytes: number;
+  /** Why Quiver closed it, when it did (too many open at once); the error the read then reports. */
+  stopReason: string | null;
   controller: AbortController;
 }
 
@@ -1057,19 +1066,28 @@ function throttled(fn: () => void): { call(): void; flush(): void } {
 
 /** Read a streamed body into items as it arrives, announcing new ones; returns the stream's id. */
 function startStream(ctx: CommandContext, workspaceId: string, kind: StreamKind, chunks: AsyncGenerator<string>, controller: AbortController): string {
-  const live: LiveStream = { id: newId(), workspaceId, kind, started: Date.now(), items: [], nextSeq: 0, dropped: 0, done: false, error: null, bytes: 0, controller };
+  // Too many open at once (an agent that never stops them): the oldest close, and their last read says why.
+  const open = [...streams.values()].filter((s) => s.workspaceId === workspaceId && !s.done);
+  for (const old of open.slice(0, Math.max(0, open.length - (MAX_OPEN_STREAMS - 1)))) {
+    old.stopReason = `Stopped: more than ${MAX_OPEN_STREAMS} streams were open at once; stop the ones you are done with`;
+    old.controller.abort();
+  }
+  const live: LiveStream = { id: newId(), workspaceId, kind, started: Date.now(), items: [], nextSeq: 0, dropped: 0, done: false, error: null, bytes: 0, keptBytes: 0, stopReason: null, controller };
   streams.set(live.id, live);
   const announce = throttled(() => ctx.host.emit('api.changed', { workspaceId, reason: 'stream', streamId: live.id }));
   const add = (items: Omit<StreamItem, 'seq' | 'at'>[]) => {
     if (!items.length) return;
     const at = Date.now() - live.started;
-    for (const item of items) live.items.push({ seq: live.nextSeq++, at, ...item });
-    const over = live.items.length - STREAM_BUFFER;
-    if (over > 0) live.items.splice(0, over);
+    for (const item of items) {
+      live.items.push({ seq: live.nextSeq++, at, ...item });
+      live.keptBytes += item.data.length;
+    }
+    while (live.items.length > STREAM_BUFFER || live.keptBytes > STREAM_KEPT_BYTES) live.keptBytes -= live.items.shift()!.data.length;
     announce.call();
   };
-  const sse = kind === 'sse' ? createSseParser() : null;
-  const lines = kind === 'lines' ? createLineSplitter() : null;
+  // A line or event that never ends is not one to keep in memory: the parser throws, and the stream closes with that error.
+  const sse = kind === 'sse' ? createSseParser({ maxEventBytes: MAX_STREAM_LINE_BYTES }) : null;
+  const lines = kind === 'lines' ? createLineSplitter(MAX_STREAM_LINE_BYTES) : null;
   void (async () => {
     try {
       for await (const chunk of chunks) {
@@ -1079,7 +1097,7 @@ function startStream(ctx: CommandContext, workspaceId: string, kind: StreamKind,
       }
       if (lines) add(lines.end().map((data) => ({ data })));
     } catch (err) {
-      live.error = controller.signal.aborted ? 'Stopped' : err instanceof Error ? err.message : String(err);
+      live.error = controller.signal.aborted ? (live.stopReason ?? 'Stopped') : err instanceof Error ? err.message : String(err);
     } finally {
       live.done = true;
       announce.flush();
@@ -1100,7 +1118,7 @@ const streamRead = defineCommand({
   id: 'api.request.stream.read',
   title: 'Read a streamed response',
   description:
-    'The items of a streamed response (an event stream, or a send with `stream`) after `since` (the `next` of the previous read, 0 for the start): events with their name, id and data, or lines. Also whether the stream ended (`done`, with `error` when it did not end by the server closing it) and how many items fell out of its 5000-item buffer before they were read.',
+    'The items of a streamed response (an event stream, or a send with `stream`) after `since` (the `next` of the previous read, 0 for the start): events with their name, id and data, or lines. Also whether the stream ended (`done`, with `error` when it did not end by the server closing it: a line or event over 1 MB, or more than 20 streams open at once, close it) and how many items fell out of its buffer (5000 items or 16 MB) before they were read. Stop streams you are done with (api.request.stream.stop).',
   scope: 'workspace',
   input: z.object({ streamId: z.string(), since: z.number().int().min(0).optional(), limit: z.number().int().min(1).max(STREAM_BUFFER).optional() }),
   handler: async ({ streamId, since, limit }, ctx): Promise<StreamRead> => {
