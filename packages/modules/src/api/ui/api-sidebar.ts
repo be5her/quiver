@@ -1,6 +1,6 @@
 import { Component, DestroyRef, computed, effect, inject, signal } from '@angular/core';
 import { historyStatusLabel, matchesHistory, matchesRequest, shortRelativeTime, type ApiCollection, type ApiRequest, type ApiRun, type Environment, type HistoryEntry } from '@quiver/core';
-import { ContextMenu, Icon, IconButton, METHOD_COLORS, SectionHeader, Toasts, TreeState, invokeResource, statusColor } from '@quiver/ui';
+import { AppState, ContextMenu, Icon, IconButton, METHOD_COLORS, SectionHeader, Toasts, TreeState, injectHostEvent, invokeResource, statusColor } from '@quiver/ui';
 import { Braces, Check, ChevronDown, ChevronRight, Cookie, FolderPlus, Import, Plus, Search, ShieldCheck, Trash2, X } from 'lucide';
 import { ApiActions } from './api-actions';
 import { ApiCollectionTree } from './api-collection-tree';
@@ -36,7 +36,9 @@ export class ApiSidebar {
   protected readonly statusLabel = historyStatusLabel;
   protected readonly requests = invokeResource<ApiRequest[]>('api.request.list', () => ({}), { refreshOn: ['requests'] });
   protected readonly collections = invokeResource<ApiCollection[]>('api.collection.list', () => ({}), { refreshOn: ['collections'] });
-  private readonly runs = invokeResource<ApiRun[]>('api.run.list', () => ({ limit: 100 }), { refreshOn: ['runs'], refreshOnEvents: ['api.changed'] });
+  private readonly app = inject(AppState);
+  /** Reloaded on the run events of this workspace only (see the constructor): `api.changed` also fires for every stream item and download step. */
+  private readonly runs = invokeResource<ApiRun[]>('api.run.list', () => ({ limit: 100 }), { refreshOn: ['runs'] });
   /** Each collection's latest run, running or finished. */
   protected readonly lastRuns = computed(() => {
     const latest = new Map<string, ApiRun>();
@@ -68,6 +70,9 @@ export class ApiSidebar {
   constructor() {
     const timer = setInterval(() => this.now.set(Date.now()), 30_000);
     inject(DestroyRef).onDestroy(() => clearInterval(timer));
+    injectHostEvent('api.changed', (p) => {
+      if (p.reason === 'run' && p.workspaceId === this.app.activeWorkspaceId()) this.runs.reload();
+    });
     // The drag needs the tree's contents to decide where an item may go.
     effect(() => {
       this.drag.collections.set(this.collections.value() ?? []);
