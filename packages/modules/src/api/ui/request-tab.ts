@@ -1,4 +1,4 @@
-import { Component, computed, effect, inject, input, linkedSignal, resource, signal, untracked } from '@angular/core';
+import { Component, DestroyRef, computed, effect, inject, input, linkedSignal, resource, signal, untracked } from '@angular/core';
 import { FormField, form } from '@angular/forms/signals';
 import {
   CODE_TARGETS,
@@ -178,6 +178,30 @@ export class RequestTab implements TabComponent {
       const tab = this.tab();
       if (tab.dirty !== dirty) untracked(() => this.tabs.updateTab(this.scope(), tab.id, { dirty }));
     });
+    // A streamed response's connection ends with the tab; nothing else could close it afterwards.
+    inject(DestroyRef).onDestroy(() => this.stopStream());
+  }
+
+  /** Close the connection of the last response when it streams; the host keeps what arrived for a while. */
+  private stopStream(): void {
+    const streamId = this.response()?.streamId;
+    if (streamId) void this.host.invoke('api.request.stream.stop', { streamId }).catch(() => undefined);
+  }
+
+  /**
+   * The request to save: the edits here over the request as it is stored now, in the place it is
+   * now. A move or reorder made meanwhile (the sidebar, an agent) must not be undone by the older
+   * copy this tab holds while it has unsaved edits.
+   */
+  private async placed(): Promise<ApiRequest> {
+    const request = this.request();
+    if (this.draft()) return request;
+    const current = await this.host.invoke<ApiRequest>('api.request.get', { id: request.id }).catch(() => null);
+    if (!current) return request;
+    const placed: ApiRequest = { ...request, collectionId: current.collectionId };
+    if (current.order === undefined) delete placed.order;
+    else placed.order = current.order;
+    return placed;
   }
 
   protected shortcut(event: KeyboardEvent): void {
@@ -196,7 +220,7 @@ export class RequestTab implements TabComponent {
 
   protected async save(): Promise<void> {
     try {
-      const stored = await this.host.invoke<ApiRequest>('api.request.save', { request: this.request() });
+      const stored = await this.host.invoke<ApiRequest>('api.request.save', { request: await this.placed() });
       this.stored.set(stored);
       this.request.set(stored);
       this.tabs.updateTab(this.scope(), this.tab().id, { title: stored.name, data: { id: stored.id } });
@@ -208,6 +232,8 @@ export class RequestTab implements TabComponent {
 
   protected async send(): Promise<void> {
     if (this.sending()) return;
+    // The last response's stream, when it is still open, ends here: the next response takes its place.
+    this.stopStream();
     this.sending.set(true);
     this.sendError.set(null);
     const sendId = newId();

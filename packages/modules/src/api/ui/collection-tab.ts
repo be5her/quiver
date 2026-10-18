@@ -116,9 +116,12 @@ export class CollectionTab implements TabComponent {
     });
   }
 
+  /** Saves the edits over the collection where it is now: a move made meanwhile is not undone by the older copy this tab holds. */
   protected async save(): Promise<void> {
     try {
-      const stored = await this.host.invoke<ApiCollection>('api.collection.save', { collection: this.collection() });
+      const current = await this.host.invoke<ApiCollection>('api.collection.get', { id: this.id() }).catch(() => null);
+      const collection = current ? { ...this.collection(), parentId: current.parentId } : this.collection();
+      const stored = await this.host.invoke<ApiCollection>('api.collection.save', { collection });
       this.stored.set(stored);
       this.collection.set(stored);
       this.tabs.updateTab(this.scope(), this.tab().id, { title: stored.name });

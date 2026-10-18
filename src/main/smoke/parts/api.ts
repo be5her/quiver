@@ -1452,6 +1452,32 @@ export default definePart({
             typeof intoLabel === 'string' && intoLabel.includes('drag me') && intoLabel.includes('drop target') && afterInto === target.id && typeof outLabel === 'string' && outLabel.includes('top level') && afterOut === null,
             { intoLabel, afterInto, outLabel, afterOut },
           );
+          // A drag released over the item's own collection moves it nowhere: the nearest target decides, never the level around it.
+          await dragTo(rowSel, targetSel);
+          const ownLabel = await dragTo(rowSel, targetSel);
+          const afterOwn = await collectionOf();
+          check('ui: a drag released over the request\'s own collection leaves it there', afterOwn === target.id && typeof ownLabel === 'string' && !ownLabel.includes('top level'), { ownLabel, afterOwn });
+
+          // A tab with unsaved edits saves them over the request as it is now: a move made meanwhile stays.
+          await js(`document.querySelector(${JSON.stringify(rowSel)})?.click()`);
+          await wait(800);
+          await js(`${visible('[data-testid=api-section-settings]')}?.click()`);
+          await wait(250);
+          await js(`(() => { const i = ${visible('[data-testid=api-option-timeout]')}; i.value = '120'; i.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+          await wait(300);
+          const dirtyBefore = await saveButtonLabel();
+          await run('api.request.move', { id: dragged.id, collectionId: null }, ws.id);
+          await wait(500);
+          await js(`[...document.querySelectorAll('button')].find((b) => b.offsetParent !== null && b.title === 'Ctrl+S')?.click()`);
+          await wait(800);
+          const savedDragged = await run<ApiRequest>('api.request.get', { id: dragged.id }, ws.id);
+          check(
+            'ui: saving a tab with unsaved edits keeps the edits and a move made meanwhile',
+            dirtyBefore === 'Save*' && savedDragged.collectionId === null && savedDragged.options?.timeoutMs === 120_000,
+            { dirtyBefore, collectionId: savedDragged.collectionId, options: savedDragged.options },
+          );
+          await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+          await wait(300);
 
           const openMenu = (selector: string) =>
             js(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return false; const r = el.getBoundingClientRect(); el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 40, clientY: r.top + 10 })); return true; })()`);
@@ -2210,6 +2236,18 @@ export default definePart({
           );
           await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
           await wait(300);
+
+          // A stream that never ends is closed with its tab: nothing else could close it afterwards.
+          const endless = await make('ui stream open', `http://127.0.0.1:${t.fixtures.ssePort}/echo`);
+          const openBefore = t.fixtures.sseOpenCount();
+          await openRow('ui stream open');
+          await send();
+          const opened = await until(() => Promise.resolve(t.fixtures.sseOpenCount() > openBefore), 3000);
+          await until(() => js(`(${visible('[data-testid=api-stream-item]')}) !== undefined`).then(Boolean), 3000);
+          await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+          const closed = await until(() => Promise.resolve(t.fixtures.sseOpenCount() === openBefore), 3000);
+          check('ui: closing the tab of a streaming response closes its connection', opened === true && closed === true, { openBefore, now: t.fixtures.sseOpenCount() });
+          await run('api.request.delete', { id: endless.id }, ws.id);
 
           await openRow('ui big');
           await send();

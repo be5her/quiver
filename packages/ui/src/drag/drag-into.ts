@@ -32,9 +32,10 @@ export interface DragIntoOptions {
 
 /**
  * Drag items onto drop targets: requests into collections, collections into each other. Targets are
- * elements carrying `data-drop-target`; the nearest one under the pointer that `canDrop` accepts is
- * the target. Pointer events rather than HTML drag and drop, as `dragReorder` uses, so it behaves the
- * same on every platform; Escape or leaving the window cancels. Call in an injection context.
+ * elements carrying `data-drop-target`; the nearest one under the pointer is the target when
+ * `canDrop` accepts it, and there is none otherwise. Pointer events rather than HTML drag and drop,
+ * as `dragReorder` uses, so it behaves the same on every platform; Escape or leaving the window
+ * cancels. Call in an injection context.
  */
 export function dragInto(options: DragIntoOptions): DragInto {
   const drag = signal<DragIntoState | null>(null);
@@ -42,14 +43,11 @@ export function dragInto(options: DragIntoOptions): DragInto {
   let cleanup: (() => void) | null = null;
   inject(DestroyRef).onDestroy(() => cleanup?.());
 
+  // A refused target is not walked past to the one around it: an item released over its own
+  // collection (a short drag given up where it started) stays put rather than moving a level up.
   const targetAt = (id: string, x: number, y: number): string | null => {
-    let el = document.elementFromPoint(x, y)?.closest<HTMLElement>('[data-drop-target]') ?? null;
-    while (el) {
-      const target = el.dataset['dropTarget'];
-      if (target !== undefined && options.canDrop(id, target)) return target;
-      el = el.parentElement?.closest<HTMLElement>('[data-drop-target]') ?? null;
-    }
-    return null;
+    const target = document.elementFromPoint(x, y)?.closest<HTMLElement>('[data-drop-target]')?.dataset['dropTarget'];
+    return target !== undefined && options.canDrop(id, target) ? target : null;
   };
 
   const pointerDown = (event: PointerEvent, id: string, label: string) => {

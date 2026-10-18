@@ -169,6 +169,8 @@ export async function startFixtures() {
 
   // SSE endpoint: two events, then the server drops the stream; a reconnect must carry Last-Event-ID.
   const sseSeen: { lastEventId: string | null; method: string; body: string; accept: string }[] = [];
+  /** Connections to /echo (a stream that never ends) still open: how the smoke sees a stream closed from the UI. */
+  let sseOpen = 0;
   const sse = createServer((req, res) => {
     let body = '';
     req.on('data', (c) => (body += c));
@@ -188,6 +190,8 @@ export async function startFixtures() {
       sseSeen.push({ lastEventId: Array.isArray(lastEventId) ? lastEventId[0] : lastEventId, method: req.method ?? '', body, accept: String(req.headers.accept ?? '') });
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
       if (url.pathname === '/echo') {
+        sseOpen++;
+        res.on('close', () => sseOpen--);
         res.write(`event: echo\ndata: ${body}\n\n`);
         return;
       }
@@ -245,6 +249,8 @@ export async function startFixtures() {
     gqlState,
     ssePort,
     sseSeen,
+    /** Open connections to the SSE /echo stream right now. */
+    sseOpenCount: () => sseOpen,
     wsPort,
     wsSockets,
     fakeRedis,
