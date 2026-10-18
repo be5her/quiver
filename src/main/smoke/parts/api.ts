@@ -662,6 +662,31 @@ export default definePart({
           noEnv.status === 200 && (noEnv.captured ?? []).every((c) => !c.ok && c.value === null) && (noEnv.captured ?? []).filter((c) => (c.error ?? '').includes('No environment')).length === 5,
         { agent: agentCaptured.map((c) => `${c.variable}=${c.value}`), leaked: ['cap-tok-123', 'req-42'].filter((s) => agentText.includes(s)), noEnv: noEnv.captured?.[0]?.error },
       );
+      // Checks quote what they read: on a secret capture's JSON path, or a secret header, an agent must get them scrubbed. A null in the body reads nothing.
+      const checkedLogin = await host.invoke(
+        'api.request.send',
+        {
+          request: {
+            ...login,
+            capture: [cap('capToken', 'body', '$.token', true), cap('capReq', 'header', 'X-Request-Id', true), cap('capUser', 'body', '$.refresh')],
+            checks: [
+              { id: 'k1', enabled: true, on: 'jsonPath', op: 'exists', path: '$.token', expected: '' },
+              { id: 'k2', enabled: true, on: 'header', op: 'eq', path: 'X-Request-Id', expected: 'req-42' },
+            ],
+          },
+        },
+        { caller: 'mcp', workspaceId: ws.id },
+      );
+      const checkedResponse = checkedLogin.ok ? (checkedLogin.result as ApiResponse) : null;
+      const checksText = JSON.stringify(checkedResponse?.checks ?? []);
+      const nullCapture = checkedResponse?.captured?.find((c) => c.variable === 'capUser');
+      const userAfterNull = (await run<Environment>('api.environment.get', { id: env.id }, ws.id)).variables.find((v) => v.key === 'capUser')?.value;
+      check(
+        'captures and checks: an agent gets check results with the secret captures scrubbed, and a capture of a null leaves the variable as it was',
+        checkedResponse?.checks?.length === 2 && checkedResponse.checks.every((c) => c.ok) && !checksText.includes('cap-tok-123') && !checksText.includes('req-42') && checksText.includes(REDACTED) &&
+          nullCapture?.ok === false && (nullCapture.error ?? '').includes('null') && userAfterNull === '7',
+        { checks: checkedResponse?.checks, nullCapture, userAfterNull, error: checkedLogin.ok ? undefined : checkedLogin.error },
+      );
       const cleaned = await run<Environment>('api.environment.get', { id: env.id }, ws.id);
       await run('api.environment.save', { environment: { ...cleaned, variables: cleaned.variables.filter((v) => !v.key.startsWith('cap')) } }, ws.id);
     }

@@ -31,6 +31,12 @@ describe('extractCapture', () => {
     expect(capture('body', '$.user[').ok).toBe(false);
   });
 
+  it('reads nothing from a null, so a failed call does not write "null" over the variable', () => {
+    const failed = { ...response, body: '{"IsSuccess":false,"ReturnedValue":null}' };
+    expect(extractCapture({ variable: 'v', from: 'body', path: '$.ReturnedValue' }, failed)).toEqual({ ok: false, error: '$.ReturnedValue is null in the body' });
+    expect(extractCapture({ variable: 'v', from: 'body', path: '' }, { ...response, body: 'null' })).toEqual({ ok: true, value: 'null' });
+  });
+
   it('reads a header without case, the last of repeated ones', () => {
     expect(capture('header', 'x-REQUEST-id')).toEqual({ ok: true, value: 'r-2' });
     expect(capture('header', 'X-Nope')).toEqual({ ok: false, error: 'The response has no X-Nope header' });
