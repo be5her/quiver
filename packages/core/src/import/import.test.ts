@@ -166,7 +166,8 @@ describe('importPostman', () => {
   it('makes folders collections and keeps {{variables}}, :path segments and disabled rows', () => {
     expect(result.collections.map((c) => c.name)).toEqual(['Shop', 'Orders']);
     expect(result.collections[0]).toMatchObject({ description: 'All of it', auth: { type: 'bearer', token: '{{token}}' } });
-    expect(result.collections[1].auth).toEqual({ type: 'basic', username: 'u', password: 'p' });
+    // A literal password becomes a variable; its value goes to the environment as a secret (see below).
+    expect(result.collections[1].auth).toEqual({ type: 'basic', username: 'u', password: '{{password}}' });
     const get = find(result, 'Get order');
     expect(get).toMatchObject({ method: 'GET', url: '{{baseUrl}}/orders/{{id}}', auth: { type: 'inherit' } });
     expect(get.params.map((p) => [p.key, p.value, p.enabled])).toEqual([
@@ -195,17 +196,49 @@ describe('importPostman', () => {
       ['baseUrl', 'https://shop.test', false],
       ['apiSecret', 's3', true],
       ['id', '42', false],
+      ['password', 'p', true],
     ]);
-    expect(result.skipped).toEqual(['The pre-request script on Shop was not imported', 'The test script on Get order was not imported']);
+    expect(result.skipped).toEqual([
+      'The pre-request script on Shop was not imported',
+      'The password credential on Orders was replaced with {{password}}; its value is a secret in the imported environment',
+      'The test script on Get order was not imported',
+    ]);
   });
 
-  it('imports an environment file on its own', () => {
-    const env = importPostman(JSON.stringify({ name: 'Staging', values: [{ key: 'token', value: 't', type: 'secret', enabled: true }, { key: 'host', value: 'h', enabled: false }], _postman_variable_scope: 'environment' }));
+  it('keeps every literal credential out of the requests, one variable per value, never taking a name the collection defines', () => {
+    const doc = {
+      info: { name: 'Keys', schema: 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json' },
+      variable: [{ key: 'token', value: 'from-collection' }],
+      item: [
+        { name: 'A', request: { method: 'GET', url: 'https://k.test/a', auth: { type: 'bearer', bearer: [{ key: 'token', value: 'literal-1' }] } } },
+        { name: 'B', request: { method: 'GET', url: 'https://k.test/b', auth: { type: 'bearer', bearer: [{ key: 'token', value: 'literal-1' }] } } },
+        { name: 'C', request: { method: 'GET', url: 'https://k.test/c', auth: { type: 'apikey', apikey: [{ key: 'key', value: 'X-Api-Key' }, { key: 'value', value: 'k-9' }] } } },
+        { name: 'D', request: { method: 'GET', url: 'https://k.test/d', auth: { type: 'bearer', bearer: [{ key: 'token', value: '{{token}}' }] } } },
+      ],
+    };
+    const keys = importPostman(JSON.stringify(doc));
+    expect(find(keys, 'A').auth).toEqual({ type: 'bearer', token: '{{token_2}}' });
+    expect(find(keys, 'B').auth).toEqual({ type: 'bearer', token: '{{token_2}}' });
+    expect(find(keys, 'C').auth).toEqual({ type: 'apikey', key: 'X-Api-Key', value: '{{x-api-key}}', in: 'header' });
+    expect(find(keys, 'D').auth).toEqual({ type: 'bearer', token: '{{token}}' });
+    expect(keys.environments[0].variables.map((v) => [v.key, v.value, Boolean(v.secret)])).toEqual([
+      ['token', 'from-collection', true],
+      ['token_2', 'literal-1', true],
+      ['x-api-key', 'k-9', true],
+    ]);
+    expect(JSON.stringify([keys.collections, keys.requests])).not.toMatch(/literal-1|k-9/);
+  });
+
+  it('imports an environment file on its own, values named like a credential secret', () => {
+    const env = importPostman(
+      JSON.stringify({ name: 'Staging', values: [{ key: 'token', value: 't', type: 'secret', enabled: true }, { key: 'host', value: 'h', enabled: false }, { key: 'password', value: 'pw', enabled: true }], _postman_variable_scope: 'environment' }),
+    );
     expect(env.collections).toEqual([]);
     expect(env.environments[0].name).toBe('Staging');
     expect(env.environments[0].variables.map((v) => [v.key, v.enabled, Boolean(v.secret)])).toEqual([
       ['token', true, true],
       ['host', false, false],
+      ['password', true, true],
     ]);
   });
 
@@ -253,20 +286,32 @@ describe('importInsomnia', () => {
       ['page', '1', true],
       ['limit', '10', false],
     ]);
-    expect(find(result, 'Upload')).toMatchObject({ body: { type: 'form', fields: [{ key: 'f', kind: 'file', value: '/tmp/x.pdf' }] }, auth: { type: 'apikey', key: 'X-Key', value: 'k', in: 'header' } });
+    expect(find(result, 'Upload')).toMatchObject({ body: { type: 'form', fields: [{ key: 'f', kind: 'file', value: '/tmp/x.pdf' }] }, auth: { type: 'apikey', key: 'X-Key', value: '{{x-key}}', in: 'header' } });
   });
 
-  it('merges the base environment into each sub-environment, nested data as dotted names', () => {
+  it('merges the base environment into each sub-environment, nested data as dotted names, credentials secret', () => {
     expect(result.environments.map((e) => e.name)).toEqual(['Production']);
-    expect(result.environments[0].variables.map((v) => [v.key, v.value])).toEqual([
-      ['api.version', 'v2'],
-      ['base', 'https://prod.billing.test'],
-      ['token', 'p'],
+    expect(result.environments[0].variables.map((v) => [v.key, v.value, Boolean(v.secret)])).toEqual([
+      ['api.version', 'v2', false],
+      ['base', 'https://prod.billing.test', false],
+      ['token', 'p', true],
+      ['x-key', 'k', true],
     ]);
   });
 
-  it('notes template tags and requests of other kinds', () => {
-    expect(result.skipped).toEqual(['A template tag in Create invoice was left as it is: Quiver does not run Insomnia tags', 'Live was not imported: WebSocket requests belong to other modules']);
+  it('notes template tags, replaced credentials and requests of other kinds', () => {
+    expect(result.skipped).toEqual([
+      'A template tag in Create invoice was left as it is: Quiver does not run Insomnia tags',
+      'The X-Key credential on Upload was replaced with {{x-key}}; its value is a secret in the imported environment',
+      'Live was not imported: WebSocket requests belong to other modules',
+    ]);
+  });
+
+  it('makes an environment for the credentials when the export has none', () => {
+    const bare = { _type: 'export', __export_format: 4, resources: [{ _id: 'w', _type: 'workspace', name: 'Bare' }, { _id: 'r', _type: 'request', parentId: 'w', name: 'Go', method: 'GET', url: 'https://b.test', authentication: { type: 'bearer', token: 'tok-1' } }] };
+    const out = importInsomnia(JSON.stringify(bare));
+    expect(find(out, 'Go').auth).toEqual({ type: 'bearer', token: '{{token}}' });
+    expect(out.environments.map((e) => [e.name, e.variables.map((v) => [v.key, v.value, Boolean(v.secret)])])).toEqual([['Bare credentials', [['token', 'tok-1', true]]]]);
   });
 
   it('reads v5 YAML', () => {

@@ -1,12 +1,14 @@
 import { keyValue, type ApiAuth, type ApiCollection, type ApiRequest, type FormField, type KeyValue, type RequestBody } from '../models/api';
-import { ImportBuilder, ImportError, arr, isRecord, method, parseStructured, rawBodyType, splitQuery, str, type ImportResult } from './common';
+import { isSecretName } from '../redact';
+import { Credentials, ImportBuilder, ImportError, arr, isRecord, method, parseStructured, rawBodyType, splitQuery, str, type ImportResult } from './common';
 
 type Json = Record<string, unknown>;
 
 /**
  * A Postman Collection (v2.0 or v2.1) or a Postman environment. Folders become collections,
- * `{{variables}}` stay as they are, collection variables become an environment. Scripts and
- * tests are listed as skipped: Quiver does not run them.
+ * `{{variables}}` stay as they are, collection variables become an environment, and a credential
+ * typed into an auth becomes a `{{variable}}` with its value a secret in that environment. Scripts
+ * and tests are listed as skipped: Quiver does not run them.
  */
 export function importPostman(text: string): ImportResult {
   const doc = parseStructured(text, 'Postman file');
@@ -23,16 +25,18 @@ export function importPostman(text: string): ImportResult {
   const skip = (line: string) => b.skip(line);
   const description = descriptionOf(info['description'] ?? doc['description']);
   if (description) b.root.description = description;
-  const rootAuth = authOf(doc['auth'], skip, b.root.name);
+  const variables = arr(doc['variable']).filter(isRecord);
+  const creds = new Credentials(skip, variables.map((v) => str(v['key'])));
+  const rootAuth = authOf(doc['auth'], skip, b.root.name, creds);
   if (rootAuth) b.root.auth = rootAuth.type === 'inherit' ? { type: 'none' } : rootAuth;
   noteScripts(doc, b.root.name, skip);
 
-  const variables = arr(doc['variable']).filter(isRecord);
   const pathVariables: { key: string; value: string }[] = [];
-  walk(arr(doc['item']), b.root, b, pathVariables, skip);
+  walk(arr(doc['item']), b.root, b, pathVariables, skip, creds);
 
-  const envVars = variables.map((v) => ({ key: str(v['key']), value: str(v['value']), enabled: v['disabled'] !== true, secret: str(v['type']) === 'secret' }));
+  const envVars = variables.map((v) => ({ key: str(v['key']), value: str(v['value']), enabled: v['disabled'] !== true, secret: str(v['type']) === 'secret' || isSecretName(str(v['key'])) }));
   for (const v of pathVariables) if (v.value && !envVars.some((e) => e.key === v.key)) envVars.push({ key: v.key, value: v.value, enabled: true, secret: false });
+  for (const v of creds.variables) if (!envVars.some((e) => e.key === v.key)) envVars.push({ key: v.key, value: v.value, enabled: true, secret: true });
   if (envVars.length) b.environment(`${b.root.name} variables`, envVars.filter((v) => v.key));
   const result = b.result();
   if (!result.requests.length) throw new ImportError('The Postman collection has no requests');
@@ -44,13 +48,13 @@ function importEnvironment(doc: Json): ImportResult {
   const values = arr(doc['values']).filter(isRecord);
   b.environment(
     str(doc['name']) || 'Postman environment',
-    values.filter((v) => str(v['key'])).map((v) => ({ key: str(v['key']), value: str(v['value']), enabled: v['enabled'] !== false, secret: str(v['type']) === 'secret' })),
+    values.filter((v) => str(v['key'])).map((v) => ({ key: str(v['key']), value: str(v['value']), enabled: v['enabled'] !== false, secret: str(v['type']) === 'secret' || isSecretName(str(v['key'])) })),
   );
   const result = b.result();
   return { ...result, collections: [] };
 }
 
-function walk(items: unknown[], parent: ApiCollection, b: ImportBuilder, pathVariables: { key: string; value: string }[], skip: (line: string) => void): void {
+function walk(items: unknown[], parent: ApiCollection, b: ImportBuilder, pathVariables: { key: string; value: string }[], skip: (line: string) => void, creds: Credentials): void {
   for (const raw of items) {
     if (!isRecord(raw)) continue;
     const name = str(raw['name']);
@@ -58,20 +62,20 @@ function walk(items: unknown[], parent: ApiCollection, b: ImportBuilder, pathVar
       const folder = b.folder(name || 'Folder', parent);
       const description = descriptionOf(raw['description']);
       if (description) folder.description = description;
-      const auth = authOf(raw['auth'], skip, folder.name);
+      const auth = authOf(raw['auth'], skip, folder.name, creds);
       if (auth) folder.auth = auth;
       noteScripts(raw, folder.name, skip);
-      walk(raw['item'], folder, b, pathVariables, skip);
+      walk(raw['item'], folder, b, pathVariables, skip, creds);
       continue;
     }
     if (raw['request'] === undefined) continue;
-    const built = requestOf(raw, pathVariables, skip);
+    const built = requestOf(raw, pathVariables, skip, creds);
     if (built) b.request(parent, built);
     noteScripts(raw, name || 'a request', skip);
   }
 }
 
-function requestOf(item: Json, pathVariables: { key: string; value: string }[], skip: (line: string) => void): Partial<ApiRequest> | null {
+function requestOf(item: Json, pathVariables: { key: string; value: string }[], skip: (line: string) => void, creds: Credentials): Partial<ApiRequest> | null {
   const req = typeof item['request'] === 'string' ? { url: item['request'], method: 'GET' } : isRecord(item['request']) ? item['request'] : {};
   const name = str(item['name']) || 'Request';
   const m = method(req['method'] || 'GET');
@@ -85,7 +89,7 @@ function requestOf(item: Json, pathVariables: { key: string; value: string }[], 
     .map((h) => keyValue(str(h['key']), str(h['value']), h['disabled'] !== true));
   const contentType = headers.find((h) => h.enabled && h.key.toLowerCase() === 'content-type')?.value ?? '';
   const body = bodyOf(req['body'], contentType, name, skip);
-  const auth = authOf(req['auth'], skip, name);
+  const auth = authOf(req['auth'], skip, name, creds);
   const description = descriptionOf(req['description']);
   return { name, method: m, url, params, headers, body, auth: auth ?? { type: 'inherit' }, ...(description ? { description } : {}) };
 }
@@ -154,8 +158,8 @@ function bodyOf(raw: unknown, contentType: string, name: string, skip: (line: st
   }
 }
 
-/** Postman auth: v2.1 keeps its fields as `[{ key, value }]`, v2.0 as an object. Undefined auth inherits. */
-function authOf(raw: unknown, skip: (line: string) => void, where: string): ApiAuth | null {
+/** Postman auth: v2.1 keeps its fields as `[{ key, value }]`, v2.0 as an object. Undefined auth inherits. Literal credentials go to `creds`. */
+function authOf(raw: unknown, skip: (line: string) => void, where: string, creds: Credentials): ApiAuth | null {
   if (!isRecord(raw)) return null;
   const type = str(raw['type']);
   const fields = (key: string): Json => {
@@ -167,14 +171,15 @@ function authOf(raw: unknown, skip: (line: string) => void, where: string): ApiA
     case 'noauth':
       return { type: 'none' };
     case 'bearer':
-      return { type: 'bearer', token: str(fields('bearer')['token']) };
+      return { type: 'bearer', token: creds.take('token', str(fields('bearer')['token']), where) };
     case 'basic': {
       const f = fields('basic');
-      return { type: 'basic', username: str(f['username']), password: str(f['password']) };
+      return { type: 'basic', username: str(f['username']), password: creds.take('password', str(f['password']), where) };
     }
     case 'apikey': {
       const f = fields('apikey');
-      return { type: 'apikey', key: str(f['key']) || 'X-API-Key', value: str(f['value']), in: str(f['in']) === 'query' ? 'query' : 'header' };
+      const key = str(f['key']) || 'X-API-Key';
+      return { type: 'apikey', key, value: creds.take(key, str(f['value']), where), in: str(f['in']) === 'query' ? 'query' : 'header' };
     }
     case 'oauth2': {
       const f = fields('oauth2');
@@ -186,7 +191,7 @@ function authOf(raw: unknown, skip: (line: string) => void, where: string): ApiA
           tokenUrl: str(f['accessTokenUrl']),
           ...(str(f['authUrl']) ? { authUrl: str(f['authUrl']) } : {}),
           clientId: str(f['clientId']),
-          clientSecret: str(f['clientSecret']),
+          clientSecret: creds.take('client_secret', str(f['clientSecret']), where),
           scopes: str(f['scope']),
           clientAuth: str(f['client_authentication']) === 'body' ? 'body' : 'basic',
           pkce: grant !== 'client_credentials',

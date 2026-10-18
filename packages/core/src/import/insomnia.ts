@@ -1,8 +1,15 @@
 import { keyValue, type ApiAuth, type ApiCollection, type ApiRequest, type FormField, type KeyValue, type RequestBody } from '../models/api';
-import { ImportBuilder, ImportError, arr, isRecord, method, parseStructured, rawBodyType, splitQuery, str, type ImportResult } from './common';
+import { isSecretName } from '../redact';
+import { Credentials, ImportBuilder, ImportError, arr, isRecord, method, parseStructured, rawBodyType, splitQuery, str, type ImportResult } from './common';
 
 type Json = Record<string, unknown>;
 type Skip = (line: string) => void;
+type EnvVar = { key: string; value: string; secret?: boolean };
+
+/** Environment values named like a credential are secrets, and the credentials taken out of auths join every environment. */
+function withSecrets(vars: { key: string; value: string }[], creds: Credentials): EnvVar[] {
+  return [...vars.map((v) => ({ ...v, ...(isSecretName(v.key) ? { secret: true } : {}) })), ...creds.variables.filter((c) => !vars.some((v) => v.key === c.key))];
+}
 
 /** `{{ _.name }}` and `{{ name }}` become `{{name}}`; template tags (`{% response … %}`) are noted and left as they are. */
 function template(text: string, where: string, skip: Skip): string {
@@ -36,6 +43,8 @@ function importV4(resources: Json[]): ImportResult {
   const workspaces = resources.filter((r) => r['_type'] === 'workspace');
   const b = new ImportBuilder(workspaces.length === 1 ? str(workspaces[0]['name']) : 'Insomnia import');
   const skip: Skip = (line) => b.skip(line);
+  const environments = resources.filter((r) => r['_type'] === 'environment');
+  const creds = new Credentials(skip, environments.flatMap((e) => flatten(e['data']).map((v) => v.key)));
   const children = new Map<string, Json[]>();
   for (const r of resources) {
     const parent = str(r['parentId']);
@@ -49,11 +58,11 @@ function importV4(resources: Json[]): ImportResult {
       if (type === 'request_group') {
         const folder = b.folder(name || 'Folder', into);
         if (str(r['description'])) folder.description = str(r['description']);
-        const auth = authOf(r['authentication'], name, skip);
+        const auth = authOf(r['authentication'], name, skip, creds);
         if (auth) folder.auth = auth;
         place(str(r['_id']), folder);
       } else if (type === 'request') {
-        const built = requestOf(r, skip);
+        const built = requestOf(r, skip, creds);
         if (built) b.request(into, built);
       } else if (type === 'grpc_request' || type === 'websocket_request') {
         skip(`${name || type} was not imported: ${type === 'grpc_request' ? 'gRPC' : 'WebSocket'} requests belong to other modules`);
@@ -64,25 +73,31 @@ function importV4(resources: Json[]): ImportResult {
   // Requests whose parent is not in the file: at the root.
   const known = new Set(resources.map((r) => str(r['_id'])));
   for (const r of resources) if (r['_type'] === 'request' && !known.has(str(r['parentId']))) {
-    const built = requestOf(r, skip);
+    const built = requestOf(r, skip, creds);
     if (built) b.request(b.root, built);
   }
 
   // The base environment sits under the workspace, its sub-environments under it; each sub-environment imports with the base merged in.
-  const environments = resources.filter((r) => r['_type'] === 'environment');
   const workspaceIds = new Set(workspaces.map((w) => str(w['_id'])));
+  let made = 0;
   for (const base of environments.filter((e) => workspaceIds.has(str(e['parentId'])))) {
     const subs = environments.filter((e) => str(e['parentId']) === str(base['_id']));
     const baseVars = flatten(base['data']);
     if (!subs.length) {
-      if (baseVars.length) b.environment(str(base['name']) || 'Base Environment', baseVars);
+      if (baseVars.length) {
+        b.environment(str(base['name']) || 'Base Environment', withSecrets(baseVars, creds));
+        made++;
+      }
       continue;
     }
     for (const sub of subs) {
       const own = flatten(sub['data']);
-      b.environment(str(sub['name']) || 'Environment', [...baseVars.filter((v) => !own.some((o) => o.key === v.key)), ...own]);
+      b.environment(str(sub['name']) || 'Environment', withSecrets([...baseVars.filter((v) => !own.some((o) => o.key === v.key)), ...own], creds));
+      made++;
     }
   }
+  // Credentials taken out of the auths need somewhere to live when the export has no environment.
+  if (!made && creds.variables.length) b.environment(`${b.root.name} credentials`, creds.variables);
   if (resources.some((r) => r['_type'] === 'cookie_jar' && arr(r['cookies']).length)) skip('Cookies in the export were not imported');
   const result = b.result();
   if (!result.requests.length) throw new ImportError('The Insomnia export has no requests');
@@ -92,36 +107,43 @@ function importV4(resources: Json[]): ImportResult {
 function importV5(doc: Json): ImportResult {
   const b = new ImportBuilder(str(doc['name']) || 'Insomnia import');
   const skip: Skip = (line) => b.skip(line);
+  const envs = isRecord(doc['environments']) ? doc['environments'] : null;
+  const subs = envs ? arr(envs['subEnvironments']).filter(isRecord) : [];
+  const creds = new Credentials(skip, envs ? [...flatten(envs['data']), ...subs.flatMap((s) => flatten(s['data']))].map((v) => v.key) : []);
   const place = (items: unknown[], into: ApiCollection) => {
     for (const item of items.filter(isRecord)) {
       if (Array.isArray(item['children'])) {
         const folder = b.folder(str(item['name']) || 'Folder', into);
-        const auth = authOf(item['authentication'], folder.name, skip);
+        const auth = authOf(item['authentication'], folder.name, skip, creds);
         if (auth) folder.auth = auth;
         place(item['children'], folder);
       } else if ('url' in item) {
-        const built = requestOf(item, skip);
+        const built = requestOf(item, skip, creds);
         if (built) b.request(into, built);
       }
     }
   };
   place(arr(doc['collection']), b.root);
-  const envs = isRecord(doc['environments']) ? doc['environments'] : null;
+  let made = 0;
   if (envs) {
     const baseVars = flatten(envs['data']);
-    const subs = arr(envs['subEnvironments']).filter(isRecord);
-    if (!subs.length && baseVars.length) b.environment(str(envs['name']) || 'Base Environment', baseVars);
+    if (!subs.length && baseVars.length) {
+      b.environment(str(envs['name']) || 'Base Environment', withSecrets(baseVars, creds));
+      made++;
+    }
     for (const sub of subs) {
       const own = flatten(sub['data']);
-      b.environment(str(sub['name']) || 'Environment', [...baseVars.filter((v) => !own.some((o) => o.key === v.key)), ...own]);
+      b.environment(str(sub['name']) || 'Environment', withSecrets([...baseVars.filter((v) => !own.some((o) => o.key === v.key)), ...own], creds));
+      made++;
     }
   }
+  if (!made && creds.variables.length) b.environment(`${b.root.name} credentials`, creds.variables);
   const result = b.result();
   if (!result.requests.length) throw new ImportError('The Insomnia export has no requests');
   return result;
 }
 
-function requestOf(r: Json, skip: Skip): Partial<ApiRequest> | null {
+function requestOf(r: Json, skip: Skip, creds: Credentials): Partial<ApiRequest> | null {
   const name = str(r['name']) || 'Request';
   const m = method(r['method'] || 'GET');
   if (!m) {
@@ -134,7 +156,7 @@ function requestOf(r: Json, skip: Skip): Partial<ApiRequest> | null {
     .filter(isRecord)
     .map((h) => keyValue(str(h['name']), template(str(h['value']), name, skip), h['disabled'] !== true));
   const body = bodyOf(r['body'], name, skip);
-  const auth = authOf(r['authentication'], name, skip);
+  const auth = authOf(r['authentication'], name, skip, creds);
   const description = str(r['description']).trim();
   return { name, method: m, url: split.url, params, headers, body, auth: auth ?? { type: 'inherit' }, ...(description ? { description } : {}) };
 }
@@ -165,7 +187,8 @@ function bodyOf(raw: unknown, name: string, skip: Skip): RequestBody {
   return { type: rawBodyType(mime, text), content: text };
 }
 
-function authOf(raw: unknown, where: string, skip: Skip): ApiAuth | null {
+/** The auth of a request or folder; a literal credential in it goes to `creds` and a `{{variable}}` takes its place. */
+function authOf(raw: unknown, where: string, skip: Skip, creds: Credentials): ApiAuth | null {
   if (!isRecord(raw) || !str(raw['type'])) return null;
   if (raw['disabled'] === true) return { type: 'none' };
   const t = (key: string) => template(str(raw[key]), where, skip);
@@ -173,11 +196,13 @@ function authOf(raw: unknown, where: string, skip: Skip): ApiAuth | null {
     case 'none':
       return { type: 'none' };
     case 'bearer':
-      return { type: 'bearer', token: t('token') };
+      return { type: 'bearer', token: creds.take('token', t('token'), where) };
     case 'basic':
-      return { type: 'basic', username: t('username'), password: t('password') };
-    case 'apikey':
-      return { type: 'apikey', key: t('key') || 'X-API-Key', value: t('value'), in: str(raw['addTo']) === 'queryParams' ? 'query' : 'header' };
+      return { type: 'basic', username: t('username'), password: creds.take('password', t('password'), where) };
+    case 'apikey': {
+      const key = t('key') || 'X-API-Key';
+      return { type: 'apikey', key, value: creds.take(key, t('value'), where), in: str(raw['addTo']) === 'queryParams' ? 'query' : 'header' };
+    }
     case 'oauth2': {
       const grant = str(raw['grantType']);
       if (grant === 'client_credentials' || grant === 'authorization_code') {
@@ -187,7 +212,7 @@ function authOf(raw: unknown, where: string, skip: Skip): ApiAuth | null {
           tokenUrl: t('accessTokenUrl'),
           ...(t('authorizationUrl') ? { authUrl: t('authorizationUrl') } : {}),
           clientId: t('clientId'),
-          clientSecret: t('clientSecret'),
+          clientSecret: creds.take('client_secret', t('clientSecret'), where),
           scopes: t('scope'),
           ...(t('audience') ? { audience: t('audience') } : {}),
           clientAuth: str(raw['credentialsInBody']) === 'true' || raw['credentialsInBody'] === true ? 'body' : 'basic',

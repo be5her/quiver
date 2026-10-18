@@ -62,6 +62,38 @@ export function variableName(text: string): string {
   return name || 'value';
 }
 
+/**
+ * Literal credentials found in an import, turned into `{{variables}}` so none reaches a committed
+ * file: the request keeps the reference, the imported environment gets the value as a secret. A
+ * value that is already a `{{reference}}`, or empty, is left as it is.
+ */
+export class Credentials {
+  readonly variables: { key: string; value: string; secret: true }[] = [];
+  private readonly taken: Set<string>;
+
+  /** `reserved` are the names the import defines itself; a credential never takes one of those. */
+  constructor(
+    private readonly skip: (line: string) => void,
+    reserved: Iterable<string> = [],
+  ) {
+    this.taken = new Set(reserved);
+  }
+
+  /** What the request keeps for this credential: `{{name}}` for a literal value, which goes to the environment. */
+  take(name: string, value: string, where: string): string {
+    if (!value || /\{\{[^}]*\}\}/.test(value)) return value;
+    const base = variableName(name);
+    const same = this.variables.find((v) => v.value === value && (v.key === base || v.key.startsWith(`${base}_`)));
+    if (same) return `{{${same.key}}}`;
+    let key = base;
+    for (let n = 2; this.taken.has(key); n++) key = `${base}_${n}`;
+    this.taken.add(key);
+    this.variables.push({ key, value, secret: true });
+    this.skip(`The ${name} credential on ${where} was replaced with {{${key}}}; its value is a secret in the imported environment`);
+    return `{{${key}}}`;
+  }
+}
+
 /** Collects collections and requests under one root, keeping the order they were found in. */
 export class ImportBuilder {
   readonly root: ApiCollection;

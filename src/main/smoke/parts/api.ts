@@ -856,6 +856,26 @@ export default definePart({
           pm.skipped.some((s) => s.includes('test script on List orders')),
         { pm, sent: sentList?.echo, env: pmEnv?.variables },
       );
+      // A credential typed into the file becomes a {{variable}} with its value a secret in the imported environment: no committed file holds it.
+      const pmSecret = await run<Summary>('api.import.postman', {
+        source: {
+          text: JSON.stringify({
+            info: { name: 'Smoke Postman secret', schema: 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json' },
+            auth: { type: 'bearer', bearer: [{ key: 'token', value: 'pm-literal-token-1' }] },
+            item: [{ name: 'Secret call', request: { method: 'GET', url: '{{baseUrl}}/pm/secret' } }],
+          }),
+        },
+      }, ws.id);
+      const pmSecretCol = await run<ApiCollection>('api.collection.get', { id: pmSecret.collectionId! }, ws.id);
+      const pmSecretEnv = await run<Environment>('api.environment.get', { id: pmSecret.environmentIds[0] }, ws.id);
+      const pmSecretFiles = (await Promise.all([fs.readFile(path.join(folder, '.quiver', 'collections', `${pmSecret.collectionId}.json`), 'utf8'), fs.readFile(path.join(folder, '.quiver', 'environments', `${pmSecret.environmentIds[0]}.json`), 'utf8')])).join('\n');
+      check(
+        'api.import.postman: a literal credential becomes a {{variable}} whose value is a secret in the imported environment, and no saved file holds it',
+        pmSecretCol.auth.type === 'bearer' && pmSecretCol.auth.token === '{{token}}' &&
+          pmSecretEnv.variables.some((v) => v.key === 'token' && v.value === 'pm-literal-token-1' && v.secret === true) &&
+          !pmSecretFiles.includes('pm-literal-token-1') && pmSecret.skipped.some((s) => s.includes('token credential')),
+        { auth: pmSecretCol.auth, env: pmSecretEnv.variables, skipped: pmSecret.skipped },
+      );
 
       // Insomnia: {{ _.host }} templates as {{host}}, the sub-environment with the base merged in, and the request sent with it.
       const ins = await run<Summary>('api.import.insomnia', { source: { path: path.join(folder, 'imports', 'insomnia.json') } }, ws.id);
