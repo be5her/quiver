@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cookiesFor, defaultCookiePath, domainMatches, expireCookies, mergeCookieHeader, pathMatches, storeCookies } from './cookie-jar';
+import { cookiesFor, defaultCookiePath, domainMatches, expireCookies, isPublicSuffix, mergeCookieHeader, pathMatches, storeCookies } from './cookie-jar';
 
 const now = Date.parse('2026-10-17T00:00:00Z');
 const names = (cookies: { name: string }[]) => cookies.map((c) => c.name);
@@ -45,6 +45,28 @@ describe('storeCookies', () => {
     expect(result.jar).toEqual([]);
     expect(result.deleted).toEqual(['a']);
     expect(result.rejected.map((r) => r.name)).toEqual(['b', 'c']);
+  });
+
+  it('rejects a Domain that is a public suffix or a hosting platform, so one site cannot set cookies for every other', () => {
+    for (const domain of ['co.uk', 'com.au', 'ne.jp', 'gov.br', 'herokuapp.com', 'github.io', 'azurewebsites.net', 'localhost', 'com']) expect(isPublicSuffix(domain), domain).toBe(true);
+    for (const domain of ['example.com', 'me.com', 'app.co.uk', 'user.github.io', 'my.herokuapp.com', 'co.example']) expect(isPublicSuffix(domain), domain).toBe(false);
+    const uk = storeCookies([], 'https://evil.co.uk/', ['wide=1; Domain=co.uk', 'own=1; Domain=evil.co.uk'], now);
+    expect(uk.stored).toEqual(['own']);
+    expect(uk.rejected).toEqual([{ name: 'wide', reason: 'Domain co.uk is too broad' }]);
+    const platform = storeCookies([], 'https://one.herokuapp.com/', ['all=1; Domain=herokuapp.com', 'mine=1; Domain=one.herokuapp.com'], now);
+    expect(platform.stored).toEqual(['mine']);
+    expect(platform.rejected.map((r) => r.name)).toEqual(['all']);
+    // The host itself may be a single label on an intranet.
+    expect(storeCookies([], 'http://intranet/', ['i=1; Domain=intranet'], now).stored).toEqual(['i']);
+    expect(storeCookies([], 'http://app.localhost/', ['l=1; Domain=localhost'], now).rejected.map((r) => r.name)).toEqual(['l']);
+  });
+
+  it('rejects a Secure cookie set over plain http, except from a loopback host', () => {
+    const plain = storeCookies([], 'http://x.test/', ['s=1; Secure', 'p=1'], now);
+    expect(plain.stored).toEqual(['p']);
+    expect(plain.rejected).toEqual([{ name: 's', reason: 'Secure cookie set over http' }]);
+    expect(storeCookies([], 'https://x.test/', ['s=1; Secure'], now).stored).toEqual(['s']);
+    expect(storeCookies([], 'http://localhost:3000/', ['s=1; Secure'], now).stored).toEqual(['s']);
   });
 });
 

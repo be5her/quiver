@@ -800,6 +800,22 @@ export default definePart({
           afterDelete.some((c) => c.name === 'manual' && c.value === 'manual-value-1') && !afterDelete.some((c) => c.name === 'hop'),
         { agentList: agentList.ok ? (agentList.result as JarCookie[]).map((c) => `${c.name}=${c.value}`) : agentList.error.code, agentCookieHeader, agentDelete: agentDelete.ok ? 'ok?' : agentDelete.error.code },
       );
+      // A Domain nobody owns outright, or a Secure cookie over plain http, is refused as a browser would; a site's own domain under a suffix is fine.
+      const setCookie = (url: string, cookie: string) => host.invoke('api.cookie.set', { url, cookie }, { caller: 'ui', workspaceId: ws.id });
+      const platformWide = await setCookie('https://one.herokuapp.com/', 'all=1; Domain=herokuapp.com; Path=/');
+      const suffixWide = await setCookie('https://evil.co.uk/', 'wide=1; Domain=co.uk; Path=/');
+      const secureOverHttp = await setCookie('http://plain.test/', 's=1; Secure; Path=/');
+      const ownUnderSuffix = await setCookie('https://x.app.co.uk/', 'own=1; Domain=app.co.uk; Path=/');
+      const afterSuffix = await run<JarCookie[]>('api.cookie.list', {}, ws.id);
+      await run('api.cookie.delete', { domain: 'app.co.uk', path: '/', name: 'own' }, ws.id);
+      check(
+        'cookie jar: a Domain that is a hosting platform or a public suffix is refused, a Secure cookie over http too, and a site\'s own domain under a suffix is kept',
+        !platformWide.ok && platformWide.error.code === 'INVALID_INPUT' && platformWide.error.message.includes('too broad') &&
+          !suffixWide.ok && suffixWide.error.message.includes('too broad') &&
+          !secureOverHttp.ok && secureOverHttp.error.message.includes('Secure cookie set over http') &&
+          ownUnderSuffix.ok && afterSuffix.some((c) => c.name === 'own' && c.domain === 'app.co.uk' && !c.hostOnly) && !afterSuffix.some((c) => c.name === 'all' || c.name === 'wide' || c.name === 's'),
+        { platformWide: platformWide.ok ? 'ok?' : platformWide.error.message, suffixWide: suffixWide.ok ? 'ok?' : suffixWide.error.message, secureOverHttp: secureOverHttp.ok ? 'ok?' : secureOverHttp.error.message, own: afterSuffix.find((c) => c.name === 'own') },
+      );
     }
 
     // Import formats: each sample, written into the project with the echo server's origin, imported by path, its tree checked and sent.

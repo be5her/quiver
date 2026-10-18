@@ -42,6 +42,27 @@ export function domainMatches(host: string, domain: string): boolean {
   return !isIp(host) && host.endsWith(`.${domain}`);
 }
 
+/**
+ * Domains nobody owns outright, so a cookie set for one would reach every site under it: hosting
+ * platforms that give each app a name under theirs, plus `localhost`. The second-level names under
+ * two-letter country codes (`co.uk`, `com.au`, `ne.jp`) are matched by pattern below. A small subset of
+ * the public suffix list, enough for the shared hosts a developer meets.
+ */
+const SHARED_SUFFIXES = new Set([
+  'localhost',
+  'herokuapp.com', 'azurewebsites.net', 'azurestaticapps.net', 'azurecontainerapps.io', 'azure-api.net', 'azureedge.net', 'cloudapp.net', 'cloudapp.azure.com', 'windows.net', 'blob.core.windows.net',
+  'amazonaws.com', 's3.amazonaws.com', 'compute.amazonaws.com', 'execute-api.amazonaws.com', 'elb.amazonaws.com', 'cloudfront.net', 'elasticbeanstalk.com', 'lambda-url.on.aws',
+  'appspot.com', 'run.app', 'web.app', 'firebaseapp.com', 'cloudfunctions.net',
+  'github.io', 'gitlab.io', 'netlify.app', 'vercel.app', 'pages.dev', 'workers.dev', 'fly.dev', 'onrender.com', 'railway.app', 'repl.co', 'glitch.me', 'surge.sh', 'now.sh',
+  'ngrok.io', 'ngrok.app', 'ngrok-free.app', 'ngrok.dev', 'loca.lt', 'trycloudflare.com', 'dyndns.org', 'no-ip.org', 'duckdns.org',
+]);
+const COUNTRY_SECOND_LEVEL = /^(ac|biz|co|com|edu|go|gob|gov|govt|info|ltd|me|mil|ne|net|nhs|nom|or|org|plc|sch)\.[a-z]{2}$/;
+
+/** A domain a Set-Cookie may not claim: a single label, a public suffix (`co.uk`), or a platform's shared one (`herokuapp.com`). */
+export function isPublicSuffix(domain: string): boolean {
+  return !domain.includes('.') || SHARED_SUFFIXES.has(domain) || COUNTRY_SECOND_LEVEL.test(domain);
+}
+
 /** RFC 6265 5.1.4: the default path is the request path up to, not including, its last slash. */
 export function defaultCookiePath(requestPath: string): string {
   if (!requestPath.startsWith('/')) return '/';
@@ -66,17 +87,24 @@ function parsedUrl(url: string): URL | null {
 
 /**
  * Store the Set-Cookie headers a response to \`url\` carried: a cookie replaces the one with the same
- * name, domain and path; one already expired (Max-Age=0, an Expires in the past) deletes it. A Domain
- * the host is not inside, or one without a dot other than the host itself, is rejected.
+ * name, domain and path; one already expired (Max-Age=0, an Expires in the past) deletes it. Rejected,
+ * as a browser would: a Domain the host is not inside; a Domain nobody owns outright (a single label,
+ * a public suffix such as `co.uk`, a hosting platform's shared domain such as `herokuapp.com`) unless
+ * it is the host itself; and a Secure cookie set over plain http, except from a loopback host.
  */
 export function storeCookies(jar: JarCookie[], url: string, setCookies: string[], now: number): StoreResult {
   const result: StoreResult = { jar: [...jar], stored: [], deleted: [], rejected: [] };
   const target = parsedUrl(url);
   if (!target) return result;
   const host = target.hostname.toLowerCase();
+  const secureOrigin = target.protocol === 'https:' || isLoopback(host);
   for (const header of setCookies) {
     const parsed = parseSetCookie(header);
     if (!parsed) continue;
+    if (parsed.secure && !secureOrigin) {
+      result.rejected.push({ name: parsed.name, reason: 'Secure cookie set over http' });
+      continue;
+    }
     let domain = host;
     let hostOnly = true;
     if (parsed.domain) {
@@ -85,7 +113,7 @@ export function storeCookies(jar: JarCookie[], url: string, setCookies: string[]
         result.rejected.push({ name: parsed.name, reason: `Domain ${wanted} does not contain ${host}` });
         continue;
       }
-      if (!wanted.includes('.') && wanted !== host) {
+      if (wanted !== host && isPublicSuffix(wanted)) {
         result.rejected.push({ name: parsed.name, reason: `Domain ${wanted} is too broad` });
         continue;
       }
