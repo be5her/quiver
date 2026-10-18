@@ -1673,14 +1673,17 @@ export default definePart({
           await wait(300);
           const segmentLabel = await js(`${visible('[data-testid=api-section-capture]')}?.textContent.trim() ?? null`);
           const captureRows = await js(`[...document.querySelectorAll('[data-testid=api-capture-row]')].filter((r) => r.offsetParent !== null).length`);
+          // Ticked where saved so (capReq), and ticked and locked where the name alone makes it secret (capToken, capSession, adminToken).
+          const secretBoxes = await js(`[...document.querySelectorAll('[data-testid=api-capture-secret]')].filter((e) => e.offsetParent !== null).map((e) => (e.checked ? '1' : '0') + (e.disabled ? 'd' : ''))`);
           await js(`[...document.querySelectorAll('button')].find((b) => b.offsetParent !== null && b.textContent.trim() === 'Send')?.click()`);
           await wait(1500);
           const strip = (await js(`[...document.querySelectorAll('[data-testid=api-response-captured-item]')].filter((e) => e.offsetParent !== null).map((e) => e.textContent.replace(/\\s+/g, ' ').trim())`)) as string[];
           await shot('03v-request-capture-light');
           check(
-            'ui: the Capture segment lists the captures, and the response shows each captured value (secret ones masked) or why it failed',
-            segmentLabel === 'Capture6' && captureRows === 6 && strip.some((s) => s.startsWith('capToken') && s.includes('••••••••') && !s.includes('cap-tok-123')) && strip.some((s) => s === 'capUser = 7') && strip.some((s) => s.startsWith('capMissing:')),
-            { segmentLabel, captureRows, strip },
+            'ui: the Capture segment lists the captures with Secret ticked and locked for a credential-like name, and the response shows each captured value (secret ones masked) or why it failed',
+            segmentLabel === 'Capture6' && captureRows === 6 && JSON.stringify(secretBoxes) === '["1d","1d","0","1","0","1d"]' &&
+              strip.some((s) => s.startsWith('capToken') && s.includes('••••••••') && !s.includes('cap-tok-123')) && strip.some((s) => s === 'capUser = 7') && strip.some((s) => s.startsWith('capMissing:')),
+            { segmentLabel, captureRows, secretBoxes, strip },
           );
           await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
           await wait(300);

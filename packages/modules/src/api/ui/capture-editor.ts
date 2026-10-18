@@ -51,6 +51,11 @@ export class CaptureEditor {
     this.value.set(this.rows().map((r) => (r.id === id ? { ...r, ...patch, ...secret } : r)));
   }
 
+  /** Secret by its name alone: shown ticked and locked, since the host keeps it secret whatever the box says. */
+  protected namedSecret(row: Capture): boolean {
+    return isSecretName(row.variable);
+  }
+
   protected text(event: Event): string {
     return (event.target as HTMLInputElement | HTMLSelectElement).value;
   }

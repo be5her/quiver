@@ -42,7 +42,16 @@
               (input)="update(row.id, { path: text($event) })"
             />
           </td>
-          <td class="py-0.5 pr-2 text-center"><input qCheckbox [checked]="row.secret" (change)="update(row.id, { secret: checked($event) })" /></td>
+          <td class="py-0.5 pr-2 text-center">
+            <input
+              qCheckbox
+              data-testid="api-capture-secret"
+              [checked]="row.secret || namedSecret(row)"
+              [disabled]="namedSecret(row)"
+              [title]="namedSecret(row) ? 'Named like a credential: always kept secret' : ''"
+              (change)="update(row.id, { secret: checked($event) })"
+            />
+          </td>
           <td class="py-0.5 text-right">
             <button qIconButton label="Remove capture" size="sm" (click)="remove(row.id)"><svg [qIcon]="icons.Trash2" class="size-3.5"></svg></button>
           </td>
