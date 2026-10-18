@@ -98,7 +98,7 @@
         @if (lower() === 'code') {
           <q-code-view [request]="current" [target]="codeTarget()" (targetChange)="rememberTarget($event)" (closed)="lower.set('response')" />
         } @else {
-          <q-response-pane [response]="response()" [error]="sendError()" [sending]="sending()" [received]="received()" />
+          <q-response-pane [compareWith]="compareTarget()" [response]="response()" [error]="sendError()" [sending]="sending()" [received]="received()" />
         }
       </div>
     </div>

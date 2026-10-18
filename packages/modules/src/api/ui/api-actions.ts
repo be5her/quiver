@@ -9,6 +9,7 @@ import {
   detectShellDialect,
   newId,
   nowIso,
+  responseFromHistory,
   type ApiCollection,
   type ApiRequest,
   type Environment,
@@ -261,6 +262,22 @@ export class ApiActions {
   openHistoryEntry(entry: HistoryEntry): void {
     const id = `history-${entry.id}`;
     this.openRequestTab({ id, name: entry.request.name }, { ...entry.request, id });
+  }
+
+  /** A past send with its kept response: the request as a draft, the response in the pane. */
+  async openHistoryResponse(entry: Pick<HistoryEntry, 'id'>): Promise<void> {
+    const full = await this.host.invoke<HistoryEntry>('api.history.get', { id: entry.id });
+    const id = `history-${full.id}`;
+    const scope = untracked(this.app.scope);
+    const tab = this.tabs.openTab(scope, { type: 'api.request', title: full.request.name, data: { id, draft: { ...full.request, id } } }, { singletonKey: `api.request:${id}` });
+    this.tabs.updateTab(scope, tab.id, { data: { ...tab.data, response: responseFromHistory(full) } });
+  }
+
+  /** Kept responses of a saved request side by side: the newest two, or the given ones. */
+  openDiff(request: { id: string; name: string }, right?: string, left?: string): void {
+    const scope = untracked(this.app.scope);
+    const tab = this.tabs.openTab(scope, { type: 'api.diff', title: `Compare: ${request.name}`, data: { requestId: request.id } }, { singletonKey: `api.diff:${request.id}` });
+    this.tabs.updateTab(scope, tab.id, { data: { requestId: request.id, ...(right ? { right } : {}), ...(left ? { left } : {}) } });
   }
 
   /** Keeps a past request as a new saved request, at the root, masks and all. */

@@ -295,6 +295,17 @@ export interface ApiResponse {
   sent: { method: HttpMethod; url: string; headers: [string, string][]; bodyPreview: string | null };
 }
 
+/** A response as the history keeps it (see `toHistoryResponse`). */
+export interface HistoryResponse {
+  status: number;
+  statusText: string;
+  headers: [string, string][];
+  contentType: string | null;
+  body: string;
+  bodyEncoding: 'utf8' | 'base64';
+  truncated: boolean;
+}
+
 export interface HistoryEntry {
   id: string;
   at: string;
@@ -307,6 +318,10 @@ export interface HistoryEntry {
   request: ApiRequest;
   /** Passed and total checks, when the request has any and a response came back. */
   checks?: { passed: number; total: number };
+  /** The response, when it was small enough and the workspace keeps responses. */
+  response?: HistoryResponse;
+  /** Set by api.history.list when the response was left out of the listing: fetch the entry for it. */
+  hasResponse?: boolean;
 }
 
 export type StreamKind = 'sse' | 'lines';

@@ -99,6 +99,9 @@
               <button qButton size="sm" variant="ghost" [icon]="icons.Search" title="Find in the body (Ctrl+F)" data-testid="api-response-search" (click)="search()">Find</button>
               <button qButton size="sm" variant="ghost" [icon]="icons.Download" title="Save the body to a file" data-testid="api-response-save" (click)="save()">Save</button>
               <button qButton size="sm" variant="ghost" [icon]="icons.Copy" (click)="copyBody()">Copy</button>
+              @if (compareWith()) {
+                <button qButton size="sm" variant="ghost" title="Compare this request's kept responses side by side" data-testid="api-response-compare" (click)="compare()">Compare</button>
+              }
             </div>
             <div class="flex-1 min-h-0">
               @if (showImage()) {

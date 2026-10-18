@@ -1,6 +1,6 @@
-import { Component, computed, model } from '@angular/core';
+import { Component, computed, inject, model } from '@angular/core';
 import { SendOptionsSchema, effectiveSendOptions, requestOptionOverrides, type RequestOptions, type SendOptions } from '@quiver/core';
-import { Button, Checkbox, Input } from '@quiver/ui';
+import { Button, Checkbox, HostBridge, Input, invokeResource } from '@quiver/ui';
 import { RotateCcw } from 'lucide';
 
 const MB = 1024 * 1024;
@@ -23,6 +23,15 @@ export class RequestSettings {
   protected readonly effective = computed(() => effectiveSendOptions(this.value()));
   protected readonly defaultSeconds = this.defaults.timeoutMs / 1000;
   protected readonly defaultMegabytes = this.defaults.maxBodyBytes / MB;
+
+  private readonly host = inject(HostBridge);
+  private readonly keep = invokeResource<{ value: boolean | null }>('workspace.state.get', () => ({ key: 'api.history.keepResponses' }), { refreshOnState: ['api.history.keepResponses'] });
+  /** A workspace setting rather than the request's: whether sends keep their response in the history. */
+  protected readonly keepResponses = computed(() => this.keep.value()?.value !== false);
+
+  protected setKeepResponses(on: boolean): void {
+    void this.host.invoke('workspace.state.set', { key: 'api.history.keepResponses', value: on });
+  }
 
   protected isSet(key: keyof SendOptions): boolean {
     return this.value()?.[key] !== undefined;

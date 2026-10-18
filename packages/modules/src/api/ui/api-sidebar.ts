@@ -117,6 +117,10 @@ export class ApiSidebar {
   protected historyMenu(event: MouseEvent, entry: HistoryEntry): void {
     this.contextMenu.open(event, [
       { label: 'Open', select: () => this.api.openHistoryEntry(entry) },
+      ...(entry.hasResponse ? [{ label: 'Open response', select: () => void this.api.openHistoryResponse(entry).catch((err) => this.toasts.error(err)), testId: 'api-history-open-response' }] : []),
+      ...(entry.hasResponse && entry.requestId && !entry.requestId.startsWith('history-')
+        ? [{ label: 'Compare…', select: () => this.api.openDiff({ id: entry.requestId!, name: entry.request.name }, entry.id), testId: 'api-history-compare' }]
+        : []),
       { label: 'Save as request', select: () => this.api.saveHistoryEntry(entry).catch((err) => this.toasts.error(err)), testId: 'api-history-save' },
       { label: 'Copy URL', select: () => this.toasts.copy(entry.url) },
       'separator',

@@ -127,12 +127,12 @@ Sizes: S is a day or less, M a few days, L a week or more.
 - [x] UI: the response pane shows a live list (time, event, data, id) with the status and headers from the first byte, Stop, and Follow that turns off when scrolled up; Stream the response in the Settings segment; `Receiving… n MB` while a big body downloads.
 - [x] Smoke: the SSE fixture's events in order with `since` paging, an NDJSON route whole by default and streamed when asked, the open `/echo` stream stopped and read by an agent; in the UI a streamed NDJSON response (screenshot `03zf`) and download progress from a new `/big` route.
 
-## PR 13: response history and diff (`feat/api-response-diff`, M)
+## PR 13: response history and diff (`feat/api-response-diff`, M; landed on the PR 1 branch at the owner's request)
 
-- [ ] History entries store the response when it is 256 KB or smaller: `HistoryEntry.response?: { status, headers, contentType, body, bodyEncoding, truncated }`, headers with `set-cookie` values masked. A workspace setting `api.history.keepResponses` (default on) in the request tab's Settings turns it off. The sidebar's history menu gets `Open response`.
-- [ ] New dependency `@codemirror/merge` for the side-by-side view (the rest of CodeMirror is already there).
-- [ ] `api.diff` tab: two pickers (history entries of the same request, the newest two by default), a `Normalise JSON` toggle (sorted keys, two-space indent, through the core's JSON formatter) and a `Headers` toggle. Opened from `Compare with previous` in the response pane and from `Compare…` in the history menu.
-- [ ] Smoke: two sends with different bodies are stored, `api.history.list` returns them with the response, the Set-Cookie value is masked in the file; a screenshot of the diff tab.
+- [x] `HistoryEntry.response` (`HistoryResponse`: status, status text, headers, content type, body, encoding, truncated) for responses of 256 KB or less, built by `toHistoryResponse` in core (tested): Set-Cookie values masked and, beyond the plan, the secrets the request resolved to scrubbed from the body. Workspace state `api.history.keepResponses` (on unless turned off), set in the Settings segment. `api.history.list` leaves responses out unless `withResponses` (marking `hasResponse`) and takes a `requestId`, so the sidebar does not carry bodies; `api.history.get` reads one entry. The history menu gets Open response (`responseFromHistory` turns the kept response back into one the pane shows) and Compare….
+- [x] New dependency `@codemirror/merge` 6.12.2 in `packages/ui`, behind a `q-diff-editor` component with the app's theme.
+- [x] `api.diff` tab: two pickers (the newest two of the request by default), Normalise JSON (`normalizeJson` in core, sorted keys at every depth) and Headers. Opened from Compare in the response pane (saved requests) and Compare… in the history menu.
+- [x] Smoke: two sends kept with their responses, listed with and without them, one read by id, the Set-Cookie value masked in the file, nothing kept with the setting off; in the UI Compare with the change marked and the headers added (screenshot `03zg`).
 
 ## PR 14: client certificates and proxy (`feat/api-network`, M)
 

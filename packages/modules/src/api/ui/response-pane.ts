@@ -76,6 +76,8 @@ export class ResponsePane {
   readonly response = input<ApiResponse | null>(null);
   readonly error = input<string | null>(null);
   readonly sending = input(false);
+  /** The saved request whose kept responses Compare opens; none for a draft. */
+  readonly compareWith = input<{ id: string; name: string } | null>(null);
   /** Bytes of the body received so far while it downloads, when the host reports it. */
   readonly received = input(0);
 
@@ -85,6 +87,11 @@ export class ResponsePane {
   protected readonly formatBytes = formatBytes;
   protected readonly view = signal<View>('body');
   /** Passed and total checks of the response, for the status line. */
+  protected compare(): void {
+    const target = this.compareWith();
+    if (target) this.api.openDiff(target);
+  }
+
   protected readonly checkCount = computed(() => checkSummary(this.response()?.checks));
   protected readonly pretty = signal(true);
   protected readonly preview = signal(true);

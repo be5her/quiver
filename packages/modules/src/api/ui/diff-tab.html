@@ -1,0 +1,40 @@
+<div class="flex flex-wrap items-center gap-3 px-3 py-2 border-b border-edge shrink-0 text-xs">
+  <span class="text-sm font-medium truncate">Compare: {{ name() }}</span>
+  <div class="flex-1"></div>
+  <label class="flex items-center gap-1.5 text-muted" title="Sort keys and indent, so only real changes show">
+    <input qCheckbox [checked]="normalise()" data-testid="api-diff-normalise" (change)="normalise.set($any($event.target).checked)" />
+    Normalise JSON
+  </label>
+  <label class="flex items-center gap-1.5 text-muted">
+    <input qCheckbox [checked]="headers()" data-testid="api-diff-headers" (change)="headers.set($any($event.target).checked)" />
+    Headers
+  </label>
+</div>
+@if (loading()) {
+  <div class="flex items-center justify-center flex-1"><svg qSpinner></svg></div>
+} @else if (kept().length < 2) {
+  <q-empty-state
+    class="flex-1"
+    title="Nothing to compare yet"
+    hint="Responses are kept in the history when they are 256 KB or smaller (unless the workspace turned it off in a request's Settings). Send this request again to compare."
+  />
+} @else {
+  <div class="grid grid-cols-2 gap-2 px-3 pt-2 shrink-0 text-xs">
+    <select qSelect class="h-7 text-xs" data-testid="api-diff-left" (change)="pick('left', $event)">
+      @for (e of kept(); track e.id) {
+        <option [value]="e.id" [selected]="e.id === leftId()">{{ label(e) }}</option>
+      }
+    </select>
+    <select qSelect class="h-7 text-xs" data-testid="api-diff-right" (change)="pick('right', $event)">
+      @for (e of kept(); track e.id) {
+        <option [value]="e.id" [selected]="e.id === rightId()">{{ label(e) }}</option>
+      }
+    </select>
+  </div>
+  @if (same()) {
+    <p class="px-3 pt-2 text-xs text-muted" data-testid="api-diff-same">The two responses are the same{{ normalise() ? ' once the JSON is normalised' : '' }}.</p>
+  }
+  <div class="flex-1 min-h-0 p-3 pt-2" data-testid="api-diff-view">
+    <q-diff-editor [left]="leftText()" [right]="rightText()" [language]="language()" />
+  </div>
+}

@@ -35,6 +35,7 @@ import {
   scrubSecrets,
   toCode,
   CODE_TARGETS,
+  toHistoryResponse,
   createLineSplitter,
   createSseParser,
   type StreamItem,
@@ -396,6 +397,8 @@ async function sendRequest(ctx: CommandContext, input: z.infer<typeof SendInput>
       response.checks = checks;
       entry.checks = checkSummary(checks);
     }
+    // The response goes into the history too, small ones and unless the workspace turned it off, to open or compare later.
+    if (await w.getState<boolean>(KEEP_RESPONSES, true)) entry.response = toHistoryResponse(response, secrets.values ?? []);
     // The response is the server's own; `sent` and the final URL are what Quiver adds, with the secrets resolved into them.
     if (!forAgent) return response;
     // Each hop's URL is one Quiver sent, so it can carry a secret the request resolved to, like `sent`.
@@ -888,15 +891,40 @@ const environmentSetActive = defineCommand({
 
 // ---------- history ----------
 
+/** Workspace state: whether sends keep their response in the history (on unless turned off). */
+const KEEP_RESPONSES = 'api.history.keepResponses';
+
 const historyList = defineCommand({
   id: 'api.history.list',
   title: 'Request history',
-  description: 'Most recent sent requests with status and timing. Tokens, passwords and API keys in them are masked; {{variable}} references are kept.',
+  description:
+    'Most recent sent requests with status and timing, optionally of one saved request. Responses of 256 KB or less are kept with their entry (Set-Cookie values and known secrets masked); they are left out of the listing (`hasResponse` says one is kept) unless withResponses is true, or read one entry with api.history.get. Tokens, passwords and API keys in requests are masked; {{variable}} references are kept.',
   scope: 'workspace',
-  input: z.object({ limit: z.number().int().min(1).max(500).default(50) }),
-  handler: async ({ limit }, ctx) => {
+  input: z.object({ limit: z.number().int().min(1).max(500).default(50), requestId: z.string().optional(), withResponses: z.boolean().optional() }),
+  handler: async ({ limit, requestId, withResponses }, ctx) => {
     await historyReady.get(ws(ctx).id);
-    return (await ws(ctx).store.readLog<HistoryEntry>(HISTORY_LOG, limit)).map((entry) => redactHistoryEntry(entry));
+    // A filtered listing reads further back, so a request sent among many others still has its past.
+    const entries = (await ws(ctx).store.readLog<HistoryEntry>(HISTORY_LOG, requestId ? 2000 : limit)).filter((e) => !requestId || e.requestId === requestId).slice(0, limit);
+    return entries.map((entry) => {
+      const masked = redactHistoryEntry(entry);
+      if (withResponses || !masked.response) return masked;
+      const { response: _kept, ...rest } = masked;
+      return { ...rest, hasResponse: true };
+    });
+  },
+});
+
+const historyGet = defineCommand({
+  id: 'api.history.get',
+  title: 'Get a history entry',
+  description: 'One history entry with its kept response, when it has one.',
+  scope: 'workspace',
+  input: z.object({ id: z.string() }),
+  handler: async ({ id }, ctx) => {
+    await historyReady.get(ws(ctx).id);
+    const entry = (await ws(ctx).store.readLog<HistoryEntry>(HISTORY_LOG, 5000)).find((e) => e.id === id);
+    if (!entry) throw new QuiverError('NOT_FOUND', `History entry ${id} not found`);
+    return redactHistoryEntry(entry);
   },
 });
 
@@ -1499,6 +1527,7 @@ export const apiModule = defineModule({
     variablesSet,
     variablesDefine,
     historyList,
+    historyGet,
     historyClear,
     collectionRun,
     collectionReorder,

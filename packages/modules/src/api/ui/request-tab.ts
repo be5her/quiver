@@ -106,6 +106,8 @@ export class RequestTab implements TabComponent {
   protected readonly response = signal<ApiResponse | null>(null);
   protected readonly sendError = signal<string | null>(null);
   protected readonly sending = signal(false);
+  /** A saved request's past responses can be compared; a draft has none of its own. */
+  protected readonly compareTarget = computed(() => (this.draft() ? null : { id: this.requestId(), name: this.request().name }));
   /** Bytes of the body so far, while a big one downloads. */
   protected readonly received = signal(0);
   /** The id the running send was given, so Stop can cancel it. */
@@ -157,6 +159,11 @@ export class RequestTab implements TabComponent {
   });
 
   constructor() {
+    // A history entry opened with its response shows that response until the next send.
+    effect(() => {
+      const kept = this.tab().data?.['response'] as ApiResponse | undefined;
+      if (kept) untracked(() => this.response.set(kept));
+    });
     injectHostEvent('api.changed', (p) => {
       if (p.reason === 'progress' && this.sendId && p.sendId === this.sendId && this.sending()) this.received.set(p.received ?? 0);
     });

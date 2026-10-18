@@ -1062,6 +1062,39 @@ export default definePart({
       );
     }
 
+    // Response history: small responses kept with their entry, Set-Cookie values masked in the file, the setting turning it off.
+    {
+      const origin = `http://127.0.0.1:${echoPort}`;
+      const probe = await run<ApiRequest>('api.request.create', { name: 'diff probe', method: 'GET', url: `${origin}/diff?v=1` }, ws.id);
+      await run('api.request.send', { requestId: probe.id }, ws.id);
+      await run('api.request.save', { request: { ...probe, url: `${origin}/diff?v=2` } }, ws.id);
+      await run('api.request.send', { requestId: probe.id }, ws.id);
+      const withBodies = await run<HistoryEntry[]>('api.history.list', { requestId: probe.id, withResponses: true }, ws.id);
+      const listed = await run<HistoryEntry[]>('api.history.list', { requestId: probe.id }, ws.id);
+      const one = await run<HistoryEntry>('api.history.get', { id: listed[0].id }, ws.id);
+      await run('api.request.send', { request: { ...probe, id: '', url: `${origin}/cookies` } }, ws.id);
+      const historyFile = await fs.readFile(path.join(folder, '.quiver', 'local', 'history.jsonl'), 'utf8');
+      const cookieLine = historyFile.split('\n').filter((l) => l.includes('/cookies')).pop() ?? '';
+      await run('workspace.state.set', { key: 'api.history.keepResponses', value: false }, ws.id);
+      await run('api.request.send', { requestId: probe.id }, ws.id);
+      const notKept = (await run<HistoryEntry[]>('api.history.list', { requestId: probe.id, withResponses: true }, ws.id))[0];
+      await run('workspace.state.set', { key: 'api.history.keepResponses', value: true }, ws.id);
+      check(
+        'history: responses are kept with their entry, left out of a plain listing, masked where they set cookies, and not kept when turned off',
+        withBodies.length === 2 &&
+          JSON.parse(withBodies[0].response?.body ?? '{}').url === '/diff?v=2' &&
+          JSON.parse(withBodies[1].response?.body ?? '{}').url === '/diff?v=1' &&
+          withBodies[0].response?.status === 200 &&
+          listed.every((e) => e.hasResponse && !e.response) &&
+          one.response?.body === withBodies[0].response?.body &&
+          cookieLine.includes(`sid=${REDACTED}`) &&
+          !cookieLine.includes('abc123') &&
+          notKept !== undefined &&
+          !notKept.response,
+        { kept: withBodies.map((e) => e.response?.body.slice(0, 40)), cookie: cookieLine.slice(cookieLine.toLowerCase().indexOf('set-cookie'), cookieLine.toLowerCase().indexOf('set-cookie') + 120), cookieLineLength: cookieLine.length, notKept: Boolean(notKept?.response) },
+      );
+    }
+
     return {
       ui: async (u) => {
         const { win, js, wait, shot } = u;
@@ -2070,6 +2103,38 @@ export default definePart({
           await wait(300);
           await run('api.request.delete', { id: streamed.id }, ws.id);
           await run('api.request.delete', { id: big.id }, ws.id);
+        }
+
+        // Compare: the request's Compare opens its last two kept responses side by side, the change marked.
+        {
+          // A new URL, so this send's response differs from the last kept one.
+          const toChange = (await run<ApiRequest[]>('api.request.list', {}, ws.id)).find((r) => r.name === 'diff probe')!;
+          await run('api.request.save', { request: { ...toChange, url: toChange.url.replace('v=2', 'v=4') } }, ws.id);
+          await until(() => js(`Boolean(document.querySelector('[data-testid=api-request-row][data-name="diff probe"]'))`).then(Boolean), 3000);
+          await js(`document.querySelector('[data-testid=api-request-row][data-name="diff probe"]')?.click()`);
+          await wait(800);
+          await js(`[...document.querySelectorAll('button')].find((b) => b.offsetParent !== null && b.textContent.trim() === 'Send')?.click()`);
+          await until(() => js(`Boolean(${visible('[data-testid=api-response-compare]')})`).then(Boolean), 4000);
+          await js(`${visible('[data-testid=api-response-compare]')}?.click()`);
+          await until(() => js(`Boolean(${visible('[data-testid=api-diff-view] .cm-mergeView')})`).then(Boolean), 4000);
+          await wait(400);
+          const pickers = await js(`[...document.querySelectorAll('[data-testid=api-diff-left], [data-testid=api-diff-right]')].filter((e) => e.offsetParent !== null).map((s) => s.options.length)`);
+          const changed = await js(`[...document.querySelectorAll('[data-testid=api-diff-view] .cm-changedText')].filter((e) => e.offsetParent !== null).map((e) => e.textContent)`);
+          await shot('03zg-response-diff-light');
+          await js(`${visible('[data-testid=api-diff-headers]')}?.click()`);
+          await wait(400);
+          const withHeaders = await js(`${visible('[data-testid=api-diff-view] .cm-merge-b .cm-content')}?.textContent ?? ''`);
+          check(
+            'ui: Compare opens the kept responses side by side with the change marked, and Headers adds the status and headers',
+            Array.isArray(pickers) && pickers.length === 2 && (pickers as number[]).every((n) => n >= 2) && (changed as string[]).some((t) => t.includes('4') || t.includes('2')) && String(withHeaders).startsWith('200 OK'),
+            { pickers, changed, withHeaders: String(withHeaders).slice(0, 60) },
+          );
+          await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+          await wait(300);
+          await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+          await wait(300);
+          const diffProbe = (await run<ApiRequest[]>('api.request.list', {}, ws.id)).find((r) => r.name === 'diff probe');
+          if (diffProbe) await run('api.request.delete', { id: diffProbe.id }, ws.id);
         }
       },
     };

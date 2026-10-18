@@ -3,6 +3,7 @@ import { AppState, defineModuleUI } from '@quiver/ui';
 import { Globe } from 'lucide';
 import { ApiActions } from './api-actions';
 import { RunTab } from './run-tab';
+import { DiffTab } from './diff-tab';
 import { ApiSidebar } from './api-sidebar';
 import { CollectionTab } from './collection-tab';
 import { CookieJarTab } from './cookie-jar-tab';
@@ -31,6 +32,7 @@ export const apiModuleUI = defineModuleUI({
     'api.history': HistoryTab,
     'api.cookies': CookieJarTab,
     'api.run': RunTab,
+    'api.diff': DiffTab,
   },
   actions: () => {
     const api = inject(ApiActions);
