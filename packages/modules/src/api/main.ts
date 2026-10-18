@@ -35,6 +35,11 @@ import {
   scrubSecrets,
   toCode,
   CODE_TARGETS,
+  createLineSplitter,
+  createSseParser,
+  type StreamItem,
+  type StreamKind,
+  type StreamRead,
   checkSummary,
   evaluateChecks,
   resolveTemplate,
@@ -314,6 +319,7 @@ const SendInput = z.object({
   /** Record the call in workspace history. Defaults to true. */
   record: z.boolean().optional(),
   sendId: z.string().min(1).max(100).optional().describe('Any id of your choosing; api.request.cancel with the same id stops this send'),
+  stream: z.boolean().optional().describe('Read the body as a live stream of lines (NDJSON); an event stream streams without it. Shorthand for options.stream.'),
 });
 
 /**
@@ -321,11 +327,14 @@ const SendInput = z.object({
  * record it in the history. `signal` stops it from outside (a run being cancelled); `recorded` gets
  * the history entry as written, credentials masked, whether or not the send succeeded.
  */
-async function sendRequest(ctx: CommandContext, input: z.infer<typeof SendInput>, signal?: AbortSignal, recorded?: (entry: HistoryEntry) => void): Promise<ApiResponse> {
+/**
+ * `streams` false reads every body whole (a collection run waits for an event stream to end, or times out).
+ */
+async function sendRequest(ctx: CommandContext, input: z.infer<typeof SendInput>, signal?: AbortSignal, recorded?: (entry: HistoryEntry) => void, streams = true): Promise<ApiResponse> {
   const w = ws(ctx);
   const request = input.request ?? (input.requestId ? await requireRequest(w, input.requestId) : null);
   if (!request) throw new QuiverError('INVALID_INPUT', 'Provide requestId or request');
-  const options = effectiveSendOptions(request.options, input.options);
+  const options = effectiveSendOptions(request.options, { ...input.options, ...(input.stream !== undefined ? { stream: input.stream } : {}) });
   const { resolved, vars } = await resolveRequest(ctx, request, input.environmentId);
   const sendable = await applyOAuth(ctx, resolved, 'send');
   const prepared = await prepareRequest(sendable, { baseDir: w.path, agent: ctx.caller === 'mcp' });
@@ -354,13 +363,31 @@ async function sendRequest(ctx: CommandContext, input: z.infer<typeof SendInput>
   try {
     // The cookie jar, unless the request or the call turns it off: cookies go out on every hop and answers' cookies are kept.
     const jar = options.cookies ? jarSession(await readJar(w)) : null;
-    const response = await sendPrepared(prepared, options, controller.signal, jar?.hooks);
+    // A big download says how far it got (to the UI, which gives a sendId); a streamed body is handed to the stream registry.
+    let streamId: string | undefined;
+    const progress = input.sendId ? throttled(() => ctx.host.emit('api.changed', { workspaceId: w.id, reason: 'progress', sendId: input.sendId, received })) : null;
+    let received = 0;
+    const response = await sendPrepared(prepared, options, controller.signal, jar?.hooks, {
+      onProgress: progress
+        ? (bytes) => {
+            received = bytes;
+            progress.call();
+          }
+        : undefined,
+      onStream: streams ? (kind, chunks) => (streamId = startStream(ctx, w.id, kind, chunks, controller)) : undefined,
+    });
     if (jar) {
       response.cookieJar = jar.report;
       if (jar.changed()) await writeJar(w, ctx.host, jar.jar());
     }
     entry.status = response.status;
     entry.durationMs = Math.round(response.timings.total);
+    if (streamId) {
+      // Captures and checks read a whole body; a stream has none yet.
+      response.streamId = streamId;
+      if (!forAgent) return response;
+      return { ...response, url: redactUrl(response.url, secrets), redirects: response.redirects.map((hop) => ({ ...hop, url: redactUrl(hop.url, secrets), location: redactUrl(hop.location, secrets) })), sent: redactSent(response.sent, secrets) };
+    }
     const captured = await runCaptures(ctx, request, response, input.environmentId);
     if (captured) response.captured = captured;
     // Checks read the response as the server sent it; their expected values resolve with the variables the request was sent with.
@@ -888,6 +915,132 @@ const historyClear = defineCommand({
   },
 });
 
+// ---------- streamed responses ----------
+
+/** Items kept per stream; older ones are dropped, and a read says how many it missed. */
+const STREAM_BUFFER = 5000;
+/** Finished streams kept per workspace for reading; older ones are forgotten. */
+const KEPT_STREAMS = 10;
+/** At most one `api.changed` per stream (or download) this often. */
+const ANNOUNCE_MS = 100;
+
+interface LiveStream {
+  id: string;
+  workspaceId: string;
+  kind: StreamKind;
+  started: number;
+  items: StreamItem[];
+  nextSeq: number;
+  dropped: number;
+  done: boolean;
+  error: string | null;
+  bytes: number;
+  controller: AbortController;
+}
+
+const streams = new Map<string, LiveStream>();
+
+/** Calls `fn` at most once per ANNOUNCE_MS, the last call always reaching it. */
+function throttled(fn: () => void): { call(): void; flush(): void } {
+  let last = 0;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const run = () => {
+    timer = null;
+    last = Date.now();
+    fn();
+  };
+  return {
+    call() {
+      if (timer) return;
+      const wait = ANNOUNCE_MS - (Date.now() - last);
+      if (wait <= 0) run();
+      else timer = setTimeout(run, wait);
+    },
+    flush() {
+      if (timer) clearTimeout(timer);
+      run();
+    },
+  };
+}
+
+/** Read a streamed body into items as it arrives, announcing new ones; returns the stream's id. */
+function startStream(ctx: CommandContext, workspaceId: string, kind: StreamKind, chunks: AsyncGenerator<string>, controller: AbortController): string {
+  const live: LiveStream = { id: newId(), workspaceId, kind, started: Date.now(), items: [], nextSeq: 0, dropped: 0, done: false, error: null, bytes: 0, controller };
+  streams.set(live.id, live);
+  const announce = throttled(() => ctx.host.emit('api.changed', { workspaceId, reason: 'stream', streamId: live.id }));
+  const add = (items: Omit<StreamItem, 'seq' | 'at'>[]) => {
+    if (!items.length) return;
+    const at = Date.now() - live.started;
+    for (const item of items) live.items.push({ seq: live.nextSeq++, at, ...item });
+    const over = live.items.length - STREAM_BUFFER;
+    if (over > 0) live.items.splice(0, over);
+    announce.call();
+  };
+  const sse = kind === 'sse' ? createSseParser() : null;
+  const lines = kind === 'lines' ? createLineSplitter() : null;
+  void (async () => {
+    try {
+      for await (const chunk of chunks) {
+        live.bytes += Buffer.byteLength(chunk);
+        if (sse) add(sse.push(chunk).map((e) => ({ event: e.event, id: e.id, data: e.data })));
+        else add(lines!.push(chunk).map((data) => ({ data })));
+      }
+      if (lines) add(lines.end().map((data) => ({ data })));
+    } catch (err) {
+      live.error = controller.signal.aborted ? 'Stopped' : err instanceof Error ? err.message : String(err);
+    } finally {
+      live.done = true;
+      announce.flush();
+      const finished = [...streams.values()].filter((s) => s.workspaceId === workspaceId && s.done);
+      for (const old of finished.slice(0, Math.max(0, finished.length - KEPT_STREAMS))) streams.delete(old.id);
+    }
+  })();
+  return live.id;
+}
+
+function liveStream(ctx: CommandContext, streamId: string): LiveStream {
+  const live = streams.get(streamId);
+  if (!live || live.workspaceId !== ws(ctx).id) throw new QuiverError('NOT_FOUND', `Stream ${streamId} not found; finished streams are kept only for a while`);
+  return live;
+}
+
+const streamRead = defineCommand({
+  id: 'api.request.stream.read',
+  title: 'Read a streamed response',
+  description:
+    'The items of a streamed response (an event stream, or a send with `stream`) after `since` (the `next` of the previous read, 0 for the start): events with their name, id and data, or lines. Also whether the stream ended (`done`, with `error` when it did not end by the server closing it) and how many items fell out of its 5000-item buffer before they were read.',
+  scope: 'workspace',
+  input: z.object({ streamId: z.string(), since: z.number().int().min(0).optional(), limit: z.number().int().min(1).max(STREAM_BUFFER).optional() }),
+  handler: async ({ streamId, since, limit }, ctx): Promise<StreamRead> => {
+    const live = liveStream(ctx, streamId);
+    const from = since ?? 0;
+    const firstSeq = live.items[0]?.seq ?? live.nextSeq;
+    const items = live.items.filter((item) => item.seq >= from).slice(0, limit ?? STREAM_BUFFER);
+    return {
+      items,
+      next: items.length ? items[items.length - 1].seq + 1 : Math.max(from, firstSeq),
+      done: live.done && (items.length === 0 || items[items.length - 1].seq === live.nextSeq - 1),
+      dropped: Math.max(0, firstSeq - from),
+      error: live.error,
+      bytes: live.bytes,
+    };
+  },
+});
+
+const streamStop = defineCommand({
+  id: 'api.request.stream.stop',
+  title: 'Stop a streamed response',
+  description: 'Closes the connection of a streamed response. What arrived stays readable. Returns whether it was still open.',
+  scope: 'workspace',
+  input: z.object({ streamId: z.string() }),
+  handler: async ({ streamId }, ctx) => {
+    const live = liveStream(ctx, streamId);
+    const open = !live.done;
+    if (open) live.controller.abort();
+    return { stopped: open };
+  },
+});
+
 // ---------- collection runs ----------
 
 const RUNS_LOG = 'runs';
@@ -930,7 +1083,7 @@ async function executeRun(ctx: CommandContext, live: LiveRun, options: { environ
     announceRun(ctx, live);
     let entry: HistoryEntry | undefined;
     try {
-      const response = await sendRequest(ctx, { requestId: item.requestId, environmentId: options.environmentId }, controller.signal, (e) => (entry = e));
+      const response = await sendRequest(ctx, { requestId: item.requestId, environmentId: options.environmentId }, controller.signal, (e) => (entry = e), false);
       item.httpStatus = response.status;
       item.durationMs = Math.round(response.timings.total);
       if (response.checks) item.checks = response.checks;
@@ -1306,6 +1459,7 @@ export const apiModule = defineModule({
   onWorkspaceClose: (w) => {
     historyReady.delete(w.id);
     for (const live of runs.values()) if (live.workspaceId === w.id) live.controller.abort();
+    for (const live of streams.values()) if (live.workspaceId === w.id) live.controller.abort();
   },
   commands: [
     requestList,
@@ -1350,6 +1504,8 @@ export const apiModule = defineModule({
     collectionReorder,
     runGet,
     runCancel,
+    streamRead,
+    streamStop,
     runList,
     importCurl,
     importOpenApiCommand,

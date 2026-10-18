@@ -29,6 +29,24 @@ export async function startFixtures() {
       res.end();
       return;
     }
+    // `/ndjson?n=&ms=` writes n JSON lines `ms` apart, then ends; `/big?chunks=&ms=` 256 KB chunks `ms` apart, for download progress.
+    if (route.pathname === '/ndjson' || route.pathname === '/big') {
+      req.resume();
+      const big = route.pathname === '/big';
+      const total = Number(route.searchParams.get(big ? 'chunks' : 'n') ?? 3);
+      const gap = Number(route.searchParams.get('ms') ?? 30);
+      res.writeHead(200, { 'content-type': big ? 'application/octet-stream' : 'application/x-ndjson' });
+      let sent = 0;
+      const tick = () => {
+        if (res.destroyed) return;
+        if (sent === total) return void res.end();
+        sent++;
+        res.write(big ? Buffer.alloc(256 * 1024, 120) : `${JSON.stringify({ n: sent })}\n`);
+        setTimeout(tick, gap);
+      };
+      tick();
+      return;
+    }
     if (route.pathname === '/cookies') {
       req.resume();
       // The second Expires holds a comma: why Set-Cookie headers are kept one by one.

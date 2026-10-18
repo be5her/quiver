@@ -3,7 +3,9 @@
     <div class="flex items-center gap-3 px-3 h-8 text-xs shrink-0">
       <span class="font-semibold" [class]="statusColor(response.status)" data-testid="api-response-status">{{ response.status }} {{ response.statusText }}</span>
       <span class="text-muted cursor-default" [title]="timing()?.title ?? ''" data-testid="api-response-time">{{ formatMs(response.timings.total) }}</span>
-      <span class="text-muted">{{ formatBytes(response.size) }}</span>
+      @if (!response.streamId) {
+        <span class="text-muted">{{ formatBytes(response.size) }}</span>
+      }
       @if (response.redirects.length) {
         <button type="button" class="text-muted hover:text-fg underline decoration-dotted underline-offset-2" data-testid="api-response-redirects" (click)="showHeaders()">
           {{ response.redirects.length }} {{ response.redirects.length === 1 ? 'redirect' : 'redirects' }}
@@ -61,6 +63,9 @@
       </div>
     }
     <div class="flex-1 min-h-0 p-2">
+      @if (response.streamId && view() === 'body') {
+        <q-stream-view [streamId]="response.streamId" [kind]="response.streamKind ?? 'sse'" />
+      } @else {
       @switch (view()) {
         @case ('body') {
           <div class="flex flex-col h-full gap-1">
@@ -195,10 +200,18 @@
           </div>
         }
       }
+      }
     </div>
   </div>
 } @else if (sending()) {
-  <div class="flex items-center justify-center h-full gap-2 text-sm text-muted"><svg qSpinner></svg> Sending…</div>
+  <div class="flex items-center justify-center h-full gap-2 text-sm text-muted" data-testid="api-response-sending">
+    <svg qSpinner></svg>
+    @if (received()) {
+      Receiving… {{ formatBytes(received()) }}
+    } @else {
+      Sending…
+    }
+  </div>
 } @else if (error(); as error) {
   <q-empty-state title="Request failed" [hint]="error" />
 } @else {

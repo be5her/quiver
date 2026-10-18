@@ -112,6 +112,8 @@ export const SendOptionsSchema = z.object({
   maxBodyBytes: z.number().int().positive().default(10 * 1024 * 1024),
   /** Send the workspace cookie jar's cookies and keep the ones responses set. */
   cookies: z.boolean().default(true),
+  /** Read the body as a live stream of lines (NDJSON and the like). Event streams stream whatever this says. */
+  stream: z.boolean().default(false),
 });
 export type SendOptions = z.infer<typeof SendOptionsSchema>;
 
@@ -125,6 +127,7 @@ export const RequestOptionsSchema = z.object({
   insecure: z.boolean().optional(),
   maxBodyBytes: z.number().int().positive().optional(),
   cookies: z.boolean().optional(),
+  stream: z.boolean().optional(),
 });
 export type RequestOptions = z.infer<typeof RequestOptionsSchema>;
 
@@ -281,6 +284,13 @@ export interface ApiResponse {
   captured?: CapturedValue[];
   /** How the request's checks went, when it has any. */
   checks?: CheckResult[];
+  /**
+   * Set when the body streams (an event stream, or a send asked to stream): the body is then empty
+   * and its items are read with `api.request.stream.read`.
+   */
+  streamId?: string;
+  /** How the stream is split: server-sent events, or one item per line. */
+  streamKind?: StreamKind;
   /** The request after variable resolution and auth application. */
   sent: { method: HttpMethod; url: string; headers: [string, string][]; bodyPreview: string | null };
 }
@@ -297,6 +307,32 @@ export interface HistoryEntry {
   request: ApiRequest;
   /** Passed and total checks, when the request has any and a response came back. */
   checks?: { passed: number; total: number };
+}
+
+export type StreamKind = 'sse' | 'lines';
+
+/** One item of a streamed body: an event of an event stream, or a line. `seq` counts from 0 for the stream. */
+export interface StreamItem {
+  seq: number;
+  /** ms since the stream started. */
+  at: number;
+  /** The event name, for an event stream. */
+  event?: string;
+  /** The event id, when the server set one. */
+  id?: string | null;
+  data: string;
+}
+
+/** A page of a stream: the items after `since`, where to read on from, and whether it ended. */
+export interface StreamRead {
+  items: StreamItem[];
+  next: number;
+  done: boolean;
+  /** Items that fell out of the buffer before they were read. */
+  dropped: number;
+  /** Why the stream ended, when it was not the server closing it. */
+  error: string | null;
+  bytes: number;
 }
 
 export type RunItemStatus = 'pending' | 'running' | 'passed' | 'failed' | 'error' | 'skipped' | 'cancelled';

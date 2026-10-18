@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { REDACTED } from '@quiver/core';
-import type { ApiCollection, ApiRequest, ApiResponse, ApiRun, JarCookie, GraphqlSchemaDoc, Environment, HistoryEntry, WorkspaceInfo } from '@quiver/core';
+import type { ApiCollection, ApiRequest, ApiResponse, ApiRun, StreamRead, JarCookie, GraphqlSchemaDoc, Environment, HistoryEntry, WorkspaceInfo } from '@quiver/core';
 import { definePart, until } from '../part';
 
 export default definePart({
@@ -1007,6 +1007,61 @@ export default definePart({
       await run('api.environment.save', { environment: { ...tokenEnv, variables: tokenEnv.variables.filter((v) => v.key !== 'runToken') } }, ws.id);
     }
 
+    // Streamed responses: an event stream streams on its own, NDJSON when asked; items in order, paging with since, stop.
+    {
+      const { ssePort } = t.fixtures;
+      type StreamResponse = ApiResponse & { streamId?: string; streamKind?: string };
+      /** An unsaved request, sent inline. */
+      const inline = (url: string, extra: Partial<ApiRequest> = {}): ApiRequest => ({ id: '', name: 'stream', method: 'GET', url, params: [], headers: [], body: { type: 'none' }, auth: { type: 'none' }, collectionId: null, createdAt: '', updatedAt: '', ...extra });
+      const readAll = async (streamId: string) => {
+        let read: StreamRead = { items: [], next: 0, done: false, dropped: 0, error: null, bytes: 0 };
+        await until(async () => (read = await run<StreamRead>('api.request.stream.read', { streamId }, ws.id)).done, 5000);
+        return read;
+      };
+      const sseResponse = await run<StreamResponse>('api.request.send', { request: inline(`http://127.0.0.1:${ssePort}/`) }, ws.id);
+      const sseRead = sseResponse.streamId ? await readAll(sseResponse.streamId) : null;
+      const paged = sseResponse.streamId ? await run<StreamRead>('api.request.stream.read', { streamId: sseResponse.streamId, since: 1 }, ws.id) : null;
+      check(
+        'streams: an event stream returns its head at once and its events are read in order, with since paging on',
+        sseResponse.status === 200 &&
+          sseResponse.streamKind === 'sse' &&
+          sseResponse.body === '' &&
+          sseRead?.done === true &&
+          sseRead.error === null &&
+          sseRead.items.map((i) => `${i.event}:${i.data}:${i.id}`).join('|') === 'tick:{"n":1}:1|message:line one\nline two:2' &&
+          paged?.items.length === 1 &&
+          paged.items[0].seq === 1 &&
+          paged.next === 2,
+        { kind: sseResponse.streamKind, items: sseRead?.items, paged: paged?.items.map((i) => i.seq) },
+      );
+
+      const ndRequest = inline(`http://127.0.0.1:${echoPort}/ndjson?n=4&ms=40`);
+      const whole = await run<StreamResponse>('api.request.send', { request: ndRequest }, ws.id);
+      const nd = await run<StreamResponse>('api.request.send', { request: ndRequest, stream: true }, ws.id);
+      const ndRead = nd.streamId ? await readAll(nd.streamId) : null;
+      check(
+        'streams: an NDJSON body is one response unless the send asks to stream it, then one item per line',
+        !whole.streamId &&
+          whole.body.trim().split('\n').length === 4 &&
+          nd.streamKind === 'lines' &&
+          ndRead?.items.map((i) => i.data).join('|') === '{"n":1}|{"n":2}|{"n":3}|{"n":4}' &&
+          ndRead.items.every((item, i) => i === 0 || item.at >= ndRead!.items[i - 1].at),
+        { wholeStream: whole.streamId ?? null, items: ndRead?.items.map((i) => i.data) },
+      );
+
+      // Stop: the never-ending /echo stream closes, and an agent reading it gets the same items.
+      const open = await run<StreamResponse>('api.request.send', { request: inline(`http://127.0.0.1:${ssePort}/echo`, { method: 'POST', body: { type: 'text', content: 'hello stream' } }) }, ws.id);
+      await until(async () => (await run<StreamRead>('api.request.stream.read', { streamId: open.streamId! }, ws.id)).items.length === 1, 3000);
+      const stopped = await run<{ stopped: boolean }>('api.request.stream.stop', { streamId: open.streamId! }, ws.id);
+      const afterStop = await readAll(open.streamId!);
+      const agentRead = await host.invoke('api.request.stream.read', { streamId: open.streamId! }, { caller: 'mcp', workspaceId: ws.id });
+      check(
+        'api.request.stream.stop: an open stream closes, what arrived stays readable, and agents read it too',
+        stopped.stopped === true && afterStop.done && afterStop.error === 'Stopped' && afterStop.items[0]?.data === 'hello stream' && agentRead.ok && (agentRead.result as StreamRead).items.length === 1,
+        { stopped, error: afterStop.error, items: afterStop.items.map((i) => i.data) },
+      );
+    }
+
     return {
       ui: async (u) => {
         const { win, js, wait, shot } = u;
@@ -1968,6 +2023,53 @@ export default definePart({
           await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
           await wait(300);
           await run('api.collection.delete', { id: uiRun.id }, ws.id);
+        }
+
+        // Streams in the UI: the Stream option, a live list of lines while it streams, and a big download saying how far it got.
+        {
+          const origin = `http://127.0.0.1:${echoPort}`;
+          const make = async (name: string, url: string, options?: ApiRequest['options']) => {
+            const created = await run<ApiRequest>('api.request.create', { name, method: 'GET', url }, ws.id);
+            return run<ApiRequest>('api.request.save', { request: { ...created, ...(options ? { options } : {}) } }, ws.id);
+          };
+          const streamed = await make('ui stream', `${origin}/ndjson?n=5&ms=150`, { stream: true });
+          const big = await make('ui big', `${origin}/big?chunks=24&ms=60`);
+          const openRow = async (name: string) => {
+            await until(() => js(`Boolean(document.querySelector('[data-testid=api-request-row][data-name="${name}"]'))`).then(Boolean), 3000);
+            await js(`document.querySelector('[data-testid=api-request-row][data-name="${name}"]')?.click()`);
+            await wait(800);
+          };
+          const send = () => js(`[...document.querySelectorAll('button')].find((b) => b.offsetParent !== null && b.textContent.trim() === 'Send')?.click()`);
+
+          await openRow('ui stream');
+          await js(`${visible('[data-testid=api-section-settings]')}?.click()`);
+          await wait(250);
+          const streamOption = await js(`${visible('[data-testid=api-option-stream]')}?.checked ?? null`);
+          await send();
+          await until(() => js(`(${visible('[data-testid=api-stream-item]')}) !== undefined`).then(Boolean), 3000);
+          const whileStreaming = await js(`${visible('[data-testid=api-stream-state]')}?.textContent.trim() ?? null`);
+          await until(() => js(`${visible('[data-testid=api-stream-state]')}?.textContent.trim() === 'Ended'`).then(Boolean), 5000);
+          const lines = await js(`[...document.querySelectorAll('[data-testid=api-stream-data]')].filter((e) => e.offsetParent !== null).map((e) => e.textContent)`);
+          const count = await js(`${visible('[data-testid=api-stream-count]')}?.textContent.trim() ?? null`);
+          await shot('03zf-stream-light');
+          check(
+            'ui: with Stream the response is a live list, Streaming while lines arrive and Ended with all of them after',
+            streamOption === true && whileStreaming === 'Streaming' && JSON.stringify(lines) === JSON.stringify([1, 2, 3, 4, 5].map((n) => `{"n":${n}}`)) && String(count).startsWith('5 lines'),
+            { streamOption, whileStreaming, lines, count },
+          );
+          await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+          await wait(300);
+
+          await openRow('ui big');
+          await send();
+          const receiving = await until(() => js(`/Receiving… \\d/.test(${visible('[data-testid=api-response-sending]')}?.textContent ?? '')`).then(Boolean), 3000);
+          const receivingText = await js(`${visible('[data-testid=api-response-sending]')}?.textContent.replace(/\\s+/g, ' ').trim() ?? null`);
+          await until(() => js(`Boolean(${visible('[data-testid=api-response-status]')})`).then(Boolean), 5000);
+          check('ui: a big download says how much has arrived while it downloads', receiving === true, receivingText);
+          await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+          await wait(300);
+          await run('api.request.delete', { id: streamed.id }, ws.id);
+          await run('api.request.delete', { id: big.id }, ws.id);
         }
       },
     };

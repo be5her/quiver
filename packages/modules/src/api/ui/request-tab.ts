@@ -106,6 +106,8 @@ export class RequestTab implements TabComponent {
   protected readonly response = signal<ApiResponse | null>(null);
   protected readonly sendError = signal<string | null>(null);
   protected readonly sending = signal(false);
+  /** Bytes of the body so far, while a big one downloads. */
+  protected readonly received = signal(0);
   /** The id the running send was given, so Stop can cancel it. */
   private sendId: string | null = null;
   protected readonly envPickerTitle = 'Active environment, where {{variables}} come from';
@@ -155,6 +157,9 @@ export class RequestTab implements TabComponent {
   });
 
   constructor() {
+    injectHostEvent('api.changed', (p) => {
+      if (p.reason === 'progress' && this.sendId && p.sendId === this.sendId && this.sending()) this.received.set(p.received ?? 0);
+    });
     injectHostEvent('store.changed', (p) => {
       if (this.draft() || p.workspaceId !== this.scope() || p.collection !== 'requests' || this.dirty()) return;
       this.stored.reload();
@@ -200,6 +205,7 @@ export class RequestTab implements TabComponent {
     this.sendError.set(null);
     const sendId = newId();
     this.sendId = sendId;
+    this.received.set(0);
     try {
       this.response.set(await this.host.invoke<ApiResponse>('api.request.send', { request: this.request(), sendId }));
     } catch (err) {

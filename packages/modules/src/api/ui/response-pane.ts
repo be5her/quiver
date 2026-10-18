@@ -4,6 +4,7 @@ import { Button, CodeEditor, EmptyState, HostBridge, Input, Segment, Segmented, 
 import { ChevronRight, Copy, Download, Search } from 'lucide';
 import { ApiActions } from './api-actions';
 import { HeaderTable } from './header-table';
+import { StreamView } from './stream-view';
 
 type View = 'body' | 'headers' | 'cookies' | 'checks' | 'request';
 
@@ -62,7 +63,7 @@ interface CookieRow extends SetCookie {
  */
 @Component({
   selector: 'q-response-pane',
-  imports: [Button, CodeEditor, EmptyState, HeaderTable, Input, Segment, Segmented, Spinner],
+  imports: [Button, CodeEditor, EmptyState, HeaderTable, Input, Segment, Segmented, Spinner, StreamView],
   templateUrl: './response-pane.html',
   host: { class: 'contents' },
 })
@@ -75,6 +76,8 @@ export class ResponsePane {
   readonly response = input<ApiResponse | null>(null);
   readonly error = input<string | null>(null);
   readonly sending = input(false);
+  /** Bytes of the body received so far while it downloads, when the host reports it. */
+  readonly received = input(0);
 
   protected readonly icons = { ChevronRight, Copy, Download, Search };
   protected readonly statusColor = statusColor;

@@ -14,6 +14,7 @@ import {
   type RedirectHop,
   type RequestBody,
   type SendOptions,
+  type StreamKind,
   type WireRequest,
 } from '@quiver/core';
 import { Agent, fetch as undiciFetch, type Dispatcher } from 'undici';
@@ -82,7 +83,7 @@ export interface PreparedRequest {
   bodyPreview: string | null;
 }
 
-const TEXT_TYPES = /^(text\/|application\/(json|xml|javascript|x-www-form-urlencoded|graphql|yaml|x-yaml|ld\+json|problem\+json)|.*\+(json|xml))/i;
+const TEXT_TYPES = /^(text\/|application\/(json|xml|javascript|x-www-form-urlencoded|graphql|yaml|x-yaml|ld\+json|problem\+json|x-ndjson|ndjson|jsonl|json-seq)|.*\+(json|xml))/i;
 
 function hasHeader(headers: [string, string][], name: string): boolean {
   const lower = name.toLowerCase();
@@ -266,12 +267,25 @@ function headerList(headers: { forEach(cb: (value: string, key: string) => void)
   return list;
 }
 
+/** How a body is read: whole, with progress, or handed over as a stream. */
+export interface BodyHooks {
+  /** Bytes received so far, while a whole body downloads. */
+  onProgress?(received: number): void;
+  /**
+   * Takes over the body of an event stream, or of any response when `options.stream` is set: the
+   * send returns the head at once and `chunks` yields the body as text until the server closes it
+   * or `signal` (the send's) is aborted. Without it, every body is read whole.
+   */
+  onStream?(kind: StreamKind, chunks: AsyncGenerator<string>): void;
+}
+
 /**
  * Send what `prepareRequest` built. Redirects are followed here rather than by fetch, so every hop
  * is known (status, headers, time) and the browser rules apply: see `nextRequest`. Aborting
- * `signal` stops the send, also while the body downloads, with REQUEST_CANCELLED.
+ * `signal` stops the send, also while the body downloads, with REQUEST_CANCELLED. The timeout
+ * covers the whole download, or, for a streamed body, the wait for the response's head.
  */
-export async function sendPrepared(prepared: PreparedRequest, options: SendOptions, signal?: AbortSignal, cookies?: CookieHooks): Promise<ApiResponse> {
+export async function sendPrepared(prepared: PreparedRequest, options: SendOptions, signal?: AbortSignal, cookies?: CookieHooks, body?: BodyHooks): Promise<ApiResponse> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error(`Timed out after ${options.timeoutMs} ms`)), options.timeoutMs);
   const onCancel = () => controller.abort(new Error('Cancelled'));
@@ -282,6 +296,8 @@ export async function sendPrepared(prepared: PreparedRequest, options: SendOptio
   const redirects: RedirectHop[] = [];
   /** The first hop's headers as they went out, jar cookies included: what `sent` shows. */
   let firstHeaders: [string, string][] | null = null;
+  /** Set when the body was handed to `onStream`, which then owns the cancel listener. */
+  let streaming = false;
 
   try {
     for (;;) {
@@ -312,9 +328,48 @@ export async function sendPrepared(prepared: PreparedRequest, options: SendOptio
         continue;
       }
       const ttfb = performance.now() - started;
-      const { buffer, truncated } = await readBody(res.body, options.maxBodyBytes);
-      const total = performance.now() - started;
       const contentType = res.headers.get('content-type');
+      const kind: StreamKind | null = body?.onStream && res.body ? (/^text\/event-stream\b/i.test(contentType ?? '') ? 'sse' : options.stream ? 'lines' : null) : null;
+      if (kind && res.body && body?.onStream) {
+        streaming = true;
+        clearTimeout(timer);
+        const reader = res.body.getReader();
+        const chunks = async function* (): AsyncGenerator<string> {
+          const decoder = new TextDecoder();
+          try {
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              yield decoder.decode(value, { stream: true });
+            }
+            const rest = decoder.decode();
+            if (rest) yield rest;
+          } finally {
+            signal?.removeEventListener('abort', onCancel);
+            await reader.cancel().catch(() => undefined);
+          }
+        };
+        body.onStream(kind, chunks());
+        return {
+          ok: res.ok,
+          status: res.status,
+          statusText: res.statusText,
+          url: current.url,
+          headers: headerList(res.headers),
+          body: '',
+          bodyEncoding: 'utf8',
+          contentType,
+          size: 0,
+          truncated: false,
+          timings: { total: ttfb, ttfb, download: 0 },
+          redirects,
+          setCookies: res.headers.getSetCookie(),
+          sent: { method: prepared.method, url: prepared.url, headers: firstHeaders ?? prepared.headers, bodyPreview: prepared.bodyPreview },
+          streamKind: kind,
+        };
+      }
+      const { buffer, truncated } = await readBody(res.body, options.maxBodyBytes, body?.onProgress);
+      const total = performance.now() - started;
       const isText = contentType ? TEXT_TYPES.test(contentType) : !buffer.subarray(0, 512).includes(0);
 
       return {
@@ -342,7 +397,7 @@ export async function sendPrepared(prepared: PreparedRequest, options: SendOptio
     throw new QuiverError('REQUEST_FAILED', message, { url: current.url });
   } finally {
     clearTimeout(timer);
-    signal?.removeEventListener('abort', onCancel);
+    if (!streaming) signal?.removeEventListener('abort', onCancel);
   }
 }
 
@@ -350,7 +405,7 @@ interface ByteStreamLike {
   getReader(): { read(): Promise<{ done: boolean; value?: unknown }>; cancel(): Promise<void> };
 }
 
-async function readBody(stream: ByteStreamLike | null, limit: number): Promise<{ buffer: Buffer; truncated: boolean }> {
+async function readBody(stream: ByteStreamLike | null, limit: number, onProgress?: (received: number) => void): Promise<{ buffer: Buffer; truncated: boolean }> {
   if (!stream) return { buffer: Buffer.alloc(0), truncated: false };
   const chunks: Uint8Array[] = [];
   let received = 0;
@@ -370,6 +425,7 @@ async function readBody(stream: ByteStreamLike | null, limit: number): Promise<{
     }
     chunks.push(value);
     received += value.byteLength;
+    onProgress?.(received);
   }
   return { buffer: Buffer.concat(chunks.map((c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength))), truncated };
 }
