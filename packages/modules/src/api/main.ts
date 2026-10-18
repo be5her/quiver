@@ -469,7 +469,9 @@ async function sendRequest(ctx: CommandContext, input: z.infer<typeof SendInput>
     if (!forAgent) return response;
     // An agent gets the response with the known secrets scrubbed from its headers and body (a secret capture's value among them), as the history keeps it.
     const maskedCaptures = response.captured?.map((c) => (c.secret && c.value !== null ? { ...c, value: REDACTED } : c));
-    return { ...scrubResponse(response, secrets), url: redactUrl(response.url, secrets), redirects: hopsForAgent(), sent: redactSent(response.sent, secrets), ...(maskedCaptures ? { captured: maskedCaptures } : {}) };
+    // What a check read quotes the response, so a check on a token's JSON path would hand the agent the token.
+    const maskedChecks = response.checks ? scrubCheckResults(response.checks, secrets.values ?? []) : undefined;
+    return { ...scrubResponse(response, secrets), url: redactUrl(response.url, secrets), redirects: hopsForAgent(), sent: redactSent(response.sent, secrets), ...(maskedCaptures ? { captured: maskedCaptures } : {}), ...(maskedChecks ? { checks: maskedChecks } : {}) };
   } catch (err) {
     entry.error = err instanceof Error ? err.message : String(err);
     throw forAgent ? errorForAgent(err, secrets) : err;

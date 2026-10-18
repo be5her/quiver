@@ -72,10 +72,10 @@ export async function startFixtures() {
     }
     if (route.pathname === '/auth/login') {
       req.resume();
-      // A login: a token in the body and a session cookie, for captures.
+      // A login: a token in the body and a session cookie, for captures; no refresh token (null), as a failed field comes back.
       res.setHeader('set-cookie', ['session=sess-9; Path=/; HttpOnly']);
       res.writeHead(200, { 'content-type': 'application/json', 'x-request-id': 'req-42' });
-      res.end(JSON.stringify({ token: 'cap-tok-123', user: { id: 7, roles: ['admin'] } }));
+      res.end(JSON.stringify({ token: 'cap-tok-123', refresh: null, user: { id: 7, roles: ['admin'] } }));
       return;
     }
     if (route.pathname === '/image.png') {

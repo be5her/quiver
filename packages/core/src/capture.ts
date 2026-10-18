@@ -23,7 +23,8 @@ export type CaptureSourceResponse = Pick<ApiResponse, 'status' | 'headers' | 'bo
 /**
  * Read one capture from a response: the status code; a header by name (case-insensitive, the last
  * one when repeated); a cookie the response set, by name; or the body, whole when the path is empty,
- * else the first value a JSON path selects (strings as they are, anything else as JSON).
+ * else the first value a JSON path selects (strings as they are, anything else as JSON; null reads
+ * nothing, so the variable keeps its value).
  */
 export function extractCapture(capture: Pick<Capture, 'variable' | 'from' | 'path'>, response: CaptureSourceResponse): CaptureResult {
   const name = capture.variable.trim();
@@ -63,6 +64,8 @@ export function extractCapture(capture: Pick<Capture, 'variable' | 'from' | 'pat
       }
       if (!values.length || values[0] === undefined) return { ok: false, error: `${path} matched nothing in the body` };
       const value = values[0];
+      // A server that failed often answers with the field null; writing "null" would wipe the token the variable held.
+      if (value === null) return { ok: false, error: `${path} is null in the body` };
       return { ok: true, value: typeof value === 'string' ? value : JSON.stringify(value) };
     }
   }
