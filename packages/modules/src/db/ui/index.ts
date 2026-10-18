@@ -13,6 +13,7 @@ import { TableTab } from './table-tab';
 export { DbActions } from './db-actions';
 export { DbError } from './db-error';
 export { formatDuration } from './db-format';
+export { GrafanaSignIn } from './grafana-signin';
 export { TeleportLogin } from './teleport-login';
 
 export const dbModuleUI = defineModuleUI({

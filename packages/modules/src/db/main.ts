@@ -10,6 +10,7 @@ import {
   SavedQueryDraftSchema,
   SavedQuerySchema,
   buildTableEdits,
+  dbAccessProblem,
   dbDataCollection,
   defineCommand,
   defineModule,
@@ -18,6 +19,7 @@ import {
   newDbConnection,
   newId,
   newSavedQuery,
+  normalizeGrafanaUrl,
   nowIso,
   redisCommandIsReadOnly,
   redisScriptIsReadOnly,
@@ -34,12 +36,15 @@ import {
   type DbTableApplyResult,
   type DbTableColumns,
   type DbTableEdit,
+  type GrafanaRedisDatasource,
+  type LogsSession,
   type SavedQuery,
   type WorkspaceApi,
 } from '@quiver/core';
 import { z } from 'zod';
 import { COLLECTIONS, DriverPool, HISTORY_LOG, explainAccessError, getConnection, listConnections, readPassword, withTemporaryDriver, writePassword } from './connections';
-import type { Driver, RedisDriverApi } from './drivers';
+import { grafanaSessions } from '../grafana/sessions';
+import { grafanaRedisDatasources, type Driver, type RedisDriverApi } from './drivers';
 
 const pool = new DriverPool();
 
@@ -80,6 +85,20 @@ function announceData(ctx: CommandContext, connectionId: string): void {
   ctx.host.emit('store.changed', { workspaceId: ws(ctx).id, collection: dbDataCollection(connectionId) });
 }
 
+/**
+ * A connection whose access fits its kind, with the Grafana address normalised (unless it holds
+ * {{variables}}, which resolve when the connection opens).
+ */
+function checkedAccess<T extends DbConnection>(connection: T): T {
+  const problem = dbAccessProblem(connection);
+  if (problem) throw new QuiverError('INVALID_INPUT', problem);
+  const { access } = connection;
+  if (access.type !== 'grafana' || access.grafanaUrl.includes('{{') || !access.grafanaUrl.trim()) return connection;
+  const grafanaUrl = normalizeGrafanaUrl(access.grafanaUrl);
+  if (!grafanaUrl) throw new QuiverError('INVALID_INPUT', `"${access.grafanaUrl}" is not an http(s) address`);
+  return { ...connection, access: { ...access, grafanaUrl } };
+}
+
 const ConnectionIdInput = z.object({ connectionId: z.string().describe('Id of a saved connection (see db.connection.list)') });
 
 // ---------- connections ----------
@@ -88,7 +107,7 @@ const connectionList = defineCommand({
   id: 'db.connection.list',
   title: 'List database connections',
   description:
-    'Lists saved MySQL, PostgreSQL, SQLite and Redis connections. Passwords are never returned; hasPassword says whether one is stored on this machine, connected whether a driver is open, inTransaction whether db.transaction began one.',
+    'Lists saved MySQL, PostgreSQL, SQLite and Redis connections. Passwords are never returned; hasPassword says whether one is stored on this machine, connected whether a driver is open, inTransaction whether db.transaction began one. access says how the server is reached; a Redis connection with access.type grafana goes through a Grafana Redis data source, and its commands run with the permissions of the Grafana user signed in on this machine.',
   scope: 'workspace',
   input: z.object({ kind: DbKindSchema.optional() }),
   handler: async ({ kind }, ctx) => {
@@ -111,7 +130,7 @@ const connectionSave = defineCommand({
   id: 'db.connection.save',
   title: 'Save database connection',
   description:
-    'Creates or updates a connection. Omit id to create. A password given here is encrypted with the OS keychain and stored only on this machine; omit it to keep the stored one, pass clearPassword to remove it. Host, user, database, file and tunnel fields may hold {{variables}} resolved from the API variables and the workspace .env when the connection opens.',
+    'Creates or updates a connection. Omit id to create. A password given here is encrypted with the OS keychain and stored only on this machine; omit it to keep the stored one, pass clearPassword to remove it. Host, user, database, file and tunnel fields may hold {{variables}} resolved from the API variables and the workspace .env when the connection opens. access is direct, teleport (tsh proxy db), command (a tunnel command with {port}) or, for Redis only, grafana: { type: "grafana", grafanaUrl, datasourceUid, datasourceName } sends every command through that Grafana Redis data source with the Grafana user signed in on this machine (db.grafana.redis.datasources lists them; no password, database index 0).',
   scope: 'workspace',
   input: z.object({
     connection: DbConnectionDraftSchema,
@@ -122,13 +141,15 @@ const connectionSave = defineCommand({
     const w = ws(ctx);
     const existing = connection.id ? await w.store.get<DbConnection>(COLLECTIONS.connections, connection.id) : undefined;
     const ts = nowIso();
-    const merged: DbConnection = DbConnectionSchema.parse({
-      ...(existing ?? newDbConnection(connection.kind)),
-      ...connection,
-      id: connection.id ?? newId(),
-      createdAt: existing?.createdAt ?? connection.createdAt ?? ts,
-      updatedAt: ts,
-    });
+    const merged: DbConnection = checkedAccess(
+      DbConnectionSchema.parse({
+        ...(existing ?? newDbConnection(connection.kind)),
+        ...connection,
+        id: connection.id ?? newId(),
+        createdAt: existing?.createdAt ?? connection.createdAt ?? ts,
+        updatedAt: ts,
+      }),
+    );
     if (!merged.name.trim()) merged.name = `${merged.kind} connection`;
     await w.store.put(COLLECTIONS.connections, merged);
     if (clearPassword) await writePassword(w, ctx.host, merged.id, null);
@@ -168,7 +189,7 @@ const connectionTest = defineCommand({
     const started = performance.now();
     let serverVersion: string;
     if (input.connection) {
-      const draft = DbConnectionSchema.parse({ ...newDbConnection(input.connection.kind), ...input.connection, id: input.connection.id ?? 'draft' });
+      const draft = checkedAccess(DbConnectionSchema.parse({ ...newDbConnection(input.connection.kind), ...input.connection, id: input.connection.id ?? 'draft' }));
       // Reuse the stored password when editing an existing connection and the field was left untouched.
       const password = input.password ?? (input.connection.id ? await readPassword(w, ctx.host, input.connection.id) : '');
       serverVersion = (await withTemporaryDriver(draft, password, w, ctx.host, (d) => d.ping())).serverVersion;
@@ -192,6 +213,41 @@ const connectionDisconnect = defineCommand({
     ctx.host.emit('store.changed', { workspaceId: ws(ctx).id, collection: COLLECTIONS.connections });
     return { closed };
   },
+});
+
+// ---------- Redis through Grafana ----------
+
+const GrafanaUrlInput = z.object({ grafanaUrl: z.string().min(1).describe('The Grafana address, e.g. https://grafana.example.com') });
+
+const grafanaSession = defineCommand({
+  id: 'db.grafana.session',
+  title: 'Check Grafana sign-in for Redis',
+  description:
+    "Asks a Grafana whether this machine is signed in, and as whom. The session is the one the Logs module uses: one per Grafana, shared. Agents cannot sign in; when state is signed-out, ask the user to sign in from Quiver (the connection's Access section, or the Logs view).",
+  scope: 'workspace',
+  input: GrafanaUrlInput,
+  handler: async ({ grafanaUrl }, ctx): Promise<LogsSession> => grafanaSessions.check(ctx.host, grafanaUrl),
+});
+
+const grafanaSignIn = defineCommand({
+  id: 'db.grafana.signin',
+  title: 'Sign in to Grafana for Redis',
+  description: "Opens Grafana's login page in a window and resolves once the user is signed in or closes it.",
+  scope: 'workspace',
+  // A window on the user's screen that only the user can complete: the UI's to open, not an agent's.
+  hidden: true,
+  input: GrafanaUrlInput,
+  handler: async ({ grafanaUrl }, ctx): Promise<LogsSession> => grafanaSessions.signIn(ctx.host, grafanaUrl),
+});
+
+const grafanaRedisSources = defineCommand({
+  id: 'db.grafana.redis.datasources',
+  title: 'List Grafana Redis data sources',
+  description:
+    'The Redis data sources (redis-datasource plugin) the signed-in Grafana user can query, with uid and name for a connection whose access is grafana. cliDisabled means the admin turned the CLI off: such a connection only reads (key browser, info).',
+  scope: 'workspace',
+  input: GrafanaUrlInput,
+  handler: async ({ grafanaUrl }, ctx): Promise<GrafanaRedisDatasource[]> => grafanaRedisDatasources(ctx.host, grafanaUrl),
 });
 
 // ---------- schema ----------
@@ -691,6 +747,9 @@ export const dbModule = defineModule({
     redisKey,
     redisCommand,
     redisInfo,
+    grafanaSession,
+    grafanaSignIn,
+    grafanaRedisSources,
   ],
   onWorkspaceClose: (workspace, host) => pool.closeWorkspace(workspace.id, host),
 });

@@ -116,7 +116,8 @@ export function teleportSpec(connection: Pick<DbConnection, 'kind' | 'database' 
  */
 export async function resolveAccess(connection: DbConnection, host: HostApi, user: string): Promise<DbConnection> {
   const { access } = connection;
-  if (access.type === 'direct') return connection;
+  // A Grafana data source is no tunnel: the driver talks to Grafana itself.
+  if (access.type === 'direct' || access.type === 'grafana') return connection;
   const { tunnels } = getTeleport(host);
   if (access.type === 'teleport') {
     const tunnel = await tunnels.ensure(teleportSpec(connection), user);
@@ -131,7 +132,7 @@ export async function resolveAccess(connection: DbConnection, host: HostApi, use
 
 /** Let go of the tunnel a driver was using. */
 export async function releaseAccess(connection: Pick<DbConnection, 'access'>, host: HostApi, user: string, immediate: boolean): Promise<void> {
-  if (connection.access.type === 'direct') return;
+  if (connection.access.type === 'direct' || connection.access.type === 'grafana') return;
   await getTeleport(host).tunnels.release(user, { immediate });
 }
 
@@ -205,9 +206,9 @@ export class DriverPool {
     if (!pending) {
       pending = (async () => {
         const password = await readPassword(ws, host, connectionId);
-        const accessUser = connection.access.type === 'direct' ? null : key;
+        const accessUser = connection.access.type === 'direct' || connection.access.type === 'grafana' ? null : key;
         const effective = await resolveAccess(await resolvedConnection(connection, ws, host), host, key);
-        const driver = createDriver(effective, password, ws.path);
+        const driver = createDriver(effective, password, ws.path, host);
         try {
           await driver.connect();
         } catch (err) {
@@ -283,7 +284,7 @@ export async function withTemporaryDriver<T>(connection: DbConnection, password:
   const user = `temp/${newId()}`;
   const workspacePath = ws.path;
   const effective = await resolveAccess(await resolvedConnection(connection, ws, host), host, user);
-  const driver = createDriver(effective, password, workspacePath);
+  const driver = createDriver(effective, password, workspacePath, host);
   try {
     await driver.connect();
     return await fn(driver);

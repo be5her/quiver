@@ -17,11 +17,14 @@ export default definePart({
         const out = await host.invoke(id, input, { caller, workspaceId: ws.id });
         return out.ok ? 'ok' : `${out.error.code}: ${out.error.message}`;
       };
+      // Other parts (db, Redis through Grafana) may have signed in to the same fake Grafana before.
+      const logins0 = fakeGrafana.seen.logins;
+      const logouts0 = fakeGrafana.seen.logouts;
       const created = await run<LogsConnectionSummary>('logs.connection.save', { connection: { name: '', grafanaUrl: `${fakeGrafana.url}/?orgId=1` } }, ws.id);
       const onDisk = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'logs-connections', `${created.id}.json`), 'utf8')) as { grafanaUrl: string };
       check(
         'logs: a new connection is committed under .quiver/logs-connections with the address normalised',
-        created.grafanaUrl === fakeGrafana.url && onDisk.grafanaUrl === fakeGrafana.url && created.name === 'Logs' && created.session.state === 'unknown',
+        created.grafanaUrl === fakeGrafana.url && onDisk.grafanaUrl === fakeGrafana.url && created.name === 'Logs' && ['unknown', 'signed-out'].includes(created.session.state),
         { grafanaUrl: created.grafanaUrl, name: created.name, session: created.session.state },
       );
       const badUrl = await fail('logs.connection.save', { connection: { id: created.id, grafanaUrl: 'ftp://nowhere' } });
@@ -35,11 +38,11 @@ export default definePart({
       const signedIn = await run<LogsSession>('logs.signin', { id: created.id }, ws.id);
       check(
         'logs: sign-in opens the login page, follows the identity provider back and knows the user',
-        signedIn.state === 'signed-in' && signedIn.user?.email === 'smoke@example.com' && fakeGrafana.seen.logins === 1,
+        signedIn.state === 'signed-in' && signedIn.user?.email === 'smoke@example.com' && fakeGrafana.seen.logins === logins0 + 1,
         { signedIn, logins: fakeGrafana.seen.logins },
       );
       const again = await run<LogsSession>('logs.signin', { id: created.id }, ws.id);
-      check('logs: signing in again with a live session opens no window', again.state === 'signed-in' && fakeGrafana.seen.logins === 1, { again: again.state, logins: fakeGrafana.seen.logins });
+      check('logs: signing in again with a live session opens no window', again.state === 'signed-in' && fakeGrafana.seen.logins === logins0 + 1, { again: again.state, logins: fakeGrafana.seen.logins });
 
       const sources = await run<LogsDatasource[]>('logs.datasources', { id: created.id }, ws.id);
       check('logs: only VictoriaLogs data sources are listed', sources.length === 1 && sources[0]?.uid === 'vl-smoke' && sources[0]?.type === 'victoriametrics-logs-datasource', sources);
@@ -113,11 +116,11 @@ export default definePart({
       const listedOut = (await run<LogsConnectionSummary[]>('logs.connection.list', {}, ws.id)).find((c) => c.id === created.id);
       check(
         'logs: signing out ends the session on Grafana and on this machine',
-        signedOff.state === 'signed-out' && fakeGrafana.seen.logouts === 1 && afterSignOut.startsWith('SIGN_IN_REQUIRED') && listedOut?.session.state === 'signed-out',
+        signedOff.state === 'signed-out' && fakeGrafana.seen.logouts === logouts0 + 1 && afterSignOut.startsWith('SIGN_IN_REQUIRED') && listedOut?.session.state === 'signed-out',
         { signedOff: signedOff.state, logouts: fakeGrafana.seen.logouts, afterSignOut, listed: listedOut?.session.state },
       );
       const back = await run<LogsSession>('logs.signin', { id: created.id }, ws.id);
-      check('logs: signing in after signing out goes through the login page again', back.state === 'signed-in' && fakeGrafana.seen.logins === 2, { back: back.state, logins: fakeGrafana.seen.logins });
+      check('logs: signing in after signing out goes through the login page again', back.state === 'signed-in' && fakeGrafana.seen.logins === logins0 + 2, { back: back.state, logins: fakeGrafana.seen.logins });
     }
 
     return {

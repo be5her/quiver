@@ -25,6 +25,7 @@ export * from './models/mcp-recording';
 export * from './models/env';
 export * from './models/todo';
 export * from './models/logs';
+export * from './grafana-redis';
 export * from './sql';
 export * from './db-url';
 export * from './db-export';

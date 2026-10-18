@@ -228,7 +228,7 @@ export async function startFixtures() {
   const wsPort = (wsHttp.address() as { port: number }).port;
 
   const fakeRedis = await startFakeRedis();
-  const fakeGrafana = await startFakeGrafana();
+  const fakeGrafana = await startFakeGrafana(fakeRedis.port);
   const tshDir = await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-smoke-tsh-'));
   const fakeTsh = await writeFakeTsh(tshDir, fakeRedis.port);
   // The fake's stand-in for ~/.kube/config: what kubectl in the user's terminal would use.
