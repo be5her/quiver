@@ -254,11 +254,20 @@ async function applyOAuth(ctx: CommandContext, request: ApiRequest, mode: 'send'
   };
 }
 
-/** Secrets are masked for agents everywhere, so an error that names the URL it failed on must not carry them either. */
+/**
+ * Secrets are masked for agents everywhere, so an error that names the URL it failed on must not carry
+ * them either, nor the hops of a redirect loop (each a URL Quiver sent, like `sent`, so a secret the
+ * request resolved to can be in any of them).
+ */
 function errorForAgent(err: unknown, secrets: RedactUrlOptions): unknown {
   if (!(err instanceof QuiverError)) return err;
-  const details = err.details as { url?: unknown } | undefined;
-  return new QuiverError(err.code, scrubSecrets(err.message, secrets.values), details && typeof details.url === 'string' ? { ...details, url: redactUrl(details.url, secrets) } : err.details);
+  const details = err.details && typeof err.details === 'object' ? (err.details as { url?: unknown; redirects?: unknown }) : null;
+  const masked = details && {
+    ...details,
+    ...(typeof details.url === 'string' ? { url: redactUrl(details.url, secrets) } : {}),
+    ...(Array.isArray(details.redirects) ? { redirects: details.redirects.map((hop) => (typeof hop === 'string' ? redactUrl(hop, secrets) : hop)) } : {}),
+  };
+  return new QuiverError(err.code, scrubSecrets(err.message, secrets.values), masked ?? err.details);
 }
 
 // ---------- requests ----------

@@ -483,10 +483,16 @@ export default definePart({
       );
       const agentHop = await host.invoke('api.request.send', { request: { ...base, url: '{{baseUrl}}/redirect/302?to=/landing&key={{token}}' } }, { caller: 'mcp', workspaceId: ws.id });
       const agentRedirects = agentHop.ok ? (agentHop.result as ApiResponse).redirects : [];
+      // The hops a redirect loop's error lists are URLs Quiver sent too: the first still carries the query secret.
+      const agentLoop = await host.invoke('api.request.send', { request: { ...base, url: '{{baseUrl}}/loop?key={{token}}' } }, { caller: 'mcp', workspaceId: ws.id });
+      const agentLoopDetails = agentLoop.ok ? null : (agentLoop.error.details as { url?: string; redirects?: string[] } | undefined);
+      const agentLoopText = agentLoop.ok ? 'ok?' : JSON.stringify(agentLoop.error);
       check(
-        'api.request.send: an agent sees each hop with the secrets in its URL masked',
-        agentHop.ok && agentRedirects.length === 1 && agentRedirects[0].url.includes(REDACTED) && !JSON.stringify(agentRedirects).includes('s3cret'),
-        agentRedirects.map((h) => h.url),
+        'api.request.send: an agent sees each hop with the secrets in its URL masked, in the hops a stopped redirect loop lists too',
+        agentHop.ok && agentRedirects.length === 1 && agentRedirects[0].url.includes(REDACTED) && !JSON.stringify(agentRedirects).includes('s3cret') &&
+          !agentLoop.ok && agentLoop.error.message.includes('Stopped after 20 redirects') && agentLoopDetails?.redirects?.length === 20 && agentLoopDetails.redirects[0].includes(`key=${REDACTED}`) &&
+          agentLoopDetails.url?.includes(`key=${REDACTED}`) === true && !agentLoopText.includes('s3cret'),
+        { hops: agentRedirects.map((h) => h.url), loop: agentLoopDetails?.redirects?.slice(0, 2), leaked: agentLoopText.includes('s3cret') },
       );
       const cookies = await run<ApiResponse>('api.request.send', { request: { ...base, method: 'GET', url: '{{baseUrl}}/cookies' } }, ws.id);
       check(
