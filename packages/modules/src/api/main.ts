@@ -35,6 +35,7 @@ import {
   redactUrl,
   requestSecretValues,
   resolveDeep,
+  scrubResponse,
   scrubSecrets,
   toCode,
   CODE_TARGETS,
@@ -425,11 +426,13 @@ async function sendRequest(ctx: CommandContext, input: z.infer<typeof SendInput>
     }
     entry.status = response.status;
     entry.durationMs = Math.round(response.timings.total);
+    // Each hop's URL is one Quiver sent, so it can carry a secret the request resolved to, like `sent`; its headers are scrubbed like the response's.
+    const hopsForAgent = () => response.redirects.map((hop) => ({ ...hop, url: redactUrl(hop.url, secrets), location: redactUrl(hop.location, secrets), headers: scrubResponse({ headers: hop.headers, body: '', bodyEncoding: 'utf8' as const }, secrets).headers }));
     if (streamId) {
       // Captures and checks read a whole body; a stream has none yet.
       response.streamId = streamId;
       if (!forAgent) return response;
-      return { ...response, url: redactUrl(response.url, secrets), redirects: response.redirects.map((hop) => ({ ...hop, url: redactUrl(hop.url, secrets), location: redactUrl(hop.location, secrets) })), sent: redactSent(response.sent, secrets) };
+      return { ...scrubResponse(response, secrets), url: redactUrl(response.url, secrets), redirects: hopsForAgent(), sent: redactSent(response.sent, secrets) };
     }
     const captures = await runCaptures(ctx, request, response, input.environmentId);
     if (captures) {
@@ -445,12 +448,10 @@ async function sendRequest(ctx: CommandContext, input: z.infer<typeof SendInput>
     }
     // The response goes into the history too, small ones and unless the workspace turned it off, to open or compare later.
     if (await w.getState<boolean>(KEEP_RESPONSES, true)) entry.response = toHistoryResponse(response, secrets.values ?? []);
-    // The response is the server's own; `sent` and the final URL are what Quiver adds, with the secrets resolved into them.
     if (!forAgent) return response;
-    // Each hop's URL is one Quiver sent, so it can carry a secret the request resolved to, like `sent`.
-    const redirects = response.redirects.map((hop) => ({ ...hop, url: redactUrl(hop.url, secrets), location: redactUrl(hop.location, secrets) }));
+    // An agent gets the response with the known secrets scrubbed from its headers and body (a secret capture's value among them), as the history keeps it.
     const maskedCaptures = response.captured?.map((c) => (c.secret && c.value !== null ? { ...c, value: REDACTED } : c));
-    return { ...response, url: redactUrl(response.url, secrets), redirects, sent: redactSent(response.sent, secrets), ...(maskedCaptures ? { captured: maskedCaptures } : {}) };
+    return { ...scrubResponse(response, secrets), url: redactUrl(response.url, secrets), redirects: hopsForAgent(), sent: redactSent(response.sent, secrets), ...(maskedCaptures ? { captured: maskedCaptures } : {}) };
   } catch (err) {
     entry.error = err instanceof Error ? err.message : String(err);
     throw forAgent ? errorForAgent(err, secrets) : err;
@@ -476,7 +477,7 @@ const requestSend = defineCommand({
   id: 'api.request.send',
   title: 'Send API request',
   description:
-    'Sends an HTTP request and returns status, headers, body and timings. Pass a saved requestId or an inline request. A request\'s `capture` entries write values from the response (a JSON path into the body, a header, a cookie, the status) into the environment; `captured` reports each, secret ones masked for agents. Variables like {{baseUrl}} resolve from global variables and the active (or given) environment. A request\'s `checks` (assertions on the status, a header, the body, a JSON path, the time or the size) are run on the response and reported in `checks`. Send options are the defaults, then the request\'s own `options`, then the `options` given here. Pass a `sendId` to be able to stop the send with api.request.cancel. For agents, the credentials and secret variables in `sent` (what went on the wire) are masked.',
+    'Sends an HTTP request and returns status, headers, body and timings. Pass a saved requestId or an inline request. A request\'s `capture` entries write values from the response (a JSON path into the body, a header, a cookie, the status) into the environment; `captured` reports each, secret ones masked for agents. Variables like {{baseUrl}} resolve from global variables and the active (or given) environment. A request\'s `checks` (assertions on the status, a header, the body, a JSON path, the time or the size) are run on the response and reported in `checks`. Send options are the defaults, then the request\'s own `options`, then the `options` given here. Pass a `sendId` to be able to stop the send with api.request.cancel. For agents, the credentials and secret variables in `sent` (what went on the wire) are masked, and the same secrets (what a secret capture read among them) are scrubbed from the response\'s headers and body.',
   scope: 'workspace',
   input: SendInput,
   handler: (input, ctx) => sendRequest(ctx, input),

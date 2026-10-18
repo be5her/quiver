@@ -13,6 +13,8 @@ const response: ApiResponse = {
     ['Content-Type', 'application/json'],
     ['Set-Cookie', 'sid=abc123; Path=/; HttpOnly'],
     ['set-cookie', 'flag'],
+    ['X-Auth-Token', 'tok-secret-1'],
+    ['Location', 'https://api.test/next?access_token=other-2&page=1'],
   ],
   body: '{"token":"tok-secret-1","name":"Ada"}',
   bodyEncoding: 'utf8',
@@ -26,12 +28,14 @@ const response: ApiResponse = {
 };
 
 describe('toHistoryResponse', () => {
-  it('keeps the status, headers and body, with cookie values masked and known secrets scrubbed', () => {
+  it('keeps the status, headers and body, with cookie values masked and known secrets scrubbed from headers and body', () => {
     const kept = toHistoryResponse(response, ['tok-secret-1'])!;
     expect(kept.headers).toEqual([
       ['Content-Type', 'application/json'],
       ['Set-Cookie', `sid=${REDACTED}; Path=/; HttpOnly`],
       ['set-cookie', 'flag'],
+      ['X-Auth-Token', REDACTED],
+      ['Location', `https://api.test/next?access_token=${REDACTED}&page=1`],
     ]);
     expect(kept.body).toBe(`{"token":"${REDACTED}","name":"Ada"}`);
     expect(kept).toMatchObject({ status: 200, statusText: 'OK', contentType: 'application/json', bodyEncoding: 'utf8', truncated: false });

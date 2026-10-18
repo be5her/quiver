@@ -194,6 +194,21 @@ export function redactSent(sent: ApiResponse['sent'], known: RedactUrlOptions = 
 }
 
 /**
+ * A response's headers and body with the known secret values scrubbed, a `Location` masked as a URL
+ * is (its credential parameters too), and a binary body left as it is. Set-Cookie values are the
+ * server's own and stay; the history masks those itself.
+ */
+export function scrubResponse<T extends Pick<ApiResponse, 'headers' | 'body' | 'bodyEncoding'>>(response: T, known: RedactUrlOptions = {}): T {
+  const values = known.values ?? [];
+  if (!values.length && !known.names?.length) return response;
+  return {
+    ...response,
+    headers: response.headers.map(([name, value]): [string, string] => [name, /^(content-)?location$/i.test(name.trim()) ? redactUrl(value, known) : scrubSecrets(value, values)]),
+    body: response.bodyEncoding === 'utf8' ? scrubSecrets(response.body, values) : response.body,
+  };
+}
+
+/**
  * A history entry as it is stored: its request redacted, and its URL (the one that went on the wire, with
  * variables resolved) with credential parameters, a password and the secret values in `known` masked.
  * An error message can quote that URL, so the secret values are masked in it as well.

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { keyValue, newApiRequest, type ApiRequest, type HistoryEntry } from './models/api';
-import { REDACTED, isSecretName, redactHistoryEntry, redactLiteral, redactRequest, redactSent, redactUrl, requestSecretValues, scrubSecrets } from './redact';
+import { REDACTED, isSecretName, redactHistoryEntry, redactLiteral, redactRequest, redactSent, redactUrl, requestSecretValues, scrubResponse, scrubSecrets } from './redact';
 
 const M = REDACTED;
 
@@ -237,5 +237,34 @@ describe('redactHistoryEntry', () => {
     expect(JSON.stringify(clean)).not.toContain('eyJhbGciOi');
     expect(clean.url).toBe(`https://merchant.example.com/auth/v1/login?api_key=${M}`);
     expect(JSON.stringify(redactHistoryEntry(clean))).toBe(JSON.stringify(clean));
+  });
+});
+
+describe('scrubResponse', () => {
+  const response = {
+    headers: [
+      ['X-Auth-Token', 'tok-secret-1'],
+      ['Location', 'https://api.test/next?access_token=other-2&page=1'],
+      ['Set-Cookie', 'sid=tok-secret-1; Path=/'],
+      ['X-Note', 'plain'],
+    ] as [string, string][],
+    body: '{"token":"tok-secret-1","other":"other-2"}',
+    bodyEncoding: 'utf8' as const,
+  };
+
+  it('scrubs the known secrets from headers and body and masks a Location as a URL', () => {
+    const out = scrubResponse(response, { values: ['tok-secret-1'] });
+    expect(out.headers).toEqual([
+      ['X-Auth-Token', M],
+      ['Location', `https://api.test/next?access_token=${M}&page=1`],
+      ['Set-Cookie', `sid=${M}; Path=/`],
+      ['X-Note', 'plain'],
+    ]);
+    expect(out.body).toBe(`{"token":"${M}","other":"other-2"}`);
+  });
+
+  it('leaves a binary body alone, and the response as it is when nothing is known', () => {
+    expect(scrubResponse({ ...response, bodyEncoding: 'base64' as const }, { values: ['tok-secret-1'] }).body).toBe(response.body);
+    expect(scrubResponse(response)).toBe(response);
   });
 });

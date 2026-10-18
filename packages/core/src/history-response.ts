@@ -1,5 +1,5 @@
 import type { ApiResponse, HistoryEntry, HistoryResponse } from './models/api';
-import { REDACTED, scrubSecrets } from './redact';
+import { REDACTED, scrubResponse } from './redact';
 
 /** Responses larger than this are not kept in the history; the entry says so. */
 export const MAX_HISTORY_RESPONSE_BYTES = 256 * 1024;
@@ -25,17 +25,18 @@ export function pruneHistory(entries: HistoryEntry[], limits = { maxEntries: MAX
 
 /**
  * The response as the history keeps it: status, headers, content type and body, with Set-Cookie
- * values masked and secrets the request resolved to scrubbed from the body. Undefined when the body
- * is too big to keep (or the response streamed).
+ * values masked and the secrets the request resolved to (and secret captures read) scrubbed from
+ * the headers and the body. Undefined when the body is too big to keep (or the response streamed).
  */
 export function toHistoryResponse(response: ApiResponse, secretValues: string[] = []): HistoryResponse | undefined {
   if (response.streamId || response.size > MAX_HISTORY_RESPONSE_BYTES) return undefined;
+  const scrubbed = scrubResponse(response, { values: secretValues });
   return {
     status: response.status,
     statusText: response.statusText,
-    headers: response.headers.map(([key, value]) => [key, key.toLowerCase() === 'set-cookie' ? maskCookie(value) : value]),
+    headers: scrubbed.headers.map(([key, value]) => [key, key.toLowerCase() === 'set-cookie' ? maskCookie(value) : value]),
     contentType: response.contentType,
-    body: response.bodyEncoding === 'utf8' ? scrubSecrets(response.body, secretValues) : response.body,
+    body: scrubbed.body,
     bodyEncoding: response.bodyEncoding,
     truncated: response.truncated,
   };

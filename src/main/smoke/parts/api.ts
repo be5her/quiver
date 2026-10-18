@@ -561,8 +561,8 @@ export default definePart({
       const login = await run<ApiRequest>('api.request.save', {
         request: {
           ...loginNew,
-          // adminToken is not ticked secret, but its name says it is one.
-          capture: [cap('capToken', 'body', '$.token', true), cap('capSession', 'cookie', 'session'), cap('capUser', 'body', '$.user.id'), cap('capReq', 'header', 'X-Request-Id'), cap('capMissing', 'header', 'X-Nope'), cap('adminToken', 'body', '$.user.roles[0]')],
+          // adminToken is not ticked secret, but its name says it is one; capReq is a secret read from a header.
+          capture: [cap('capToken', 'body', '$.token', true), cap('capSession', 'cookie', 'session'), cap('capUser', 'body', '$.user.id'), cap('capReq', 'header', 'X-Request-Id', true), cap('capMissing', 'header', 'X-Nope'), cap('adminToken', 'body', '$.user.roles[0]')],
         },
       }, ws.id);
       const loggedIn = await run<ApiResponse>('api.request.send', { requestId: login.id }, ws.id);
@@ -583,21 +583,24 @@ export default definePart({
       );
       const capHistory = await fs.readFile(path.join(folder, '.quiver', 'local', 'history.jsonl'), 'utf8');
       check(
-        'captures: the response kept in the history has the secret captures masked and the rest as it was',
-        !capHistory.includes('cap-tok-123') && !/"roles":\["admin"/.test(capHistory) && capHistory.includes('req-42'),
-        { tokenInHistory: capHistory.includes('cap-tok-123'), roleInHistory: /"roles":\["admin"/.test(capHistory), responseKept: capHistory.includes('req-42') },
+        'captures: the response kept in the history has the secret captures scrubbed, from the body and the headers, and the rest as it was',
+        !capHistory.includes('cap-tok-123') && !capHistory.includes('[\\"admin\\"]') && !capHistory.includes('req-42') && capHistory.includes('roles'),
+        { tokenInHistory: capHistory.includes('cap-tok-123'), roleInHistory: capHistory.includes('[\\"admin\\"]'), headerInHistory: capHistory.includes('req-42'), responseKept: capHistory.includes('roles') },
       );
       const chained =await run<ApiResponse>('api.request.send', { request: { ...saved, id: '', name: 'chained', url: '{{baseUrl}}/me?user={{capUser}}', headers: [], auth: { type: 'bearer', token: '{{capToken}}' } } }, ws.id);
       const chainedEcho = JSON.parse(chained.body) as { url: string; headers: Record<string, string> };
       check('captures: the next request resolves the captured variables', chainedEcho.url === '/me?user=7' && chainedEcho.headers.authorization === 'Bearer cap-tok-123', { url: chainedEcho.url, authorization: chainedEcho.headers.authorization });
       const agentLogin = await host.invoke('api.request.send', { requestId: login.id }, { caller: 'mcp', workspaceId: ws.id });
-      const agentCaptured = agentLogin.ok ? ((agentLogin.result as ApiResponse).captured ?? []) : [];
+      const agentResponse = agentLogin.ok ? (agentLogin.result as ApiResponse) : null;
+      const agentCaptured = agentResponse?.captured ?? [];
+      const agentText = JSON.stringify(agentResponse ?? {});
       const noEnv = await run<ApiResponse>('api.request.send', { request: { ...login, url: `http://127.0.0.1:${echoPort}/auth/login` }, environmentId: null }, ws.id);
       check(
-        'captures: an agent sees secret captures masked, and without an environment the captures fail but the send does not',
+        'captures: an agent sees secret captures masked and scrubbed from the body and headers it gets, and without an environment the captures fail but the send does not',
         agentCaptured.find((c) => c.variable === 'capToken')?.value === REDACTED && agentCaptured.find((c) => c.variable === 'adminToken')?.value === REDACTED && agentCaptured.find((c) => c.variable === 'capUser')?.value === '7' &&
+          !agentText.includes('cap-tok-123') && !agentText.includes('req-42') && agentResponse?.body.includes('"id":7') === true && agentResponse.headers.some(([k, v]) => k.toLowerCase() === 'x-request-id' && v === REDACTED) &&
           noEnv.status === 200 && (noEnv.captured ?? []).every((c) => !c.ok && c.value === null) && (noEnv.captured ?? []).filter((c) => (c.error ?? '').includes('No environment')).length === 5,
-        { agent: agentCaptured.map((c) => `${c.variable}=${c.value}`), noEnv: noEnv.captured?.[0]?.error },
+        { agent: agentCaptured.map((c) => `${c.variable}=${c.value}`), leaked: ['cap-tok-123', 'req-42'].filter((s) => agentText.includes(s)), noEnv: noEnv.captured?.[0]?.error },
       );
       const cleaned = await run<Environment>('api.environment.get', { id: env.id }, ws.id);
       await run('api.environment.save', { environment: { ...cleaned, variables: cleaned.variables.filter((v) => !v.key.startsWith('cap')) } }, ws.id);
