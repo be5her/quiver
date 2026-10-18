@@ -739,15 +739,18 @@ export default definePart({
       );
       oauth.state.expiresIn = 10;
       const shortLived = await run<{ source: string }>('api.oauth2.token', { auth: ac, force: true }, ws.id);
-      const refreshed = await host.invoke('api.oauth2.token', { auth: ac }, { caller: 'mcp', workspaceId: ws.id });
+      // Two agent calls at once find the token stale (a 10 s token is inside the 30 s margin): one refresh, shared, not two racing.
+      const agentToken = () => host.invoke('api.oauth2.token', { auth: ac }, { caller: 'mcp', workspaceId: ws.id });
+      const [refreshedA, refreshedB] = await Promise.all([agentToken(), agentToken()]);
+      const sources = [refreshedA, refreshedB].map((r) => (r.ok ? (r.result as { source: string }).source : r.error.message)).sort();
       oauth.state.expiresIn = 3600;
       const status = await run<{ hasToken: boolean; refreshable: boolean }>('api.oauth2.status', { auth: ac }, ws.id);
       await run('api.oauth2.clear', { auth: ac }, ws.id);
       const cleared = await run<{ hasToken: boolean }>('api.oauth2.status', { auth: ac }, ws.id);
       check(
-        'oauth: a token near its expiry is refreshed with the refresh token, also for an agent, and Forget clears it',
-        shortLived.source === 'new' && refreshed.ok && (refreshed.result as { source: string }).source === 'refresh' && oauth.seen.refreshes === 1 && status.hasToken && status.refreshable && !cleared.hasToken,
-        { shortLived: shortLived.source, refreshed: refreshed.ok ? refreshed.result : refreshed.error.message, status, cleared },
+        'oauth: a token near its expiry is refreshed with the refresh token, also for an agent, two calls at once sharing one refresh, and Forget clears it',
+        shortLived.source === 'new' && sources.join() === 'cache,refresh' && oauth.seen.refreshes === 1 && status.hasToken && status.refreshable && !cleared.hasToken,
+        { shortLived: shortLived.source, sources, refreshes: oauth.seen.refreshes, status, cleared },
       );
 
       const oauthCol = await run<ApiCollection>('api.collection.create', { name: 'oauth collection' }, ws.id);

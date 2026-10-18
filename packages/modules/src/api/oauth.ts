@@ -43,14 +43,35 @@ export async function readToken(w: WorkspaceApi, host: HostApi, key: string): Pr
   }
 }
 
+/** Writes to a workspace's token file, one after another: two tokens stored together both stay. */
+const tokenWrites = new Map<string, Promise<void>>();
+
 async function writeToken(w: WorkspaceApi, host: HostApi, key: string, token: OAuthToken | null): Promise<void> {
-  const doc = await w.store.readLocal<TokensDoc>(OAUTH_TOKENS_DOC, {});
-  if (token) doc[key] = host.secrets.encrypt(JSON.stringify(token));
-  else delete doc[key];
-  await w.store.writeLocal(OAUTH_TOKENS_DOC, doc);
-  // writeLocal does not announce itself; the auth editors show the token's state.
-  host.emit('store.changed', { workspaceId: w.id, collection: OAUTH_TOKENS_DOC });
+  const previous = tokenWrites.get(w.id) ?? Promise.resolve();
+  const next = previous
+    .catch(() => undefined)
+    .then(async () => {
+      const doc = await w.store.readLocal<TokensDoc>(OAUTH_TOKENS_DOC, {});
+      if (token) doc[key] = host.secrets.encrypt(JSON.stringify(token));
+      else delete doc[key];
+      await w.store.writeLocal(OAUTH_TOKENS_DOC, doc);
+      // writeLocal does not announce itself; the auth editors show the token's state.
+      host.emit('store.changed', { workspaceId: w.id, collection: OAUTH_TOKENS_DOC });
+    });
+  tokenWrites.set(w.id, next);
+  try {
+    await next;
+  } finally {
+    if (tokenWrites.get(w.id) === next) tokenWrites.delete(w.id);
+  }
 }
+
+/**
+ * Token work under way per workspace and token key. Two sends that find the same token stale share
+ * one refresh rather than both posting the refresh token: with rotation, the second would be refused
+ * and could revoke the whole family. `signingIn` says a person is at the window, which an agent does not wait on.
+ */
+const tokenWork = new Map<string, { signingIn: boolean; promise: Promise<TokenResult> }>();
 
 function check(auth: OAuth2Auth): void {
   if (!auth.tokenUrl.trim()) throw new QuiverError('INVALID_INPUT', 'OAuth 2.0 needs the token URL');
@@ -147,6 +168,24 @@ async function signInForCode(host: HostApi, auth: OAuth2Auth, key: string): Prom
 export async function getOAuthToken(w: WorkspaceApi, host: HostApi, auth: OAuth2Auth, options: { interactive: boolean; force?: boolean; insecure?: boolean; network?: NetworkContext }): Promise<TokenResult> {
   check(auth);
   const key = tokenKey(auth);
+  const lock = `${w.id}:${key}`;
+  const underWay = options.force ? undefined : tokenWork.get(lock);
+  if (underWay) {
+    if (underWay.signingIn && !options.interactive) throw new QuiverError('SIGN_IN_REQUIRED', `A sign-in at ${new URL(auth.tokenUrl.trim()).host} is under way in the Quiver window; try again once it is done`);
+    const { token } = await underWay.promise;
+    return { token, source: 'cache' };
+  }
+  const entry = { signingIn: false, promise: undefined as unknown as Promise<TokenResult> };
+  entry.promise = fetchToken(w, host, auth, key, options, () => (entry.signingIn = true));
+  tokenWork.set(lock, entry);
+  try {
+    return await entry.promise;
+  } finally {
+    if (tokenWork.get(lock) === entry) tokenWork.delete(lock);
+  }
+}
+
+async function fetchToken(w: WorkspaceApi, host: HostApi, auth: OAuth2Auth, key: string, options: { interactive: boolean; force?: boolean; insecure?: boolean; network?: NetworkContext }, signingIn: () => void): Promise<TokenResult> {
   const net: TokenNetwork = { insecure: options.insecure ?? false, network: options.network };
   const cached = options.force ? null : await readToken(w, host, key);
   if (cached && tokenIsFresh(cached, Date.now())) return { token: cached, source: 'cache' };
@@ -173,6 +212,7 @@ export async function getOAuthToken(w: WorkspaceApi, host: HostApi, auth: OAuth2
         `Signing in at ${new URL(auth.tokenUrl.trim()).host} needs the Quiver window: open the request's Auth segment and press Get token`,
       );
     }
+    signingIn();
     const { code, redirectUri, verifier } = await signInForCode(host, auth, key);
     token = await postToken(auth, { grant_type: 'authorization_code', code, redirect_uri: redirectUri, ...(verifier ? { code_verifier: verifier } : {}) }, net);
   }
