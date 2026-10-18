@@ -40,6 +40,7 @@ import {
   type ClientCertificate,
   type NetworkConfig,
   toHistoryResponse,
+  pruneHistory,
   createLineSplitter,
   createSseParser,
   type StreamItem,
@@ -99,16 +100,36 @@ const HISTORY_LOG = 'history';
 
 /**
  * History written before credentials were masked still holds them in plain text, so the log is
- * rewritten once when its workspace opens. Reads and appends wait for that, so nothing is lost or reordered.
+ * tidied once when its workspace opens. Reads and appends wait for that, so nothing is lost or reordered.
  */
 const historyReady = new Map<string, Promise<void>>();
 
-async function scrubHistory(w: WorkspaceApi): Promise<void> {
-  const entries = (await w.store.readLog<HistoryEntry>(HISTORY_LOG, Number.MAX_SAFE_INTEGER)).reverse();
-  const clean = entries.map((entry) => redactHistoryEntry(entry));
-  if (JSON.stringify(clean) === JSON.stringify(entries)) return;
+/** Appends and rewrites of a workspace's history, one after another: a tidy never loses an entry appended meanwhile. */
+const historyWrites = new Map<string, Promise<void>>();
+
+function withHistory(w: WorkspaceApi, write: () => Promise<void>): Promise<void> {
+  const next = (historyWrites.get(w.id) ?? Promise.resolve()).catch(() => undefined).then(write);
+  historyWrites.set(w.id, next);
+  return next.finally(() => {
+    if (historyWrites.get(w.id) === next) historyWrites.delete(w.id);
+  });
+}
+
+/** The log is tidied after this many appends, so it never grows far past what `pruneHistory` keeps. */
+const TIDY_EVERY = 50;
+const appendsSinceTidy = new Map<string, number>();
+
+/**
+ * Rewrite the log when it needs it: entries from before credentials were masked get masked, and it
+ * is pruned to the newest entries, responses kept on the newest of those (`pruneHistory`), so the
+ * file stays quick to read and a kept body does not sit on disk for ever.
+ */
+async function tidyHistory(w: WorkspaceApi): Promise<void> {
+  const entries = await w.store.readLog<HistoryEntry>(HISTORY_LOG, Number.MAX_SAFE_INTEGER);
+  const pruned = pruneHistory(entries.map((entry) => redactHistoryEntry(entry)));
+  if (!pruned.changed && JSON.stringify(pruned.entries) === JSON.stringify(entries)) return;
   await w.store.clearLog(HISTORY_LOG);
-  for (const entry of clean) await w.store.appendLog(HISTORY_LOG, entry);
+  for (const entry of [...pruned.entries].reverse()) await w.store.appendLog(HISTORY_LOG, entry);
 }
 
 function ws(ctx: CommandContext): WorkspaceApi {
@@ -438,7 +459,12 @@ async function sendRequest(ctx: CommandContext, input: z.infer<typeof SendInput>
     recorded?.(masked);
     if (input.record !== false) {
       await historyReady.get(w.id);
-      await w.store.appendLog(HISTORY_LOG, masked);
+      await withHistory(w, async () => {
+        await w.store.appendLog(HISTORY_LOG, masked);
+        const appends = (appendsSinceTidy.get(w.id) ?? 0) + 1;
+        appendsSinceTidy.set(w.id, appends % TIDY_EVERY);
+        if (appends % TIDY_EVERY === 0) await tidyHistory(w);
+      });
       ctx.host.emit('store.changed', { workspaceId: w.id, collection: HISTORY_LOG });
     }
   }
@@ -970,7 +996,7 @@ const historyClear = defineCommand({
   input: z.object({}),
   handler: async (_i, ctx) => {
     await historyReady.get(ws(ctx).id);
-    await ws(ctx).store.clearLog(HISTORY_LOG);
+    await withHistory(ws(ctx), () => ws(ctx).store.clearLog(HISTORY_LOG));
     ctx.host.emit('store.changed', { workspaceId: ws(ctx).id, collection: HISTORY_LOG });
     return { cleared: true };
   },
@@ -1635,7 +1661,7 @@ export const apiModule = defineModule({
   onWorkspaceOpen: (w) => {
     historyReady.set(
       w.id,
-      scrubHistory(w).catch((err) => console.warn(`[quiver] could not mask credentials in the request history of ${w.path}: ${(err as Error).message}`)),
+      withHistory(w, () => tidyHistory(w)).catch((err) => console.warn(`[quiver] could not tidy the request history of ${w.path}: ${(err as Error).message}`)),
     );
   },
   onWorkspaceClose: (w) => {

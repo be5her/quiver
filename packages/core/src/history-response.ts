@@ -3,6 +3,25 @@ import { REDACTED, scrubSecrets } from './redact';
 
 /** Responses larger than this are not kept in the history; the entry says so. */
 export const MAX_HISTORY_RESPONSE_BYTES = 256 * 1024;
+/** Entries the history keeps; the oldest go when the log is tidied. */
+export const MAX_HISTORY_ENTRIES = 1000;
+/** The newest entries that keep their response; older ones keep everything else. */
+export const HISTORY_RESPONSES_KEPT = 200;
+
+/**
+ * The history pruned: the newest `maxEntries` kept, responses only on the newest `responsesKept`
+ * of them. `entries` is newest first, as the log is read. `changed` says whether anything went.
+ */
+export function pruneHistory(entries: HistoryEntry[], limits = { maxEntries: MAX_HISTORY_ENTRIES, responsesKept: HISTORY_RESPONSES_KEPT }): { entries: HistoryEntry[]; changed: boolean } {
+  let changed = entries.length > limits.maxEntries;
+  const kept = entries.slice(0, limits.maxEntries).map((entry, i) => {
+    if (i < limits.responsesKept || entry.response === undefined) return entry;
+    changed = true;
+    const { response: _dropped, ...rest } = entry;
+    return rest;
+  });
+  return { entries: kept, changed };
+}
 
 /**
  * The response as the history keeps it: status, headers, content type and body, with Set-Cookie
