@@ -1040,7 +1040,7 @@ export default definePart({
       const listed = await run<ApiRun[]>('api.run.list', { collectionId: flow.id }, ws.id);
       const runsFile = await fs.readFile(path.join(folder, '.quiver', 'local', 'runs.jsonl'), 'utf8').catch(() => '');
       check(
-        'api.collection.run: the requests go in their set order, the second captures a token the third sends and checks, and the run is kept',
+        'api.collection.run: the requests go in their set order, the second captures a token the third sends and checks (the secret scrubbed from the kept check), and the run is kept',
         badOrder.ok === false &&
           started.requests === 3 &&
           done.status === 'passed' &&
@@ -1048,12 +1048,15 @@ export default definePart({
           done.items.every((i) => i.status === 'passed' && i.httpStatus === 200) &&
           done.items[1].captured?.join() === 'runToken' &&
           done.items[2].checks?.[0]?.ok === true &&
+          done.items[2].checks[0].actual === REDACTED &&
+          done.items[2].checks[0].message.includes(REDACTED) &&
           done.passed === 3 &&
           done.failed === 0 &&
           historyAfter - historyBefore === 3 &&
           listed[0]?.id === started.runId &&
-          runsFile.includes(started.runId),
-        { done: done.items.map((i) => `${i.name}:${i.status}:${i.httpStatus}:${i.error ?? ''}`), captured: done.items[1].captured, historyAdded: historyAfter - historyBefore, badOrder: badOrder.ok },
+          runsFile.includes(started.runId) &&
+          !runsFile.includes('t-123'),
+        { done: done.items.map((i) => `${i.name}:${i.status}:${i.httpStatus}:${i.error ?? ''}`), captured: done.items[1].captured, check: done.items[2].checks?.[0], tokenInRuns: runsFile.includes('t-123'), historyAdded: historyAfter - historyBefore, badOrder: badOrder.ok },
       );
 
       // Stop at the first failure: the first check fails, the rest are skipped.

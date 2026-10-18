@@ -35,6 +35,7 @@ import {
   redactUrl,
   requestSecretValues,
   resolveDeep,
+  scrubCheckResults,
   scrubResponse,
   scrubSecrets,
   toCode,
@@ -371,7 +372,7 @@ const SendInput = z.object({
 /**
  * `streams` false reads every body whole (a collection run waits for an event stream to end, or times out).
  */
-async function sendRequest(ctx: CommandContext, input: z.infer<typeof SendInput>, signal?: AbortSignal, recorded?: (entry: HistoryEntry) => void, streams = true): Promise<ApiResponse> {
+async function sendRequest(ctx: CommandContext, input: z.infer<typeof SendInput>, signal?: AbortSignal, recorded?: (entry: HistoryEntry, secretValues: string[]) => void, streams = true): Promise<ApiResponse> {
   const w = ws(ctx);
   const request = input.request ?? (input.requestId ? await requireRequest(w, input.requestId) : null);
   if (!request) throw new QuiverError('INVALID_INPUT', 'Provide requestId or request');
@@ -459,7 +460,8 @@ async function sendRequest(ctx: CommandContext, input: z.infer<typeof SendInput>
     if (key) inflight.delete(key);
     // The log is a plain file: credentials typed into the request, and secrets the URL resolved to, are masked before they reach it.
     const masked = redactHistoryEntry(entry, secrets);
-    recorded?.(masked);
+    // A run keeps more than the entry (check results); it gets the secrets to mask them the same way.
+    recorded?.(masked, secrets.values ?? []);
     if (input.record !== false) {
       await historyReady.get(w.id);
       await withHistory(w, async () => {
@@ -1172,11 +1174,13 @@ async function executeRun(ctx: CommandContext, live: LiveRun, options: { environ
     item.status = 'running';
     announceRun(ctx, live);
     let entry: HistoryEntry | undefined;
+    let secretValues: string[] = [];
     try {
-      const response = await sendRequest(ctx, { requestId: item.requestId, environmentId: options.environmentId }, controller.signal, (e) => (entry = e), false);
+      const response = await sendRequest(ctx, { requestId: item.requestId, environmentId: options.environmentId }, controller.signal, (e, values) => ((entry = e), (secretValues = values)), false);
       item.httpStatus = response.status;
       item.durationMs = Math.round(response.timings.total);
-      if (response.checks) item.checks = response.checks;
+      // What a check read can be a secret (a token's JSON path); the run is a plain file and agents read it.
+      if (response.checks) item.checks = scrubCheckResults(response.checks, secretValues);
       const captured = response.captured?.filter((c) => c.ok).map((c) => c.variable);
       if (captured?.length) item.captured = captured;
       item.status = response.checks?.some((c) => !c.ok) ? 'failed' : 'passed';

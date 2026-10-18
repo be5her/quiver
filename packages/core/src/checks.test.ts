@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { checkSummary, evaluateCheck, evaluateChecks, type CheckSourceResponse } from './checks';
+import { checkSummary, evaluateCheck, evaluateChecks, scrubCheckResults, type CheckSourceResponse } from './checks';
 import type { Check } from './models/api';
+import { REDACTED } from './redact';
 
 const response: CheckSourceResponse = {
   status: 201,
@@ -72,5 +73,14 @@ describe('evaluateChecks', () => {
     expect(checkSummary(results)).toEqual({ passed: 1, total: 2 });
     expect(checkSummary([])).toBeUndefined();
     expect(evaluateChecks(undefined, response)).toEqual([]);
+  });
+
+  it('scrubs known secrets from what a check read and from its message', () => {
+    const results = evaluateChecks([check({ id: 't', on: 'header', path: 'content-type', op: 'contains', expected: 'json' })], response);
+    expect(results[0]).toMatchObject({ ok: true, actual: 'application/json; charset=utf-8', message: 'Header content-type is "application/json; charset=utf-8"' });
+    const scrubbed = scrubCheckResults(results, ['application/json']);
+    expect(scrubbed[0]).toMatchObject({ ok: true, actual: `${REDACTED}; charset=utf-8`, message: `Header content-type is "${REDACTED}; charset=utf-8"` });
+    expect(scrubCheckResults(results, [])).toBe(results);
+    expect(scrubCheckResults([{ id: 'x', ok: false, actual: null, message: 'nothing' }], ['application/json'])[0].actual).toBeNull();
   });
 });

@@ -1,5 +1,6 @@
 import { jsonPath } from './json-path';
 import type { ApiResponse, Check, CheckOp, CheckResult, CheckTarget } from './models/api';
+import { scrubSecrets } from './redact';
 
 /** The parts of a response checks read. */
 export type CheckSourceResponse = Pick<ApiResponse, 'status' | 'headers' | 'body' | 'bodyEncoding' | 'size' | 'timings'>;
@@ -179,6 +180,16 @@ export function evaluateCheck(check: Check, response: CheckSourceResponse): Chec
 /** The enabled checks of a request against its response, `{{variables}}` in `expected` resolved by `resolve`. */
 export function evaluateChecks(checks: Check[] | undefined, response: CheckSourceResponse, resolve: (text: string) => string = (t) => t): CheckResult[] {
   return (checks ?? []).filter((c) => c.enabled).map((c) => evaluateCheck({ ...c, expected: resolve(c.expected) }, response));
+}
+
+/**
+ * Check results as they may be written down or handed to an agent: the known secret values scrubbed
+ * from what each check read and from the message quoting it. A check on a token's JSON path, or on a
+ * header a secret capture reads, would otherwise put the value in the run log in plain text.
+ */
+export function scrubCheckResults(results: CheckResult[], secretValues: string[]): CheckResult[] {
+  if (!secretValues.length) return results;
+  return results.map((r) => ({ ...r, actual: r.actual === null ? null : scrubSecrets(r.actual, secretValues), message: scrubSecrets(r.message, secretValues) }));
 }
 
 /** Passed and total, for the history and the status line. */
