@@ -19,6 +19,7 @@ import {
 } from '@quiver/core';
 import { fetch as undiciFetch } from 'undici';
 import { dispatcherFor, type NetworkContext } from './network';
+import { agentPath } from './paths';
 
 /** A body read from files as it is sent, so a large upload never sits in memory. Opened again for each redirect hop. */
 export interface StreamBody {
@@ -61,8 +62,9 @@ async function resolveFile(files: FileAccess, given: string, what: string): Prom
   if (!trimmed) throw new QuiverError('INVALID_INPUT', `Pick a file for ${what}`);
   const abs = path.isAbsolute(trimmed) ? path.normalize(trimmed) : path.resolve(files.baseDir, trimmed);
   if (files.agent) {
-    const back = path.relative(files.baseDir, abs);
-    if (!back || back.startsWith('..') || path.isAbsolute(back)) throw new QuiverError('INVALID_INPUT', `Agents may only send files inside the project folder; ${trimmed} is outside it`);
+    // Links followed: a junction inside the project pointing at the user's home does not make its files sendable.
+    const placed = await agentPath(files.baseDir, trimmed);
+    if (placed.refused) throw new QuiverError('INVALID_INPUT', `Agents may only send files inside the project folder; ${placed.refused}`);
   }
   const stat = await fs.stat(abs).catch(() => null);
   if (!stat) throw new QuiverError('INVALID_INPUT', `The file ${trimmed} for ${what} does not exist`);

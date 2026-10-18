@@ -480,12 +480,22 @@ export default definePart({
       const inside = await host.invoke('api.response.save', { path: 'saved/agent.txt', body: 'x' }, { caller: 'mcp', workspaceId: ws.id });
       const escaped = await host.invoke('api.response.save', { path: outside, body: 'x' }, { caller: 'mcp', workspaceId: ws.id });
       const climbed = await host.invoke('api.response.save', { path: '../climbed.txt', body: 'x' }, { caller: 'mcp', workspaceId: ws.id });
+      // A junction inside the project that leads out of it is followed; the repository's own folders are refused whatever is in them.
+      const linkDir = path.join(folder, 'linked-out');
+      await fs.symlink(path.dirname(outside), linkDir, 'junction');
+      const throughLink = await host.invoke('api.response.save', { path: 'linked-out/through-link.txt', body: 'x' }, { caller: 'mcp', workspaceId: ws.id });
+      const gitHook = await host.invoke('api.response.save', { path: '.git/hooks/pre-commit', body: 'x' }, { caller: 'mcp', workspaceId: ws.id });
+      const localSecrets = await host.invoke('api.response.save', { path: path.join(folder, '.quiver', 'local', 'secrets.json'), body: '{}' }, { caller: 'mcp', workspaceId: ws.id });
       await run('config.update', { patch: { mcp: mcpBefore } }, null);
+      await fs.rmdir(linkDir).catch(() => fs.unlink(linkDir));
       const outsideWritten = await fs.stat(outside).then(() => true, () => false);
+      const linkWritten = await fs.stat(path.join(path.dirname(outside), 'through-link.txt')).then(() => true, () => false);
       check(
-        'api.response.save: gated for agents, and with mutations on still only inside the project folder',
-        !blocked.ok && blocked.error.code === 'MUTATION_BLOCKED' && inside.ok && !escaped.ok && escaped.error.code === 'INVALID_INPUT' && !climbed.ok && !outsideWritten,
-        { blocked: blocked.ok ? 'ok?' : blocked.error.code, inside: inside.ok, escaped: escaped.ok ? 'ok?' : escaped.error.code, climbed: climbed.ok ? 'ok?' : climbed.error.code },
+        'api.response.save: gated for agents, and with mutations on still only inside the project folder, links followed, never under .git or .quiver/local',
+        !blocked.ok && blocked.error.code === 'MUTATION_BLOCKED' && inside.ok && !escaped.ok && escaped.error.code === 'INVALID_INPUT' && !climbed.ok && !outsideWritten &&
+          !throughLink.ok && throughLink.error.message.includes('link') && !linkWritten &&
+          !gitHook.ok && gitHook.error.message.includes('.git') && !localSecrets.ok && localSecrets.error.message.includes('.quiver/local'),
+        { blocked: blocked.ok ? 'ok?' : blocked.error.code, inside: inside.ok, escaped: escaped.ok ? 'ok?' : escaped.error.code, climbed: climbed.ok ? 'ok?' : climbed.error.code, throughLink: throughLink.ok ? 'ok?' : throughLink.error.message, gitHook: gitHook.ok ? 'ok?' : gitHook.error.message, localSecrets: localSecrets.ok ? 'ok?' : localSecrets.error.message },
       );
       await fs.rm(path.join(folder, 'saved'), { recursive: true, force: true });
     }
@@ -650,14 +660,20 @@ export default definePart({
       const agentOutside = await host.invoke('api.request.send', { request: { ...base, method: 'POST', url: '{{baseUrl}}/up', body: { type: 'binary', path: outsideFile } } }, { caller: 'mcp', workspaceId: ws.id });
       const agentClimb = await host.invoke('api.request.send', { request: { ...base, method: 'POST', url: '{{baseUrl}}/up', body: { type: 'form', fields: [{ id: 'f', key: 'f', value: '../outside.txt', enabled: true, kind: 'file' }] } } }, { caller: 'mcp', workspaceId: ws.id });
       const agentInside = await host.invoke('api.request.send', { request: { ...base, method: 'POST', url: '{{baseUrl}}/up', body: { type: 'binary', path: 'uploads/hello.txt' } } }, { caller: 'mcp', workspaceId: ws.id });
+      // A junction inside the project pointing outside it does not make the files there sendable by an agent.
+      const linkUp = path.join(folder, 'linked-up');
+      await fs.symlink(t.hooksFolder, linkUp, 'junction');
+      const agentLinked = await host.invoke('api.request.send', { request: { ...base, method: 'POST', url: '{{baseUrl}}/up', body: { type: 'binary', path: 'linked-up/outside-upload.txt' } } }, { caller: 'mcp', workspaceId: ws.id });
+      await fs.rmdir(linkUp).catch(() => fs.unlink(linkUp));
       const missing = await host.invoke('api.request.send', { request: { ...base, method: 'POST', url: '{{baseUrl}}/up', body: { type: 'binary', path: 'uploads/nope.bin' } } }, { caller: 'ui', workspaceId: ws.id });
       check(
-        'files: the UI may send any file, an agent only one inside the project, and a missing file is refused',
+        'files: the UI may send any file, an agent only one inside the project (links followed), and a missing file is refused',
         uiOutside.ok && (JSON.parse((uiOutside.result as ApiResponse).body) as Echo).body === 'from outside' &&
           !agentOutside.ok && agentOutside.error.code === 'INVALID_INPUT' && agentOutside.error.message.includes('inside the project folder') &&
           !agentClimb.ok && agentClimb.error.code === 'INVALID_INPUT' && agentInside.ok &&
+          !agentLinked.ok && agentLinked.error.code === 'INVALID_INPUT' && agentLinked.error.message.includes('link') &&
           !missing.ok && missing.error.message.includes('does not exist'),
-        { agentOutside: agentOutside.ok ? 'ok?' : agentOutside.error.message, agentClimb: agentClimb.ok ? 'ok?' : agentClimb.error.code, agentInside: agentInside.ok, missing: missing.ok ? 'ok?' : missing.error.message },
+        { agentOutside: agentOutside.ok ? 'ok?' : agentOutside.error.message, agentClimb: agentClimb.ok ? 'ok?' : agentClimb.error.code, agentInside: agentInside.ok, agentLinked: agentLinked.ok ? 'ok?' : agentLinked.error.message, missing: missing.ok ? 'ok?' : missing.error.message },
       );
       const uploadReq = await run<ApiRequest>('api.request.create', { name: 'file upload', method: 'POST', url: '{{baseUrl}}/upload' }, ws.id);
       await run('api.request.save', {

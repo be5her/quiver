@@ -99,6 +99,7 @@ import { prepareRequest, sendPrepared } from './http';
 import { clearOAuthToken, getOAuthToken, oauthStatus } from './oauth';
 import { jarSession, readJar, updateJar } from './cookies';
 import { CERTIFICATES_DOC, networkConfig, readCertificates, resolveNetwork, type NetworkContext } from './network';
+import { agentPath } from './paths';
 
 const HISTORY_LOG = 'history';
 
@@ -519,8 +520,9 @@ const responseSave = defineCommand({
     const w = ws(ctx);
     const abs = path.isAbsolute(target) ? path.normalize(target) : path.resolve(w.path, target);
     if (ctx.caller === 'mcp') {
-      const back = path.relative(w.path, abs);
-      if (!back || back.startsWith('..') || path.isAbsolute(back)) throw new QuiverError('INVALID_INPUT', 'Agents may only save inside the project folder');
+      // Links followed, so a junction inside the project cannot lead the write out of it; .git and .quiver/local refused.
+      const placed = await agentPath(w.path, target, { writing: true });
+      if (placed.refused) throw new QuiverError('INVALID_INPUT', `Agents may only save inside the project folder: ${placed.refused}`);
     }
     const data = Buffer.from(body, bodyEncoding === 'base64' ? 'base64' : 'utf8');
     await fs.mkdir(path.dirname(abs), { recursive: true });
@@ -1504,8 +1506,8 @@ async function importText(ctx: CommandContext, source: z.infer<typeof ImportSour
   const given = source.path.trim();
   const abs = path.isAbsolute(given) ? path.normalize(given) : path.resolve(w.path, given);
   if (ctx.caller === 'mcp') {
-    const back = path.relative(w.path, abs);
-    if (!back || back.startsWith('..') || path.isAbsolute(back)) throw new QuiverError('INVALID_INPUT', `Agents may only import files inside the project folder; ${given} is outside it`);
+    const placed = await agentPath(w.path, given);
+    if (placed.refused) throw new QuiverError('INVALID_INPUT', `Agents may only import files inside the project folder; ${placed.refused}`);
   }
   const stat = await fs.stat(abs).catch(() => null);
   if (!stat?.isFile()) throw new QuiverError('INVALID_INPUT', `The file ${given} does not exist`);
