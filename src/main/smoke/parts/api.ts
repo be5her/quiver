@@ -412,7 +412,14 @@ export default definePart({
 
     // Redirects are followed by Quiver: every hop is listed, POST becomes GET on 302, 307 repeats it, credentials stay with their origin.
     {
-      const base = { ...saved, id: '', name: 'redirects', headers: [], auth: { type: 'bearer' as const, token: '{{token}}' }, body: { type: 'json' as const, content: '{"r":1}' } };
+      const base = {
+        ...saved,
+        id: '',
+        name: 'redirects',
+        headers: [{ id: 'k', key: 'X-API-Key', value: 'key-777', enabled: true }],
+        auth: { type: 'bearer' as const, token: '{{token}}' },
+        body: { type: 'json' as const, content: '{"r":1}' },
+      };
       const send = (url: string, options?: object) => host.invoke('api.request.send', { request: { ...base, url }, options }, { caller: 'ui', workspaceId: ws.id });
       const echoOf = (r: ApiResponse) => JSON.parse(r.body) as { method: string; url: string; body: string; headers: Record<string, string> };
       const r302 = await run<ApiResponse>('api.request.send', { request: { ...base, url: '{{baseUrl}}/redirect/302?to=/landing' } }, ws.id);
@@ -425,10 +432,10 @@ export default definePart({
         { method: echoOf(r302).method, body: echoOf(r302).body, redirects: r302.redirects.map((h) => `${h.status} ${h.method} ${h.location}`), url: r302.url },
       );
       check(
-        'api.request.send: a 307 repeats the POST with its body and Authorization; one that leaves the origin drops Authorization',
-        echoOf(r307).method === 'POST' && echoOf(r307).body === '{"r":1}' && echoOf(r307).headers.authorization === 'Bearer s3cret' &&
-          echoOf(cross).method === 'POST' && echoOf(cross).url === '/elsewhere' && echoOf(cross).headers.authorization === undefined,
-        { r307: [echoOf(r307).method, echoOf(r307).headers.authorization], cross: [echoOf(cross).url, echoOf(cross).headers.authorization ?? null] },
+        'api.request.send: a 307 repeats the POST with its body, Authorization and API key; one that leaves the origin drops Authorization and the API-key header',
+        echoOf(r307).method === 'POST' && echoOf(r307).body === '{"r":1}' && echoOf(r307).headers.authorization === 'Bearer s3cret' && echoOf(r307).headers['x-api-key'] === 'key-777' &&
+          echoOf(cross).method === 'POST' && echoOf(cross).url === '/elsewhere' && echoOf(cross).headers.authorization === undefined && echoOf(cross).headers['x-api-key'] === undefined,
+        { r307: [echoOf(r307).method, echoOf(r307).headers.authorization, echoOf(r307).headers['x-api-key']], cross: [echoOf(cross).url, echoOf(cross).headers.authorization ?? null, echoOf(cross).headers['x-api-key'] ?? null] },
       );
       const unfollowed = await send('{{baseUrl}}/redirect/302?to=/landing', { followRedirects: false });
       const loop = await send('{{baseUrl}}/loop');

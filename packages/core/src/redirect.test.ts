@@ -8,6 +8,7 @@ const post: WireRequest<string> = {
     ['Content-Type', 'application/json'],
     ['Authorization', 'Bearer t'],
     ['Cookie', 'sid=1'],
+    ['X-API-Key', 'k'],
     ['X-Trace', 'abc'],
   ],
   body: '{"a":1}',
@@ -22,6 +23,7 @@ describe('nextRequest', () => {
         headers: [
           ['Authorization', 'Bearer t'],
           ['Cookie', 'sid=1'],
+          ['X-API-Key', 'k'],
           ['X-Trace', 'abc'],
         ],
         body: null,
@@ -39,9 +41,12 @@ describe('nextRequest', () => {
     expect(nextRequest({ ...post, method: 'DELETE' }, 303, '/x')?.method).toBe('GET');
   });
 
-  it('drops credentials when the redirect leaves the origin', () => {
+  it('drops credentials, API-key headers among them, when the redirect leaves the origin', () => {
     expect(nextRequest(post, 307, 'https://other.test/login')?.headers.map(([k]) => k)).toEqual(['Content-Type', 'X-Trace']);
-    expect(nextRequest(post, 307, 'http://api.test/login')?.headers.some(([k]) => k === 'Authorization')).toBe(false);
+    // Another scheme or port is another origin: a downgrade to http would send them in the clear.
+    expect(nextRequest(post, 307, 'http://api.test/login')?.headers.map(([k]) => k)).toEqual(['Content-Type', 'X-Trace']);
+    expect(nextRequest(post, 307, 'https://api.test:8443/login')?.headers.map(([k]) => k)).toEqual(['Content-Type', 'X-Trace']);
+    expect(nextRequest({ ...post, headers: [['X-Auth-Token', 't'], ['Ocp-Apim-Subscription-Key', 's'], ['Accept', '*/*']] }, 302, 'https://other.test/')?.headers).toEqual([['Accept', '*/*']]);
   });
 
   it('refuses a location that is not an http URL', () => {

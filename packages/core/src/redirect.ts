@@ -1,4 +1,5 @@
 import type { HttpMethod } from './models/api';
+import { isSecretName } from './redact';
 
 export const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
@@ -11,14 +12,15 @@ export interface WireRequest<B> {
 }
 
 const BODY_HEADERS = new Set(['content-type', 'content-length', 'content-encoding', 'content-language', 'content-location', 'transfer-encoding']);
-/** Credentials that belong to the origin they were sent to. */
+/** Credentials that belong to the origin they were sent to, besides every header named like one (`X-API-Key`). */
 const ORIGIN_HEADERS = new Set(['authorization', 'proxy-authorization', 'cookie']);
 
 /**
  * The request a redirect leads to, following browsers: 303 turns everything but HEAD into a GET,
  * 301 and 302 turn a POST into a GET, and a method changed this way drops the body and its headers;
- * 307 and 308 repeat the request as it was. Credentials (Authorization, Proxy-Authorization, Cookie)
- * are dropped when the redirect leaves the origin. Null when `location` cannot be read as a URL.
+ * 307 and 308 repeat the request as it was. Credentials (Authorization, Proxy-Authorization, Cookie,
+ * and any header named like a credential, such as an API key's) are dropped when the redirect leaves
+ * the origin, a change of scheme or port included. Null when `location` cannot be read as a URL.
  */
 export function nextRequest<B>(request: WireRequest<B>, status: number, location: string): WireRequest<B> | null {
   let target: URL;
@@ -36,7 +38,7 @@ export function nextRequest<B>(request: WireRequest<B>, status: number, location
     const lower = name.toLowerCase();
     if (lower === 'host') return false;
     if (toGet && BODY_HEADERS.has(lower)) return false;
-    if (crossOrigin && ORIGIN_HEADERS.has(lower)) return false;
+    if (crossOrigin && (ORIGIN_HEADERS.has(lower) || isSecretName(lower))) return false;
     return true;
   });
   return { method: toGet ? 'GET' : request.method, url: target.toString(), headers, body: toGet ? null : request.body };
