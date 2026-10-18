@@ -751,6 +751,14 @@ export default definePart({
           logout.cookieJar?.deleted.includes('jsid') === true && afterLogout === 'hop=h1',
         { hopCookie: hopEcho.headers.cookie, logout: logout.cookieJar, afterLogout },
       );
+      // Two sends in flight together: each one's cookies are added to the other's, not written over.
+      const [parA, parB] = await Promise.all([send(setUrl(['par-a=a1; Path=/'])), send(setUrl(['par-b=b1; Path=/']))]);
+      const afterBoth = await run<JarCookie[]>('api.cookie.list', {}, ws.id);
+      check(
+        'cookie jar: two sends finishing together both keep their cookies',
+        parA.cookieJar?.stored.includes('par-a') === true && parB.cookieJar?.stored.includes('par-b') === true && afterBoth.some((c) => c.name === 'par-a') && afterBoth.some((c) => c.name === 'par-b'),
+        { names: afterBoth.map((c) => c.name) },
+      );
       const off = await send(setUrl(['off=1; Path=/']), { options: { cookies: false } });
       const offSent = await cookieSent('{{baseUrl}}/me', { options: { cookies: false } });
       const listed = await run<JarCookie[]>('api.cookie.list', {}, ws.id);
@@ -763,15 +771,16 @@ export default definePart({
       const agentSend = await host.invoke('api.request.send', { request: { ...base, url: '{{baseUrl}}/me' } }, { caller: 'mcp', workspaceId: ws.id });
       const agentCookieHeader = agentSend.ok ? (agentSend.result as ApiResponse).sent.headers.find(([k]) => k.toLowerCase() === 'cookie')?.[1] : null;
       const agentDelete = await host.invoke('api.cookie.delete', { domain: '127.0.0.1', path: '/', name: 'hop' }, { caller: 'mcp', workspaceId: ws.id });
-      await run('api.cookie.set', { url: `http://127.0.0.1:${echoPort}/`, cookie: 'manual=m; Path=/' }, ws.id);
-      const jarFile = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'local', 'cookies.json'), 'utf8')) as JarCookie[];
+      await run('api.cookie.set', { url: `http://127.0.0.1:${echoPort}/`, cookie: 'manual=manual-value-1; Path=/' }, ws.id);
+      const jarFile = await fs.readFile(path.join(folder, '.quiver', 'local', 'cookies.json'), 'utf8');
       await run('api.cookie.delete', { domain: '127.0.0.1', path: '/', name: 'hop' }, ws.id);
       const afterDelete = await run<JarCookie[]>('api.cookie.list', {}, ws.id);
       check(
-        'cookie jar: agents see values masked and cannot delete, cookies can be set by hand, and the jar is a local file',
+        'cookie jar: agents see values masked and cannot delete, cookies can be set by hand, and the jar is an encrypted local file',
         agentList.ok && (agentList.result as JarCookie[]).every((c) => c.value === REDACTED) && (agentList.result as JarCookie[]).length >= 2 &&
           agentCookieHeader === REDACTED && !agentDelete.ok && agentDelete.error.code === 'MUTATION_BLOCKED' &&
-          jarFile.some((c) => c.name === 'manual') && afterDelete.some((c) => c.name === 'manual') && !afterDelete.some((c) => c.name === 'hop'),
+          jarFile.includes('"cipher"') && !jarFile.includes('manual-value-1') && !jarFile.includes('"manual"') &&
+          afterDelete.some((c) => c.name === 'manual' && c.value === 'manual-value-1') && !afterDelete.some((c) => c.name === 'hop'),
         { agentList: agentList.ok ? (agentList.result as JarCookie[]).map((c) => `${c.name}=${c.value}`) : agentList.error.code, agentCookieHeader, agentDelete: agentDelete.ok ? 'ok?' : agentDelete.error.code },
       );
     }
@@ -1150,6 +1159,13 @@ export default definePart({
       const before = proxySeen.length;
       await run('api.network.save', { proxy: 'manual', url: `http://127.0.0.1:${proxyPort}`, noProxy: [], username: 'smoke', password: 'proxy-pass' }, null);
       const viaProxy = await run<ApiResponse>('api.request.send', { request: plain(`http://127.0.0.1:${echoPort}/through?x=1`) }, ws.id);
+      // The token request of an OAuth 2.0 auth goes the same way as the request it is for.
+      const oauthHost = new URL(t.fixtures.fakeOAuth.url).host;
+      const tokenViaProxy = await run<{ source: string }>(
+        'api.oauth2.token',
+        { auth: { type: 'oauth2', grant: 'client_credentials', tokenUrl: `${t.fixtures.fakeOAuth.url}/token`, clientId: 'quiver', clientSecret: 'cc-secret', scopes: 'proxied', clientAuth: 'basic', pkce: false }, force: true },
+        ws.id,
+      );
       const pem2 = await run<{ id: string }>('api.certificate.save', { certificate: { hostPattern: '127.0.0.1', certPath: path.join(certs, 'client.crt'), keyPath: path.join(certs, 'client.key'), caPath: path.join(certs, 'ca.crt') } }, ws.id);
       const tunnelled = await run<ApiResponse>('api.request.send', { request: plain(mtlsUrl) }, ws.id);
       await run('api.certificate.delete', { id: pem2.id }, ws.id);
@@ -1161,8 +1177,10 @@ export default definePart({
       const agentNet = await host.invoke('api.network.save', { proxy: 'none' }, { caller: 'mcp' });
       await run('api.network.save', { proxy: 'none', url: '', noProxy: ['localhost', '127.0.0.1', '::1'], username: '', password: '' }, null);
       check(
-        'proxy: a manual proxy carries http and https requests with its credentials, the bypass list goes direct, the password stays hidden, agents may not change it',
+        'proxy: a manual proxy carries http and https requests and OAuth 2.0 token requests with its credentials, the bypass list goes direct, the password stays hidden, agents may not change it',
         viaProxy.status === 200 &&
+          tokenViaProxy.source === 'new' &&
+          seenThrough.some((p) => p.method === 'CONNECT' && p.target === oauthHost) &&
           seenThrough.some((p) => p.method === 'CONNECT' && p.target === `127.0.0.1:${echoPort}` && p.auth === `Basic ${Buffer.from('smoke:proxy-pass').toString('base64')}`) &&
           tunnelled.status === 200 &&
           seenThrough.some((p) => p.method === 'CONNECT' && p.target === `127.0.0.1:${mtlsPort}`) &&

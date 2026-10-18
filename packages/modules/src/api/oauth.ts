@@ -3,6 +3,13 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { QuiverError, authorizeUrl, oauthIdentity, parseTokenResponse, readCallback, tokenIsFresh, tokenRequest, type HostApi, type OAuth2Auth, type OAuthToken, type WorkspaceApi } from '@quiver/core';
 import { fetch as undiciFetch } from 'undici';
+import { dispatcherFor, type NetworkContext } from './network';
+
+/** How the token URL is reached: through the proxy and with the client certificate that apply to it, accepting invalid certificates when `insecure`. */
+export interface TokenNetwork {
+  insecure: boolean;
+  network?: NetworkContext;
+}
 
 /** Tokens per machine, under `.quiver/local`, each encrypted with the OS keychain. */
 export const OAUTH_TOKENS_DOC = 'oauth-tokens';
@@ -51,13 +58,14 @@ function check(auth: OAuth2Auth): void {
   if (auth.grant === 'authorization_code' && !auth.authUrl?.trim()) throw new QuiverError('INVALID_INPUT', 'The authorization code grant needs the authorize URL');
 }
 
-async function postToken(auth: OAuth2Auth, grant: Record<string, string>): Promise<OAuthToken> {
+async function postToken(auth: OAuth2Auth, grant: Record<string, string>, net: TokenNetwork): Promise<OAuthToken> {
   const { body, headers } = tokenRequest(auth, grant);
   const url = auth.tokenUrl.trim();
   let status: number;
   let text: string;
   try {
-    const res = await undiciFetch(url, { method: 'POST', headers, body, signal: AbortSignal.timeout(30_000) });
+    // The same way out as the request itself: a token URL behind the proxy, or one asking for a client certificate, works too.
+    const res = await undiciFetch(url, { method: 'POST', headers, body, signal: AbortSignal.timeout(30_000), dispatcher: dispatcherFor(url, net.insecure, net.network) });
     status = res.status;
     text = await res.text();
   } catch (err) {
@@ -133,17 +141,19 @@ async function signInForCode(host: HostApi, auth: OAuth2Auth, key: string): Prom
  * A token for this auth: the cached one while it is fresh, else a refresh with the refresh token,
  * else a new one (client credentials, or a sign-in when `interactive`). `force` skips the cache and
  * the refresh. Agents are not interactive: an authorization code token they cannot refresh is
- * SIGN_IN_REQUIRED, to be got from the Quiver window.
+ * SIGN_IN_REQUIRED, to be got from the Quiver window. `insecure` and `network` say how the token
+ * URL is reached (see TokenNetwork).
  */
-export async function getOAuthToken(w: WorkspaceApi, host: HostApi, auth: OAuth2Auth, options: { interactive: boolean; force?: boolean }): Promise<TokenResult> {
+export async function getOAuthToken(w: WorkspaceApi, host: HostApi, auth: OAuth2Auth, options: { interactive: boolean; force?: boolean; insecure?: boolean; network?: NetworkContext }): Promise<TokenResult> {
   check(auth);
   const key = tokenKey(auth);
+  const net: TokenNetwork = { insecure: options.insecure ?? false, network: options.network };
   const cached = options.force ? null : await readToken(w, host, key);
   if (cached && tokenIsFresh(cached, Date.now())) return { token: cached, source: 'cache' };
 
   if (cached?.refreshToken) {
     try {
-      const refreshed = await postToken(auth, { grant_type: 'refresh_token', refresh_token: cached.refreshToken, ...(auth.scopes.trim() ? { scope: auth.scopes.trim() } : {}) });
+      const refreshed = await postToken(auth, { grant_type: 'refresh_token', refresh_token: cached.refreshToken, ...(auth.scopes.trim() ? { scope: auth.scopes.trim() } : {}) }, net);
       // A server may keep the refresh token and send none back.
       const token = refreshed.refreshToken ? refreshed : { ...refreshed, refreshToken: cached.refreshToken };
       await writeToken(w, host, key, token);
@@ -155,7 +165,7 @@ export async function getOAuthToken(w: WorkspaceApi, host: HostApi, auth: OAuth2
 
   let token: OAuthToken;
   if (auth.grant === 'client_credentials') {
-    token = await postToken(auth, { grant_type: 'client_credentials', ...scopeAndAudience(auth) });
+    token = await postToken(auth, { grant_type: 'client_credentials', ...scopeAndAudience(auth) }, net);
   } else {
     if (!options.interactive) {
       throw new QuiverError(
@@ -164,7 +174,7 @@ export async function getOAuthToken(w: WorkspaceApi, host: HostApi, auth: OAuth2
       );
     }
     const { code, redirectUri, verifier } = await signInForCode(host, auth, key);
-    token = await postToken(auth, { grant_type: 'authorization_code', code, redirect_uri: redirectUri, ...(verifier ? { code_verifier: verifier } : {}) });
+    token = await postToken(auth, { grant_type: 'authorization_code', code, redirect_uri: redirectUri, ...(verifier ? { code_verifier: verifier } : {}) }, net);
   }
   await writeToken(w, host, key, token);
   return { token, source: 'new' };

@@ -59,6 +59,7 @@ import {
   type ApiCollection,
   type ApiRequest,
   type ApiAuth,
+  type OAuth2Auth,
   type JarCookie,
   type ApiResponse,
   type CapturedValue,
@@ -91,8 +92,8 @@ import {
 import { graphqlEndpoint, introspect, readSchema } from './graphql';
 import { prepareRequest, sendPrepared } from './http';
 import { clearOAuthToken, getOAuthToken, oauthStatus } from './oauth';
-import { jarSession, readJar, writeJar } from './cookies';
-import { CERTIFICATES_DOC, networkConfig, readCertificates, resolveNetwork } from './network';
+import { jarSession, readJar, updateJar } from './cookies';
+import { CERTIFICATES_DOC, networkConfig, readCertificates, resolveNetwork, type NetworkContext } from './network';
 
 const HISTORY_LOG = 'history';
 
@@ -200,13 +201,15 @@ async function runCaptures(ctx: CommandContext, request: ApiRequest, response: A
  * An OAuth 2.0 request with its token in place: a bearer (or the header prefix the auth sets). The UI
  * signs in when it has to; agents get a cached, refreshed or client credentials token only. With
  * `optional` a request whose token cannot be had without a sign-in goes without auth (curl export).
+ * The token URL is reached as the request is: through `network` and with the request's TLS choice.
  */
-async function applyOAuth(ctx: CommandContext, request: ApiRequest, mode: 'send' | 'optional'): Promise<ApiRequest> {
+async function applyOAuth(ctx: CommandContext, request: ApiRequest, mode: 'send' | 'optional', network: NetworkContext): Promise<ApiRequest> {
   if (request.auth.type !== 'oauth2') return request;
   const auth = request.auth;
   let accessToken: string;
   try {
-    accessToken = (await getOAuthToken(ws(ctx), ctx.host, auth, { interactive: mode === 'send' && ctx.caller === 'ui' })).token.accessToken;
+    const { insecure } = effectiveSendOptions(request.options);
+    accessToken = (await getOAuthToken(ws(ctx), ctx.host, auth, { interactive: mode === 'send' && ctx.caller === 'ui', insecure, network })).token.accessToken;
   } catch (err) {
     if (mode === 'optional') return { ...request, auth: { type: 'none' } };
     throw err;
@@ -350,7 +353,9 @@ async function sendRequest(ctx: CommandContext, input: z.infer<typeof SendInput>
   if (!request) throw new QuiverError('INVALID_INPUT', 'Provide requestId or request');
   const options = effectiveSendOptions(request.options, { ...input.options, ...(input.stream !== undefined ? { stream: input.stream } : {}) });
   const { resolved, vars } = await resolveRequest(ctx, request, input.environmentId);
-  const sendable = await applyOAuth(ctx, resolved, 'send');
+  // The proxy and client certificates, read once for the token request and every hop of the send.
+  const network = await resolveNetwork(ctx.host, w);
+  const sendable = await applyOAuth(ctx, resolved, 'send', network);
   const prepared = await prepareRequest(sendable, { baseDir: w.path, agent: ctx.caller === 'mcp' });
   // Known before sending, so a failed send is recorded just as carefully; an OAuth token too.
   const secrets = await knownSecrets(ctx, resolved, input.environmentId);
@@ -376,7 +381,7 @@ async function sendRequest(ctx: CommandContext, input: z.infer<typeof SendInput>
   if (key) inflight.set(key, controller);
   try {
     // The cookie jar, unless the request or the call turns it off: cookies go out on every hop and answers' cookies are kept.
-    const jar = options.cookies ? jarSession(await readJar(w)) : null;
+    const jar = options.cookies ? jarSession(await readJar(w, ctx.host)) : null;
     // A big download says how far it got (to the UI, which gives a sendId); a streamed body is handed to the stream registry.
     let streamId: string | undefined;
     const progress = input.sendId ? throttled(() => ctx.host.emit('api.changed', { workspaceId: w.id, reason: 'progress', sendId: input.sendId, received })) : null;
@@ -389,10 +394,11 @@ async function sendRequest(ctx: CommandContext, input: z.infer<typeof SendInput>
           }
         : undefined,
       onStream: streams ? (kind, chunks) => (streamId = startStream(ctx, w.id, kind, chunks, controller)) : undefined,
-    }, await resolveNetwork(ctx.host, w));
+    }, network);
     if (jar) {
       response.cookieJar = jar.report;
-      if (jar.changed()) await writeJar(w, ctx.host, jar.jar());
+      // Applied to the jar as it is now, not the one read before the send: a send that finished meanwhile keeps its cookies.
+      if (jar.changed()) await updateJar(w, ctx.host, (current) => jar.apply(current));
     }
     entry.status = response.status;
     entry.durationMs = Math.round(response.timings.total);
@@ -500,11 +506,16 @@ const OAuthRefInput = z.object({
   environmentId: z.string().nullable().optional(),
 });
 
-/** The OAuth 2.0 auth a request, a collection or the input names, with variables resolved. */
-async function oauthFor(ctx: CommandContext, input: z.infer<typeof OAuthRefInput>) {
+/** The OAuth 2.0 auth a request, a collection or the input names, with variables resolved, and whether the request accepts invalid certificates. */
+async function oauthFor(ctx: CommandContext, input: z.infer<typeof OAuthRefInput>): Promise<{ auth: OAuth2Auth; insecure: boolean }> {
   const w = ws(ctx);
   let auth: ApiAuth | undefined = input.auth;
-  if (!auth && input.requestId) auth = (await withInheritance(w, await requireRequest(w, input.requestId))).auth;
+  let insecure = false;
+  if (!auth && input.requestId) {
+    const request = await requireRequest(w, input.requestId);
+    auth = (await withInheritance(w, request)).auth;
+    insecure = effectiveSendOptions(request.options).insecure;
+  }
   if (!auth && input.collectionId) {
     const collections = await listCollections(w);
     const col = collections.find((c) => c.id === input.collectionId);
@@ -517,7 +528,7 @@ async function oauthFor(ctx: CommandContext, input: z.infer<typeof OAuthRefInput
   const resolved = resolveDeep(auth, vars);
   const missing = findUnresolved(JSON.stringify(resolved), vars);
   if (missing.length) throw new QuiverError('UNRESOLVED_VARIABLES', `Unresolved variables: ${missing.join(', ')}`, { missing });
-  return resolved;
+  return { auth: resolved, insecure };
 }
 
 const oauthToken = defineCommand({
@@ -528,8 +539,8 @@ const oauthToken = defineCommand({
   scope: 'workspace',
   input: OAuthRefInput.extend({ force: z.boolean().optional() }),
   handler: async (input, ctx) => {
-    const auth = await oauthFor(ctx, input);
-    const { token, source } = await getOAuthToken(ws(ctx), ctx.host, auth, { interactive: ctx.caller === 'ui', force: input.force });
+    const { auth, insecure } = await oauthFor(ctx, input);
+    const { token, source } = await getOAuthToken(ws(ctx), ctx.host, auth, { interactive: ctx.caller === 'ui', force: input.force, insecure, network: await resolveNetwork(ctx.host, ws(ctx)) });
     return {
       source,
       tokenType: token.tokenType,
@@ -547,7 +558,7 @@ const oauthStatusCommand = defineCommand({
   description: 'Whether a token is cached for an OAuth 2.0 auth, when it expires and whether it can be refreshed, without asking the server.',
   scope: 'workspace',
   input: OAuthRefInput,
-  handler: async (input, ctx) => oauthStatus(ws(ctx), ctx.host, await oauthFor(ctx, input)),
+  handler: async (input, ctx) => oauthStatus(ws(ctx), ctx.host, (await oauthFor(ctx, input)).auth),
 });
 
 const oauthClear = defineCommand({
@@ -557,7 +568,7 @@ const oauthClear = defineCommand({
   scope: 'workspace',
   input: OAuthRefInput,
   handler: async (input, ctx) => {
-    await clearOAuthToken(ws(ctx), ctx.host, await oauthFor(ctx, input));
+    await clearOAuthToken(ws(ctx), ctx.host, (await oauthFor(ctx, input)).auth);
     return { cleared: true };
   },
 });
@@ -576,7 +587,7 @@ const cookieList = defineCommand({
   scope: 'workspace',
   input: z.object({ url: z.string().optional() }),
   handler: async ({ url }, ctx) => {
-    const jar = await readJar(ws(ctx));
+    const jar = await readJar(ws(ctx), ctx.host);
     const list = url ? cookiesFor(jar, url, Date.now()) : [...jar].sort((a, b) => a.domain.localeCompare(b.domain) || a.path.localeCompare(b.path) || a.name.localeCompare(b.name));
     return jarForCaller(ctx, list);
   },
@@ -590,11 +601,11 @@ const cookieSet = defineCommand({
   input: z.object({ url: z.string().min(1), cookie: z.string().min(1) }),
   handler: async ({ url, cookie }, ctx) => {
     const w = ws(ctx);
-    const result = storeCookies(await readJar(w), url, [cookie], Date.now());
-    if (result.rejected.length) throw new QuiverError('INVALID_INPUT', result.rejected[0].reason);
-    if (!result.stored.length && !result.deleted.length) throw new QuiverError('INVALID_INPUT', `"${cookie}" is not a cookie (name=value) or ${url} is not a URL`);
-    await writeJar(w, ctx.host, result.jar);
-    return { stored: result.stored, deleted: result.deleted };
+    const probe = storeCookies(await readJar(w, ctx.host), url, [cookie], Date.now());
+    if (probe.rejected.length) throw new QuiverError('INVALID_INPUT', probe.rejected[0].reason);
+    if (!probe.stored.length && !probe.deleted.length) throw new QuiverError('INVALID_INPUT', `"${cookie}" is not a cookie (name=value) or ${url} is not a URL`);
+    await updateJar(w, ctx.host, (jar) => storeCookies(jar, url, [cookie], Date.now()).jar);
+    return { stored: probe.stored, deleted: probe.deleted };
   },
 });
 
@@ -606,11 +617,13 @@ const cookieDelete = defineCommand({
   mutating: true,
   input: z.object({ domain: z.string(), path: z.string(), name: z.string() }),
   handler: async ({ domain, path: cookiePath, name }, ctx) => {
-    const w = ws(ctx);
-    const jar = await readJar(w);
-    const kept = jar.filter((c) => !(c.domain === domain.toLowerCase() && c.path === cookiePath && c.name === name));
-    if (kept.length !== jar.length) await writeJar(w, ctx.host, kept);
-    return { deleted: jar.length - kept.length };
+    let deleted = 0;
+    await updateJar(ws(ctx), ctx.host, (jar) => {
+      const kept = jar.filter((c) => !(c.domain === domain.toLowerCase() && c.path === cookiePath && c.name === name));
+      deleted = jar.length - kept.length;
+      return deleted ? kept : null;
+    });
+    return { deleted };
   },
 });
 
@@ -622,12 +635,14 @@ const cookieClear = defineCommand({
   mutating: true,
   input: z.object({ domain: z.string().optional() }),
   handler: async ({ domain }, ctx) => {
-    const w = ws(ctx);
-    const jar = await readJar(w);
     const d = domain?.trim().toLowerCase().replace(/^\./, '');
-    const kept = d ? jar.filter((c) => c.domain !== d && !c.domain.endsWith(`.${d}`)) : [];
-    await writeJar(w, ctx.host, kept);
-    return { cleared: jar.length - kept.length };
+    let cleared = 0;
+    await updateJar(ws(ctx), ctx.host, (jar) => {
+      const kept = d ? jar.filter((c) => c.domain !== d && !c.domain.endsWith(`.${d}`)) : [];
+      cleared = jar.length - kept.length;
+      return kept;
+    });
+    return { cleared };
   },
 });
 
@@ -655,12 +670,13 @@ const graphqlIntrospect = defineCommand({
   handler: async (input, ctx) => {
     const request = await requestFrom(ctx, input);
     const { resolved: written } = await resolveRequest(ctx, request, input.environmentId);
-    const resolved = await applyOAuth(ctx, written, 'send');
-    if (ctx.caller !== 'mcp') return introspect(ws(ctx), resolved, await resolveNetwork(ctx.host, ws(ctx)));
+    const network = await resolveNetwork(ctx.host, ws(ctx));
+    const resolved = await applyOAuth(ctx, written, 'send', network);
+    if (ctx.caller !== 'mcp') return introspect(ws(ctx), resolved, network);
     const secrets = await knownSecrets(ctx, written, input.environmentId);
     secrets.values = [...(secrets.values ?? []), ...requestSecretValues(resolved)];
     try {
-      const doc = await introspect(ws(ctx), resolved, await resolveNetwork(ctx.host, ws(ctx)));
+      const doc = await introspect(ws(ctx), resolved, network);
       return { ...doc, url: redactUrl(doc.url, secrets) };
     } catch (err) {
       throw errorForAgent(err, secrets);
@@ -1536,7 +1552,7 @@ async function exportInput(ctx: CommandContext, input: z.infer<typeof ExportInpu
   if (!request) throw new QuiverError('INVALID_INPUT', 'Provide requestId or request');
   const vars = await resolveVariableMap(ws(ctx), ctx.host, input.environmentId);
   const written = resolveDeep(await withInheritance(ws(ctx), request), vars);
-  const resolved = await applyOAuth(ctx, written, 'optional');
+  const resolved = await applyOAuth(ctx, written, 'optional', await resolveNetwork(ctx.host, ws(ctx)));
   const prepared = await prepareRequest(resolved);
   const wire = { method: prepared.method, url: prepared.url, headers: prepared.headers, bodyPreview: typeof prepared.body === 'string' ? prepared.body : null };
   const known = ctx.caller === 'mcp' ? await knownSecrets(ctx, resolved, input.environmentId) : null;
