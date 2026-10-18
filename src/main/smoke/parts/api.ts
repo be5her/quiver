@@ -767,12 +767,16 @@ export default definePart({
       const sources = [refreshedA, refreshedB].map((r) => (r.ok ? (r.result as { source: string }).source : r.error.message)).sort();
       oauth.state.expiresIn = 3600;
       const status = await run<{ hasToken: boolean; refreshable: boolean }>('api.oauth2.status', { auth: ac }, ws.id);
+      // Forgetting a token every request with the grant shares is a delete: gated for agents, like the cookie jar's.
+      const agentClear = await host.invoke('api.oauth2.clear', { auth: ac }, { caller: 'mcp', workspaceId: ws.id });
+      const stillThere = await run<{ hasToken: boolean }>('api.oauth2.status', { auth: ac }, ws.id);
       await run('api.oauth2.clear', { auth: ac }, ws.id);
       const cleared = await run<{ hasToken: boolean }>('api.oauth2.status', { auth: ac }, ws.id);
       check(
-        'oauth: a token near its expiry is refreshed with the refresh token, also for an agent, two calls at once sharing one refresh, and Forget clears it',
-        shortLived.source === 'new' && sources.join() === 'cache,refresh' && oauth.seen.refreshes === 1 && status.hasToken && status.refreshable && !cleared.hasToken,
-        { shortLived: shortLived.source, sources, refreshes: oauth.seen.refreshes, status, cleared },
+        'oauth: a token near its expiry is refreshed with the refresh token, also for an agent, two calls at once sharing one refresh, an agent cannot forget it, and Forget clears it',
+        shortLived.source === 'new' && sources.join() === 'cache,refresh' && oauth.seen.refreshes === 1 && status.hasToken && status.refreshable &&
+          !agentClear.ok && agentClear.error.code === 'MUTATION_BLOCKED' && stillThere.hasToken && !cleared.hasToken,
+        { shortLived: shortLived.source, sources, refreshes: oauth.seen.refreshes, status, agentClear: agentClear.ok ? 'ok?' : agentClear.error.code, stillThere, cleared },
       );
 
       const oauthCol = await run<ApiCollection>('api.collection.create', { name: 'oauth collection' }, ws.id);

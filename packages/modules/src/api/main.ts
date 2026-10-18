@@ -606,6 +606,8 @@ const oauthClear = defineCommand({
   title: 'Forget an OAuth 2.0 token',
   description: 'Forgets the cached token of an OAuth 2.0 auth and the session of its sign-in window, so the next token is got again.',
   scope: 'workspace',
+  // Deletes a credential (and a signed-in session) every request and collection with the same grant shares: gated like the cookie jar's deletes.
+  mutating: true,
   input: OAuthRefInput,
   handler: async (input, ctx) => {
     await clearOAuthToken(ws(ctx), ctx.host, (await oauthFor(ctx, input)).auth);
