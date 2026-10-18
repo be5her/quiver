@@ -15,6 +15,7 @@ import {
   defineModule,
   effectiveRequest,
   storeCookies,
+  captureIsSecret,
   extractCapture,
   effectiveSendOptions,
   cookiesFor,
@@ -197,7 +198,8 @@ async function runCaptures(ctx: CommandContext, request: ApiRequest, response: A
   const env = envId ? await getEnvironment(w, ctx.host, envId) : undefined;
   const results: CapturedValue[] = captures.map((capture) => {
     const variable = capture.variable.trim();
-    const secret = capture.secret || Boolean(env?.variables.some((v) => v.enabled && v.key.trim() === variable && v.secret));
+    // Marked secret, named like a credential, or already secret in the environment: never in the committed file.
+    const secret = captureIsSecret(capture, env?.variables);
     const read = extractCapture(capture, response);
     return read.ok ? { variable, value: read.value, ok: true, secret } : { variable, value: null, ok: false, error: read.error, secret };
   });
@@ -206,9 +208,9 @@ async function runCaptures(ctx: CommandContext, request: ApiRequest, response: A
   const fail = (error: string) => done(results.map((r) => (r.ok ? { ...r, value: null, ok: false, error } : r)));
   if (!env) return fail('No environment is active, so there is nowhere to write it');
   let variables = env.variables;
-  results.forEach((r, i) => {
-    if (r.ok && r.value !== null) variables = defineVariableIn(variables, r.variable, r.value, newId(), captures[i].secret);
-  });
+  for (const r of results) {
+    if (r.ok && r.value !== null) variables = defineVariableIn(variables, r.variable, r.value, newId(), r.secret);
+  }
   if (variables === env.variables) return done(results);
   try {
     await saveEnvironment(w, ctx.host, { ...env, variables });

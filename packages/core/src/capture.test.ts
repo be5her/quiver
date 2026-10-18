@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractCapture, type CaptureSourceResponse } from './capture';
+import { captureIsSecret, extractCapture, type CaptureSourceResponse } from './capture';
 
 const response: CaptureSourceResponse = {
   status: 201,
@@ -45,5 +45,19 @@ describe('extractCapture', () => {
   it('refuses a name that cannot be a variable', () => {
     expect(capture('status', '', '$uuid').ok).toBe(false);
     expect(capture('status', '', 'two words').ok).toBe(false);
+  });
+});
+
+describe('captureIsSecret', () => {
+  it('is secret when marked, when the variable is named like a credential, or when the variable already is', () => {
+    expect(captureIsSecret({ variable: 'userId', secret: true })).toBe(true);
+    expect(captureIsSecret({ variable: 'userId', secret: false })).toBe(false);
+    for (const variable of ['token', 'accessToken', 'apiKey', 'password', 'client_secret', ' accessKey ']) expect(captureIsSecret({ variable, secret: false }), variable).toBe(true);
+    const variables = [
+      { key: 'userId', enabled: true, secret: true },
+      { key: 'other', enabled: false, secret: true },
+    ];
+    expect(captureIsSecret({ variable: 'userId', secret: false }, variables)).toBe(true);
+    expect(captureIsSecret({ variable: 'other', secret: false }, variables)).toBe(false);
   });
 });

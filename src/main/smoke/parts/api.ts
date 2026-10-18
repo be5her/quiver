@@ -559,7 +559,11 @@ export default definePart({
       const cap = (variable: string, from: 'body' | 'header' | 'cookie' | 'status', path: string, secret = false) => ({ id: `cap-${variable}`, enabled: true, variable, from, path, secret });
       const loginNew = await run<ApiRequest>('api.request.create', { name: 'capture login', method: 'POST', url: '{{baseUrl}}/auth/login' }, ws.id);
       const login = await run<ApiRequest>('api.request.save', {
-        request: { ...loginNew, capture: [cap('capToken', 'body', '$.token', true), cap('capSession', 'cookie', 'session'), cap('capUser', 'body', '$.user.id'), cap('capReq', 'header', 'X-Request-Id'), cap('capMissing', 'header', 'X-Nope')] },
+        request: {
+          ...loginNew,
+          // adminToken is not ticked secret, but its name says it is one.
+          capture: [cap('capToken', 'body', '$.token', true), cap('capSession', 'cookie', 'session'), cap('capUser', 'body', '$.user.id'), cap('capReq', 'header', 'X-Request-Id'), cap('capMissing', 'header', 'X-Nope'), cap('adminToken', 'body', '$.user.roles[0]')],
+        },
       }, ws.id);
       const loggedIn = await run<ApiResponse>('api.request.send', { requestId: login.id }, ws.id);
       const byName = Object.fromEntries((loggedIn.captured ?? []).map((c) => [c.variable, c]));
@@ -567,18 +571,21 @@ export default definePart({
       const envDisk = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'environments', `${env.id}.json`), 'utf8')) as Environment;
       const valueOf = (name: string) => envAfter.variables.find((v) => v.key === name);
       check(
-        'captures: a send writes what it reads into the active environment, a secret one encrypted, and reports a capture that read nothing',
+        'captures: a send writes what it reads into the active environment, a secret one (ticked, or named like a credential) encrypted, and reports a capture that read nothing',
         byName.capToken?.ok && byName.capToken.value === 'cap-tok-123' && byName.capSession?.value === 'sess-9' && byName.capUser?.value === '7' && byName.capReq?.value === 'req-42' &&
           byName.capMissing?.ok === false && (byName.capMissing.error ?? '').includes('X-Nope') &&
+          byName.adminToken?.value === 'admin' && byName.adminToken.secret === true &&
           valueOf('capToken')?.value === 'cap-tok-123' && valueOf('capToken')?.secret === true && valueOf('capSession')?.value === 'sess-9' &&
-          envDisk.variables.find((v) => v.key === 'capToken')?.value === '' && !JSON.stringify(envDisk).includes('cap-tok-123'),
-        { captured: loggedIn.captured, onDisk: envDisk.variables.find((v) => v.key === 'capToken') },
+          valueOf('adminToken')?.value === 'admin' && valueOf('adminToken')?.secret === true &&
+          envDisk.variables.find((v) => v.key === 'capToken')?.value === '' && envDisk.variables.find((v) => v.key === 'adminToken')?.value === '' &&
+          !JSON.stringify(envDisk).includes('cap-tok-123') && !JSON.stringify(envDisk).includes('"admin"'),
+        { captured: loggedIn.captured, onDisk: envDisk.variables.filter((v) => v.key === 'capToken' || v.key === 'adminToken') },
       );
       const capHistory = await fs.readFile(path.join(folder, '.quiver', 'local', 'history.jsonl'), 'utf8');
       check(
-        'captures: the response kept in the history has the secret capture masked and the rest as it was',
-        !capHistory.includes('cap-tok-123') && capHistory.includes('req-42'),
-        { tokenInHistory: capHistory.includes('cap-tok-123'), responseKept: capHistory.includes('req-42') },
+        'captures: the response kept in the history has the secret captures masked and the rest as it was',
+        !capHistory.includes('cap-tok-123') && !/"roles":\["admin"/.test(capHistory) && capHistory.includes('req-42'),
+        { tokenInHistory: capHistory.includes('cap-tok-123'), roleInHistory: /"roles":\["admin"/.test(capHistory), responseKept: capHistory.includes('req-42') },
       );
       const chained =await run<ApiResponse>('api.request.send', { request: { ...saved, id: '', name: 'chained', url: '{{baseUrl}}/me?user={{capUser}}', headers: [], auth: { type: 'bearer', token: '{{capToken}}' } } }, ws.id);
       const chainedEcho = JSON.parse(chained.body) as { url: string; headers: Record<string, string> };
@@ -588,8 +595,8 @@ export default definePart({
       const noEnv = await run<ApiResponse>('api.request.send', { request: { ...login, url: `http://127.0.0.1:${echoPort}/auth/login` }, environmentId: null }, ws.id);
       check(
         'captures: an agent sees secret captures masked, and without an environment the captures fail but the send does not',
-        agentCaptured.find((c) => c.variable === 'capToken')?.value === REDACTED && agentCaptured.find((c) => c.variable === 'capUser')?.value === '7' &&
-          noEnv.status === 200 && (noEnv.captured ?? []).every((c) => !c.ok && c.value === null) && (noEnv.captured ?? []).filter((c) => (c.error ?? '').includes('No environment')).length === 4,
+        agentCaptured.find((c) => c.variable === 'capToken')?.value === REDACTED && agentCaptured.find((c) => c.variable === 'adminToken')?.value === REDACTED && agentCaptured.find((c) => c.variable === 'capUser')?.value === '7' &&
+          noEnv.status === 200 && (noEnv.captured ?? []).every((c) => !c.ok && c.value === null) && (noEnv.captured ?? []).filter((c) => (c.error ?? '').includes('No environment')).length === 5,
         { agent: agentCaptured.map((c) => `${c.variable}=${c.value}`), noEnv: noEnv.captured?.[0]?.error },
       );
       const cleaned = await run<Environment>('api.environment.get', { id: env.id }, ws.id);
@@ -1624,7 +1631,7 @@ export default definePart({
           await shot('03v-request-capture-light');
           check(
             'ui: the Capture segment lists the captures, and the response shows each captured value (secret ones masked) or why it failed',
-            segmentLabel === 'Capture5' && captureRows === 5 && strip.some((s) => s.startsWith('capToken') && s.includes('••••••••') && !s.includes('cap-tok-123')) && strip.some((s) => s === 'capUser = 7') && strip.some((s) => s.startsWith('capMissing:')),
+            segmentLabel === 'Capture6' && captureRows === 6 && strip.some((s) => s.startsWith('capToken') && s.includes('••••••••') && !s.includes('cap-tok-123')) && strip.some((s) => s === 'capUser = 7') && strip.some((s) => s.startsWith('capMissing:')),
             { segmentLabel, captureRows, strip },
           );
           await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);

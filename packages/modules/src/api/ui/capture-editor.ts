@@ -1,5 +1,5 @@
 import { Component, model } from '@angular/core';
-import { newId, type Capture, type CaptureSource } from '@quiver/core';
+import { isSecretName, newId, type Capture, type CaptureSource } from '@quiver/core';
 import { Button, Checkbox, IconButton, Icon, Select } from '@quiver/ui';
 import { Plus, Trash2 } from 'lucide';
 
@@ -45,8 +45,10 @@ export class CaptureEditor {
     this.value.set(rows.length ? rows : undefined);
   }
 
+  /** A variable named like a credential (`token`, `password`, `apiKey`) ticks Secret as it is typed; the host treats it as secret either way. */
   protected update(id: string, patch: Partial<Capture>): void {
-    this.value.set(this.rows().map((r) => (r.id === id ? { ...r, ...patch } : r)));
+    const secret = patch.variable !== undefined && isSecretName(patch.variable) ? { secret: true } : {};
+    this.value.set(this.rows().map((r) => (r.id === id ? { ...r, ...patch, ...secret } : r)));
   }
 
   protected text(event: Event): string {

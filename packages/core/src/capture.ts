@@ -1,9 +1,21 @@
 import { parseSetCookie } from './cookies';
 import { jsonPath } from './json-path';
 import type { ApiResponse, Capture } from './models/api';
+import { isSecretName } from './redact';
 import { DEFINABLE_VARIABLE_NAME } from './variables';
 
 export type CaptureResult = { ok: true; value: string } | { ok: false; error: string };
+
+/**
+ * Whether what a capture writes is a secret: when it is marked so, when its variable is named like a
+ * credential (`token`, `password`, `apiKey`), or when the variable it writes is already secret in
+ * `variables`. A credential captured with the box unticked would otherwise land in the committed
+ * environment file in plain text.
+ */
+export function captureIsSecret(capture: Pick<Capture, 'variable' | 'secret'>, variables: { key: string; enabled: boolean; secret?: boolean }[] = []): boolean {
+  const name = capture.variable.trim();
+  return capture.secret || isSecretName(name) || variables.some((v) => v.enabled && v.key.trim() === name && v.secret === true);
+}
 
 /** The parts of a response a capture reads. */
 export type CaptureSourceResponse = Pick<ApiResponse, 'status' | 'headers' | 'body' | 'bodyEncoding' | 'setCookies'>;

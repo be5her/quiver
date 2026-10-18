@@ -54,5 +54,5 @@
 <button qButton size="sm" variant="ghost" [icon]="icons.Plus" class="mt-1" data-testid="api-capture-add" (click)="add()">Add capture</button>
 <p class="text-xs text-muted mt-2 max-w-xl">
   After each send, the values read here are written to the active environment, so a later request can use them as {{ variableSyntax }}: a login's
-  token, an id the server made. A variable that is already secret stays secret.
+  token, an id the server made. A variable named like a credential (token, password, key), or one that is already secret, is kept secret.
 </p>
