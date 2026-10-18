@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { fakeRedisDatasources } from './fake-grafana-redis';
 
 interface Entry {
   at: number;
@@ -11,8 +12,8 @@ interface Entry {
 
 export interface FakeGrafana {
   url: string;
-  /** What the module did: LogsQL sent, sign-ins completed, token renewals and logouts. */
-  seen: { exprs: { expr: string; queryType: string; maxLines?: number }[]; logins: number; rotations: number; logouts: number };
+  /** What the modules did: LogsQL sent, Redis CLI lines and fixed commands, sign-ins completed, token renewals and logouts. */
+  seen: { exprs: { expr: string; queryType: string; maxLines?: number }[]; redis: string[]; logins: number; rotations: number; logouts: number };
   /** Make every live token due for renewal, as Grafana does every few minutes. */
   expireTokens(): void;
   /** Add an entry while running, such as one stamped ahead of this machine's clock by a server whose clock runs ahead. */
@@ -27,11 +28,13 @@ const LOGS_TYPE = 'victoriametrics-logs-datasource';
  * (the meta refresh stands in for the click, the redirect for the identity provider), session cookies
  * that must be renewed, `/api/user`, the data sources in `/api/frontend/settings`, and `/api/ds/query`
  * answering a handful of entries the way VictoriaLogs does, with exact-match filters, a free-text
- * word, `field_names`, `stats by (...) count() hits` and `hits` buckets.
+ * word, `field_names`, `stats by (...) count() hits` and `hits` buckets. Its Redis data sources
+ * (`fake-grafana-redis.ts`) answer from the fake Redis at `redisPort`.
  */
-export async function startFakeGrafana(): Promise<FakeGrafana> {
+export async function startFakeGrafana(redisPort: number): Promise<FakeGrafana> {
   const tokens = new Map<string, { renewBy: number }>();
-  const seen: FakeGrafana['seen'] = { exprs: [], logins: 0, rotations: 0, logouts: 0 };
+  const seen: FakeGrafana['seen'] = { exprs: [], redis: [], logins: 0, rotations: 0, logouts: 0 };
+  const redis = fakeRedisDatasources(redisPort, seen);
   const start = Date.now();
   const entries: Entry[] = [];
   const add = (entry: Omit<Entry, 'nanos'>) => {
@@ -188,11 +191,17 @@ export async function startFakeGrafana(): Promise<FakeGrafana> {
             datasources: {
               'VictoriaLogs-Smoke': { uid: 'vl-smoke', type: LOGS_TYPE, name: 'VictoriaLogs-Smoke' },
               Prometheus: { uid: 'prom', type: 'prometheus', name: 'Prometheus' },
+              ...redis.datasources,
             },
           });
         }
         if (path === '/api/ds/query' && req.method === 'POST') {
-          const out = dsQuery(JSON.parse(raw || '{}'));
+          const body = JSON.parse(raw || '{}');
+          if (redis.owns(body.queries?.[0]?.datasource?.uid)) {
+            void redis.query(body).then((out) => json(res, out.status, out.body));
+            return;
+          }
+          const out = dsQuery(body);
           return json(res, out.status, out.body);
         }
       }

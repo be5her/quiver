@@ -17,6 +17,8 @@ import { AppState, Autofocus, Badge, Button, Checkbox, HostBridge, Icon, Input, 
 import { ChevronDown, ChevronRight, FolderOpen, Link2, PlugZap, Save } from 'lucide';
 import { ApiVariables } from '../../api/ui/api-variables';
 import { KindIcon } from './kind-icon';
+import { GrafanaAccessFields, type GrafanaAccess } from './grafana-access-fields';
+import { grafanaAccessTitle } from './kind-icon';
 import { TeleportAccessFields, type TeleportAccess } from './teleport-access-fields';
 
 type AccessType = DbAccess['type'];
@@ -25,12 +27,14 @@ const ACCESS_LABELS: Record<AccessType, string> = {
   direct: 'Direct',
   teleport: 'Teleport tunnel (tsh proxy db)',
   command: 'Command tunnel (ssh and similar)',
+  grafana: 'Grafana data source',
 };
 
 function defaultName(conn: DbConnection): string {
   if (conn.kind === 'sqlite') return `${DB_KIND_LABELS.sqlite} ${conn.file.split(/[\\/]/).pop() ?? ''}`.trim();
   if (conn.access.type === 'teleport') return conn.access.database || `${DB_KIND_LABELS[conn.kind]} via Teleport`;
   if (conn.access.type === 'command') return `${DB_KIND_LABELS[conn.kind]} tunnel`;
+  if (conn.access.type === 'grafana') return conn.access.datasourceName || 'Redis via Grafana';
   return `${DB_KIND_LABELS[conn.kind]} ${conn.host}`;
 }
 
@@ -44,14 +48,14 @@ function relativeToWorkspace(file: string, workspacePath: string): string {
 }
 
 /**
- * A MySQL, PostgreSQL, SQLite or Redis connection: where it is, how it is reached (directly, or
- * through a Teleport tunnel or a tunnel command, behind "Access"), its credentials and whether it is
+ * A MySQL, PostgreSQL, SQLite or Redis connection: where it is, how it is reached (directly, through a
+ * Teleport tunnel or a tunnel command, or for Redis a Grafana data source, behind "Access"), its credentials and whether it is
  * production. A pasted URL fills the form; host, user, database and file take `{{variables}}`.
  * The password is kept encrypted on this machine.
  */
 @Component({
   selector: 'q-connection-tab',
-  imports: [ApiVariables, Autofocus, Badge, Button, Checkbox, FormField, Icon, Input, KindIcon, Label, Select, Spinner, TeleportAccessFields, VariableInput],
+  imports: [ApiVariables, Autofocus, Badge, Button, Checkbox, FormField, GrafanaAccessFields, Icon, Input, KindIcon, Label, Select, Spinner, TeleportAccessFields, VariableInput],
   templateUrl: './connection-tab.html',
   host: { class: 'contents', '(keydown)': 'shortcut($event)' },
 })
@@ -67,7 +71,8 @@ export class ConnectionTab implements TabComponent {
   protected readonly icons = { ChevronDown, ChevronRight, FolderOpen, Link2, PlugZap, Save };
   protected readonly kinds = DbKindSchema.options;
   protected readonly kindLabels = DB_KIND_LABELS;
-  protected readonly accessTypes = Object.keys(ACCESS_LABELS) as AccessType[];
+  /** Grafana data sources only reach Redis. */
+  protected readonly accessTypes = computed(() => (Object.keys(ACCESS_LABELS) as AccessType[]).filter((t) => t !== 'grafana' || this.connection().kind === 'redis'));
   protected readonly accessLabels = ACCESS_LABELS;
   private readonly tabKey = computed(() => String(this.tab().data?.['id'] ?? ''));
   /** A draft tab (`new-<kind>`) until the connection is first saved. */
@@ -110,6 +115,10 @@ export class ConnectionTab implements TabComponent {
     const access = this.connection().access;
     return access.type === 'teleport' ? access : null;
   });
+  protected readonly grafanaAccess = computed(() => {
+    const access = this.connection().access;
+    return access.type === 'grafana' ? access : null;
+  });
   protected readonly commandAccess = computed(() => {
     const access = this.connection().access;
     return access.type === 'command' ? access : null;
@@ -118,6 +127,7 @@ export class ConnectionTab implements TabComponent {
     const access = this.connection().access;
     if (access.type === 'teleport') return `Teleport tunnel: ${access.database || 'pick a database'} as ${access.dbUser || '…'}`;
     if (access.type === 'command') return `Tunnel command: ${access.command || '…'}`;
+    if (access.type === 'grafana') return grafanaAccessTitle(access);
     return 'Direct';
   });
   protected readonly portPlaceholder = computed(() => String(defaultPort(this.connection().kind)));
@@ -169,7 +179,7 @@ export class ConnectionTab implements TabComponent {
   protected switchKind(event: Event): void {
     const kind = (event.target as HTMLSelectElement).value as DbKind;
     if (kind === this.connection().kind) return;
-    this.patch({ kind, port: 0 });
+    this.patch({ kind, port: 0, ...(kind !== 'redis' && this.connection().access.type === 'grafana' ? { access: { type: 'direct' as const } } : {}) });
     // A draft keeps its kind when the workspace is restored.
     if (this.isNew()) this.tabs.updateTab(this.scope(), this.tab().id, { data: { ...this.tab().data, kind } });
   }
@@ -180,7 +190,16 @@ export class ConnectionTab implements TabComponent {
     if (type === conn.access.type) return;
     if (type === 'direct') this.patch({ access: { type: 'direct' } });
     else if (type === 'teleport') this.patch({ access: { type: 'teleport', proxy: '', database: '', dbUser: conn.user }, host: '127.0.0.1', port: 0, user: conn.kind === 'redis' ? '' : conn.user });
+    else if (type === 'grafana') this.patch({ access: { type: 'grafana', grafanaUrl: '', datasourceUid: '', datasourceName: '' }, dbIndex: 0, ssl: false });
     else this.patch({ access: { type: 'command', command: '' }, host: '127.0.0.1', port: 0 });
+  }
+
+  protected setGrafanaAccess(access: GrafanaAccess): void {
+    const conn = this.connection();
+    // A connection still named after its old data source (or not named) takes the new one's name.
+    const previous = conn.access.type === 'grafana' ? conn.access.datasourceName : '';
+    const rename = access.datasourceName && (!conn.name.trim() || conn.name === previous);
+    this.patch({ access, ...(rename ? { name: access.datasourceName } : {}) });
   }
 
   protected setTeleportAccess(access: TeleportAccess): void {

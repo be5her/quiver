@@ -10,7 +10,9 @@ function hostOf(base: string): string {
 }
 
 /**
- * Grafana sessions on this machine, one per address, shared by every connection and workspace.
+ * Grafana sessions on this machine, one per origin, shared by every connection, workspace and module:
+ * signing in for Logs also signs in Redis through the same Grafana, and the reverse. Use the one
+ * instance, `grafanaSessions`.
  * Requests carry the session cookie of the sign-in window. Grafana asks clients to renew the session
  * token every few minutes (`grafana_session_expiry`, and 401 with `session.token.rotate`); this does
  * that before a request is due, and once more when a request is refused, before giving up.
@@ -102,7 +104,7 @@ export class GrafanaSessions {
     if (res.status === 401 && (await this.rotate(web, base))) res = await send();
     if (res.status === 401) {
       if (this.session(base).state !== 'signing-in') this.set(host, base, { ...SIGNED_OUT, checkedAt: nowIso() });
-      throw new QuiverError('SIGN_IN_REQUIRED', `Not signed in to Grafana at ${hostOf(base)}. Sign in from the Logs view in Quiver.`, { grafanaUrl: base });
+      throw new QuiverError('SIGN_IN_REQUIRED', `Not signed in to Grafana at ${hostOf(base)}. Sign in from Quiver: the Logs view, or the database connection that goes through this Grafana.`, { grafanaUrl: base });
     }
     let body: unknown = res.text;
     try {
@@ -147,10 +149,14 @@ export class GrafanaSessions {
     this.sessions.set(partition, session);
     if (before?.state !== session.state || before?.user?.login !== session.user?.login || before?.error !== session.error) {
       host.emit('logs.changed', { reason: 'session', grafanaUrl: base });
+      host.emit('grafana.changed', { grafanaUrl: base, state: session.state });
     }
     return session;
   }
 }
+
+/** The sessions of this machine, shared by the Logs and Databases modules. */
+export const grafanaSessions = new GrafanaSessions();
 
 function requireWeb(host: HostApi): WebSessionsApi {
   if (!host.web) throw new QuiverError('REQUEST_FAILED', 'Grafana sign-in needs the Quiver desktop app');

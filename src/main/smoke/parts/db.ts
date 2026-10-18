@@ -2,11 +2,11 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { parseConnectionUrl } from '@quiver/core';
 import type { DbConnectionSummary, DbExportResult, DbSchemaMatch, DbTableApplyResult, DbTableColumns, DbConnectionTest, DbHistoryEntry, DbQueryResult, DbTable, DbTableDetail, RedisInfo, DbTableRows, RedisKeyDetail, RedisScanResult, SavedQuery } from '@quiver/core';
-import { definePart } from '../part';
+import { definePart, until } from '../part';
 
 export default definePart({
   name: 'db',
-  summary: 'Databases: SQLite, the fake Redis, live MySQL/PostgreSQL when configured, agents over MCP, the grid and key browser',
+  summary: 'Databases: SQLite, the fake Redis directly and through the fake Grafana, live MySQL/PostgreSQL when configured, agents over MCP, the grid and key browser',
   async run(t) {
     const { host, check, run, ws, folder, rpc, toolNames: names } = t;
     const { fakeRedis } = t.fixtures;
@@ -176,6 +176,161 @@ export default definePart({
     const templatedTest = await run<DbConnectionTest>('db.connection.test', { id: templated.id }, ws.id);
     check('db: {{variables}} in a connection resolve from the workspace .env', templatedTest.ok && templated.host === '{{REDIS_HOST}}', { host: templated.host, version: templatedTest.serverVersion });
     await run('db.connection.delete', { id: templated.id }, ws.id);
+
+    // ---------- databases: Redis through a Grafana Redis data source (the fake Grafana in front of the fake Redis) ----------
+    const { fakeGrafana } = t.fixtures;
+    const outcome = async (id: string, input: unknown, caller: 'ui' | 'mcp' = 'ui') => {
+      const out = await host.invoke(id, input, { caller, workspaceId: ws.id });
+      return out.ok ? { ok: true as const, value: out.result } : { ok: false as const, code: out.error.code, message: out.error.message, details: out.error.details as Record<string, unknown> | undefined };
+    };
+    const said = (o: Awaited<ReturnType<typeof outcome>>) => (o.ok ? 'ok' : `${o.code}: ${o.message}`);
+    const grafanaAccess = (datasourceUid: string, datasourceName: string) => ({ type: 'grafana', grafanaUrl: `${fakeGrafana.url}/?orgId=1`, datasourceUid, datasourceName });
+    const grafanaRedis = await run<DbConnectionSummary>('db.connection.save', { connection: { kind: 'redis', name: 'grafana redis', access: grafanaAccess('redis-smoke', 'Redis-Smoke') } }, ws.id);
+    const grafanaOnDisk = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'db-connections', `${grafanaRedis.id}.json`), 'utf8')) as DbConnectionSummary;
+    check(
+      'db: a Redis connection through a Grafana data source is committed with the address normalised and no secret',
+      JSON.stringify(grafanaOnDisk.access) === JSON.stringify({ type: 'grafana', grafanaUrl: fakeGrafana.url, datasourceUid: 'redis-smoke', datasourceName: 'Redis-Smoke' }) && grafanaRedis.hasPassword === false,
+      grafanaOnDisk.access,
+    );
+    const sqlViaGrafana = await outcome('db.connection.save', { connection: { kind: 'postgres', name: 'x', access: grafanaAccess('redis-smoke', 'Redis-Smoke') } });
+    const indexViaGrafana = await outcome('db.connection.save', { connection: { kind: 'redis', name: 'x', dbIndex: 2, access: grafanaAccess('redis-smoke', 'Redis-Smoke') } });
+    check(
+      'db: Grafana access is refused for SQL kinds and with a database index',
+      !sqlViaGrafana.ok && sqlViaGrafana.code === 'INVALID_INPUT' && sqlViaGrafana.message.includes('only reach Redis') && !indexViaGrafana.ok && indexViaGrafana.code === 'INVALID_INPUT',
+      { sql: said(sqlViaGrafana), index: said(indexViaGrafana) },
+    );
+
+    const grafanaSignedOut = await outcome('db.redis.keys', { connectionId: grafanaRedis.id, pattern: '*' });
+    check(
+      'db: through Grafana without a session the call asks for a sign-in, with the address for the Sign in button',
+      !grafanaSignedOut.ok && grafanaSignedOut.code === 'SIGN_IN_REQUIRED' && grafanaSignedOut.details?.['grafanaUrl'] === fakeGrafana.url,
+      said(grafanaSignedOut),
+    );
+    const grafanaLogins0 = fakeGrafana.seen.logins;
+    const grafanaSignIn = await run<{ state: string; user: { email: string } | null }>('db.grafana.signin', { grafanaUrl: fakeGrafana.url }, ws.id);
+    const sharedLogs = await run<{ id: string }>('logs.connection.save', { connection: { name: 'shared session', grafanaUrl: fakeGrafana.url } }, ws.id);
+    const logsSees = await run<{ state: string }>('logs.session', { id: sharedLogs.id }, ws.id);
+    const signInHidden = host.registry.list().find((c) => c.id === 'db.grafana.signin')?.hidden === true;
+    check(
+      'db: signing in for Redis opens the Grafana login once, is the Logs session too, and is not offered to agents',
+      grafanaSignIn.state === 'signed-in' && fakeGrafana.seen.logins === grafanaLogins0 + 1 && logsSees.state === 'signed-in' && signInHidden,
+      { state: grafanaSignIn.state, logins: fakeGrafana.seen.logins - grafanaLogins0, logs: logsSees.state, signInHidden },
+    );
+    const agentSources = await outcome('db.grafana.redis.datasources', { grafanaUrl: fakeGrafana.url }, 'mcp');
+    const sources = agentSources.ok ? (agentSources.value as { uid: string; name: string; cliDisabled: boolean }[]) : [];
+    check(
+      'db: agents list the Redis data sources of a Grafana, and only those',
+      agentSources.ok && sources.map((s) => `${s.uid}:${s.cliDisabled}`).join() === 'redis-ro:true,redis-smoke:false,redis-down:false' && names.includes('db_grafana_redis_datasources'),
+      agentSources.ok ? sources : said(agentSources),
+    );
+
+    const grafanaTest = await run<DbConnectionTest>('db.connection.test', { id: grafanaRedis.id }, ws.id);
+    check('db: through Grafana the test runs PING and INFO through the data source', grafanaTest.serverVersion === 'Redis 7.2.0-fake via Grafana (Redis-Smoke)', grafanaTest.serverVersion);
+    const awkward = 'line one\nline "two" it\'s $HOME';
+    const sentBefore = fakeGrafana.seen.redis.length;
+    const roundTrip = await run<DbQueryResult[]>(
+      'db.redis.command',
+      { connectionId: grafanaRedis.id, commands: [['SET', 'smoke:grafana', awkward], ['GET', 'smoke:grafana'], ['EXISTS', 'smoke:grafana'], ['DEL', 'smoke:grafana'], ['EXISTS', 'smoke:grafana'], ['GET', 'smoke:grafana']] },
+      ws.id,
+    );
+    check(
+      'db: through Grafana SET, GET, EXISTS and DEL round trip a value with quotes, a line break and a dollar, one CLI query each',
+      JSON.stringify(roundTrip.map((r) => r.value)) === JSON.stringify(['OK', awkward, 1, 1, 0, null]) && fakeGrafana.seen.redis.length === sentBefore + 6 && fakeGrafana.seen.redis[sentBefore] === `SET smoke:grafana 'line one\nline "two" it'\\''s $HOME'`,
+      { values: roundTrip.map((r) => r.value), sent: fakeGrafana.seen.redis.slice(sentBefore) },
+    );
+    const grafanaConsole = await run<DbQueryResult[]>('db.query.run', { connectionId: grafanaRedis.id, query: 'SET smoke:num 007\nGET smoke:num\nLRANGE queue 0 -1\nDEL smoke:num' }, ws.id);
+    check(
+      'db: the console through Grafana keeps numeric strings as strings and lists as arrays',
+      grafanaConsole[1]?.value === '007' && JSON.stringify(grafanaConsole[2]?.value) === JSON.stringify(['job-1', 'job-2', 'job-3']) && grafanaConsole[2]?.rowCount === 3,
+      grafanaConsole.map((r) => r.value),
+    );
+    const grafanaScan = await run<RedisScanResult>('db.redis.keys', { connectionId: grafanaRedis.id, pattern: 'user:*' }, ws.id);
+    const grafanaHash = await run<RedisKeyDetail>('db.redis.key', { connectionId: grafanaRedis.id, key: 'user:1' }, ws.id);
+    const grafanaString = await run<RedisKeyDetail>('db.redis.key', { connectionId: grafanaRedis.id, key: 'session:abc' }, ws.id);
+    const grafanaZset = await run<RedisKeyDetail>('db.redis.key', { connectionId: grafanaRedis.id, key: 'scores' }, ws.id);
+    const grafanaInfo = await run<RedisInfo>('db.redis.info', { connectionId: grafanaRedis.id }, ws.id);
+    check(
+      'db: through Grafana the key browser scans with type and TTL, shows a hash, a string with its TTL, a sorted set and the server info',
+      grafanaScan.done &&
+        grafanaScan.keys.map((k) => `${k.key}:${k.type}:${k.ttl}`).join() === 'user:1:hash:-1,user:2:hash:-1' &&
+        (grafanaHash.value as Record<string, string>).name === 'Ada' &&
+        grafanaHash.length === 2 &&
+        grafanaString.type === 'string' &&
+        grafanaString.ttl > 0 &&
+        String(grafanaString.value).includes('"userId":1') &&
+        JSON.stringify(grafanaZset.value) === '[["linus",7],["ada",10]]' &&
+        grafanaInfo.version === '7.2.0-fake' &&
+        grafanaInfo.hitRate === 0.9 &&
+        (grafanaInfo.keys ?? 0) >= 6,
+      { scan: grafanaScan.keys, hash: grafanaHash.value, string: grafanaString, zset: grafanaZset.value, info: grafanaInfo },
+    );
+
+    const pluginError = await outcome('db.query.run', { connectionId: grafanaRedis.id, query: 'BOGUS x' });
+    const selectRefused = await outcome('db.query.run', { connectionId: grafanaRedis.id, query: 'SELECT 1' });
+    const sentBeforeRefusal = fakeGrafana.seen.redis.length;
+    const surrogate = await outcome('db.redis.command', { connectionId: grafanaRedis.id, commands: [['SET', 'smoke:ok', 'fine'], ['SET', 'smoke:bad', 'half \uD800 pair']] });
+    check(
+      "db: through Grafana the plugin's error comes back verbatim, SELECT is refused, and an argument Grafana cannot carry is refused before anything runs",
+      !pluginError.ok &&
+        pluginError.message === "ERR unknown command 'BOGUS'" &&
+        !selectRefused.ok &&
+        selectRefused.code === 'INVALID_INPUT' &&
+        selectRefused.message.includes('SELECT cannot run through Grafana') &&
+        !surrogate.ok &&
+        surrogate.code === 'INVALID_INPUT' &&
+        surrogate.message.includes('lone UTF-16 surrogate') &&
+        fakeGrafana.seen.redis.length === sentBeforeRefusal,
+      { pluginError: said(pluginError), select: said(selectRefused), surrogate: said(surrogate), sent: fakeGrafana.seen.redis.slice(sentBeforeRefusal) },
+    );
+    const agentWrite = await outcome('db.redis.command', { connectionId: grafanaRedis.id, commands: [['SET', 'smoke:agent', 'x']] }, 'mcp');
+    const agentRead = await outcome('db.redis.command', { connectionId: grafanaRedis.id, commands: [['GET', 'user:1'], ['TYPE', 'user:1']] }, 'mcp');
+    const agentConsoleWrite = await outcome('db.query.run', { connectionId: grafanaRedis.id, query: 'FLUSHALL' }, 'mcp');
+    check(
+      'db: through Grafana agents may read but a write is gated the same as on a direct connection',
+      !agentWrite.ok && agentWrite.code === 'MUTATION_BLOCKED' && !agentConsoleWrite.ok && agentConsoleWrite.code === 'MUTATION_BLOCKED' && agentRead.ok,
+      { write: said(agentWrite), console: said(agentConsoleWrite), read: said(agentRead) },
+    );
+
+    const unreachable = await run<DbConnectionSummary>('db.connection.save', { connection: { kind: 'redis', name: 'grafana unreachable', access: grafanaAccess('redis-down', 'Redis-Unreachable') } }, ws.id);
+    const unreachableTest = await outcome('db.connection.test', { id: unreachable.id });
+    check(
+      "db: Grafana's bare 500 Query data error says the data source cannot reach Redis",
+      !unreachableTest.ok && unreachableTest.message === 'Grafana could not reach Redis through data source Redis-Unreachable; ask the Grafana admin to run Save & test on it.',
+      said(unreachableTest),
+    );
+    const moved = await run<DbConnectionSummary>('db.connection.save', { connection: { kind: 'redis', name: 'grafana moved', access: grafanaAccess('z2A9WFrDz', 'Redis-Smoke') } }, ws.id);
+    const movedTest = await outcome('db.connection.test', { id: moved.id });
+    const movedTo = movedTest.ok ? null : (movedTest.details?.['datasourceMoved'] as { uid: string; name: string } | undefined);
+    check(
+      'db: a data source whose uid changed is found by name, and the error offers the new uid',
+      !movedTest.ok && movedTest.code === 'NOT_FOUND' && movedTest.message.includes('uid redis-smoke') && movedTo?.uid === 'redis-smoke' && movedTest.details?.['connectionId'] === moved.id,
+      said(movedTest),
+    );
+
+    const readOnly = await run<DbConnectionSummary>('db.connection.save', { connection: { kind: 'redis', name: 'grafana read-only', access: grafanaAccess('redis-ro', 'Redis-ReadOnly') } }, ws.id);
+    const readOnlyTest = await run<DbConnectionTest>('db.connection.test', { id: readOnly.id }, ws.id);
+    const readOnlyScan = await run<RedisScanResult>('db.redis.keys', { connectionId: readOnly.id, pattern: 'user:*' }, ws.id);
+    const readOnlyHash = await run<RedisKeyDetail>('db.redis.key', { connectionId: readOnly.id, key: 'user:2' }, ws.id);
+    const readOnlyInfo = await run<RedisInfo>('db.redis.info', { connectionId: readOnly.id }, ws.id);
+    const readOnlyWrite = await outcome('db.redis.command', { connectionId: readOnly.id, commands: [['GET', 'user:1']] });
+    check(
+      "db: with the data source's CLI turned off the key browser reads through the plugin's fixed commands and commands are refused",
+      readOnlyTest.serverVersion === 'Redis 7.2.0-fake via Grafana (Redis-ReadOnly), read-only: CLI turned off' &&
+        readOnlyScan.keys.map((k) => `${k.key}:${k.type}:${k.ttl}`).join() === 'user:1:hash:-1,user:2:hash:-1' &&
+        (readOnlyHash.value as Record<string, string>).name === 'Linus' &&
+        readOnlyInfo.version === '7.2.0-fake' &&
+        !readOnlyWrite.ok &&
+        readOnlyWrite.message.includes('CLI is turned off on Grafana data source Redis-ReadOnly') &&
+        !fakeGrafana.seen.redis.includes('CLI sent to a data source with the CLI turned off'),
+      { version: readOnlyTest.serverVersion, scan: readOnlyScan.keys, hash: readOnlyHash.value, info: readOnlyInfo.version, write: said(readOnlyWrite) },
+    );
+    for (const c of [unreachable, moved, readOnly]) await run('db.connection.delete', { id: c.id }, ws.id);
+
+    // Signing out from Logs ends the session for Redis too; the Logs part then starts signed out, as when run alone.
+    await run('logs.signout', { id: sharedLogs.id }, ws.id);
+    const afterSignOut = await outcome('db.redis.keys', { connectionId: grafanaRedis.id, pattern: '*' });
+    check('db: signing out of Grafana in Logs signs the Redis connection out too', !afterSignOut.ok && afterSignOut.code === 'SIGN_IN_REQUIRED', said(afterSignOut));
+    await run('logs.connection.delete', { id: sharedLogs.id }, ws.id);
 
     // Optional: a live MySQL server, e.g. QUIVER_SMOKE_MYSQL=mysql://root:secret@127.0.0.1:3306/test
     if (process.env.QUIVER_SMOKE_MYSQL) {
@@ -513,6 +668,52 @@ export default definePart({
           await wait(500);
         }
         await shot('08-redis-dark');
+        // Redis through Grafana: the connection's Access section with the sign-in state and the data source picker, then the key browser over Grafana.
+        {
+          // Run alone, the host checks above end signed out; a full run leaves the Logs part's session behind.
+          await run('db.grafana.signin', { grafanaUrl: fakeGrafana.url }, ws.id);
+          await js(`document.documentElement.classList.remove('dark')`);
+          const visible = `(s) => [...document.querySelectorAll(s)].find((e) => e.offsetParent !== null)`;
+          const grafanaRow = `[...document.querySelectorAll('[data-testid=db-connection-row]')].find((r) => r.textContent.includes('grafana redis'))`;
+          await js(`${grafanaRow}?.querySelector('[data-testid=db-connection-menu]')?.click()`);
+          await wait(300);
+          await js(`[...document.querySelectorAll('[role^=menuitem]')].find((b) => b.textContent.trim() === 'Edit connection')?.click()`);
+          await until(async () => (await js(`(${visible})('[data-testid=db-grafana-source]')?.options.length ?? 0`)) === 3, 6000);
+          const form = await js(
+            `(() => { const v = ${visible}; const select = v('[data-testid=db-grafana-source]'); return { session: v('[data-testid=db-grafana-session]')?.textContent.trim() ?? null, source: select?.value ?? null, options: [...(select?.options ?? [])].map((o) => o.textContent.trim()), url: v('[data-testid=db-grafana-url]')?.value ?? null, hostShown: [...document.querySelectorAll('label')].some((l) => l.offsetParent !== null && ['Host', 'Password'].includes(l.textContent.trim())), treeBadge: Boolean(${grafanaRow}?.querySelector('[data-testid=db-via-grafana]')) }; })()`,
+          );
+          check(
+            'ui: the Access section of a Redis connection through Grafana shows who is signed in and picks among the Redis data sources, without host or password',
+            JSON.stringify(form) ===
+              JSON.stringify({
+                session: 'Signed in as smoke@example.com',
+                source: 'redis-smoke',
+                options: ['Redis-ReadOnly (CLI off: read-only)', 'Redis-Smoke', 'Redis-Unreachable'],
+                url: fakeGrafana.url,
+                hostShown: false,
+                treeBadge: true,
+              }),
+            form,
+          );
+          await shot('08b-redis-grafana-access-light');
+          await js(`${grafanaRow}?.click()`);
+          await wait(400);
+          await js(`(() => { const rows = [...document.querySelectorAll('[role=button]')]; const at = rows.findIndex((r) => r.textContent.includes('grafana redis')); rows.slice(at).find((r) => r.textContent.trim() === 'Keys')?.click(); })()`);
+          await until(async () => Boolean(await js(`[...document.querySelectorAll('button')].some((b) => b.offsetParent !== null && b.textContent.includes('session:abc'))`)), 6000);
+          await js(`[...document.querySelectorAll('button')].find((b) => b.offsetParent !== null && b.textContent.includes('user:2'))?.click()`);
+          await until(async () => Boolean(await js(`[...document.querySelectorAll('[role=gridcell]')].some((c) => c.offsetParent !== null && c.textContent === 'Linus')`)), 4000);
+          await js(`document.documentElement.classList.add('dark')`);
+          await wait(300);
+          const browser = await js(
+            `(() => { const v = ${visible}; return { badge: v('[data-testid=db-via-grafana]')?.textContent.trim() ?? null, keys: [...document.querySelectorAll('button')].filter((b) => b.offsetParent !== null && /(user|session|queue|tags|scores)/.test(b.textContent)).length, linus: [...document.querySelectorAll('[role=gridcell]')].some((c) => c.offsetParent !== null && c.textContent === 'Linus'), info: v('[data-testid=db-redis-info]')?.textContent ?? null }; })()`,
+          );
+          check(
+            'ui: the key browser over Grafana lists the keys, shows a hash and the server info, and is marked via Grafana',
+            typeof browser === 'object' && browser !== null && (browser as { badge: string }).badge === 'via Grafana' && (browser as { keys: number }).keys >= 5 && (browser as { linus: boolean }).linus && String((browser as { info: string }).info).includes('7.2.0-fake'),
+            browser,
+          );
+          await shot('08c-redis-grafana-keys-dark');
+        }
       },
     };
   },

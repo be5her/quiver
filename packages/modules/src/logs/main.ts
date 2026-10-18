@@ -32,12 +32,10 @@ import {
   type WorkspaceApi,
 } from '@quiver/core';
 import { z } from 'zod';
-import { GrafanaSessions } from './grafana';
+import { grafanaSessions as sessions } from '../grafana/sessions';
 
 export const LOGS_COLLECTION = 'logs-connections';
 const HISTORY_LOG = 'logs-history';
-
-const sessions = new GrafanaSessions();
 
 function ws(ctx: CommandContext): WorkspaceApi {
   return ctx.workspace!;

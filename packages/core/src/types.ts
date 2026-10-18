@@ -1,6 +1,7 @@
 import type { NetworkConfig } from './network';
 import type { ActivityBarLayout } from './activity-bar';
 import type { McpRecordingStatus } from './models/mcp-recording';
+import type { LogsSession } from './models/logs';
 import type { z } from 'zod';
 
 export type Caller = 'ui' | 'mcp' | 'cli' | 'system';
@@ -292,6 +293,8 @@ export interface HostEvents {
   'env.changed': { workspaceId: string; reason: 'files'; path?: string };
   /** Logs: a Grafana sign-in started, finished or ended (`session`, for every connection on that address), or the query history grew. */
   'logs.changed': { reason: 'session' | 'history'; grafanaUrl?: string; workspaceId?: string };
+  /** The Grafana session for an address changed (signed in, out, or the check failed); Logs and Redis through Grafana share it. */
+  'grafana.changed': { grafanaUrl: string; state: LogsSession['state'] };
   /** The workspace's todo list changed. */
   'todo.changed': { workspaceId: string };
   /** The in-app updater moved: checking, a version found, download progress, downloaded, or an error. */

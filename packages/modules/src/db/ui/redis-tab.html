@@ -9,6 +9,9 @@
       }
     </button>
     <button qIconButton label="New key" size="sm" data-testid="db-redis-new-key" (click)="newKey()"><svg [qIcon]="icons.Plus" class="size-3.5"></svg></button>
+    @if (connection.value(); as conn) {
+      <q-access-badge [access]="conn.access" />
+    }
   </div>
   @if (vitals().length) {
     <div class="px-2 py-1 border-b border-edge text-[10px] text-muted leading-4 flex items-center gap-1 min-w-0" data-testid="db-redis-info">

@@ -17,6 +17,9 @@
       }
     </select>
   }
+  @if (connection(); as conn) {
+    <q-access-badge [access]="conn.access" />
+  }
   @if (connection()?.production) {
     <span qBadge class="text-danger border-danger/40" title="Production connection: writes are confirmed first" data-testid="db-prod-badge">PROD</span>
   }
