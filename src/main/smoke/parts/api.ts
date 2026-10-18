@@ -1818,8 +1818,9 @@ export default definePart({
           await shot('03x-multipart-files-light');
           check(
             'ui: a binary body shows its path and size, and a multipart file row its ticked File toggle and a Choose button',
+            // The upload request has a file row, a text row and a file row with its own name.
             binaryPath === 'uploads/hello.txt' && typeof binaryInfo === 'string' && binaryInfo.includes('10 B') && binaryInfo.includes('in the project') &&
-              Array.isArray(toggles) && toggles[0] === true && toggles[1] === false && browse === 1,
+              Array.isArray(toggles) && toggles.join() === 'true,false,true' && browse === 2,
             { binaryPath, binaryInfo, toggles, browse },
           );
           await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
