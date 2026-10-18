@@ -1,0 +1,74 @@
+<div class="flex items-center gap-2 px-3 py-2 border-b border-edge shrink-0">
+  <span class="text-sm font-medium">Client certificates</span>
+  <span class="text-xs text-muted">this workspace, on this machine</span>
+  <div class="flex-1"></div>
+  <button qButton size="sm" variant="ghost" [icon]="icons.Plus" data-testid="api-cert-add" (click)="add()">Add certificate</button>
+</div>
+<div class="flex-1 overflow-auto p-3 flex flex-col gap-4 max-w-3xl">
+  <p class="text-xs text-muted">
+    A request to a matching host presents the certificate (mutual TLS), whether it goes direct or through the proxy. The most specific pattern wins: an exact host
+    before <code class="font-mono">*.example.com</code>, a port before none. The files stay on this machine; nothing here is committed.
+  </p>
+  @if (draft(); as d) {
+    <div class="rounded-md border border-edge p-3 grid grid-cols-[9rem_1fr_auto] items-center gap-x-2 gap-y-2 text-xs" data-testid="api-cert-form">
+      <label for="cert-host" class="text-muted font-medium">Host</label>
+      <input qInput id="cert-host" class="h-7 font-mono" placeholder="api.example.com or *.example.com:8443" data-testid="api-cert-host" [value]="d.hostPattern" (input)="set('hostPattern', $event)" />
+      <span></span>
+      <label for="cert-cert" class="text-muted font-medium">Certificate (PEM)</label>
+      <input qInput id="cert-cert" class="h-7 font-mono" [value]="d.certPath" (input)="set('certPath', $event)" />
+      <button qButton size="sm" variant="ghost" (click)="pick('certPath', 'Client certificate')">Choose…</button>
+      <label for="cert-key" class="text-muted font-medium">Key (PEM)</label>
+      <input qInput id="cert-key" class="h-7 font-mono" [value]="d.keyPath" (input)="set('keyPath', $event)" />
+      <button qButton size="sm" variant="ghost" (click)="pick('keyPath', 'Private key')">Choose…</button>
+      <label for="cert-pfx" class="text-muted font-medium">Or PKCS#12</label>
+      <input qInput id="cert-pfx" class="h-7 font-mono" placeholder=".p12 or .pfx" [value]="d.pfxPath" (input)="set('pfxPath', $event)" />
+      <button qButton size="sm" variant="ghost" (click)="pick('pfxPath', 'PKCS#12 file')">Choose…</button>
+      <label for="cert-pass" class="text-muted font-medium">Passphrase</label>
+      <input
+        qInput
+        id="cert-pass"
+        type="password"
+        autocomplete="new-password"
+        class="h-7"
+        [placeholder]="d.hasPassphrase ? 'kept, encrypted on this machine' : 'if the key or file has one'"
+        [value]="d.passphrase"
+        (input)="set('passphrase', $event)"
+      />
+      <span></span>
+      <label for="cert-ca" class="text-muted font-medium">CA (optional)</label>
+      <input qInput id="cert-ca" class="h-7 font-mono" placeholder="a private CA to trust for these hosts" [value]="d.caPath" (input)="set('caPath', $event)" />
+      <button qButton size="sm" variant="ghost" (click)="pick('caPath', 'CA certificate')">Choose…</button>
+      <div class="col-span-3 flex justify-end gap-2 mt-1">
+        <button qButton size="sm" variant="ghost" (click)="draft.set(null)">Cancel</button>
+        <button qButton size="sm" variant="primary" data-testid="api-cert-save" (click)="save()">Save</button>
+      </div>
+    </div>
+  }
+  @if (list.value()?.length) {
+    <table class="w-full text-xs" data-testid="api-cert-table">
+      <thead class="text-muted text-left">
+        <tr>
+          <th class="font-medium pb-1">Host</th>
+          <th class="font-medium pb-1">Files</th>
+          <th class="font-medium pb-1">CA</th>
+          <th class="w-16"></th>
+        </tr>
+      </thead>
+      <tbody>
+        @for (c of list.value(); track c.id) {
+          <tr class="border-t border-edge/60" data-testid="api-cert-row">
+            <td class="py-1.5 font-mono">{{ c.hostPattern }}</td>
+            <td class="py-1.5 font-mono truncate max-w-xs" [title]="files(c)">{{ files(c) }}{{ c.hasPassphrase ? ' · passphrase' : '' }}</td>
+            <td class="py-1.5 font-mono truncate max-w-[10rem]">{{ c.caPath || '–' }}</td>
+            <td class="py-1.5 text-right whitespace-nowrap">
+              <button qIconButton label="Edit" size="sm" (click)="edit(c)"><svg [qIcon]="icons.Pencil" class="size-3.5"></svg></button>
+              <button qIconButton label="Remove" size="sm" (click)="remove(c)"><svg [qIcon]="icons.Trash2" class="size-3.5"></svg></button>
+            </td>
+          </tr>
+        }
+      </tbody>
+    </table>
+  } @else if (!draft()) {
+    <q-empty-state title="No client certificates" hint="Add one for a server that asks for a client certificate (mutual TLS)." />
+  }
+</div>

@@ -248,6 +248,11 @@ export class ApiActions {
     if (runId) this.tabs.updateTab(scope, tab.id, { data: { collectionId: collection.id, runId } });
   }
 
+  /** The workspace's client certificates. */
+  openCertificates(): void {
+    this.tabs.openTab(untracked(this.app.scope), { type: 'api.certificates', title: 'Client certificates', data: {} }, { singletonKey: 'api.certificates' });
+  }
+
   /** The workspace's cookie jar. */
   openCookieJar(): void {
     this.tabs.openTab(untracked(this.app.scope), { type: 'api.cookies', title: 'Cookie jar', data: {} }, { singletonKey: 'api.cookies' });

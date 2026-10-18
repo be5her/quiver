@@ -17,7 +17,8 @@ import {
   type StreamKind,
   type WireRequest,
 } from '@quiver/core';
-import { Agent, fetch as undiciFetch, type Dispatcher } from 'undici';
+import { fetch as undiciFetch } from 'undici';
+import { dispatcherFor, type NetworkContext } from './network';
 
 /** A body read from files as it is sent, so a large upload never sits in memory. Opened again for each redirect hop. */
 export interface StreamBody {
@@ -252,12 +253,6 @@ export async function prepareRequest(req: ApiRequest, files?: FileAccess): Promi
   return { method: req.method, url: appendQuery(req.url.trim(), query), headers, body, bodyPreview };
 }
 
-let insecureAgent: Dispatcher | null = null;
-function getInsecureAgent(): Dispatcher {
-  insecureAgent ??= new Agent({ connect: { rejectUnauthorized: false } });
-  return insecureAgent;
-}
-
 /** Redirects followed before giving up, as browsers do. */
 export const MAX_REDIRECTS = 20;
 
@@ -282,10 +277,11 @@ export interface BodyHooks {
 /**
  * Send what `prepareRequest` built. Redirects are followed here rather than by fetch, so every hop
  * is known (status, headers, time) and the browser rules apply: see `nextRequest`. Aborting
- * `signal` stops the send, also while the body downloads, with REQUEST_CANCELLED. The timeout
+ * `signal` stops the send, also while the body downloads, with REQUEST_CANCELLED. `network` picks the
+ * proxy and client certificate for each hop. The timeout
  * covers the whole download, or, for a streamed body, the wait for the response's head.
  */
-export async function sendPrepared(prepared: PreparedRequest, options: SendOptions, signal?: AbortSignal, cookies?: CookieHooks, body?: BodyHooks): Promise<ApiResponse> {
+export async function sendPrepared(prepared: PreparedRequest, options: SendOptions, signal?: AbortSignal, cookies?: CookieHooks, body?: BodyHooks, network?: NetworkContext): Promise<ApiResponse> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error(`Timed out after ${options.timeoutMs} ms`)), options.timeoutMs);
   const onCancel = () => controller.abort(new Error('Cancelled'));
@@ -312,7 +308,8 @@ export async function sendPrepared(prepared: PreparedRequest, options: SendOptio
         ...(stream ? { duplex: 'half' as const } : {}),
         redirect: 'manual',
         signal: controller.signal,
-        dispatcher: options.insecure ? getInsecureAgent() : undefined,
+        // Per hop: a redirect to another host may need another proxy decision or certificate.
+        dispatcher: dispatcherFor(current.url, options.insecure, network),
       });
       cookies?.store(current.url, res.headers.getSetCookie());
       const location = res.headers.get('location');

@@ -6,6 +6,7 @@ import { buildSchema, graphql as executeGraphql } from 'graphql';
 import type { WebSocket as WsSocket } from 'ws';
 import { startFakeGrafana } from './fake-grafana';
 import { startFakeMcpHttp, writeFakeMcpStdio } from './fake-mcp';
+import { startFakeNetwork } from './fake-network';
 import { startFakeOAuth } from './fake-oauth';
 import { startFakeRedis } from './fake-redis';
 import { writeFakeTsh } from './fake-tsh';
@@ -234,6 +235,8 @@ export async function startFixtures() {
   const fakeStdio = await writeFakeMcpStdio(mcpDir);
   const fakeMcp = await startFakeMcpHttp();
   const fakeOAuth = await startFakeOAuth();
+  // Mutual TLS and a forward proxy, for the API client's client certificates and proxy settings.
+  const fakeNetwork = await startFakeNetwork();
 
   return {
     echoPort,
@@ -251,6 +254,7 @@ export async function startFixtures() {
     fakeStdio,
     fakeMcp,
     fakeOAuth,
+    fakeNetwork,
     async close() {
       echo.close();
       gql.close();
@@ -264,6 +268,7 @@ export async function startFixtures() {
       await fakeGrafana.close();
       await fakeMcp.close();
       await fakeOAuth.close();
+      await fakeNetwork.close();
       if (previousKubeconfig === undefined) delete process.env.KUBECONFIG;
       else process.env.KUBECONFIG = previousKubeconfig;
       await fs.rm(tshDir, { recursive: true, force: true }).catch(() => {});

@@ -88,6 +88,53 @@
       >
     </section>
 
+    <section data-testid="settings-network">
+      <h2 class="text-sm font-semibold mb-3 pb-1 border-b border-edge">Network</h2>
+      <p class="text-xs text-muted mb-3">
+        How the API client, realtime connections and GraphQL introspection reach servers, on this machine. Client certificates are per project, in the API client's
+        Certificates tab.
+      </p>
+      @let net = network();
+      <div class="grid grid-cols-[8rem_1fr] items-center gap-x-3 gap-y-2 max-w-xl">
+        <label qLabel class="mb-0" for="settings-proxy">Proxy</label>
+        <select qSelect id="settings-proxy" class="w-56" data-testid="settings-proxy" [value]="net.proxy" (change)="setNetwork({ proxy: $any($event.target).value })">
+          <option value="none">None</option>
+          <option value="system">System (HTTPS_PROXY, HTTP_PROXY, NO_PROXY)</option>
+          <option value="manual">Manual</option>
+        </select>
+        @if (net.proxy === 'manual') {
+          <label qLabel class="mb-0" for="settings-proxy-url">Proxy URL</label>
+          <input qInput id="settings-proxy-url" data-testid="settings-proxy-url" placeholder="http://proxy.example.com:3128" [value]="net.url" (input)="setNetwork({ url: $any($event.target).value })" />
+          <label qLabel class="mb-0" for="settings-proxy-user">User name</label>
+          <input qInput id="settings-proxy-user" autocomplete="off" [value]="net.username" (input)="setNetwork({ username: $any($event.target).value })" />
+          <label qLabel class="mb-0" for="settings-proxy-password">Password</label>
+          <input
+            qInput
+            id="settings-proxy-password"
+            type="password"
+            autocomplete="new-password"
+            [placeholder]="net.hasPassword ? 'kept, encrypted on this machine' : ''"
+            [value]="proxyPassword()"
+            (input)="proxyPassword.set($any($event.target).value)"
+          />
+        }
+        @if (net.proxy !== 'none') {
+          <label qLabel class="mb-0" for="settings-no-proxy">Bypass for</label>
+          <input
+            qInput
+            id="settings-no-proxy"
+            data-testid="settings-no-proxy"
+            placeholder="localhost, .internal.example.com"
+            [value]="net.noProxy.join(', ')"
+            (change)="setNetwork({ noProxy: splitHosts($any($event.target).value) })"
+          />
+        }
+      </div>
+      <div class="mt-2 flex items-center gap-3">
+        <button qButton size="sm" variant="primary" [disabled]="!networkChanged()" data-testid="settings-network-save" (click)="saveNetwork()">Save network settings</button>
+      </div>
+    </section>
+
     <section>
       <h2 class="text-sm font-semibold mb-3 pb-1 border-b border-edge">Global variables</h2>
       <p class="text-xs text-muted mb-2">Available in every workspace as {{ variableSyntax }}. Workspace environments override them. Do not put secrets here.</p>

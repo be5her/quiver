@@ -28,6 +28,7 @@
     <button qIconButton label="New collection" size="sm" (click)="api.newCollection(null)"><svg [qIcon]="icons.FolderPlus" class="size-3.5"></svg></button>
     <button qIconButton label="Import from curl, OpenAPI, Postman, Insomnia or HAR" size="sm" data-testid="api-import-menu" (click)="api.importMenu($event)"><svg [qIcon]="icons.Import" class="size-3.5"></svg></button>
     <button qIconButton label="Cookie jar" size="sm" data-testid="api-open-cookies" (click)="api.openCookieJar()"><svg [qIcon]="icons.Cookie" class="size-3.5"></svg></button>
+    <button qIconButton label="Client certificates" size="sm" data-testid="api-open-certificates" (click)="api.openCertificates()"><svg [qIcon]="icons.ShieldCheck" class="size-3.5"></svg></button>
   </q-section-header>
   <q-api-collection-tree [collections]="collections.value() ?? []" [requests]="requests.value() ?? []" [filter]="filter()" [lastRuns]="lastRuns()" />
   @if (empty()) {

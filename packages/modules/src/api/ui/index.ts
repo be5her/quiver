@@ -4,6 +4,7 @@ import { Globe } from 'lucide';
 import { ApiActions } from './api-actions';
 import { RunTab } from './run-tab';
 import { DiffTab } from './diff-tab';
+import { CertificatesTab } from './certificates-tab';
 import { ApiSidebar } from './api-sidebar';
 import { CollectionTab } from './collection-tab';
 import { CookieJarTab } from './cookie-jar-tab';
@@ -33,6 +34,7 @@ export const apiModuleUI = defineModuleUI({
     'api.cookies': CookieJarTab,
     'api.run': RunTab,
     'api.diff': DiffTab,
+    'api.certificates': CertificatesTab,
   },
   actions: () => {
     const api = inject(ApiActions);
@@ -50,6 +52,7 @@ export const apiModuleUI = defineModuleUI({
       { id: 'api.environment.new', title: 'New environment', group: 'API', run: () => api.createEnvironment(), when: hasWorkspace },
       { id: 'api.history.show', title: 'Show request history', group: 'API', run: () => api.openHistoryTab(), when: hasWorkspace },
       { id: 'api.cookies.show', title: 'Show cookie jar', group: 'API', run: () => api.openCookieJar(), when: hasWorkspace },
+      { id: 'api.certificates.show', title: 'Client certificates', group: 'API', run: () => api.openCertificates(), when: hasWorkspace },
     ];
   },
 });

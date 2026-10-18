@@ -23,7 +23,7 @@ The UI checks only run with screenshots (`--shots` or `QUIVER_SMOKE_SHOTS=<dir>`
 ## How it is built
 
 - `index.ts` is the runner. It starts the fixtures, then sets up the core every part relies on: the private MCP port, a workspace in a temporary folder, the active environment `local` (`{{baseUrl}}` is the echo server, `{{token}}` the secret `s3cret`) and an MCP client for that workspace. `PARTS` lists the parts in the order they run.
-- `fixtures.ts` starts the local servers; the `fake-*.ts` files are the fakes with more to them.
+- `fixtures.ts` starts the local servers; the `fake-*.ts` files are the fakes with more to them. `certs/` holds test-only TLS material for the mutual-TLS server in `fake-network.ts` (see its README).
 - `part.ts` holds the contract and small helpers (`until`, `processAlive`, `freePort`).
 - `parts/<name>.ts` is one part. Its `run(t)` does the host checks: commands, files on disk and the same features as an agent sees them over MCP. It may return hooks that run later, each in its own phase and in part order: `renderer` once the window has loaded, `ui` with screenshots to drive the window, and `after` once every part's UI is done.
 

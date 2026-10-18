@@ -12,7 +12,8 @@ import {
   type RealtimeStatus,
   type WorkspaceApi,
 } from '@quiver/core';
-import { Agent, WebSocket as UndiciWebSocket, fetch as undiciFetch, type Dispatcher } from 'undici';
+import { WebSocket as UndiciWebSocket, fetch as undiciFetch } from 'undici';
+import { dispatcherFor, resolveNetwork, type NetworkContext } from '../api/network';
 
 /** Bytes of a message kept in the log; the rest is dropped but counted. */
 const DATA_LIMIT = 256 * 1024;
@@ -39,6 +40,8 @@ interface Waiter {
 interface ConnState {
   workspace: WorkspaceApi;
   host: HostApi | null;
+  /** The proxy and client certificates, read again on every (re)connect. */
+  network?: NetworkContext;
   definition: RealtimeConnection;
   target: ResolvedTarget | null;
   status: RealtimeStatus;
@@ -67,11 +70,6 @@ interface ConnState {
 
 const logName = (connectionId: string) => `realtime-messages-${connectionId}`;
 
-let insecureAgent: Dispatcher | null = null;
-function getInsecureAgent(): Dispatcher {
-  insecureAgent ??= new Agent({ connect: { rejectUnauthorized: false } });
-  return insecureAgent;
-}
 
 function errorMessage(err: unknown, fallback = 'Connection failed'): string {
   const e = err as { message?: string; cause?: { message?: string; code?: string } } | undefined;
@@ -316,9 +314,10 @@ export class RealtimeRuntime {
 
   // ---------- opening ----------
 
-  private open(s: ConnState): Promise<void> {
+  private async open(s: ConnState): Promise<void> {
     s.status = s.attempts > 0 ? 'reconnecting' : 'connecting';
     this.notify(s, 'status');
+    s.network = s.host ? await resolveNetwork(s.host, s.workspace) : undefined;
     return s.definition.kind === 'sse' ? this.openSse(s) : this.openSocket(s);
   }
 
@@ -331,7 +330,7 @@ export class RealtimeRuntime {
       socket = new UndiciWebSocket(toWebSocketUrl(target.url), {
         protocols: def.protocols.length ? def.protocols : undefined,
         headers: target.headers,
-        dispatcher: def.insecure ? getInsecureAgent() : undefined,
+        dispatcher: dispatcherFor(toHttpUrl(target.url), def.insecure, s.network),
       });
     } catch (err) {
       s.error = errorMessage(err, 'Invalid WebSocket URL');
@@ -426,7 +425,7 @@ export class RealtimeRuntime {
             headers,
             body: def.method === 'POST' ? target.body : undefined,
             signal: controller.signal,
-            dispatcher: def.insecure ? getInsecureAgent() : undefined,
+            dispatcher: dispatcherFor(toHttpUrl(target.url), def.insecure, s.network),
           });
         } catch (err) {
           if (controller.signal.aborted) return settle();

@@ -35,6 +35,8 @@ import {
   scrubSecrets,
   toCode,
   CODE_TARGETS,
+  type ClientCertificate,
+  type NetworkConfig,
   toHistoryResponse,
   createLineSplitter,
   createSseParser,
@@ -88,6 +90,7 @@ import { graphqlEndpoint, introspect, readSchema } from './graphql';
 import { prepareRequest, sendPrepared } from './http';
 import { clearOAuthToken, getOAuthToken, oauthStatus } from './oauth';
 import { jarSession, readJar, writeJar } from './cookies';
+import { CERTIFICATES_DOC, networkConfig, readCertificates, resolveNetwork } from './network';
 
 const HISTORY_LOG = 'history';
 
@@ -376,7 +379,7 @@ async function sendRequest(ctx: CommandContext, input: z.infer<typeof SendInput>
           }
         : undefined,
       onStream: streams ? (kind, chunks) => (streamId = startStream(ctx, w.id, kind, chunks, controller)) : undefined,
-    });
+    }, await resolveNetwork(ctx.host, w));
     if (jar) {
       response.cookieJar = jar.report;
       if (jar.changed()) await writeJar(w, ctx.host, jar.jar());
@@ -639,11 +642,11 @@ const graphqlIntrospect = defineCommand({
     const request = await requestFrom(ctx, input);
     const { resolved: written } = await resolveRequest(ctx, request, input.environmentId);
     const resolved = await applyOAuth(ctx, written, 'send');
-    if (ctx.caller !== 'mcp') return introspect(ws(ctx), resolved);
+    if (ctx.caller !== 'mcp') return introspect(ws(ctx), resolved, await resolveNetwork(ctx.host, ws(ctx)));
     const secrets = await knownSecrets(ctx, written, input.environmentId);
     secrets.values = [...(secrets.values ?? []), ...requestSecretValues(resolved)];
     try {
-      const doc = await introspect(ws(ctx), resolved);
+      const doc = await introspect(ws(ctx), resolved, await resolveNetwork(ctx.host, ws(ctx)));
       return { ...doc, url: redactUrl(doc.url, secrets) };
     } catch (err) {
       throw errorForAgent(err, secrets);
@@ -1256,6 +1259,124 @@ const collectionReorder = defineCommand({
   },
 });
 
+// ---------- network: proxy and client certificates ----------
+
+/** The proxy settings without the encrypted password, which no caller needs back. */
+function proxyView(config: NetworkConfig) {
+  const { passwordCipher, ...rest } = config;
+  return { ...rest, hasPassword: Boolean(passwordCipher) };
+}
+
+const networkGet = defineCommand({
+  id: 'api.network.get',
+  title: 'Network settings',
+  description: 'How the API client, realtime connections and GraphQL introspection reach the network: no proxy, the system proxy (HTTPS_PROXY, HTTP_PROXY, NO_PROXY) or a manual one, with the hosts that bypass it. The proxy password is never returned.',
+  scope: 'global',
+  input: z.object({}),
+  handler: async (_i, ctx) => proxyView(networkConfig(ctx.host)),
+});
+
+const networkSave = defineCommand({
+  id: 'api.network.save',
+  title: 'Save network settings',
+  description: 'Sets the proxy for this machine: none, system or manual (url, username, and a password kept encrypted; omit password to keep it, an empty one clears it), and the hosts that bypass it.',
+  scope: 'global',
+  mutating: true,
+  input: z.object({
+    proxy: z.enum(['none', 'system', 'manual']),
+    url: z.string().default(''),
+    noProxy: z.array(z.string()).default([]),
+    username: z.string().default(''),
+    password: z.string().optional(),
+  }),
+  handler: async ({ proxy, url, noProxy, username, password }, ctx) => {
+    if (proxy === 'manual') {
+      let parsed: URL | null = null;
+      try {
+        parsed = new URL(url.trim());
+      } catch {
+        parsed = null;
+      }
+      if (!parsed || !/^https?:$/.test(parsed.protocol)) throw new QuiverError('INVALID_INPUT', 'A manual proxy needs a URL like http://proxy.example.com:3128');
+    }
+    const current = networkConfig(ctx.host);
+    const passwordCipher = password === undefined ? current.passwordCipher : password ? ctx.host.secrets.encrypt(password) : '';
+    const next: NetworkConfig = { proxy, url: url.trim(), noProxy: noProxy.map((h) => h.trim()).filter(Boolean), username: username.trim(), passwordCipher };
+    await ctx.host.config.update({ network: next });
+    return proxyView(next);
+  },
+});
+
+/** A certificate as callers see it: no passphrase; for agents, file names without the folders they sit in. */
+function certificateView(c: ClientCertificate, agent: boolean) {
+  const { passphraseCipher, ...rest } = c;
+  const shown = (p: string) => (agent && p ? path.basename(p) : p);
+  return { ...rest, certPath: shown(c.certPath), keyPath: shown(c.keyPath), pfxPath: shown(c.pfxPath), caPath: shown(c.caPath), hasPassphrase: Boolean(passphraseCipher) };
+}
+
+const certificateList = defineCommand({
+  id: 'api.certificate.list',
+  title: 'List client certificates',
+  description: 'Client certificates of this workspace on this machine, by host pattern: the files (PEM certificate and key, or a PKCS#12 file, and an optional CA). Passphrases are never returned; agents get file names only.',
+  scope: 'workspace',
+  input: z.object({}),
+  handler: async (_i, ctx) => (await readCertificates(ws(ctx))).map((c) => certificateView(c, ctx.caller === 'mcp')),
+});
+
+const certificateSave = defineCommand({
+  id: 'api.certificate.save',
+  title: 'Save a client certificate',
+  description: 'Adds or replaces a client certificate for the hosts matching hostPattern (api.example.com, *.example.com, optionally :port). Give certPath and keyPath (PEM) or pfxPath (PKCS#12); paths relative to the project folder resolve against it. Omit passphrase to keep the stored one; an empty one clears it.',
+  scope: 'workspace',
+  mutating: true,
+  input: z.object({
+    certificate: z.object({
+      id: z.string().optional(),
+      hostPattern: z.string().min(1),
+      certPath: z.string().default(''),
+      keyPath: z.string().default(''),
+      pfxPath: z.string().default(''),
+      caPath: z.string().default(''),
+      passphrase: z.string().optional(),
+    }),
+  }),
+  handler: async ({ certificate }, ctx) => {
+    const w = ws(ctx);
+    if (!certificate.pfxPath.trim() && !(certificate.certPath.trim() && certificate.keyPath.trim())) {
+      throw new QuiverError('INVALID_INPUT', 'Give a certificate and its key (PEM), or a PKCS#12 file');
+    }
+    const all = await readCertificates(w);
+    const existing = certificate.id ? all.find((c) => c.id === certificate.id) : undefined;
+    const { passphrase, ...fields } = certificate;
+    const saved: ClientCertificate = {
+      ...fields,
+      id: existing?.id ?? newId(),
+      hostPattern: fields.hostPattern.trim(),
+      passphraseCipher: passphrase === undefined ? (existing?.passphraseCipher ?? '') : passphrase ? ctx.host.secrets.encrypt(passphrase) : '',
+    };
+    await w.store.writeLocal(CERTIFICATES_DOC, existing ? all.map((c) => (c.id === saved.id ? saved : c)) : [...all, saved]);
+    ctx.host.emit('store.changed', { workspaceId: w.id, collection: CERTIFICATES_DOC });
+    return certificateView(saved, ctx.caller === 'mcp');
+  },
+});
+
+const certificateDelete = defineCommand({
+  id: 'api.certificate.delete',
+  title: 'Delete a client certificate',
+  description: 'Removes a client certificate from this workspace (the files stay where they are).',
+  scope: 'workspace',
+  mutating: true,
+  input: z.object({ id: z.string() }),
+  handler: async ({ id }, ctx) => {
+    const w = ws(ctx);
+    const all = await readCertificates(w);
+    const left = all.filter((c) => c.id !== id);
+    await w.store.writeLocal(CERTIFICATES_DOC, left);
+    ctx.host.emit('store.changed', { workspaceId: w.id, collection: CERTIFICATES_DOC });
+    return { deleted: left.length !== all.length };
+  },
+});
+
 // ---------- import / export ----------
 
 const importCurl = defineCommand({
@@ -1536,6 +1657,11 @@ export const apiModule = defineModule({
     streamRead,
     streamStop,
     runList,
+    networkGet,
+    networkSave,
+    certificateList,
+    certificateSave,
+    certificateDelete,
     importCurl,
     importOpenApiCommand,
     importPostmanCommand,

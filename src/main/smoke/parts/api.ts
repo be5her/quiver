@@ -1095,6 +1095,69 @@ export default definePart({
       );
     }
 
+    // Network: a client certificate for the mutual-TLS server (PEM and PKCS#12), and the proxy with its bypass list.
+    {
+      const { mtlsPort, proxyPort, proxySeen } = t.fixtures.fakeNetwork;
+      const certs = path.join(process.cwd(), 'src', 'main', 'smoke', 'certs');
+      const plain = (url: string): ApiRequest => ({ id: '', name: 'net', method: 'GET', url, params: [], headers: [], body: { type: 'none' }, auth: { type: 'none' }, collectionId: null, createdAt: '', updatedAt: '' });
+      const mtlsUrl = `https://127.0.0.1:${mtlsPort}/whoami`;
+      // The server's certificate is from the smoke CA: accept it here, so the missing client certificate is what is refused.
+      const without = await host.invoke('api.request.send', { request: plain(mtlsUrl), options: { insecure: true } }, { caller: 'ui', workspaceId: ws.id });
+      const pem = await run<{ id: string }>('api.certificate.save', { certificate: { hostPattern: '127.0.0.1', certPath: path.join(certs, 'client.crt'), keyPath: path.join(certs, 'client.key'), caPath: path.join(certs, 'ca.crt') } }, ws.id);
+      const withPem = await run<ApiResponse>('api.request.send', { request: plain(mtlsUrl) }, ws.id);
+      await run('api.certificate.save', { certificate: { id: pem.id, hostPattern: `127.0.0.1:${mtlsPort}`, pfxPath: path.join(certs, 'client.p12'), caPath: path.join(certs, 'ca.crt'), passphrase: 'smoke-pass' } }, ws.id);
+      const withPfx = await run<ApiResponse>('api.request.send', { request: plain(mtlsUrl) }, ws.id);
+      const listedForUi = await run<{ pfxPath: string; hasPassphrase: boolean }[]>('api.certificate.list', {}, ws.id);
+      const listedForAgent = await host.invoke('api.certificate.list', {}, { caller: 'mcp', workspaceId: ws.id });
+      const certFile = await fs.readFile(path.join(folder, '.quiver', 'local', 'certificates.json'), 'utf8');
+      const agentSave = await host.invoke('api.certificate.save', { certificate: { hostPattern: 'x.test', pfxPath: 'a.p12' } }, { caller: 'mcp', workspaceId: ws.id });
+      check(
+        'certificates: a server asking for a client certificate refuses a request without one and accepts the PEM pair and the PKCS#12 file with its passphrase',
+        without.ok === true &&
+          (without.result as ApiResponse).status === 401 &&
+          withPem.status === 200 &&
+          JSON.parse(withPem.body).client === 'quiver-smoke-client' &&
+          withPfx.status === 200 &&
+          listedForUi[0]?.pfxPath.endsWith('client.p12') &&
+          listedForUi[0].hasPassphrase &&
+          listedForAgent.ok &&
+          (listedForAgent.result as { pfxPath: string }[])[0]?.pfxPath === 'client.p12' &&
+          !JSON.stringify(listedForAgent.result).includes('passphrase"') &&
+          !certFile.includes('smoke-pass') &&
+          agentSave.ok === false,
+        { without: without.ok ? (without.result as ApiResponse).status : without.error.message, pem: withPem.status, pfx: withPfx.status, agent: listedForAgent.ok ? listedForAgent.result : null },
+      );
+      await run('api.certificate.delete', { id: pem.id }, ws.id);
+
+      // The proxy: undici tunnels every request with CONNECT (https with the certificate again), with the proxy credentials; the bypass list goes direct.
+      const before = proxySeen.length;
+      await run('api.network.save', { proxy: 'manual', url: `http://127.0.0.1:${proxyPort}`, noProxy: [], username: 'smoke', password: 'proxy-pass' }, null);
+      const viaProxy = await run<ApiResponse>('api.request.send', { request: plain(`http://127.0.0.1:${echoPort}/through?x=1`) }, ws.id);
+      const pem2 = await run<{ id: string }>('api.certificate.save', { certificate: { hostPattern: '127.0.0.1', certPath: path.join(certs, 'client.crt'), keyPath: path.join(certs, 'client.key'), caPath: path.join(certs, 'ca.crt') } }, ws.id);
+      const tunnelled = await run<ApiResponse>('api.request.send', { request: plain(mtlsUrl) }, ws.id);
+      await run('api.certificate.delete', { id: pem2.id }, ws.id);
+      const seenThrough = proxySeen.slice(before);
+      await run('api.network.save', { proxy: 'manual', url: `http://127.0.0.1:${proxyPort}`, noProxy: ['127.0.0.1'], username: 'smoke' }, null);
+      const bypassed = await run<ApiResponse>('api.request.send', { request: plain(`http://127.0.0.1:${echoPort}/direct`) }, ws.id);
+      const seenAfterBypass = proxySeen.length - before;
+      const shown = await run<{ hasPassword: boolean; passwordCipher?: string }>('api.network.get', {}, null);
+      const agentNet = await host.invoke('api.network.save', { proxy: 'none' }, { caller: 'mcp' });
+      await run('api.network.save', { proxy: 'none', url: '', noProxy: ['localhost', '127.0.0.1', '::1'], username: '', password: '' }, null);
+      check(
+        'proxy: a manual proxy carries http and https requests with its credentials, the bypass list goes direct, the password stays hidden, agents may not change it',
+        viaProxy.status === 200 &&
+          seenThrough.some((p) => p.method === 'CONNECT' && p.target === `127.0.0.1:${echoPort}` && p.auth === `Basic ${Buffer.from('smoke:proxy-pass').toString('base64')}`) &&
+          tunnelled.status === 200 &&
+          seenThrough.some((p) => p.method === 'CONNECT' && p.target === `127.0.0.1:${mtlsPort}`) &&
+          bypassed.status === 200 &&
+          seenAfterBypass === seenThrough.length &&
+          shown.hasPassword === true &&
+          shown.passwordCipher === undefined &&
+          agentNet.ok === false,
+        { seen: seenThrough, via: viaProxy.status, tunnelled: tunnelled.status, bypassed: bypassed.status, agent: agentNet.ok },
+      );
+    }
+
     return {
       ui: async (u) => {
         const { win, js, wait, shot } = u;
@@ -2135,6 +2198,32 @@ export default definePart({
           await wait(300);
           const diffProbe = (await run<ApiRequest[]>('api.request.list', {}, ws.id)).find((r) => r.name === 'diff probe');
           if (diffProbe) await run('api.request.delete', { id: diffProbe.id }, ws.id);
+        }
+
+        // Network in the UI: the Certificates tab lists a certificate, and Settings has the proxy.
+        {
+          const certs = path.join(process.cwd(), 'src', 'main', 'smoke', 'certs');
+          const cert = await run<{ id: string }>('api.certificate.save', { certificate: { hostPattern: '*.internal.test', pfxPath: path.join(certs, 'client.p12'), caPath: path.join(certs, 'ca.crt'), passphrase: 'smoke-pass' } }, ws.id);
+          await js(`document.querySelector('[data-testid=api-open-certificates]')?.click()`);
+          await until(() => js(`Boolean(${visible('[data-testid=api-cert-row]')})`).then(Boolean), 3000);
+          const certRow = await js(`${visible('[data-testid=api-cert-row]')}?.textContent.replace(/\\s+/g, ' ').trim() ?? null`);
+          await shot('03zh-certificates-light');
+          await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+          await run('api.certificate.delete', { id: cert.id }, ws.id);
+          await js(`document.querySelector('button[aria-label^="Settings"]')?.click()`);
+          await until(() => js(`Boolean(${visible('[data-testid=settings-network]')})`).then(Boolean), 3000);
+          await js(`(() => { const s = ${visible('[data-testid=settings-proxy]')}; s.value = 'manual'; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+          await wait(300);
+          const proxyFields = await js(`Boolean(${visible('[data-testid=settings-proxy-url]')}) && ${visible('[data-testid=settings-no-proxy]')}?.value === 'localhost, 127.0.0.1, ::1'`);
+          await js(`${visible('[data-testid=settings-network]')}?.scrollIntoView()`);
+          await shot('03zi-settings-network-light');
+          check(
+            'ui: the Certificates tab lists a certificate with its file and passphrase, and Settings shows the proxy fields for a manual proxy',
+            String(certRow).includes('*.internal.test') && String(certRow).includes('client.p12') && String(certRow).includes('passphrase') && proxyFields === true,
+            { certRow, proxyFields },
+          );
+          await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+          await wait(300);
         }
       },
     };

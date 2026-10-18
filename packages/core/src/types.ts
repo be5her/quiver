@@ -1,3 +1,4 @@
+import type { NetworkConfig } from './network';
 import type { ActivityBarLayout } from './activity-bar';
 import type { McpRecordingStatus } from './models/mcp-recording';
 import type { z } from 'zod';
@@ -80,6 +81,8 @@ export interface GlobalConfig {
   updates: UpdatesConfig;
   /** The user's order of the activity bar and the modules hidden from it. */
   activityBar: ActivityBarLayout;
+  /** How the API client, realtime connections and GraphQL introspection reach the network: the proxy. */
+  network: NetworkConfig;
 }
 
 /** Which releases the in-app updater follows. `beta` adds the Windows prereleases built from every merge to main. */

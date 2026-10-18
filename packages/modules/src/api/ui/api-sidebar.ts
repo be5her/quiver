@@ -1,7 +1,7 @@
 import { Component, DestroyRef, computed, effect, inject, signal } from '@angular/core';
 import { historyStatusLabel, matchesHistory, matchesRequest, shortRelativeTime, type ApiCollection, type ApiRequest, type ApiRun, type Environment, type HistoryEntry } from '@quiver/core';
 import { ContextMenu, Icon, IconButton, METHOD_COLORS, SectionHeader, Toasts, TreeState, invokeResource, statusColor } from '@quiver/ui';
-import { Braces, Check, ChevronDown, ChevronRight, Cookie, FolderPlus, Import, Plus, Search, Trash2, X } from 'lucide';
+import { Braces, Check, ChevronDown, ChevronRight, Cookie, FolderPlus, Import, Plus, Search, ShieldCheck, Trash2, X } from 'lucide';
 import { ApiActions } from './api-actions';
 import { ApiCollectionTree } from './api-collection-tree';
 import { ApiRow } from './api-row';
@@ -28,7 +28,7 @@ export class ApiSidebar {
   protected readonly api = inject(ApiActions);
   protected readonly drag = inject(ApiTreeDrag);
 
-  protected readonly icons = { Braces, Check, ChevronDown, ChevronRight, Cookie, FolderPlus, Import, Plus, Search, Trash2, X };
+  protected readonly icons = { Braces, Check, ChevronDown, ChevronRight, Cookie, FolderPlus, Import, Plus, Search, ShieldCheck, Trash2, X };
   protected readonly methodColors = METHOD_COLORS;
   protected readonly baseUrlSyntax = '{{baseUrl}}';
   protected readonly rootTarget = ROOT_TARGET;
