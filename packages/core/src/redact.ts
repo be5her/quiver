@@ -1,15 +1,23 @@
-import type { ApiRequest, ApiResponse, HistoryEntry, KeyValue, RequestAuth } from './models/api';
+import type { ApiAuth, ApiRequest, ApiResponse, HistoryEntry, KeyValue } from './models/api';
 import { findVariableSpans } from './variables';
 
 /** What a masked credential reads as. The same marker environments use for secrets shown to agents. */
 export const REDACTED = '••••••••';
 
-/** Shorter values are not scrubbed out of a text: they would match half of it. */
+/**
+ * Shorter values are not scrubbed out of a text by value: they would match half of it (`ab` is in
+ * `about`). Such a credential is still masked where it sits by name: in a credential header, parameter
+ * or auth field. The README's Agents section says so.
+ */
 const MIN_SCRUB_LENGTH = 4;
 
-const SECRET_NAME = /^(proxy-)?authorization$|^cookie$|^key$|^sig$|token|secret|passw(or)?d|api[-_]?key|access[-_]?key|signature|credential/i;
+const SECRET_NAME =
+  /^(proxy-)?authorization$|^cookie$|^key$|^sig$|^sid$|^auth$|^jwt$|^otp$|^pin$|^pass$|^x-auth|token|secret|passw(or)?d|passphrase|pwd|api[-_]?key|access[-_]?key|private[-_]?key|subscription[-_]?key|client[-_]?key|app[-_]?key|license[-_]?key|sess(ion|id)|signature|credential/i;
 
-/** Whether a header or parameter of this name carries a credential: `Authorization`, `X-API-Key`, `access_token`, `password`. */
+/**
+ * Whether a header, parameter, field or variable of this name carries a credential: `Authorization`,
+ * `X-API-Key`, `access_token`, `password`, `X-Auth`, `Ocp-Apim-Subscription-Key`, `session`, `sid`, `pwd`.
+ */
 export function isSecretName(name: string): boolean {
   return SECRET_NAME.test(name.trim());
 }
@@ -39,7 +47,7 @@ function redactHeaderValue(name: string, value: string): string {
   return /^(proxy-)?authorization$/i.test(name.trim()) ? redactAuthorization(value) : redactLiteral(value);
 }
 
-function redactAuth(auth: RequestAuth): RequestAuth {
+function redactAuth(auth: ApiAuth): ApiAuth {
   switch (auth?.type) {
     case 'bearer':
       return { ...auth, token: redactLiteral(auth.token ?? '') };
@@ -47,6 +55,8 @@ function redactAuth(auth: RequestAuth): RequestAuth {
       return { ...auth, password: redactLiteral(auth.password ?? '') };
     case 'apikey':
       return { ...auth, value: redactLiteral(auth.value ?? '') };
+    case 'oauth2':
+      return { ...auth, clientSecret: redactLiteral(auth.clientSecret ?? '') };
     default:
       return auth;
   }
@@ -72,16 +82,23 @@ function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/** The value as it sits inside a JSON string: `"` and `\` escaped, control characters as `\n` or `\uXXXX`; some encoders write `/` as `\/` too. */
+function jsonForms(value: string): string[] {
+  const escaped = JSON.stringify(value).slice(1, -1);
+  return [escaped, escaped.replace(/\//g, '\\/')];
+}
+
 /**
- * Masks every occurrence of the given secret values in a text: as they are, URL-encoded and form-encoded.
- * Values of fewer than four characters are left alone.
+ * Masks every occurrence of the given secret values in a text: as they are, URL-encoded, form-encoded
+ * and as a JSON encoder writes them inside a string (a secret holding `"`, `\` or `/` appears escaped in
+ * a JSON body). Values of fewer than four characters are left alone (`MIN_SCRUB_LENGTH`).
  */
 export function scrubSecrets(text: string, values: string[] = []): string {
   if (!text) return text;
   const secrets = [...new Set(values)].filter((v) => v.length >= MIN_SCRUB_LENGTH && v !== REDACTED).sort((a, b) => b.length - a.length);
   let out = text;
   for (const value of secrets) {
-    const forms = new Set([value, encodeURIComponent(value), new URLSearchParams([['', value]]).toString().slice(1)]);
+    const forms = new Set([value, encodeURIComponent(value), new URLSearchParams([['', value]]).toString().slice(1), ...jsonForms(value)]);
     for (const form of forms) out = out.replace(new RegExp(escapeRegExp(form), 'g'), REDACTED);
   }
   return out;
@@ -163,6 +180,7 @@ export function requestSecretValues(resolved: ApiRequest): string[] {
   if (auth.type === 'bearer') out.push(auth.token);
   if (auth.type === 'basic') out.push(auth.password);
   if (auth.type === 'apikey') out.push(auth.value);
+  if (auth.type === 'oauth2' && auth.clientSecret) out.push(auth.clientSecret);
   for (const header of resolved.headers) {
     if (!isSecretName(header.key)) continue;
     // Without the scheme: `Bearer abc` holds the secret `abc`.
@@ -183,6 +201,21 @@ export function redactSent(sent: ApiResponse['sent'], known: RedactUrlOptions = 
     url: redactUrl(sent.url, known),
     headers: sent.headers.map(([name, value]): [string, string] => [name, isSecretName(name) ? redactHeaderValue(name, value) : scrubSecrets(value, known.values)]),
     bodyPreview: sent.bodyPreview === null ? null : scrubSecrets(sent.bodyPreview, known.values),
+  };
+}
+
+/**
+ * A response's headers and body with the known secret values scrubbed, a `Location` masked as a URL
+ * is (its credential parameters too), and a binary body left as it is. Set-Cookie values are the
+ * server's own and stay; the history masks those itself.
+ */
+export function scrubResponse<T extends Pick<ApiResponse, 'headers' | 'body' | 'bodyEncoding'>>(response: T, known: RedactUrlOptions = {}): T {
+  const values = known.values ?? [];
+  if (!values.length && !known.names?.length) return response;
+  return {
+    ...response,
+    headers: response.headers.map(([name, value]): [string, string] => [name, /^(content-)?location$/i.test(name.trim()) ? redactUrl(value, known) : scrubSecrets(value, values)]),
+    body: response.bodyEncoding === 'utf8' ? scrubSecrets(response.body, values) : response.body,
   };
 }
 

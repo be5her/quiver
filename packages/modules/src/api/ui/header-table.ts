@@ -1,4 +1,4 @@
-import { Component, input } from '@angular/core';
+import { Component, booleanAttribute, input } from '@angular/core';
 
 /** Header names and values, one per row. */
 @Component({
@@ -15,8 +15,10 @@ import { Component, input } from '@angular/core';
       </tbody>
     </table>
   `,
-  host: { class: 'block overflow-auto h-full text-xs font-mono' },
+  host: { class: 'block text-xs font-mono', '[class.overflow-auto]': '!fit()', '[class.h-full]': '!fit()' },
 })
 export class HeaderTable {
   readonly headers = input.required<[string, string][]>();
+  /** Take the height of the rows instead of filling and scrolling the parent. */
+  readonly fit = input(false, { transform: booleanAttribute });
 }

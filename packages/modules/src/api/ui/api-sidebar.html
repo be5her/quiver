@@ -1,13 +1,42 @@
-<q-section-header title="Collections">
-  <button qIconButton label="New request" size="sm" (click)="api.createRequest()"><svg [qIcon]="icons.Plus" class="size-3.5"></svg></button>
-  <button qIconButton label="New GraphQL request" size="sm" (click)="api.createGraphqlRequest()"><svg [qIcon]="icons.Braces" class="size-3.5"></svg></button>
-  <button qIconButton label="New collection" size="sm" (click)="api.newCollection(null)"><svg [qIcon]="icons.FolderPlus" class="size-3.5"></svg></button>
-  <button qIconButton label="Import from curl" size="sm" (click)="api.importCurl()"><svg [qIcon]="icons.Import" class="size-3.5"></svg></button>
-</q-section-header>
-<q-api-collection-tree [collections]="collections.value() ?? []" [requests]="requests.value() ?? []" />
-@if (empty()) {
-  <p class="px-3 py-2 text-xs text-muted">No requests yet. Create one or import a curl command.</p>
-}
+<div class="px-2 pt-2 pb-1 shrink-0">
+  <div class="relative">
+    <svg [qIcon]="icons.Search" class="size-3.5 text-muted absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none"></svg>
+    <input
+      #filterBox
+      type="text"
+      class="w-full h-7 rounded-md border border-edge bg-surface pl-7 pr-7 text-xs text-fg placeholder:text-muted/70 focus:outline-none focus:border-accent focus:ring-2 focus:ring-accent/30"
+      placeholder="Filter requests and history"
+      spellcheck="false"
+      autocomplete="off"
+      data-testid="api-filter"
+      [value]="filter()"
+      (input)="setFilter($event)"
+      (keydown)="filterKey($event, filterBox)"
+    />
+    @if (filtering()) {
+      <button type="button" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted hover:text-fg" title="Clear (Esc)" (click)="clearFilter(filterBox)">
+        <svg [qIcon]="icons.X" class="size-3.5"></svg>
+      </button>
+    }
+  </div>
+</div>
+
+<div [attr.data-drop-target]="rootTarget" data-testid="api-tree-root" class="rounded-sm pb-1" [class]="drag.dnd.drag()?.target === rootTarget ? 'bg-accent/10 outline outline-1 outline-accent/60' : ''">
+  <q-section-header title="Collections">
+    <button qIconButton label="New request" size="sm" (click)="api.createRequest()"><svg [qIcon]="icons.Plus" class="size-3.5"></svg></button>
+    <button qIconButton label="New GraphQL request" size="sm" (click)="api.createGraphqlRequest()"><svg [qIcon]="icons.Braces" class="size-3.5"></svg></button>
+    <button qIconButton label="New collection" size="sm" (click)="api.newCollection(null)"><svg [qIcon]="icons.FolderPlus" class="size-3.5"></svg></button>
+    <button qIconButton label="Import from curl, OpenAPI, Postman, Insomnia or HAR" size="sm" data-testid="api-import-menu" (click)="api.importMenu($event)"><svg [qIcon]="icons.Import" class="size-3.5"></svg></button>
+    <button qIconButton label="Cookie jar" size="sm" data-testid="api-open-cookies" (click)="api.openCookieJar()"><svg [qIcon]="icons.Cookie" class="size-3.5"></svg></button>
+    <button qIconButton label="Client certificates" size="sm" data-testid="api-open-certificates" (click)="api.openCertificates()"><svg [qIcon]="icons.ShieldCheck" class="size-3.5"></svg></button>
+  </q-section-header>
+  <q-api-collection-tree [collections]="collections.value() ?? []" [requests]="requests.value() ?? []" [filter]="filter()" [lastRuns]="lastRuns()" />
+  @if (empty()) {
+    <p class="px-3 py-2 text-xs text-muted">No requests yet. Create one, or import a curl command, an OpenAPI document or a Postman, Insomnia or HAR file.</p>
+  } @else if (noMatches()) {
+    <p class="px-3 py-2 text-xs text-muted" data-testid="api-filter-empty">No request matches "{{ filter().trim() }}".</p>
+  }
+</div>
 
 <div class="mt-3">
   <q-section-header>
@@ -47,12 +76,43 @@
     }
   </q-section-header>
   @if (historyOpen()) {
-    @for (entry of history.value() ?? []; track entry.id) {
-      <button type="button" class="w-full text-left px-3 py-1 hover:bg-elevated flex items-center gap-2 min-w-0" [title]="entry.at + '\n' + entry.url" data-testid="api-history-entry" (click)="replay(entry)">
+    @for (entry of shownHistory(); track entry.id) {
+      <button
+        type="button"
+        class="w-full text-left px-3 py-1 hover:bg-elevated flex items-center gap-2 min-w-0"
+        [title]="entryTitle(entry)"
+        data-testid="api-history-entry"
+        (click)="replay(entry)"
+        (contextmenu)="historyMenu($event, entry)"
+      >
         <span class="text-[10px] font-bold w-10 shrink-0" [class]="methodColors[entry.method]">{{ entry.method }}</span>
         <span class="truncate text-xs text-fg flex-1">{{ shortUrl(entry.url) }}</span>
-        <span class="text-[10px] font-mono shrink-0" [class]="entry.status ? statusColor(entry.status) : 'text-danger'">{{ entry.status ?? 'ERR' }}</span>
+        <span class="text-[10px] font-mono shrink-0" [class]="entry.status ? statusColor(entry.status) : cancelled(entry) ? 'text-muted' : 'text-danger'">{{ statusLabel(entry) }}</span>
+        <span class="text-[10px] text-muted tabular-nums shrink-0 w-7 text-right" data-testid="api-history-age">{{ age(entry) }}</span>
       </button>
+    } @empty {
+      @if (filtering() && history.value()?.length) {
+        <p class="px-3 py-1 text-xs text-muted">No recent request matches.</p>
+      }
+    }
+    @if (moreHistory() || (filtering() && history.value()?.length)) {
+      <button type="button" class="px-3 py-1 text-xs text-accent hover:underline" data-testid="api-history-show-all" (click)="api.openHistoryTab()">Show all</button>
     }
   }
 </div>
+
+@if (drag.dnd.drag(); as dragging) {
+  <div
+    class="fixed z-50 pointer-events-none rounded-md border border-edge bg-elevated px-2 py-1 text-xs shadow-md max-w-64 truncate"
+    [style.left.px]="dragging.x + 14"
+    [style.top.px]="dragging.y + 10"
+    data-testid="api-drag-label"
+  >
+    {{ dragging.label }}
+    @if (drag.targetName(); as target) {
+      <span class="text-muted">→ {{ target }}</span>
+    } @else {
+      <span class="text-muted">: drop on a collection</span>
+    }
+  </div>
+}

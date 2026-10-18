@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { detectShellDialect, tokenizeCmd, tokenizePosix, tokenizePowerShell, type ShellDialect } from './shell';
+import { SHELL_DIALECTS, detectShellDialect, quoteCmd, quoteForShell, quotePosix, quotePowerShell, tokenizeCmd, tokenizePosix, tokenizePowerShell, tokenizeShellDialect, type ShellDialect } from './shell';
 
 const values = (tokens: { value: string }[]) => tokens.map((t) => t.value);
 
@@ -97,5 +97,39 @@ describe('tokenizePowerShell', () => {
     [`{{baseUrl}}/a`, /unquoted \{/],
   ])('rejects %j', (source, error) => {
     expect(() => tokenizePowerShell(source)).toThrow(error);
+  });
+});
+
+describe('quoteForShell', () => {
+  const nasty = [
+    'plain',
+    '',
+    'https://x.test/a?b=1&c=2|3<4>5',
+    '{"a":"x\\y","q":"it\'s"}',
+    'a "quoted" \\ back\\\\slash\\"',
+    '%PATH% and %TEMP and 100%',
+    'line1\nline2\n',
+    'tab\there (paren) ^caret^ `tick` $HOME $(x) !bang! @at #hash ; , = ~ * --% -H',
+    'C:\\dir\\',
+    'é ü 😀',
+  ];
+
+  it.each(SHELL_DIALECTS)('%s reads back exactly what it quoted', (dialect) => {
+    for (const value of nasty) {
+      const quoted = quoteForShell(dialect, value);
+      expect(values(tokenizeShellDialect(`curl ${quoted} -H ${quoted}`, dialect)), JSON.stringify(value)).toEqual(['curl', value, '-H', value]);
+    }
+  });
+
+  it('writes each shell its own way', () => {
+    expect(quotePosix("it's")).toBe(`'it'\\''s'`);
+    // cmd.exe: ^"…^" with carets on what cmd.exe acts on, MSVC escapes inside, %VAR% kept from expanding.
+    expect(quoteCmd('a "b" & c\\')).toBe('^"a ^\\^"b^\\^" ^& c^\\^\\^"');
+    expect(quoteCmd('100%VAR%')).toBe('^"100^%^VAR^%^"');
+    expect(quoteCmd('x\ny')).toBe('^"x^\n\ny^"');
+    expect(quoteCmd('')).toBe('^"^"');
+    expect(detectShellDialect(`curl ${quoteCmd('https://x.test')}`)).toBe('cmd');
+    // PowerShell: every quote it reads as a single quote doubled, so a value cannot close the literal.
+    expect(quotePowerShell("it's ’ ‘ ‚ ‛")).toBe("'it''s ’’ ‘‘ ‚‚ ‛‛'");
   });
 });

@@ -103,3 +103,24 @@ describe('FileStore external changes', () => {
     expect((await store.list('collections')).map((r) => r.id)).toEqual(['c']);
   });
 });
+
+describe('FileStore logs', () => {
+  it('writeLog replaces the log in one step, oldest first, and leaves no temp file behind', async () => {
+    const { store, root } = await tempStore();
+    for (const id of [1, 2, 3]) await store.appendLog('history', { id });
+    await store.writeLog('history', [{ id: 2 }, { id: 3 }, { id: 4 }]);
+    expect(await store.readLog<{ id: number }>('history', 10)).toEqual([{ id: 4 }, { id: 3 }, { id: 2 }]);
+    expect(await fs.readFile(path.join(root, 'local', 'history.jsonl'), 'utf8')).toBe('{"id":2}\n{"id":3}\n{"id":4}\n');
+    expect((await fs.readdir(path.join(root, 'local'))).filter((f) => f.endsWith('.tmp'))).toEqual([]);
+
+    await store.writeLog('history', []);
+    expect(await store.readLog('history', 10)).toEqual([]);
+    await store.appendLog('history', { id: 5 });
+    expect(await store.readLog<{ id: number }>('history', 10)).toEqual([{ id: 5 }]);
+
+    // A log that never existed is written too.
+    await store.writeLog('fresh', [{ id: 'a' }]);
+    expect(await store.readLog<{ id: string }>('fresh', 10)).toEqual([{ id: 'a' }]);
+    await expect(store.writeLog('../x', [])).rejects.toThrow(/Unsafe log name/);
+  });
+});

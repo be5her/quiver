@@ -22,7 +22,16 @@ import { AboutPanel } from './about-panel';
 
 type ThemePreference = GlobalConfig['theme'];
 
-/** Settings: appearance, the MCP server, Teleport, global variables and About. Saved in the global config. */
+/** The proxy settings as api.network.get gives them: the password only as whether one is kept. */
+interface NetworkView {
+  proxy: 'none' | 'system' | 'manual';
+  url: string;
+  noProxy: string[];
+  username: string;
+  hasPassword: boolean;
+}
+
+/** Settings: appearance, the MCP server, Teleport, the network, global variables and About. Saved in the global config. */
 @Component({
   selector: 'q-settings-tab',
   imports: [AboutPanel, Button, Checkbox, FormField, Input, KeyValueEditor, Label, NgTemplateOutlet, Select],
@@ -58,6 +67,16 @@ export class SettingsTab implements TabComponent {
     source: () => this.config()?.globalVariables,
     computation: (stored, previous) => (!previous || JSON.stringify(previous.value) === JSON.stringify(previous.source) ? (stored ?? []) : previous.value),
   });
+  private readonly storedNetwork = invokeResource<NetworkView>('api.network.get', () => ({}), { workspaceId: null, refreshOnEvents: ['config.changed'] });
+  /** The proxy settings being edited; they follow the stored ones until changed. */
+  protected readonly network = linkedSignal<NetworkView | undefined, NetworkView>({
+    source: () => this.storedNetwork.value(),
+    computation: (stored, previous) =>
+      !previous || previous.source === undefined || JSON.stringify(previous.value) === JSON.stringify(previous.source) ? (stored ??{ proxy: 'none', url: '', noProxy: [], username: '', hasPassword: false }) : previous.value,
+  });
+  /** Typed only to change it; the stored one is never shown. */
+  protected readonly proxyPassword = signal('');
+  protected readonly networkChanged = computed(() => Boolean(this.proxyPassword()) || JSON.stringify(this.network()) !== JSON.stringify(this.storedNetwork.value()));
   protected readonly globalsChanged = computed(() => JSON.stringify(this.globals()) !== JSON.stringify(this.config()?.globalVariables));
   protected readonly selectedPalette = computed(() => resolvePalette(this.config()?.palette).key);
   protected readonly httpUrl = computed(() => `http://127.0.0.1:${this.config()?.mcp.port}/mcp`);
@@ -123,6 +142,29 @@ export class SettingsTab implements TabComponent {
   protected async saveGlobals(): Promise<void> {
     await this.update({ globalVariables: this.globals() });
     this.toasts.notify('Global variables saved', 'success');
+  }
+
+  protected splitHosts(text: string): string[] {
+    return text
+      .split(',')
+      .map((h) => h.trim())
+      .filter(Boolean);
+  }
+
+  protected setNetwork(patch: Partial<NetworkView>): void {
+    this.network.update((n) => ({ ...n, ...patch }));
+  }
+
+  protected async saveNetwork(): Promise<void> {
+    const n = this.network();
+    try {
+      await this.host.invoke('api.network.save', { proxy: n.proxy, url: n.url, noProxy: n.noProxy.map((h) => h.trim()).filter(Boolean), username: n.username, ...(this.proxyPassword() ? { password: this.proxyPassword() } : {}) }, null);
+      this.proxyPassword.set('');
+      this.storedNetwork.reload();
+      this.toasts.notify('Network settings saved', 'success');
+    } catch (err) {
+      this.toasts.error(err);
+    }
   }
 
   protected copy(text: string): void {

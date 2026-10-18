@@ -8,7 +8,10 @@ export default definePart({
   summary: 'Realtime: WebSocket and SSE connections, reconnects, agents over MCP, the message log and composer',
   async run(t) {
     const { host, check, run, ws, folder, rpc, toolNames: names } = t;
-    const { ssePort, sseSeen, wsPort, wsSockets } = t.fixtures;
+    const { ssePort, sseSeen: allSseSeen, wsPort, wsSockets } = t.fixtures;
+    // Other parts (the API client's streamed responses) use the same SSE server; count only the requests made from here.
+    const sseFrom = allSseSeen.length;
+    const sseSeenNow = () => allSseSeen.slice(sseFrom);
 
     // ---------- realtime: WebSocket and SSE connections, send, wait, reconnect, errors ----------
     type RtWait = { message: RealtimeMessage | null; timedOut: boolean };
@@ -97,9 +100,9 @@ export default definePart({
       tick?.eventId === '1' && tick.data === '{"n":1}' && multiLine?.event === 'message' && multiLine.data === 'line one\nline two',
       sseLog.map((m) => [m.kind, m.event, m.eventId, m.data]),
     );
-    check('realtime: sse reconnects after the retry hint with Last-Event-ID', !resumed.timedOut && resumed.message?.data === 'after 2' && sseSeen.length === 2 && sseSeen[0].lastEventId === null && sseSeen[1].lastEventId === '2', sseSeen);
+    check('realtime: sse reconnects after the retry hint with Last-Event-ID', !resumed.timedOut && resumed.message?.data === 'after 2' && sseSeenNow().length === 2 && sseSeenNow()[0].lastEventId === null && sseSeenNow()[1].lastEventId === '2', sseSeenNow());
     const sseAfter = await run<RealtimeConnectionSummary>('realtime.connection.get', { id: sseConn.id }, ws.id);
-    check('realtime: sse summary tracks the last event id and sent the right headers', sseAfter.status === 'open' && sseAfter.lastEventId === '3' && sseSeen[0].accept.includes('text/event-stream') && sseSeen[0].method === 'GET');
+    check('realtime: sse summary tracks the last event id and sent the right headers', sseAfter.status === 'open' && sseAfter.lastEventId === '3' && sseSeenNow()[0].accept.includes('text/event-stream') && sseSeenNow()[0].method === 'GET');
     const sseInfo = sseLog.find((m) => m.kind === 'info');
     check('realtime: sse reconnect used the server retry hint', /Reconnecting in 200 ms/.test(sseInfo?.data ?? ''), sseInfo?.data);
     await run('realtime.disconnect', { id: sseConn.id }, ws.id);
@@ -107,7 +110,7 @@ export default definePart({
     const echoEventWait = run<RtWait>('realtime.message.wait', { id: sseConn.id, event: 'echo', timeoutMs: 5000 }, ws.id);
     await run('realtime.connect', { id: sseConn.id }, ws.id);
     const echoEvent = await echoEventWait;
-    check('realtime: sse can POST a body and streams the answer', echoEvent.message?.data === '{"subscribe":"s3cret"}' && sseSeen.at(-1)?.method === 'POST', echoEvent.message?.data);
+    check('realtime: sse can POST a body and streams the answer', echoEvent.message?.data === '{"subscribe":"s3cret"}' && sseSeenNow().at(-1)?.method === 'POST', echoEvent.message?.data);
     await run('realtime.disconnect', { id: sseConn.id }, ws.id);
     await run('realtime.connection.save', { connection: { id: sseConn.id, url: `http://127.0.0.1:${ssePort}/missing`, method: 'GET' } }, ws.id);
     const sse404 = await run<RealtimeConnectionSummary>('realtime.connect', { id: sseConn.id }, ws.id);

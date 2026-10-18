@@ -177,9 +177,15 @@ export interface SseParser {
  * lines end with CR, LF or CRLF, `data:` lines accumulate joined by LF, a blank line dispatches,
  * `:` starts a comment, an unknown field is ignored, and an event with no data is dropped.
  */
-export function createSseParser(): SseParser {
+/**
+ * `maxEventBytes` bounds a line, and the data of one event, that has not ended yet: a server that
+ * never sends the blank line would otherwise be kept whole in memory. Push throws past it.
+ */
+export function createSseParser(options: { maxEventBytes?: number } = {}): SseParser {
+  const max = options.maxEventBytes ?? Number.POSITIVE_INFINITY;
   let buffer = '';
   let data: string[] = [];
+  let dataLength = 0;
   let eventName = '';
   let lastEventId: string | null = null;
   let pendingId: string | null = null;
@@ -193,6 +199,7 @@ export function createSseParser(): SseParser {
         ? null
         : { event: eventName || 'message', data: data.join('\n'), id: pendingId ?? lastEventId, retry };
     data = [];
+    dataLength = 0;
     eventName = '';
     retry = null;
     return out;
@@ -206,6 +213,8 @@ export function createSseParser(): SseParser {
     if (value.startsWith(' ')) value = value.slice(1);
     switch (name) {
       case 'data':
+        dataLength += value.length + 1;
+        if (dataLength > max) throw new Error(`An event of more than ${Math.round(max / 1024 / 1024)} MB without its blank line: the stream was closed`);
         data.push(value);
         break;
       case 'event':
@@ -244,7 +253,13 @@ export function createSseParser(): SseParser {
       const events: SseEvent[] = [];
       for (;;) {
         const match = /\r\n|\r|\n/.exec(buffer);
-        if (!match) break;
+        if (!match) {
+          if (buffer.length > max) {
+            buffer = '';
+            throw new Error(`A line of more than ${Math.round(max / 1024 / 1024)} MB without a line break: the stream was closed`);
+          }
+          break;
+        }
         // A lone CR at the very end may be the first half of CRLF: wait for more.
         if (match[0] === '\r' && match.index === buffer.length - 1) break;
         const line = buffer.slice(0, match.index);

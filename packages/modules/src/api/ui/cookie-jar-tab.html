@@ -1,0 +1,58 @@
+<div class="flex items-center gap-2 px-3 py-2 border-b border-edge shrink-0">
+  <input
+    type="text"
+    class="w-72 h-8 rounded-md border border-edge bg-surface px-2.5 text-sm text-fg placeholder:text-muted/70 focus:outline-none focus:border-accent"
+    placeholder="Filter by domain, name or path"
+    spellcheck="false"
+    data-testid="api-cookie-filter"
+    [value]="filter()"
+    (input)="setFilter($event)"
+  />
+  <span class="text-xs text-muted" data-testid="api-cookie-count">{{ total() }} {{ total() === 1 ? 'cookie' : 'cookies' }}</span>
+  <div class="flex-1"></div>
+  @if (total()) {
+    <button qButton size="sm" variant="ghost" [icon]="icons.Trash2" data-testid="api-cookie-clear-all" (click)="clear()">Clear all</button>
+  }
+</div>
+<div class="flex-1 min-h-0 overflow-auto p-3">
+  @if (jar.value() === undefined) {
+    <span class="text-xs text-muted">Loading…</span>
+  } @else if (!total()) {
+    <q-empty-state title="The cookie jar is empty" hint="Cookies that responses set are kept here and sent with the requests that match, unless a request turns the jar off in its Settings." />
+  } @else {
+    @for (group of groups(); track group.domain) {
+      <section class="mb-4" data-testid="api-cookie-domain" [attr.data-domain]="group.domain">
+        <div class="flex items-center gap-2 mb-1">
+          <h3 class="text-sm font-semibold font-mono">{{ group.domain }}</h3>
+          <button qButton size="sm" variant="ghost" (click)="clear(group.domain)">Clear</button>
+        </div>
+        <table class="w-full text-xs">
+          <thead class="text-muted text-left">
+            <tr class="border-b border-edge">
+              <th class="py-1 pr-3 font-medium">Name</th>
+              <th class="py-1 pr-3 font-medium">Value</th>
+              <th class="py-1 pr-3 font-medium">Path</th>
+              <th class="py-1 pr-3 font-medium">Expires</th>
+              <th class="py-1 pr-3 font-medium">Flags</th>
+              <th class="w-8"></th>
+            </tr>
+          </thead>
+          <tbody class="font-mono">
+            @for (c of group.cookies; track c.name + c.path) {
+              <tr class="border-b border-edge/60 align-top" data-testid="api-cookie-row">
+                <td class="py-1 pr-3 whitespace-nowrap">{{ c.name }}</td>
+                <td class="py-1 pr-3 break-all">{{ c.value }}</td>
+                <td class="py-1 pr-3 text-muted">{{ c.path }}</td>
+                <td class="py-1 pr-3 text-muted whitespace-nowrap">{{ expiry(c) }}</td>
+                <td class="py-1 pr-3 text-muted whitespace-nowrap font-sans">{{ flags(c) }}</td>
+                <td class="py-0.5 text-right">
+                  <button qIconButton label="Delete cookie" size="sm" data-testid="api-cookie-delete" (click)="remove(c)"><svg [qIcon]="icons.Trash2" class="size-3.5"></svg></button>
+                </td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </section>
+    }
+  }
+</div>

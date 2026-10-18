@@ -13,7 +13,7 @@ Open several folders at once and switch instantly. Each workspace has its own ta
 - Workspaces in the title bar reorder by dragging the same way, and reopen in that order on the next start (`workspace.reorder`). Right-click one to close it, the others, those to the right or all, copy its path, or reveal it in the file manager.
 - The activity bar is yours to arrange: drag its icons to reorder them, and right-click it to hide a module or tick modules on and off ("Reset Order and Visibility" undoes it all). The last visible module cannot be hidden, hiding the module on screen moves to the first one still shown, and hidden modules stay reachable from the command palette. The arrangement lives in the global config, so it applies to every workspace, and a module added in a later version appears at the end.
 
-Reordering is one shared helper (`app/drag-reorder.ts`, drawn by `app/drop-marker.ts`) built on pointer events rather than HTML drag and drop, so the marker follows the pointer and the result is the same on every platform.
+Reordering is one shared helper (`dragReorder` in `packages/ui/src/drag/drag-reorder.ts`, drawn by `DropMarker`) built on pointer events rather than HTML drag and drop, so the marker follows the pointer and the result is the same on every platform. Beside it, `dragInto` drags an item onto drop targets (elements with `data-drop-target`) the same way; the API sidebar moves requests and collections with it. It clears any text selection when a drag starts, since a press on selected text would start the browser's own drag and cancel the pointer events.
 
 ## How it is built
 
@@ -34,11 +34,12 @@ Two things to know when styling: `cn` joins class names without Tailwind merging
 `packages/ui` holds what the shell and the modules share:
 
 - The host contract: `HostBridge` (commands and host events over the preload), `invokeResource` (a command as a `resource()` that runs again on store, state or host events and keeps its last value while reloading) and `injectHostEvent`.
-- State services: `AppState`, `TabsState`, `TreeState`, `UiActions` (the palette's entries), `Toasts`, `Dialogs`, the context menu and the variable hover.
+- State services: `AppState`, `TabsState`, `TreeState`, `UiActions` (the palette's entries), `Toasts`, `Dialogs` (prompt, prompt with a choice, confirm, and a notice with only OK), the context menu and the variable hover.
 - `defineModuleUI`, the renderer half of a module: id, title, icon, sidebar component, tab components by type, and palette actions created in an injection context.
+- Dragging: `dragReorder` and `DropMarker` for strips, `dragInto` for dropping items on targets.
 - Controls as directives on native elements (`button[qButton]`, `button[qIconButton]`, `input[qInput]`, `select[qSelect]`, `input[qCheckbox]`, `span[qBadge]`, `svg[qSpinner]`, `[qAutofocus]`), and components: the segmented tabs, section header, empty state, the key/value editor, the CodeMirror editor, the variable input with its hover card, and the toast, dialog and context menu hosts.
 - `VariableSource`, the injection token the variable input and hover read `{{variables}}` from; `[qVariables]` provides one, and the API module's `ApiVariables` directive provides the active environment's.
 
 ## Verified by
 
-The smoke's `shell` part ([`src/main/smoke/parts/shell.ts`](../main/smoke/parts/shell.ts)) checks the updater state of a dev build, that the default palette applies and a saved one recolours the window in both modes, and in the UI the tab strip (scrolling, dragging, Escape during a drag, middle click, the right-click menus), dragging workspaces, hiding and reordering modules in the activity bar, and the About and palette sections of the settings. `npm run smoke -- shell --shots` runs it alone with its UI checks.
+The smoke's `shell` part ([`src/main/smoke/parts/shell.ts`](../main/smoke/parts/shell.ts)) checks the updater state of a dev build, that the default palette applies and a saved one recolours the window in both modes, and in the UI the tab strip (scrolling, dragging, Escape during a drag, middle click, the right-click menus), dragging workspaces, hiding and reordering modules in the activity bar, and the About and palette sections of the settings. Settings also has a Network section (the proxy for the API client, realtime and GraphQL introspection), checked by the `api` part. `npm run smoke -- shell --shots` runs it alone with its UI checks.

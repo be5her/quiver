@@ -1,8 +1,6 @@
 import { Component, ElementRef, afterRenderEffect, computed, inject, untracked, viewChild } from '@angular/core';
-import { AppState, ContextMenu, Icon, TabsState, type Tab } from '@quiver/ui';
+import { AppState, ContextMenu, DropMarker, Icon, TabsState, dragReorder, type Tab } from '@quiver/ui';
 import { X } from 'lucide';
-import { DropMarker } from '../drop-marker';
-import { dragReorder } from '../drag-reorder';
 import { ShellActions } from '../shell-actions';
 
 /** The open tabs of the current scope: drag to reorder, middle-click or Ctrl+W to close, right-click for more. */

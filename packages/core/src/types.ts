@@ -1,3 +1,4 @@
+import type { NetworkConfig } from './network';
 import type { ActivityBarLayout } from './activity-bar';
 import type { McpRecordingStatus } from './models/mcp-recording';
 import type { z } from 'zod';
@@ -80,6 +81,8 @@ export interface GlobalConfig {
   updates: UpdatesConfig;
   /** The user's order of the activity bar and the modules hidden from it. */
   activityBar: ActivityBarLayout;
+  /** How the API client, realtime connections and GraphQL introspection reach the network: the proxy. */
+  network: NetworkConfig;
 }
 
 /** Which releases the in-app updater follows. `beta` adds the Windows prereleases built from every merge to main. */
@@ -101,6 +104,8 @@ export interface StoreApi {
   /** Append-only JSON lines logs under `.quiver/local`. */
   appendLog(name: string, entry: unknown): Promise<void>;
   readLog<T>(name: string, limit: number): Promise<T[]>;
+  /** Replaces a log with these entries, oldest first, in one step: a reader sees the old log or the new one, never part of either. */
+  writeLog(name: string, entries: unknown[]): Promise<void>;
   clearLog(name: string): Promise<void>;
 }
 
@@ -272,6 +277,11 @@ export interface HostEvents {
   'teleport.changed': { reason: 'status' | 'tunnels' | 'login' | 'pins' };
   /** Kubernetes queries: the local history changed, or a followed log stream has new lines or ended. */
   'teleport.kube.changed': { reason: 'history' | 'stream'; runId?: string };
+  /**
+   * API client: a collection run started, moved on or finished (`runId`; fetch api.run.get), a streamed response got items or
+   * ended (`streamId`; read api.request.stream.read), or a download of a send given a `sendId` got further (`received` bytes).
+   */
+  'api.changed': { workspaceId: string; reason: 'run' | 'stream' | 'progress'; runId?: string; streamId?: string; sendId?: string; received?: number };
   /** A mock server started or stopped, its definition changed, or it captured requests. */
   'mock.changed': { workspaceId: string; serverId: string; reason: 'status' | 'requests' | 'servers' };
   /** A WebSocket or SSE connection changed state, its definition changed, or messages arrived. */

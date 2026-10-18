@@ -76,6 +76,17 @@ describe('sse parser', () => {
     expect(parser.retryMs).toBe(500);
     expect(createSseParser().push('﻿data: z\n\n')[0].data).toBe('z');
   });
+
+  it('gives up on a line or an event that never ends when given a limit', () => {
+    const bounded = createSseParser({ maxEventBytes: 20 });
+    expect(bounded.push('data: fits\n\n')[0].data).toBe('fits');
+    expect(() => bounded.push('data: 0123456789')).not.toThrow();
+    expect(() => bounded.push('0123456789 and on')).toThrow(/A line of more than/);
+    const events = createSseParser({ maxEventBytes: 20 });
+    expect(events.push('data: 0123456789\n')).toEqual([]);
+    expect(() => events.push('data: 0123456789\n')).toThrow(/An event of more than/);
+    expect(() => createSseParser().push(`data: ${'x'.repeat(100)}\n`)).not.toThrow();
+  });
 });
 
 describe('schemas', () => {

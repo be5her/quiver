@@ -1,0 +1,85 @@
+@let current = run();
+<div class="flex items-center gap-3 px-3 py-2 border-b border-edge shrink-0 text-sm">
+  <span class="font-medium truncate">{{ current?.collectionName ?? tab().title }}</span>
+  @if (current) {
+    <span class="rounded px-1.5 py-px text-[10px] font-semibold uppercase" [class]="badge(current.status === 'running' ? 'running' : current.status)" data-testid="api-run-status">{{
+      current.status
+    }}</span>
+    <span class="text-xs text-muted" data-testid="api-run-summary"
+      >{{ done() }} of {{ current.items.length }} · <span class="text-success">{{ current.passed }} passed</span> ·
+      <span [class]="current.failed ? 'text-danger' : ''">{{ current.failed }} failed</span>
+      @if (elapsed(); as elapsed) {
+        · {{ elapsed }}
+      }
+    </span>
+  }
+  <div class="flex-1"></div>
+  <label class="flex items-center gap-1.5 text-xs text-muted">
+    <input qCheckbox [checked]="stopOnFail()" data-testid="api-run-stop-on-fail" (change)="stopOnFail.set($any($event.target).checked)" />
+    Stop at the first failure
+  </label>
+  @if (running()) {
+    <button qButton size="sm" variant="danger" [icon]="icons.Square" data-testid="api-run-stop" (click)="stop()">Stop</button>
+  } @else {
+    <button qButton size="sm" variant="primary" [icon]="current ? icons.RotateCw : icons.Play" [disabled]="starting()" data-testid="api-run-again" (click)="again()">
+      {{ current ? 'Run again' : 'Run' }}
+    </button>
+  }
+</div>
+@if (current) {
+  <div class="h-0.5 bg-edge shrink-0">
+    <div class="h-full transition-[width]" [class]="current.failed ? 'bg-danger' : 'bg-success'" [style.width]="progress()" data-testid="api-run-progress"></div>
+  </div>
+  <div class="flex-1 overflow-auto">
+    <table class="w-full text-xs" data-testid="api-run-table">
+      <thead class="text-muted text-left sticky top-0 bg-surface">
+        <tr>
+          <th class="font-medium px-3 py-1.5 w-8">#</th>
+          <th class="font-medium py-1.5 w-24">Result</th>
+          <th class="font-medium py-1.5">Request</th>
+          <th class="font-medium py-1.5 w-16">Status</th>
+          <th class="font-medium py-1.5 w-20">Time</th>
+          <th class="font-medium py-1.5 w-16">Checks</th>
+        </tr>
+      </thead>
+      <tbody>
+        @for (item of current.items; track $index) {
+          <tr class="border-t border-edge/60 align-top hover:bg-elevated cursor-pointer" data-testid="api-run-row" [attr.data-status]="item.status" (click)="open(item)">
+            <td class="px-3 py-1.5 text-muted">{{ $index + 1 }}</td>
+            <td class="py-1.5">
+              <span class="inline-flex items-center gap-1 rounded px-1.5 py-px text-[10px] font-semibold uppercase" [class]="badge(item.status)">
+                @if (item.status === 'running') {
+                  <svg qSpinner class="size-2.5"></svg>
+                }
+                {{ item.status }}
+              </span>
+            </td>
+            <td class="py-1.5 pr-3 min-w-0">
+              <div class="flex items-baseline gap-2 min-w-0">
+                <span class="font-bold text-[10px] shrink-0" [class]="methodColors[item.method]">{{ item.method }}</span>
+                <span class="font-medium truncate">{{ item.name }}</span>
+                @if (item.url) {
+                  <span class="text-muted font-mono truncate">{{ item.url }}</span>
+                }
+              </div>
+              @if (item.error) {
+                <div class="text-danger mt-0.5 break-all" data-testid="api-run-error">{{ item.error }}</div>
+              }
+              @for (c of failedChecks(item); track c.id) {
+                <div class="text-danger font-mono mt-0.5 break-all" data-testid="api-run-failed-check">✗ {{ c.message }}</div>
+              }
+              @if (item.captured?.length) {
+                <div class="text-muted mt-0.5">Captured {{ item.captured!.join(', ') }}</div>
+              }
+            </td>
+            <td class="py-1.5 font-semibold" [class]="item.httpStatus ? statusColor(item.httpStatus) : 'text-muted'">{{ item.httpStatus ?? '–' }}</td>
+            <td class="py-1.5 text-muted">{{ item.durationMs === null ? '–' : item.durationMs + ' ms' }}</td>
+            <td class="py-1.5" [class]="failedChecks(item).length ? 'text-danger' : 'text-success'">{{ checkCount(item) ?? '' }}</td>
+          </tr>
+        }
+      </tbody>
+    </table>
+  </div>
+} @else {
+  <q-empty-state class="flex-1" title="Not run yet" hint="Run sends every request of the collection in order, with captures carried from one to the next and checks counted." />
+}
