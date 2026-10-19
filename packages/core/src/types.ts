@@ -120,6 +120,8 @@ export interface WebResponse {
   status: number;
   headers: Record<string, string>;
   text: string;
+  /** The body as bytes, only when the request asked for `binary` (a file export); `text` is then empty. */
+  bytes?: Uint8Array;
 }
 
 /**
@@ -134,7 +136,8 @@ export interface WebSessionsApi {
    * partition focuses the open window and shares its outcome.
    */
   signIn(options: { partition: string; url: string; title: string; done(url: string): boolean | Promise<boolean> }): Promise<boolean>;
-  fetch(partition: string, url: string, init?: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number }): Promise<WebResponse>;
+  /** A request with the partition's cookies. `binary` answers with `bytes` instead of `text`, for downloads. */
+  fetch(partition: string, url: string, init?: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number; binary?: boolean }): Promise<WebResponse>;
   /** A cookie the partition holds for `url`, or null. */
   cookie(partition: string, url: string, name: string): Promise<string | null>;
   /** Forget everything the partition stored: cookies, storage and cache. */
@@ -295,6 +298,8 @@ export interface HostEvents {
   'logs.changed': { reason: 'session' | 'history'; grafanaUrl?: string; workspaceId?: string };
   /** The Grafana session for an address changed (signed in, out, or the check failed); Logs and Redis through Grafana share it. */
   'grafana.changed': { grafanaUrl: string; state: LogsSession['state'] };
+  /** Metabase: a sign-in or key check for an address changed (`session`), an API key was stored or cleared on this machine (`secret`), or the query history grew (`history`). */
+  'metabase.changed': { reason: 'session' | 'secret' | 'history'; url?: string; connectionId?: string; workspaceId?: string };
   /** The workspace's todo list changed. */
   'todo.changed': { workspaceId: string };
   /** The in-app updater moved: checking, a version found, download progress, downloaded, or an error. */

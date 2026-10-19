@@ -6,6 +6,7 @@ import { buildSchema, graphql as executeGraphql } from 'graphql';
 import type { WebSocket as WsSocket } from 'ws';
 import { startFakeGrafana } from './fake-grafana';
 import { startFakeMcpHttp, writeFakeMcpStdio } from './fake-mcp';
+import { startFakeMetabase } from './fake-metabase';
 import { startFakeNetwork } from './fake-network';
 import { startFakeOAuth } from './fake-oauth';
 import { startFakeRedis } from './fake-redis';
@@ -229,6 +230,7 @@ export async function startFixtures() {
 
   const fakeRedis = await startFakeRedis();
   const fakeGrafana = await startFakeGrafana(fakeRedis.port);
+  const fakeMetabase = await startFakeMetabase();
   const tshDir = await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-smoke-tsh-'));
   const fakeTsh = await writeFakeTsh(tshDir, fakeRedis.port);
   // The fake's stand-in for ~/.kube/config: what kubectl in the user's terminal would use.
@@ -255,6 +257,7 @@ export async function startFixtures() {
     wsSockets,
     fakeRedis,
     fakeGrafana,
+    fakeMetabase,
     fakeTsh,
     mcpDir,
     fakeStdio,
@@ -272,6 +275,7 @@ export async function startFixtures() {
       wsHttp.close();
       await fakeRedis.close();
       await fakeGrafana.close();
+      await fakeMetabase.close();
       await fakeMcp.close();
       await fakeOAuth.close();
       await fakeNetwork.close();

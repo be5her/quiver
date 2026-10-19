@@ -47,6 +47,7 @@ export class ElectronWebSessions implements WebSessionsApi {
     }
 
     const parent = BrowserWindow.getFocusedWindow() ?? undefined;
+    const webPreferences = { session: this.get(options.partition), sandbox: true, contextIsolation: true, nodeIntegration: false, spellcheck: false };
     const win = new BrowserWindow({
       width: 520,
       height: 720,
@@ -55,7 +56,7 @@ export class ElectronWebSessions implements WebSessionsApi {
       parent,
       autoHideMenuBar: true,
       icon: process.platform === 'darwin' ? undefined : iconPath,
-      webPreferences: { session: this.get(options.partition), sandbox: true, contextIsolation: true, nodeIntegration: false, spellcheck: false },
+      webPreferences,
     });
     // The window keeps saying what it is for, whatever page is in it.
     win.on('page-title-updated', (event) => event.preventDefault());
@@ -68,6 +69,7 @@ export class ElectronWebSessions implements WebSessionsApi {
       const settle = (ok: boolean, error?: Error) => {
         if (settled) return;
         settled = true;
+        clearInterval(poll);
         this.pending.delete(options.partition);
         void this.get(options.partition).cookies.flushStore().catch(() => {});
         if (error) reject(error);
@@ -75,7 +77,7 @@ export class ElectronWebSessions implements WebSessionsApi {
         if (!win.isDestroyed()) win.close();
       };
       const check = async (url: string) => {
-        if (settled || checking) return;
+        if (settled || checking || !url) return;
         checking = true;
         try {
           if (await options.done(url)) settle(true);
@@ -86,11 +88,24 @@ export class ElectronWebSessions implements WebSessionsApi {
         }
       };
 
-      win.on('closed', () => settle(false));
-      // Identity providers sometimes open a popup; it loads in this window instead, and only over http(s).
+      win.on('closed', () => {
+        clearInterval(poll);
+        settle(false);
+      });
+      // Identity providers open popups (Google's sign-in button does) and post the outcome back to the
+      // page that opened them, so a popup gets a window of its own, sandboxed the same way and closed with
+      // this one; anything but http(s) is refused.
       win.webContents.setWindowOpenHandler(({ url }) => {
-        if (/^https?:/i.test(url)) void win.loadURL(url);
-        return { action: 'deny' };
+        if (!/^https?:/i.test(url)) return { action: 'deny' };
+        return { action: 'allow', overrideBrowserWindowOptions: { parent: win, show: this.options.show, autoHideMenuBar: true, icon: process.platform === 'darwin' ? undefined : iconPath, webPreferences } };
+      });
+      win.webContents.on('did-create-window', (child) => {
+        child.on('page-title-updated', (event) => event.preventDefault());
+        child.webContents.on('will-navigate', (event, url) => {
+          if (!/^https?:/i.test(url)) event.preventDefault();
+        });
+        // A popup that signs the page in without the page navigating (a posted message) is still noticed.
+        child.on('closed', () => void check(win.isDestroyed() ? '' : win.webContents.getURL()));
       });
       win.webContents.on('will-navigate', (event, url) => {
         if (!/^https?:/i.test(url)) event.preventDefault();
@@ -100,23 +115,32 @@ export class ElectronWebSessions implements WebSessionsApi {
         void check(url);
       });
       win.webContents.on('did-navigate-in-page', (_event, url, isMainFrame) => isMainFrame && void check(url));
+      win.webContents.on('did-finish-load', () => void check(win.webContents.getURL()));
       win.webContents.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
         // Only an address that never loads is an error; -3 is an aborted load, which redirects produce.
         if (isMainFrame && !committed && code !== -3) settle(false, new Error(`Could not open ${url}: ${description}`));
       });
+      // A sign-in that finishes without a navigation this window sees (a single-page app that only
+      // swaps its view, a popup that posted back) is caught by looking again every couple of seconds.
+      const poll = setInterval(() => {
+        if (settled || win.isDestroyed()) return clearInterval(poll);
+        if (committed) void check(win.webContents.getURL());
+      }, 2000);
       void win.loadURL(options.url).catch(() => {});
     });
     this.pending.set(options.partition, { win, outcome });
     return outcome;
   }
 
-  async fetch(partition: string, url: string, init: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number } = {}): Promise<WebResponse> {
+  async fetch(partition: string, url: string, init: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number; binary?: boolean } = {}): Promise<WebResponse> {
     const controller = new AbortController();
     const timeoutMs = init.timeoutMs ?? 60_000;
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await this.get(partition).fetch(url, { method: init.method ?? 'GET', headers: init.headers, body: init.body, signal: controller.signal });
-      return { status: res.status, headers: Object.fromEntries(res.headers), text: await res.text() };
+      const headers = Object.fromEntries(res.headers);
+      if (init.binary) return { status: res.status, headers, text: '', bytes: new Uint8Array(await res.arrayBuffer()) };
+      return { status: res.status, headers, text: await res.text() };
     } catch (err) {
       if (controller.signal.aborted) throw new Error(`${url} did not answer within ${Math.round(timeoutMs / 1000)} s`);
       throw err;

@@ -11,6 +11,7 @@ import db from './parts/db';
 import env from './parts/env';
 import logs from './parts/logs';
 import mcp from './parts/mcp';
+import metabase from './parts/metabase';
 import mock from './parts/mock';
 import realtime from './parts/realtime';
 import shell from './parts/shell';
@@ -19,7 +20,7 @@ import todo from './parts/todo';
 import tools from './parts/tools';
 
 /** Every part, in the order they run. A full run is all of them; `npm run smoke -- db mock` picks some. */
-export const PARTS: SmokePart[] = [api, tools, db, teleport, mock, realtime, mcp, env, todo, logs, shell];
+export const PARTS: SmokePart[] = [api, tools, db, teleport, mock, realtime, mcp, env, todo, logs, metabase, shell];
 
 type Phase = 'host' | 'renderer' | 'ui' | 'after';
 

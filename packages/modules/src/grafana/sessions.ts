@@ -55,10 +55,11 @@ export class GrafanaSessions {
         partition: grafanaPartition(base),
         url: login.href,
         title: `Sign in to Grafana · ${login.host}`,
-        // Signed in once Grafana serves a page that is not the login form and knows the user.
+        // Signed in once Grafana serves a page that is not the login form and knows the user. The host is
+        // compared, not the origin: a server that upgrades http to https is still the same Grafana.
         done: async (url) => {
           const at = new URL(url);
-          if (at.origin !== login.origin || at.pathname.startsWith(login.pathname)) return false;
+          if (at.host !== login.host || at.pathname.startsWith(login.pathname)) return false;
           return (await this.whoami(host, base)) !== null;
         },
       });
