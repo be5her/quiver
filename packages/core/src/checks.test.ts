@@ -99,4 +99,16 @@ describe('evaluateChecks', () => {
     expect(scrubCheckResults(results, [])).toBe(results);
     expect(scrubCheckResults([{ id: 'x', ok: false, actual: null, message: 'nothing' }], ['application/json'])[0].actual).toBeNull();
   });
+
+  it('scrubs the start of a secret that the message cuts short', () => {
+    const token = `eyJ${'a'.repeat(120)}.sig`;
+    const body = JSON.stringify({ access_token: token });
+    const [result] = evaluateChecks([check({ id: 't', on: 'jsonPath', path: '$.access_token', op: 'exists', expected: '' })], { ...response, body });
+    expect(result.message).toContain('eyJaaa');
+    const scrubbed = scrubCheckResults([result], [token]);
+    expect(scrubbed[0]).toMatchObject({ actual: REDACTED, message: `$.access_token is "${REDACTED}…"` });
+    const [bearer] = scrubCheckResults(evaluateChecks([check({ id: 'b', on: 'body', path: '', op: 'exists', expected: '' })], { ...response, body: `Bearer ${token}` }), [token]);
+    expect(bearer.message).not.toContain('eyJ');
+    expect(bearer.message).toContain(`Bearer ${REDACTED}…`);
+  });
 });

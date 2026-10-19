@@ -687,6 +687,25 @@ export default definePart({
           nullCapture?.ok === false && (nullCapture.error ?? '').includes('null') && userAfterNull === '7',
         { checks: checkedResponse?.checks, nullCapture, userAfterNull, error: checkedLogin.ok ? undefined : checkedLogin.error },
       );
+      // A message cuts a long value short with "…": the part of a secret before the cut is masked too.
+      const longSecret = await host.invoke(
+        'api.request.send',
+        {
+          request: {
+            ...login,
+            url: `{{baseUrl}}/long?t=${'q'.repeat(120)}`,
+            capture: [cap('capLong', 'body', '$.url', true)],
+            checks: [{ id: 'k1', enabled: true, on: 'jsonPath', op: 'exists', path: '$.url', expected: '' }],
+          },
+        },
+        { caller: 'mcp', workspaceId: ws.id },
+      );
+      const longCheck = longSecret.ok ? (longSecret.result as ApiResponse).checks?.[0] : undefined;
+      check(
+        'checks: an agent gets no part of a secret that a check message cuts short',
+        longCheck?.ok === true && longCheck.actual === REDACTED && longCheck.message.endsWith(`${REDACTED}…"`) && !longCheck.message.includes('qqqq'),
+        { check: longCheck, error: longSecret.ok ? undefined : longSecret.error },
+      );
       const cleaned = await run<Environment>('api.environment.get', { id: env.id }, ws.id);
       await run('api.environment.save', { environment: { ...cleaned, variables: cleaned.variables.filter((v) => !v.key.startsWith('cap')) } }, ws.id);
     }

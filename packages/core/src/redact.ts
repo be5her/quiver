@@ -9,7 +9,7 @@ export const REDACTED = '••••••••';
  * `about`). Such a credential is still masked where it sits by name: in a credential header, parameter
  * or auth field. The README's Agents section says so.
  */
-const MIN_SCRUB_LENGTH = 4;
+export const MIN_SCRUB_LENGTH = 4;
 
 const SECRET_NAME =
   /^(proxy-)?authorization$|^cookie$|^key$|^sig$|^sid$|^auth$|^jwt$|^otp$|^pin$|^pass$|^x-auth|token|secret|passw(or)?d|passphrase|pwd|api[-_]?key|access[-_]?key|private[-_]?key|subscription[-_]?key|client[-_]?key|app[-_]?key|license[-_]?key|sess(ion|id)|signature|credential/i;
