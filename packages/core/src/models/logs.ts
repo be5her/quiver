@@ -127,6 +127,11 @@ export function newLogsConnection(partial: Partial<LogsConnection> = {}): LogsCo
 
 /** `grafana.example.com/` becomes `https://grafana.example.com`; a sub-path stays, query and hash go. Empty when it is no http(s) address. */
 export function normalizeGrafanaUrl(raw: string): string {
+  return normalizeServiceUrl(raw);
+}
+
+/** The address of a web service signed in to from Quiver, as Grafana and Metabase take it: scheme added, sub-path kept, query and hash dropped. */
+export function normalizeServiceUrl(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return '';
   const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;

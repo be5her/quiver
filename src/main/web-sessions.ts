@@ -110,13 +110,15 @@ export class ElectronWebSessions implements WebSessionsApi {
     return outcome;
   }
 
-  async fetch(partition: string, url: string, init: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number } = {}): Promise<WebResponse> {
+  async fetch(partition: string, url: string, init: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number; binary?: boolean } = {}): Promise<WebResponse> {
     const controller = new AbortController();
     const timeoutMs = init.timeoutMs ?? 60_000;
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await this.get(partition).fetch(url, { method: init.method ?? 'GET', headers: init.headers, body: init.body, signal: controller.signal });
-      return { status: res.status, headers: Object.fromEntries(res.headers), text: await res.text() };
+      const headers = Object.fromEntries(res.headers);
+      if (init.binary) return { status: res.status, headers, text: '', bytes: new Uint8Array(await res.arrayBuffer()) };
+      return { status: res.status, headers, text: await res.text() };
     } catch (err) {
       if (controller.signal.aborted) throw new Error(`${url} did not answer within ${Math.round(timeoutMs / 1000)} s`);
       throw err;
