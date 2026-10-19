@@ -95,8 +95,8 @@ const METADATA = {
 };
 
 /**
- * Enough Metabase for the smoke test of the metabase module: a login page that signs in without hands (the meta
- * refresh stands in for the click, the redirect for the identity provider) and sets `metabase.SESSION`, or an API key
+ * Enough Metabase for the smoke test of the metabase module: a login page that signs in without hands through a popup
+ * (the identity provider's window posts back to its opener and closes, as Google sign-in does) and sets `metabase.SESSION`, or an API key
  * in `x-api-key`; one database with two tables, a collection tree with two questions and a dashboard, search, native
  * queries (`boom` fails the way Metabase reports a SQL error, `big` comes back cut at 2000 rows) and the export
  * endpoints, which take form-encoded bodies as Metabase's own download buttons send them.
@@ -278,20 +278,18 @@ export async function startFakeMetabase(): Promise<FakeMetabase> {
             return;
           }
           res.writeHead(200, { 'content-type': 'text/html' });
-          res.end('<!doctype html><title>Metabase</title><meta http-equiv="refresh" content="0;url=/auth/sso"><p>Sign in with SSO</p>');
+          res.end(
+            "<!doctype html><title>Metabase</title><p>Sign in with Google</p><script>const w = window.open('/auth/sso/popup', 'mb-sso'); window.addEventListener('message', (e) => { if (e.data === 'metabase-signed-in') location.href = '/'; });</script>",
+          );
           return;
         }
-        if (path === '/auth/sso') {
-          res.writeHead(302, { location: '/auth/sso/callback?code=smoke' });
-          res.end();
-          return;
-        }
-        if (path === '/auth/sso/callback') {
+        if (path === '/auth/sso/popup') {
+          // The identity provider's popup: it signs in, tells its opener and closes, the way Google Identity Services does.
           const token = randomUUID();
           sessions.add(token);
           seen.logins++;
-          res.writeHead(302, { location: '/', 'Set-Cookie': `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=1209600` });
-          res.end();
+          res.writeHead(200, { 'content-type': 'text/html', 'Set-Cookie': `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=1209600` });
+          res.end("<!doctype html><title>Sign in</title><script>window.opener.postMessage('metabase-signed-in', '*'); window.close();</script>");
           return;
         }
         if (path === '/') {

@@ -69,10 +69,11 @@ export class MetabaseSessions {
         partition: metabasePartition(base),
         url: login.href,
         title: `Sign in to Metabase · ${login.host}`,
-        // Signed in once Metabase serves a page outside its sign-in pages and knows the user.
+        // Signed in once Metabase serves a page outside its sign-in pages and knows the user. The host is
+        // compared, not the origin: a server that upgrades http to https is still the same Metabase.
         done: async (url) => {
           const at = new URL(url);
-          if (at.origin !== login.origin || at.pathname.startsWith(authPath)) return false;
+          if (at.host !== login.host || at.pathname.startsWith(authPath)) return false;
           return (await this.whoami(host, base)) !== null;
         },
       });
