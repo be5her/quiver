@@ -476,7 +476,8 @@ describe('importHar', () => {
     const upload = find(result, 'POST /upload');
     expect(upload.headers).toEqual([]);
     expect(upload.body).toMatchObject({ type: 'form', fields: [{ key: 'f', kind: 'file', value: '', fileName: 'a.png', contentType: 'image/png' }, { key: 'n', value: '1' }] });
-    expect(JSON.stringify(result)).not.toMatch(/eyJhbGciOi|k-123|hunter2|sid=1|abc/);
+    // The token is matched with its parameter: ids are random hex, where a bare "abc" turns up by chance.
+    expect(JSON.stringify(result)).not.toMatch(/eyJhbGciOi|k-123|hunter2|sid=1|access_token=abc|"abc"/);
     expect(result.skipped).toContain('2 page loads (documents, scripts, styles, images, fonts) left out');
     expect(result.skipped).toContain('1 repeated request left out');
     expect(result.skipped).toContain('The authorization credential was replaced with {{authorization}}; define it in an environment');
