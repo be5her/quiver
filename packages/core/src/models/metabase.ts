@@ -160,6 +160,81 @@ export interface MetabaseExportResult {
   bytes: number;
 }
 
+// ---------- table browsing through the query builder (MBQL) ----------
+
+/**
+ * The filters a table view offers, as Metabase's query builder names them. They run with the
+ * query-builder permission, which users without native SQL access usually have.
+ */
+export const METABASE_FILTER_OPS = ['=', '!=', '>', '>=', '<', '<=', 'contains', 'does-not-contain', 'starts-with', 'ends-with', 'is-null', 'not-null', 'is-empty', 'not-empty'] as const;
+export type MetabaseFilterOp = (typeof METABASE_FILTER_OPS)[number];
+export const METABASE_FILTER_LABELS: Record<MetabaseFilterOp, string> = {
+  '=': 'is',
+  '!=': 'is not',
+  '>': '>',
+  '>=': '≥',
+  '<': '<',
+  '<=': '≤',
+  contains: 'contains',
+  'does-not-contain': 'does not contain',
+  'starts-with': 'starts with',
+  'ends-with': 'ends with',
+  'is-null': 'is null',
+  'not-null': 'is not null',
+  'is-empty': 'is empty',
+  'not-empty': 'is not empty',
+};
+/** Operators that take no value. */
+export const METABASE_UNARY_OPS: ReadonlySet<MetabaseFilterOp> = new Set(['is-null', 'not-null', 'is-empty', 'not-empty']);
+
+export const MetabaseTableFilterSchema = z.object({
+  /** A field id from `metabase.tables`. */
+  fieldId: z.number().int(),
+  op: z.enum(METABASE_FILTER_OPS),
+  /** A string, number or boolean; left out for the operators that take none. Numbers in text are sent as numbers for numeric fields by the UI. */
+  value: z.union([z.string(), z.number(), z.boolean()]).optional(),
+});
+export type MetabaseTableFilter = z.infer<typeof MetabaseTableFilterSchema>;
+
+export const MetabaseTableOrderSchema = z.object({
+  fieldId: z.number().int(),
+  direction: z.enum(['asc', 'desc']).default('asc'),
+});
+export type MetabaseTableOrder = z.infer<typeof MetabaseTableOrderSchema>;
+
+/** The rows asked of a table: a page, in an order, through filters. */
+export interface MetabaseTableQuery {
+  databaseId: number;
+  tableId: number;
+  /** Rows per page, 1 to 2000. */
+  limit: number;
+  /** Page number from 1; Metabase pages by `limit` rows. */
+  page: number;
+  orderBy: MetabaseTableOrder | null;
+  filters: MetabaseTableFilter[];
+}
+
+/** One MBQL filter clause as `/api/dataset` takes it. */
+export function mbqlFilter(filter: MetabaseTableFilter): unknown[] {
+  const field = ['field', filter.fieldId, null];
+  if (METABASE_UNARY_OPS.has(filter.op)) return [filter.op, field];
+  return [filter.op, field, filter.value ?? ''];
+}
+
+/**
+ * The query-builder (MBQL) dataset query for a table page: `source-table`, the filters ANDed, the
+ * order, and `page` for the rows past the first page. Metabase runs it with the user's query-builder
+ * permission, so it works where native SQL is not allowed.
+ */
+export function mbqlTableQuery(q: MetabaseTableQuery): Record<string, unknown> {
+  const query: Record<string, unknown> = { 'source-table': q.tableId, limit: q.limit };
+  if (q.filters.length === 1) query['filter'] = mbqlFilter(q.filters[0]!);
+  else if (q.filters.length > 1) query['filter'] = ['and', ...q.filters.map(mbqlFilter)];
+  if (q.orderBy) query['order-by'] = [[q.orderBy.direction, ['field', q.orderBy.fieldId, null]]];
+  if (q.page > 1) query['page'] = { page: q.page, items: q.limit };
+  return { database: q.databaseId, type: 'query', query };
+}
+
 /** One native query run from the editor, recorded per machine. */
 export interface MetabaseHistoryEntry {
   id: string;

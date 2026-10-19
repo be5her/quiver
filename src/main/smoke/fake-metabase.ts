@@ -5,9 +5,19 @@ export interface FakeMetabase {
   url: string;
   /** The API key the fake accepts in `x-api-key`. */
   apiKey: string;
-  /** What the module did: sign-ins completed, sessions ended, native SQL run, requests made with the key, export formats asked for. */
-  seen: { logins: number; logouts: number; sql: string[]; apiKeyCalls: number; exports: string[] };
+  /**
+   * What the module did: sign-ins completed, sessions ended, native SQL run, query-builder (MBQL) bodies sent to
+   * `/api/dataset` and its exports, requests made with the key, export formats asked for.
+   */
+  seen: { logins: number; logouts: number; sql: string[]; mbql: MbqlBody[]; apiKeyCalls: number; exports: string[] };
   close(): Promise<void>;
+}
+
+/** A query-builder dataset query as `/api/dataset` takes it. */
+export interface MbqlBody {
+  database?: number;
+  type?: string;
+  query?: { 'source-table'?: number; limit?: number; filter?: unknown[]; 'order-by'?: unknown[][]; page?: { page: number; items: number } };
 }
 
 const API_KEY = 'mb-smoke-key';
@@ -23,6 +33,44 @@ const ORDER_ROWS: unknown[][] = [
   [2, 'Linus', 30],
   [3, 'Grace', 7.25],
 ];
+
+/** The tables the query builder reads, by id: their fields (in column order) and rows. Native SQL keeps answering `ORDER_ROWS`. */
+interface FakeTable {
+  name: string;
+  cols: { id: number; name: string; display_name: string; base_type: string }[];
+  rows: unknown[][];
+}
+const TABLES: Record<number, FakeTable> = {
+  11: {
+    name: 'orders',
+    cols: [
+      { id: 101, ...ORDER_COLS[0]! },
+      { id: 102, ...ORDER_COLS[1]! },
+      { id: 103, ...ORDER_COLS[2]! },
+    ],
+    rows: [...ORDER_ROWS, [4, 'Marie', 1], [5, 'Alan', 50], [6, 'Edsger', 8], [7, 'Barbara', 22]],
+  },
+  12: {
+    name: 'customers',
+    cols: [
+      { id: 104, name: 'id', display_name: 'ID', base_type: 'type/Integer' },
+      { id: 105, name: 'name', display_name: 'Name', base_type: 'type/Text' },
+    ],
+    rows: [
+      [1, 'Ada'],
+      [2, 'Linus'],
+    ],
+  },
+  // Enough rows for the table tab to page through at its default page size.
+  13: {
+    name: 'events',
+    cols: [
+      { id: 106, name: 'id', display_name: 'ID', base_type: 'type/Integer' },
+      { id: 107, name: 'kind', display_name: 'Kind', base_type: 'type/Text' },
+    ],
+    rows: Array.from({ length: 120 }, (_, i) => [i + 1, ['click', 'view', 'buy'][i % 3]!]),
+  },
+};
 
 const CUSTOMER_PARAMETER = { id: 'p1', name: 'Customer', slug: 'customer', type: 'string/=', target: ['variable', ['template-tag', 'customer']] };
 
@@ -91,19 +139,109 @@ const METADATA = {
         { id: 105, name: 'name', display_name: 'Name', base_type: 'type/Text', database_type: 'text' },
       ],
     },
+    {
+      id: 13,
+      name: 'events',
+      display_name: 'Events',
+      schema: 'public',
+      fields: [
+        { id: 106, name: 'id', display_name: 'ID', base_type: 'type/Integer', database_type: 'int4' },
+        { id: 107, name: 'kind', display_name: 'Kind', base_type: 'type/Text', database_type: 'text' },
+      ],
+    },
   ],
 };
+
+function fieldIndex(table: FakeTable, ref: unknown): number {
+  const id = Array.isArray(ref) && ref[0] === 'field' ? (ref[1] as unknown) : undefined;
+  const index = table.cols.findIndex((c) => c.id === id);
+  if (index < 0) throw new Error(`Field ${JSON.stringify(ref)} is not in table ${table.name}`);
+  return index;
+}
+
+/** Whether a row passes an MBQL filter clause; a field the table does not have throws. */
+function passes(table: FakeTable, clause: unknown[], row: unknown[]): boolean {
+  const [op, ref, value] = clause as [string, unknown, unknown];
+  if (op === 'and') return clause.slice(1).every((c) => passes(table, c as unknown[], row));
+  if (op === 'or') return clause.slice(1).some((c) => passes(table, c as unknown[], row));
+  const cell = row[fieldIndex(table, ref)];
+  const present = cell !== null && cell !== undefined;
+  const text = (x: unknown) => String(x ?? '').toLowerCase();
+  const equal = cell === value || (present && value !== undefined && String(cell) === String(value));
+  switch (op) {
+    case '=':
+      return equal;
+    case '!=':
+      return !equal;
+    case '>':
+      return present && Number(cell) > Number(value);
+    case '>=':
+      return present && Number(cell) >= Number(value);
+    case '<':
+      return present && Number(cell) < Number(value);
+    case '<=':
+      return present && Number(cell) <= Number(value);
+    // Case-insensitive, as Metabase compares text on most databases.
+    case 'contains':
+      return present && text(cell).includes(text(value));
+    case 'does-not-contain':
+      return present && !text(cell).includes(text(value));
+    case 'starts-with':
+      return present && text(cell).startsWith(text(value));
+    case 'ends-with':
+      return present && text(cell).endsWith(text(value));
+    case 'is-null':
+      return !present;
+    case 'not-null':
+      return present;
+    case 'is-empty':
+      return !present || cell === '';
+    case 'not-empty':
+      return present && cell !== '';
+    default:
+      throw new Error(`Unknown filter ${String(op)}`);
+  }
+}
+
+/** What an MBQL query answers: the table's rows through its filter, order, page and limit, or Metabase's failure. */
+function mbqlRows(body: MbqlBody): { table: FakeTable; rows: unknown[][] } | { error: string } {
+  const query = body.query ?? {};
+  const id = query['source-table'];
+  const table = typeof id === 'number' ? TABLES[id] : undefined;
+  if (!table) return { error: `Table ${String(id)} does not exist` };
+  try {
+    let rows = table.rows.filter((r) => !query.filter || passes(table, query.filter, r));
+    const order = (query['order-by'] ?? []).map(([direction, ref]) => ({ sign: direction === 'desc' ? -1 : 1, index: fieldIndex(table, ref) }));
+    if (order.length) {
+      rows = [...rows].sort((a, b) => {
+        for (const { sign, index } of order) {
+          const x = a[index];
+          const y = b[index];
+          const c = x === y ? 0 : x === null ? -1 : y === null ? 1 : typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y));
+          if (c !== 0) return sign * c;
+        }
+        return 0;
+      });
+    }
+    if (query.page) rows = rows.slice((query.page.page - 1) * query.page.items, query.page.page * query.page.items);
+    if (typeof query.limit === 'number') rows = rows.slice(0, query.limit);
+    return { table, rows };
+  } catch (err) {
+    return { error: (err as Error).message };
+  }
+}
 
 /**
  * Enough Metabase for the smoke test of the metabase module: a login page that signs in without hands through a popup
  * (the identity provider's window posts back to its opener and closes, as Google sign-in does) and sets `metabase.SESSION`, or an API key
- * in `x-api-key`; one database with two tables, a collection tree with two questions and a dashboard, search, native
- * queries (`boom` fails the way Metabase reports a SQL error, `big` comes back cut at 2000 rows) and the export
- * endpoints, which take form-encoded bodies as Metabase's own download buttons send them.
+ * in `x-api-key`; one database with three tables, a collection tree with two questions and a dashboard, search, native
+ * queries (`boom` fails the way Metabase reports a SQL error, `big` comes back cut at 2000 rows), query-builder (MBQL)
+ * table queries with filters, order, page and limit (a table that does not exist fails the way Metabase says it) and
+ * the export endpoints, which take form-encoded bodies as Metabase's own download buttons send them.
  */
 export async function startFakeMetabase(): Promise<FakeMetabase> {
   const sessions = new Set<string>();
-  const seen: FakeMetabase['seen'] = { logins: 0, logouts: 0, sql: [], apiKeyCalls: 0, exports: [] };
+  const seen: FakeMetabase['seen'] = { logins: 0, logouts: 0, sql: [], mbql: [], apiKeyCalls: 0, exports: [] };
 
   const cookieOf = (req: IncomingMessage, name: string) =>
     (req.headers.cookie ?? '')
@@ -144,17 +282,19 @@ export async function startFakeMetabase(): Promise<FakeMetabase> {
     const matching = ORDER_ROWS.filter((r) => r[1] === value);
     return matching.length ? matching : [[0, String(value), 0]];
   };
-  const dataset = (rows: unknown[][], truncated?: number) => ({
+  const dataset = (rows: unknown[][], truncated?: number, cols: unknown[] = ORDER_COLS) => ({
     status: 'completed',
     row_count: rows.length,
     running_time: 12,
-    data: { cols: ORDER_COLS, rows, ...(truncated ? { rows_truncated: truncated } : {}) },
+    data: { cols, rows, ...(truncated ? { rows_truncated: truncated } : {}) },
   });
+  /** A query-builder table's columns as `/api/dataset` describes them, with their field refs. */
+  const tableCols = (table: FakeTable) => table.cols.map((c) => ({ ...c, field_ref: ['field', c.id, null] }));
   const failed = (error: string) => ({ status: 'failed', error, error_type: 'invalid-query', row_count: 0, running_time: 3, data: { rows: [], cols: [] } });
 
   /** The bytes of an export, in the content type Metabase answers with. */
-  const exported = (format: string, rows: unknown[][]): { type: string; body: Buffer } => {
-    const names = ORDER_COLS.map((c) => c.display_name);
+  const exported = (format: string, rows: unknown[][], cols: { display_name: string }[] = ORDER_COLS): { type: string; body: Buffer } => {
+    const names = cols.map((c) => c.display_name);
     if (format === 'csv') return { type: 'text/csv', body: Buffer.from([names.join(','), ...rows.map((r) => r.join(','))].join('\n') + '\n') };
     if (format === 'json') return { type: 'application/json', body: Buffer.from(JSON.stringify(rows.map((r) => Object.fromEntries(names.map((n, i) => [n, r[i]]))))) };
     // Not a real workbook, but shaped like one: a zip signature and a few hundred bytes.
@@ -237,7 +377,13 @@ export async function startFakeMetabase(): Promise<FakeMetabase> {
       return;
     }
     if (path === '/api/dataset' && method === 'POST') {
-      const body = JSON.parse(raw || '{}') as { database?: number; type?: string; native?: { query?: string } };
+      const body = JSON.parse(raw || '{}') as MbqlBody & { native?: { query?: string } };
+      if (body.type === 'query') {
+        seen.mbql.push(body);
+        if (body.database !== 1) return json(res, 202, failed(`Database ${String(body.database)} does not exist.`));
+        const out = mbqlRows(body);
+        return json(res, 202, 'error' in out ? failed(out.error) : dataset(out.rows, undefined, tableCols(out.table)));
+      }
       const sql = body.native?.query ?? '';
       seen.sql.push(sql);
       if (body.database !== 1) return json(res, 202, failed(`Database ${String(body.database)} does not exist.`));
@@ -249,7 +395,18 @@ export async function startFakeMetabase(): Promise<FakeMetabase> {
       const form = formOf(req, raw);
       const query = form?.get('query');
       if (!form || !query) return json(res, 400, { message: 'Expected a form-encoded body with a query' });
-      const parsed = JSON.parse(query) as { database?: number; native?: { query?: string } };
+      const parsed = JSON.parse(query) as MbqlBody & { native?: { query?: string } };
+      if (parsed.type === 'query') {
+        seen.mbql.push(parsed);
+        if (parsed.database !== 1) return json(res, 400, { message: `Database ${String(parsed.database)} does not exist.` });
+        const out = mbqlRows(parsed);
+        if ('error' in out) return json(res, 400, { message: out.error });
+        seen.exports.push(datasetExport[1]!);
+        const file = exported(datasetExport[1]!, out.rows, out.table.cols);
+        res.writeHead(200, { 'content-type': file.type, 'content-disposition': `attachment; filename="query_result.${datasetExport[1]}"` });
+        res.end(file.body);
+        return;
+      }
       const sql = parsed.native?.query;
       if (parsed.database !== 1 || typeof sql !== 'string') return json(res, 400, { message: 'The query has no native SQL for database 1' });
       const out = nativeRows(sql);

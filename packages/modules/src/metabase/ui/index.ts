@@ -6,6 +6,7 @@ import { MetabaseActions } from './metabase-actions';
 import { MetabaseSidebar } from './metabase-sidebar';
 import { MetabaseQueryTab } from './query-tab';
 import { MetabaseQuestionTab } from './question-tab';
+import { MetabaseTableTab } from './table-tab';
 
 export const metabaseModuleUI = defineModuleUI({
   id: 'metabase',
@@ -18,6 +19,7 @@ export const metabaseModuleUI = defineModuleUI({
     'metabase.connection': MetabaseConnectionTab,
     'metabase.question': MetabaseQuestionTab,
     'metabase.query': MetabaseQueryTab,
+    'metabase.table': MetabaseTableTab,
   },
   actions: () => {
     const metabase = inject(MetabaseActions);
