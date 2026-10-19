@@ -2,6 +2,7 @@ import {
   QuiverError,
   datasetError,
   datasetToResult,
+  mbqlTableQuery,
   type DbQueryResult,
   type HostApi,
   type MetabaseCard,
@@ -16,6 +17,7 @@ import {
   type MetabaseParameter,
   type MetabaseParameterValue,
   type MetabaseTable,
+  type MetabaseTableQuery,
   type MetabaseUser,
   type WorkspaceApi,
 } from '@quiver/core';
@@ -330,19 +332,26 @@ export async function runCard(host: HostApi, ws: WorkspaceApi, conn: MetabaseCon
   return datasetResult(dataset, card.sql ?? card.name, card.sql);
 }
 
-/** Every row of a question or a native query, formatted by Metabase's own export endpoint. */
-export async function exportRows(
-  host: HostApi,
-  ws: WorkspaceApi,
-  conn: MetabaseConnection,
-  format: MetabaseExportFormat,
-  source: { card: MetabaseCard; values: MetabaseParameterValue[] } | { databaseId: number; sql: string },
-): Promise<Buffer> {
+/**
+ * A page of a table through the query builder (MBQL), so it runs with the user's query-builder
+ * permission where native SQL is refused. The statement names the table (or its id) and the page.
+ */
+export async function runTableQuery(host: HostApi, ws: WorkspaceApi, conn: MetabaseConnection, q: MetabaseTableQuery, tableName?: string): Promise<DbQueryResult> {
+  const dataset = await metabaseRequest<MetabaseDataset>(host, ws, conn, '/api/dataset', { json: mbqlTableQuery(q), timeoutMs: QUERY_TIMEOUT_MS });
+  return datasetResult(dataset, `${tableName || `table ${q.tableId}`} page ${q.page}`, null);
+}
+
+export type MetabaseExportSource = { card: MetabaseCard; values: MetabaseParameterValue[] } | { databaseId: number; sql: string } | { table: MetabaseTableQuery };
+
+/** Every row of a question, a native query or a table (through its filters), formatted by Metabase's own export endpoint. */
+export async function exportRows(host: HostApi, ws: WorkspaceApi, conn: MetabaseConnection, format: MetabaseExportFormat, source: MetabaseExportSource): Promise<Buffer> {
   const path = 'card' in source ? `/api/card/${source.card.id}/query/${format}` : `/api/dataset/${format}`;
   const form: Record<string, string> =
     'card' in source
       ? { parameters: JSON.stringify(cardParameters(source.card, source.values)), format_rows: 'true' }
-      : { query: JSON.stringify(nativeQuery(source.databaseId, source.sql)), format_rows: 'true' };
+      : 'table' in source
+        ? { query: JSON.stringify(mbqlTableQuery(source.table)), format_rows: 'true' }
+        : { query: JSON.stringify(nativeQuery(source.databaseId, source.sql)), format_rows: 'true' };
   const res = await metabaseRaw(host, ws, conn, path, { form, timeoutMs: QUERY_TIMEOUT_MS, binary: format === 'xlsx' });
   // Metabase answers a query that fails during an export with its dataset error as JSON, still 2xx.
   // A JSON export of rows is an array; an object is that error.

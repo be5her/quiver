@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { datasetError, datasetToResult, describeMetabaseConnection, metabasePartition, normalizeMetabaseUrl, type MetabaseDataset } from './metabase';
+import { datasetError, datasetToResult, describeMetabaseConnection, mbqlFilter, mbqlTableQuery, metabasePartition, normalizeMetabaseUrl, type MetabaseDataset } from './metabase';
 
 describe('metabase address', () => {
   it('adds https, keeps a sub-path and drops trailing slashes, query and hash', () => {
@@ -64,5 +64,43 @@ describe('metabase datasets', () => {
     expect(result.rowCount).toBe(3);
     expect(datasetToResult({ data: { rows, rows_truncated: 0 } }, 'q').truncated).toBe(false);
     expect(datasetToResult({}, 'q')).toMatchObject({ columns: [], rows: [], rowCount: 0, truncated: false });
+  });
+});
+
+describe('metabase table queries (MBQL)', () => {
+  const base = { databaseId: 1, tableId: 11, limit: 100, page: 1, orderBy: null, filters: [] };
+
+  it('builds one filter clause, with or without a value', () => {
+    expect(mbqlFilter({ fieldId: 102, op: '=', value: 'Ada' })).toEqual(['=', ['field', 102, null], 'Ada']);
+    expect(mbqlFilter({ fieldId: 103, op: '>', value: 10 })).toEqual(['>', ['field', 103, null], 10]);
+    expect(mbqlFilter({ fieldId: 102, op: 'is-null' })).toEqual(['is-null', ['field', 102, null]]);
+    expect(mbqlFilter({ fieldId: 102, op: 'not-empty', value: 'ignored' })).toEqual(['not-empty', ['field', 102, null]]);
+  });
+
+  it('asks the first page of a table without page or filter', () => {
+    expect(mbqlTableQuery(base)).toEqual({ database: 1, type: 'query', query: { 'source-table': 11, limit: 100 } });
+  });
+
+  it('puts a single filter as is and ANDs several', () => {
+    const one = mbqlTableQuery({ ...base, filters: [{ fieldId: 102, op: 'contains', value: 'a' }] });
+    expect((one['query'] as Record<string, unknown>)['filter']).toEqual(['contains', ['field', 102, null], 'a']);
+    const two = mbqlTableQuery({
+      ...base,
+      filters: [
+        { fieldId: 103, op: '>', value: 10 },
+        { fieldId: 102, op: 'not-null' },
+      ],
+    });
+    expect((two['query'] as Record<string, unknown>)['filter']).toEqual(['and', ['>', ['field', 103, null], 10], ['not-null', ['field', 102, null]]]);
+  });
+
+  it('orders by one field', () => {
+    const q = mbqlTableQuery({ ...base, orderBy: { fieldId: 103, direction: 'desc' } });
+    expect((q['query'] as Record<string, unknown>)['order-by']).toEqual([['desc', ['field', 103, null]]]);
+  });
+
+  it('pages past the first page by limit rows', () => {
+    expect((mbqlTableQuery({ ...base, limit: 2, page: 1 })['query'] as Record<string, unknown>)['page']).toBeUndefined();
+    expect((mbqlTableQuery({ ...base, limit: 2, page: 3 })['query'] as Record<string, unknown>)['page']).toEqual({ page: 3, items: 2 });
   });
 });

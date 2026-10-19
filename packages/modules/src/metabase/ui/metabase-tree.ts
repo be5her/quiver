@@ -5,7 +5,6 @@ import { ChevronDown, ChevronRight, Database, FileChartColumn, Folder, LayoutDas
 import { DbRow } from '../../db/ui/db-row';
 import { MetabaseActions } from './metabase-actions';
 import { MetabaseError } from './metabase-error';
-import { selectFromTable } from './metabase-format';
 
 /** Lists that failed for want of a session load again once the connection is signed in. */
 function reloadOnSignIn(conn: () => MetabaseConnectionSummary, list: InvokeResource<unknown>): void {
@@ -142,7 +141,7 @@ export class MetabaseItemList {
   }
 }
 
-/** A database's tables; one opens a query that selects from it. */
+/** A database's tables; one opens the table browser, which runs through the query builder. */
 @Component({
   selector: 'q-mb-table-list',
   imports: [DbRow, Icon, MetabaseError, Spinner],
@@ -175,7 +174,7 @@ export class MetabaseTableList {
   protected readonly tables = invokeResource<MetabaseTable[]>('metabase.tables', () => ({ connectionId: this.conn().id, databaseId: this.database().id }));
 
   protected open(table: MetabaseTable): void {
-    this.metabase.openQuery(this.conn(), { databaseId: this.database().id, sql: selectFromTable(table, this.database().engine), title: table.name });
+    this.metabase.openTable(this.conn(), this.database(), table);
   }
 }
 

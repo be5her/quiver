@@ -25,7 +25,7 @@ async function readAll(dir: string, skip: string[] = []): Promise<string> {
 
 export default definePart({
   name: 'metabase',
-  summary: 'Metabase: the fake sign-in and API keys, databases, collections, questions, dashboards, native SQL, exports, history, agent gating, the tabs',
+  summary: 'Metabase: the fake sign-in and API keys, databases, collections, questions, dashboards, native SQL, the query-builder table browser (filters, order, pages), exports, history, agent gating, the tabs',
   async run(t) {
     const { host, check, run, ws, folder, hooksFolder, rpc, toolNames: names } = t;
     const { fakeMetabase } = t.fixtures;
@@ -84,7 +84,7 @@ export default definePart({
     const orders = tables.find((x) => x.name === 'orders');
     check(
       'metabase: tables come sorted with their fields and types',
-      tables.map((x) => `${x.schema}.${x.name}`).join() === 'public.customers,public.orders' &&
+      tables.map((x) => `${x.schema}.${x.name}`).join() === 'public.customers,public.events,public.orders' &&
         orders?.displayName === 'Orders' &&
         orders.fields.map((f) => `${f.name}:${f.baseType}:${f.databaseType}`).join() === 'id:type/Integer:int4,customer:type/Text:text,total:type/Float:numeric' &&
         orders.fields[1]?.displayName === 'Customer',
@@ -199,6 +199,94 @@ export default definePart({
     const both = await fail('metabase.export', { connectionId: browser.id, format: 'csv', cardId: 1, databaseId: 1, sql: 'SELECT 1' });
     const neither = await fail('metabase.export', { connectionId: browser.id, format: 'csv' });
     check('metabase: an export needs one source, and Excel needs a file', xlsxNoPath.startsWith('INVALID_INPUT') && both.startsWith('INVALID_INPUT') && neither.startsWith('INVALID_INPUT'), { xlsxNoPath, both, neither });
+
+    // Tables through the query builder (MBQL): pages, order and filters, for users without native SQL. Orders has 7 rows here.
+    {
+      const rowsOf = (input: Record<string, unknown>) => run<DbQueryResult>('metabase.table.rows', { connectionId: browser.id, databaseId: 1, tableId: 11, ...input }, ws.id);
+      const ids = (r: DbQueryResult) => r.rows.map((x) => x[0]).join();
+      const lastQuery = () => fakeMetabase.seen.mbql.at(-1)?.query;
+      const sql0 = fakeMetabase.seen.sql.length;
+      const first = await rowsOf({});
+      const firstQuery = lastQuery();
+      check(
+        'metabase: a table page runs through the query builder with the default limit and answers its rows',
+        first.kind === 'rows' &&
+          ids(first) === '1,2,3,4,5,6,7' &&
+          JSON.stringify(first.rows[0]) === JSON.stringify([1, 'Ada', 12.5]) &&
+          first.columns.map((c) => c.name).join() === 'ID,Customer,Total' &&
+          /page 1$/.test(first.statement ?? '') &&
+          fakeMetabase.seen.mbql.at(-1)?.type === 'query' &&
+          fakeMetabase.seen.mbql.at(-1)?.database === 1 &&
+          firstQuery?.['source-table'] === 11 &&
+          firstQuery.limit === 100 &&
+          firstQuery.page === undefined &&
+          firstQuery.filter === undefined &&
+          fakeMetabase.seen.sql.length === sql0,
+        { ids: ids(first), columns: first.columns.map((c) => c.name), statement: first.statement, sent: fakeMetabase.seen.mbql.at(-1), nativeSent: fakeMetabase.seen.sql.slice(sql0) },
+      );
+      const customers = await rowsOf({ tableId: 12 });
+      check('metabase: another table answers its own columns and rows', customers.columns.map((c) => c.name).join() === 'ID,Name' && JSON.stringify(customers.rows) === JSON.stringify([[1, 'Ada'], [2, 'Linus']]), { columns: customers.columns, rows: customers.rows });
+      const page2 = await rowsOf({ limit: 2, page: 2 });
+      const page2Query = lastQuery();
+      check(
+        'metabase: limit 2, page 2 gives rows 3 and 4, sent as page.items',
+        ids(page2) === '3,4' && /page 2$/.test(page2.statement ?? '') && JSON.stringify(page2Query?.page) === JSON.stringify({ page: 2, items: 2 }) && page2Query?.limit === 2,
+        { ids: ids(page2), statement: page2.statement, sent: page2Query },
+      );
+      const desc = await rowsOf({ orderBy: { fieldId: 103, direction: 'desc' } });
+      check(
+        'metabase: a table sorts descending on a field, sent as order-by',
+        ids(desc) === '5,2,7,1,6,3,4' && JSON.stringify(lastQuery()?.['order-by']) === JSON.stringify([['desc', ['field', 103, null]]]),
+        { ids: ids(desc), sent: lastQuery()?.['order-by'] },
+      );
+      const equal = await rowsOf({ filters: [{ fieldId: 102, op: '=', value: 'Linus' }] });
+      const equalFilter = lastQuery()?.filter;
+      const contains = await rowsOf({ filters: [{ fieldId: 102, op: 'contains', value: 'A' }] });
+      const greater = await rowsOf({ filters: [{ fieldId: 103, op: '>', value: 20 }] });
+      const greaterFilter = lastQuery()?.filter;
+      const isNull = await rowsOf({ filters: [{ fieldId: 102, op: 'is-null' }] });
+      const isNullFilter = lastQuery()?.filter;
+      const both = await rowsOf({ filters: [{ fieldId: 102, op: 'contains', value: 'a' }, { fieldId: 103, op: '>', value: 20 }] });
+      const bothFilter = lastQuery()?.filter;
+      check(
+        'metabase: table filters =, contains, > and is-null narrow the rows, and two filters are ANDed',
+        ids(equal) === '2' &&
+          JSON.stringify(equalFilter) === JSON.stringify(['=', ['field', 102, null], 'Linus']) &&
+          ids(contains) === '1,3,4,5,7' &&
+          ids(greater) === '2,5,7' &&
+          JSON.stringify(greaterFilter) === JSON.stringify(['>', ['field', 103, null], 20]) &&
+          isNull.rows.length === 0 &&
+          JSON.stringify(isNullFilter) === JSON.stringify(['is-null', ['field', 102, null]]) &&
+          ids(both) === '5,7' &&
+          Array.isArray(bothFilter) &&
+          bothFilter[0] === 'and' &&
+          bothFilter.length === 3,
+        { equal: ids(equal), equalFilter, contains: ids(contains), greater: ids(greater), greaterFilter, isNull: isNull.rows.length, isNullFilter, both: ids(both), bothFilter },
+      );
+      const missing = await fail('metabase.table.rows', { connectionId: browser.id, databaseId: 1, tableId: 99 });
+      check("metabase: a table that does not exist comes back with Metabase's message", missing.startsWith('REQUEST_FAILED') && missing.includes('Table 99 does not exist'), missing);
+      const tableExports0 = fakeMetabase.seen.exports.length;
+      const tableCsv = await run<MetabaseExportResult>('metabase.export', { connectionId: browser.id, format: 'csv', databaseId: 1, tableId: 11, filters: [{ fieldId: 103, op: '>', value: 20 }] }, ws.id);
+      const exportQuery = lastQuery();
+      check(
+        'metabase: a table exports every row through its filters as CSV text',
+        tableCsv.format === 'csv' &&
+          tableCsv.path === null &&
+          tableCsv.text === 'ID,Customer,Total\n2,Linus,30\n5,Alan,50\n7,Barbara,22\n' &&
+          fakeMetabase.seen.exports.slice(tableExports0).join() === 'csv' &&
+          exportQuery?.['source-table'] === 11 &&
+          (exportQuery.limit ?? 0) >= 1_000_000 &&
+          exportQuery.page === undefined &&
+          JSON.stringify(exportQuery.filter) === JSON.stringify(['>', ['field', 103, null], 20]),
+        { text: tableCsv.text, formats: fakeMetabase.seen.exports.slice(tableExports0), sent: exportQuery },
+      );
+      const agentRows = await tool('metabase_table_rows', { connectionId: browser.id, databaseId: 1, tableId: 11, filters: [{ fieldId: 102, op: '=', value: 'Barbara' }] });
+      check(
+        'metabase: agents see metabase_table_rows and may read a table with it',
+        names.includes('metabase_table_rows') && !agentRows.error && agentRows.text.includes('Barbara') && !agentRows.text.includes('Linus'),
+        { listed: names.includes('metabase_table_rows'), agentRows: agentRows.text.slice(0, 200) },
+      );
+    }
 
     const history = await run<MetabaseHistoryEntry[]>('metabase.history.list', { connectionId: browser.id }, ws.id);
     check(
@@ -446,6 +534,125 @@ export default definePart({
         await click('[data-testid=mb-error-signin]');
         await until(async () => fakeMetabase.seen.logins > logins1 && !(await js(`Boolean(${v('[data-testid=mb-error]')})`)), 8000);
         check('ui: metabase: the Sign in button signs in again', fakeMetabase.seen.logins > logins1, { logins: fakeMetabase.seen.logins - logins1 });
+
+        // The table tab: a table from the tree opens it through the query builder, with filters, sorting and pages.
+        const tableItem = (name: string) =>
+          `[...document.querySelectorAll('[data-testid=mb-tree-item][data-model=table]')].find((e) => e.offsetParent !== null && e.textContent.trim().startsWith(${JSON.stringify(name)}))`;
+        const inTable = (selector: string) => `${pane('metabase.table')}?.querySelector(${JSON.stringify(selector)})`;
+        const tableText = async (selector: string) => String((await js(`${inTable(selector)}?.textContent.trim() ?? ''`)) ?? '');
+        /** The rows loaded once the table is not loading, or -1. */
+        const loadedRows = async () => Number(await js(`(() => { const r = ${inTable('[data-testid=mb-table-result]')}; return r && !r.hasAttribute('data-loading') ? Number(r.getAttribute('data-rows')) : -1; })()`));
+        const tableCells = async () => (await js(`[...(${inTable('[data-testid=mb-table-result]')}?.querySelectorAll('[role=gridcell]') ?? [])].map((c) => c.textContent.trim())`)) as string[];
+        const pick = (selector: string, label: string) =>
+          js(
+            `(() => { const el = ${inTable(selector)}; const o = el && [...el.options].find((x) => x.textContent.trim() === ${JSON.stringify(label)}); if (!o) return false; el.value = o.value; el.dispatchEvent(new Event('change', { bubbles: true })); el.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`,
+          );
+        const clickIn = (selector: string) => js(`(() => { const el = ${inTable(selector)}; if (el && !el.disabled) el.click(); return Boolean(el) && !el.disabled; })()`);
+        const disabled = async (selector: string) => Boolean(await js(`Boolean(${inTable(selector)}?.disabled)`));
+        const openTable = async (name: string) => {
+          if (!(await js(`Boolean(${tableItem(name)})`))) await js(`${v('[data-testid=mb-tree-database]')}?.click()`);
+          await until(async () => Boolean(await js(`Boolean(${tableItem(name)})`)), 6000);
+          await js(`${tableItem(name)}?.click()`);
+          await until(async () => (await tableText('[data-testid=mb-table-name]')).includes(name) && (await loadedRows()) >= 0, 6000);
+        };
+        const mbql0 = fakeMetabase.seen.mbql.length;
+        await openTable('orders');
+        const openedCells = await tableCells();
+        const openedCount = await tableText('[data-testid=mb-rowcount]');
+        check(
+          'ui: metabase: a table from the tree opens its tab with the rows and the row count, through the query builder',
+          (await loadedRows()) === 7 &&
+            /rows 1\s*[–-]\s*7\b/.test(openedCount) &&
+            ['Ada', 'Barbara'].every((n) => openedCells.includes(n)) &&
+            fakeMetabase.seen.mbql.slice(mbql0).some((b) => b.query?.['source-table'] === 11) &&
+            (await disabled('[data-testid=mb-page-next]')) &&
+            (await disabled('[data-testid=mb-page-prev]')),
+          { rows: await loadedRows(), rowcount: openedCount, cells: openedCells.slice(0, 12), sent: fakeMetabase.seen.mbql.slice(mbql0).map((b) => b.query) },
+        );
+
+        // A header click sorts through the query builder.
+        await js(`[...(${pane('metabase.table')}?.querySelectorAll('[role=columnheader]') ?? [])].find((h) => h.textContent.trim() === 'Total')?.click()`);
+        await until(async () => JSON.stringify(fakeMetabase.seen.mbql.at(-1)?.query?.['order-by']) === JSON.stringify([['asc', ['field', 103, null]]]) && (await loadedRows()) === 7, 6000);
+        await wait(200);
+        const sortedCells = await tableCells();
+        check(
+          'ui: metabase: a header click sorts the table, sent as order-by',
+          JSON.stringify(fakeMetabase.seen.mbql.at(-1)?.query?.['order-by']) === JSON.stringify([['asc', ['field', 103, null]]]) && sortedCells[0] === '4' && sortedCells[1] === 'Marie',
+          { sent: fakeMetabase.seen.mbql.at(-1)?.query, cells: sortedCells.slice(0, 6) },
+        );
+
+        // A filter from the bar narrows the rows and shows as a chip.
+        const pickedField = await pick('[data-testid=mb-filter-field]', 'Customer');
+        await wait(100);
+        const pickedOp = await pick('[data-testid=mb-filter-op]', 'contains');
+        await wait(100);
+        const typedValue = await js(
+          `(() => { const el = ${inTable('[data-testid=mb-filter-value]')}; if (!el) return false; Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, 'ar'); el.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`,
+        );
+        await wait(100);
+        await clickIn('[data-testid=mb-filter-add]');
+        await until(async () => (await loadedRows()) === 2, 6000);
+        await wait(200);
+        const filteredCells = await tableCells();
+        const chips = (await js(`[...(${pane('metabase.table')}?.querySelectorAll('[data-testid=mb-filter-chip]') ?? [])].map((c) => c.textContent.trim())`)) as string[];
+        const filterSent = fakeMetabase.seen.mbql.at(-1)?.query;
+        check(
+          'ui: metabase: a filter from the bar narrows the rows and shows as a chip',
+          pickedField === true &&
+            pickedOp === true &&
+            typedValue === true &&
+            (await loadedRows()) === 2 &&
+            /rows 1\s*[–-]\s*2\b/.test(await tableText('[data-testid=mb-rowcount]')) &&
+            filteredCells.includes('Marie') &&
+            filteredCells.includes('Barbara') &&
+            !filteredCells.includes('Ada') &&
+            chips.length === 1 &&
+            /Customer.*contains.*ar/.test(chips[0] ?? '') &&
+            JSON.stringify(filterSent?.filter) === JSON.stringify(['contains', ['field', 102, null], 'ar']) &&
+            JSON.stringify(filterSent?.['order-by']) === JSON.stringify([['asc', ['field', 103, null]]]),
+          { pickedField, pickedOp, typedValue, rows: await loadedRows(), cells: filteredCells, chips, sent: filterSent },
+        );
+        // The sign-in toast from the earlier check would cover the footer.
+        await js(`document.querySelectorAll('button[aria-label=Dismiss]').forEach((b) => b.click())`);
+        await wait(200);
+        await shot('29h-metabase-table-light');
+        await clickIn('[data-testid=mb-filter-chip-remove]');
+        await until(async () => (await loadedRows()) === 7, 6000);
+        check(
+          'ui: metabase: removing the chip brings the rows back',
+          (await loadedRows()) === 7 && !(await js(`Boolean(${inTable('[data-testid=mb-filter-chip]')})`)) && fakeMetabase.seen.mbql.at(-1)?.query?.filter === undefined,
+          { rows: await loadedRows(), sent: fakeMetabase.seen.mbql.at(-1)?.query },
+        );
+
+        // Pages: 120 events at 100 a page, then at 50.
+        await openTable('events');
+        await until(async () => (await loadedRows()) === 100, 6000);
+        const nextEnabled = !(await disabled('[data-testid=mb-page-next]'));
+        await clickIn('[data-testid=mb-page-next]');
+        await until(async () => (await loadedRows()) === 20, 6000);
+        const page2Count = await tableText('[data-testid=mb-rowcount]');
+        const page2Sent = fakeMetabase.seen.mbql.at(-1)?.query;
+        const page2NextDisabled = await disabled('[data-testid=mb-page-next]');
+        await clickIn('[data-testid=mb-page-prev]');
+        await until(async () => (await loadedRows()) === 100, 6000);
+        const backCount = await tableText('[data-testid=mb-rowcount]');
+        await pick('[data-testid=mb-page-size]', '50');
+        await until(async () => (await loadedRows()) === 50, 6000);
+        const size50Count = await tableText('[data-testid=mb-rowcount]');
+        const size50Sent = fakeMetabase.seen.mbql.at(-1)?.query;
+        check(
+          'ui: metabase: Next and Prev move between pages, the last page disables Next, and the page size changes the limit',
+          nextEnabled &&
+            /rows 101\s*[–-]\s*120\b/.test(page2Count) &&
+            JSON.stringify(page2Sent?.page) === JSON.stringify({ page: 2, items: 100 }) &&
+            page2Sent?.['source-table'] === 13 &&
+            page2NextDisabled &&
+            /rows 1\s*[–-]\s*100\b/.test(backCount) &&
+            /rows 1\s*[–-]\s*50\b/.test(size50Count) &&
+            size50Sent?.limit === 50 &&
+            size50Sent.page === undefined,
+          { nextEnabled, page2Count, page2Sent, page2NextDisabled, backCount, size50Count, size50Sent },
+        );
 
         // The connection tab, in both auth modes.
         const openConnection = async (name: string) => {

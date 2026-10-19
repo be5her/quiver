@@ -5,6 +5,8 @@ import {
   MetabaseConnectionDraftSchema,
   MetabaseConnectionSchema,
   MetabaseParameterValueSchema,
+  MetabaseTableFilterSchema,
+  MetabaseTableOrderSchema,
   QuiverError,
   compact,
   defineCommand,
@@ -39,6 +41,7 @@ import {
   listTables,
   runCard,
   runNative,
+  runTableQuery,
   search,
   serverVersion,
 } from './client';
@@ -380,6 +383,29 @@ const dashboardGet = defineCommand({
   handler: async ({ connectionId, dashboardId }, ctx) => withConnection(ctx, connectionId, (conn) => getDashboard(ctx.host, ws(ctx), conn, dashboardId)),
 });
 
+// ---------- tables through the query builder ----------
+
+const OrderByInput = MetabaseTableOrderSchema.optional().describe('Sort by one field id from metabase.tables, `asc` or `desc`');
+const FiltersInput = z.array(MetabaseTableFilterSchema).default([]).describe('Filters on field ids from metabase.tables, ANDed; `is-null`, `not-null`, `is-empty` and `not-empty` take no value');
+
+const tableRows = defineCommand({
+  id: 'metabase.table.rows',
+  title: 'Browse a Metabase table',
+  description:
+    "One page of a table's rows (see metabase.tables) through Metabase's query builder, so it works with query-builder permission where native SQL is refused. `limit` rows per page (at most 2000), `page` from 1, an optional `orderBy` and `filters` on field ids. metabase.export with `tableId` gets every row through the filters.",
+  scope: 'workspace',
+  input: ConnectionInput.extend({
+    databaseId: z.number().int(),
+    tableId: z.number().int(),
+    limit: z.number().int().min(1).max(2000).default(100),
+    page: z.number().int().min(1).default(1),
+    orderBy: OrderByInput,
+    filters: FiltersInput,
+  }),
+  handler: async ({ connectionId, databaseId, tableId, limit, page, orderBy, filters }, ctx): Promise<DbQueryResult> =>
+    withConnection(ctx, connectionId, (conn) => runTableQuery(ctx.host, ws(ctx), conn, { databaseId, tableId, limit, page, orderBy: orderBy ?? null, filters })),
+});
+
 // ---------- native queries ----------
 
 async function record(ctx: CommandContext, entry: MetabaseHistoryEntry): Promise<void> {
@@ -417,7 +443,7 @@ const exportCommand = defineCommand({
   id: 'metabase.export',
   title: 'Export from Metabase',
   description:
-    "Exports every row of a saved question (`cardId`, with `parameters`) or of native SQL (`databaseId` and `sql`) through Metabase's export, formatted as Metabase formats them. Returns CSV or JSON as text, or writes the file to `path` (relative to the workspace); xlsx needs a path. Writing a file, or SQL that writes, is mutating.",
+    "Exports every row of a saved question (`cardId`, with `parameters`), of native SQL (`databaseId` and `sql`) or of a table through the query builder (`tableId` and `databaseId`, with optional `orderBy` and `filters` as metabase.table.rows takes them) through Metabase's export, formatted as Metabase formats them. Pass exactly one of cardId, sql or tableId. Returns CSV or JSON as text, or writes the file to `path` (relative to the workspace); xlsx needs a path. Writing a file, or SQL that writes, is mutating.",
   scope: 'workspace',
   mutating: (i) => Boolean(i.path) || (i.sql ? !scriptIsReadOnly(i.sql) : false),
   input: ConnectionInput.extend({
@@ -427,12 +453,17 @@ const exportCommand = defineCommand({
     parameters: ParametersInput,
     databaseId: z.number().int().optional(),
     sql: z.string().optional(),
+    tableId: z.number().int().optional().describe('Export a table through the query builder (with databaseId)'),
+    orderBy: OrderByInput,
+    filters: FiltersInput,
   }),
   handler: async (input, ctx): Promise<MetabaseExportResult> => {
     const hasCard = input.cardId !== undefined;
-    const hasSql = input.databaseId !== undefined || Boolean(input.sql);
-    if (hasCard === hasSql) throw new QuiverError('INVALID_INPUT', 'Pass either cardId, or databaseId and sql');
+    const hasTable = input.tableId !== undefined;
+    const hasSql = input.sql !== undefined;
+    if ([hasCard, hasSql, hasTable].filter(Boolean).length !== 1) throw new QuiverError('INVALID_INPUT', 'Pass exactly one of cardId, sql (with databaseId) or tableId (with databaseId)');
     if (hasSql && (input.databaseId === undefined || !input.sql?.trim())) throw new QuiverError('INVALID_INPUT', 'Native SQL needs both databaseId and sql');
+    if (hasTable && input.databaseId === undefined) throw new QuiverError('INVALID_INPUT', 'A table export needs databaseId');
     if (input.format === 'xlsx' && !input.path) throw new QuiverError('INVALID_INPUT', 'An xlsx export needs a path to write to');
     const w = ws(ctx);
     return withConnection(ctx, input.connectionId, async (conn) => {
@@ -441,7 +472,11 @@ const exportCommand = defineCommand({
         w,
         conn,
         input.format,
-        input.cardId !== undefined ? { card: await getCard(ctx.host, w, conn, input.cardId), values: input.parameters } : { databaseId: input.databaseId!, sql: input.sql! },
+        input.cardId !== undefined
+          ? { card: await getCard(ctx.host, w, conn, input.cardId), values: input.parameters }
+          : input.tableId !== undefined
+            ? { table: { databaseId: input.databaseId!, tableId: input.tableId, limit: 1_000_000, page: 1, orderBy: input.orderBy ?? null, filters: input.filters } }
+            : { databaseId: input.databaseId!, sql: input.sql! },
       );
       if (!input.path) return { format: input.format, path: null, text: bytes.toString('utf8'), bytes: bytes.length };
       const target = path.isAbsolute(input.path) ? input.path : path.resolve(w.path, input.path);
@@ -504,6 +539,7 @@ export const metabaseModule = defineModule({
     cardGet,
     cardRun,
     dashboardGet,
+    tableRows,
     queryRun,
     exportCommand,
     historyList,

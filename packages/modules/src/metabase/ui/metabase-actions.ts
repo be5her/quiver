@@ -32,6 +32,16 @@ export class MetabaseActions {
     this.tabs.openTab(this.scope(), { type: 'metabase.question', title: card.name, data: { id, connectionId: conn.id, cardId: card.id } }, { singletonKey: `metabase.question:${id}` });
   }
 
+  /** Open (or focus) a table's rows, browsed through the query builder (no native SQL permission needed). */
+  openTable(conn: { id: string }, database: { id: number }, table: { id: number; name: string }): void {
+    const id = `${conn.id}:${table.id}`;
+    this.tabs.openTab(
+      this.scope(),
+      { type: 'metabase.table', title: table.name, data: { id, connectionId: conn.id, databaseId: database.id, tableId: table.id, name: table.name } },
+      { singletonKey: `metabase.table:${id}` },
+    );
+  }
+
   /** A new native query on a connection, optionally on a database and with SQL to start from. */
   openQuery(conn: { id: string; name?: string }, options: OpenMetabaseQueryOptions = {}): void {
     const id = newId();
@@ -96,7 +106,7 @@ export class MetabaseActions {
     if (!(await this.dialogs.confirm({ title: `Delete "${conn.name}"?`, message: 'The connection is removed from the project, with its API key on this machine. A browser sign-in to the server stays.', danger: true, confirmLabel: 'Delete' }))) return;
     try {
       await this.host.invoke('metabase.connection.delete', { id: conn.id });
-      this.tabs.closeWhere(this.scope(), (t) => (t.type === 'metabase.connection' && t.data?.['id'] === conn.id) || ((t.type === 'metabase.question' || t.type === 'metabase.query') && t.data?.['connectionId'] === conn.id));
+      this.tabs.closeWhere(this.scope(), (t) => (t.type === 'metabase.connection' && t.data?.['id'] === conn.id) || ((t.type === 'metabase.question' || t.type === 'metabase.query' || t.type === 'metabase.table') && t.data?.['connectionId'] === conn.id));
     } catch (err) {
       this.toasts.error(err);
     }

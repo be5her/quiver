@@ -9,14 +9,19 @@ import {
   type MetabaseExportFormat,
   type MetabaseExportResult,
   type MetabaseParameterValue,
+  type MetabaseTableFilter,
+  type MetabaseTableOrder,
 } from '@quiver/core';
 import { HostBridge, Icon, IconButton, Toasts } from '@quiver/ui';
 import { Download } from 'lucide';
 
 const COPY_FORMATS: DbExportFormat[] = ['csv', 'json', 'markdown'];
 
-/** What Metabase runs again for "Save all rows": a saved question with its parameters, or a native query. */
-export type MetabaseExportSource = { cardId: number; parameters: MetabaseParameterValue[] } | { databaseId: number; sql: string };
+/** What Metabase runs again for "Save all rows": a saved question with its parameters, a native query, or a table through its filters and order (every row, not one page). */
+export type MetabaseExportSource =
+  | { cardId: number; parameters: MetabaseParameterValue[] }
+  | { databaseId: number; sql: string }
+  | { tableId: number; databaseId: number; orderBy?: MetabaseTableOrder; filters: MetabaseTableFilter[] };
 
 /**
  * The export menu of a Metabase result: copy the rows in hand as CSV, JSON or Markdown, or have
