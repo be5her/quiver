@@ -53,4 +53,5 @@ export * from './line-splitter';
 export * from './history-response';
 export * from './network';
 export * from './queues-kafka';
+export * from './queues-rabbit';
 export * from './queues-messages';
