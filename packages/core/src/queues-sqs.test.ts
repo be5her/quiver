@@ -1,6 +1,22 @@
 import { describe, expect, it } from 'vitest';
 import type { QueueMessage } from './models/queues';
-import { sqsDestination, sqsIsFifo, sqsMergePeek, sqsMessage, sqsMessageAttributes, sqsNearRedrive, sqsQueueName, sqsRedrive } from './queues-sqs';
+import {
+  sqsCollectStop,
+  sqsDestination,
+  sqsErrorCode,
+  sqsIsFifo,
+  sqsMergePeek,
+  sqsMessage,
+  sqsMessageAttributes,
+  sqsNearRedrive,
+  sqsQueueName,
+  sqsQueueOrigins,
+  sqsRedrive,
+  sqsRegion,
+  sqsRetryable,
+  sqsSecretBinding,
+  SQS_COLLECT_STALE_ROUNDS,
+} from './queues-sqs';
 
 describe('sqsQueueName', () => {
   it('takes the name from a queue URL or an ARN', () => {
@@ -49,6 +65,88 @@ describe('sqsNearRedrive', () => {
   it('is false without a redrive policy', () => {
     expect(sqsNearRedrive(1000, null)).toBe(false);
     expect(sqsNearRedrive(1000, redrive(0))).toBe(false);
+  });
+});
+
+describe('sqsCollectStop', () => {
+  const round = { seen: 4, enough: 15, visible: 15, got: 4, stale: 0, redrive: false, nearRedrive: false };
+
+  it('goes on after a short round while the queue holds more', () => {
+    expect(sqsCollectStop(round)).toBeNull();
+    expect(sqsCollectStop({ ...round, visible: undefined })).toBeNull();
+  });
+
+  it('stops before another round once a message is one receive short of the dead-letter queue, even when more are wanted', () => {
+    expect(sqsCollectStop({ ...round, redrive: true, nearRedrive: true })).toBe('near-redrive');
+    expect(sqsCollectStop({ ...round, seen: 15, redrive: true, nearRedrive: true })).toBe('near-redrive');
+  });
+
+  it('stops with enough, on an empty round, or once as many as the queue held are seen', () => {
+    expect(sqsCollectStop({ ...round, seen: 15 })).toBe('enough');
+    expect(sqsCollectStop({ ...round, got: 0 })).toBe('drained');
+    expect(sqsCollectStop({ ...round, enough: 500, seen: 15 })).toBe('drained');
+  });
+
+  it('gives SQS a few rounds of messages already seen, but only one when receives count towards a redrive policy', () => {
+    expect(sqsCollectStop({ ...round, stale: SQS_COLLECT_STALE_ROUNDS - 1 })).toBeNull();
+    expect(sqsCollectStop({ ...round, stale: SQS_COLLECT_STALE_ROUNDS })).toBe('stale');
+    expect(sqsCollectStop({ ...round, stale: 1, redrive: true })).toBe('stale');
+  });
+});
+
+describe('sqsRegion and sqsQueueOrigins', () => {
+  it('lower-cases the region as the SDK does in hostnames, defaulting to us-east-1 with an endpoint', () => {
+    expect(sqsRegion(' EU-West-1 ', '')).toBe('eu-west-1');
+    expect(sqsRegion('', 'http://localhost:4566')).toBe('us-east-1');
+    expect(sqsRegion('', '')).toBe('');
+  });
+
+  it('takes the endpoint origin, or SQS hosts in the region whatever its case', () => {
+    expect(sqsQueueOrigins('http://localhost:4566/', 'eu-west-1')).toEqual(['http://localhost:4566']);
+    expect(sqsQueueOrigins('', 'EU-West-1')).toContain(new URL('https://sqs.eu-west-1.amazonaws.com/1/q').origin);
+    expect(sqsQueueOrigins('not a url', 'eu-west-1')).toEqual([]);
+    expect(sqsQueueOrigins('', '')).toEqual([]);
+  });
+});
+
+describe('sqsSecretBinding', () => {
+  it('names the endpoint origin (or AWS) and the region, so a committed change of either is told apart', () => {
+    expect(sqsSecretBinding({ endpoint: 'http://localhost:4566/', region: '' })).toBe('http://localhost:4566 (us-east-1)');
+    expect(sqsSecretBinding({ endpoint: '', region: 'EU-West-1' })).toBe('AWS (eu-west-1)');
+    expect(sqsSecretBinding({ endpoint: 'http://attacker:4566', region: '' })).not.toBe(sqsSecretBinding({ endpoint: 'http://localhost:4566', region: '' }));
+    expect(sqsSecretBinding({ endpoint: '', region: 'eu-west-2' })).not.toBe(sqsSecretBinding({ endpoint: '', region: 'eu-west-1' }));
+  });
+});
+
+describe('sqsErrorCode and sqsRetryable', () => {
+  it('maps AWS error names, KMS ones included', () => {
+    expect(sqsErrorCode('QueueDoesNotExist')).toBe('NOT_FOUND');
+    expect(sqsErrorCode('PurgeQueueInProgress')).toBe('CONFLICT');
+    expect(sqsErrorCode('ExpiredTokenException')).toBe('AUTH_FAILED');
+    expect(sqsErrorCode('KmsAccessDenied')).toBe('AUTH_FAILED');
+    expect(sqsErrorCode('KmsDisabled')).toBe('INVALID_INPUT');
+    expect(sqsErrorCode('KmsThrottled')).toBe('REQUEST_FAILED');
+    expect(sqsErrorCode('Whatever')).toBe('REQUEST_FAILED');
+  });
+
+  it('retries throttling, what the SDK marks retryable, 5xx and network drops', () => {
+    expect(sqsRetryable({ name: 'ThrottlingException', $metadata: { httpStatusCode: 400 } })).toBe(true);
+    expect(sqsRetryable({ name: 'KmsThrottled', $metadata: { httpStatusCode: 400 } })).toBe(true);
+    expect(sqsRetryable({ name: 'Odd', $retryable: {}, $metadata: { httpStatusCode: 400 } })).toBe(true);
+    expect(sqsRetryable({ name: 'InternalError', $metadata: { httpStatusCode: 500 } })).toBe(true);
+    expect(sqsRetryable({ name: 'Odd', $metadata: { httpStatusCode: 429 } })).toBe(true);
+    // A network failure: no answer, though the SDK's retries add a $metadata without a status.
+    expect(sqsRetryable({ name: 'TimeoutError' })).toBe(true);
+    expect(sqsRetryable({ name: 'Error', $metadata: {} })).toBe(true);
+  });
+
+  it('does not retry what would fail again: credentials, KMS, a missing queue, other 4xx', () => {
+    expect(sqsRetryable({ name: 'CredentialsProviderError' })).toBe(false);
+    expect(sqsRetryable({ name: 'TokenProviderError' })).toBe(false);
+    expect(sqsRetryable({ name: 'AccessDenied', $metadata: { httpStatusCode: 403 } })).toBe(false);
+    expect(sqsRetryable({ name: 'KmsDisabled', $metadata: { httpStatusCode: 400 } })).toBe(false);
+    expect(sqsRetryable({ name: 'QueueDoesNotExist', $metadata: { httpStatusCode: 400 } })).toBe(false);
+    expect(sqsRetryable({ name: 'SomethingNew', $metadata: { httpStatusCode: 400 } })).toBe(false);
   });
 });
 

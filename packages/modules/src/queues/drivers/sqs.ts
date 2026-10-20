@@ -15,18 +15,26 @@ import {
 } from '@aws-sdk/client-sqs';
 import {
   QuiverError,
+  sqsCollectStop,
   sqsDestination,
+  sqsErrorCode,
   sqsIsFifo,
   sqsMergePeek,
   sqsMessage,
   sqsMessageAttributes,
   sqsNearRedrive,
   sqsQueueName,
+  sqsQueueOrigins,
   sqsRedrive,
+  sqsRegion,
+  sqsRetryable,
+  sqsSecretBinding,
   SQS_LIST_ATTRIBUTES,
+  SQS_SECRET_BINDING,
   type QueueConnection,
   type QueueDriver,
   type QueueSecrets,
+  type SqsFailure,
   type SqsRedrive,
 } from '@quiver/core';
 
@@ -34,9 +42,10 @@ import {
 // profile or key change; queue URLs are cached on it by name. SQS has no way to look at a message without
 // receiving it, so peeks and tails receive with a visibility timeout of 0: the message stays visible to every
 // other consumer and nothing is deleted, but each receive counts towards its receive count (and so a redrive
-// policy's maxReceiveCount). Peeks therefore receive each message about once, tails back off while SQS keeps
-// handing back what they have seen and stop one receive short of the DLQ, and the commands make all of them
-// mutating for agents. Tails never delete either, like Kafka's throwaway groups and the memory broker.
+// policy's maxReceiveCount). Peeks therefore receive each message about once and stop before a round that could
+// receive one past the limit, tails back off while SQS keeps handing back what they have seen and stop one receive
+// short of the DLQ, and the commands make all of them mutating for agents. Tails never delete either, like
+// Kafka's throwaway groups and the memory broker.
 
 const CONNECT_TIMEOUT_MS = 5000;
 /** Longer than the 20 second long poll a tail waits in. */
@@ -68,14 +77,16 @@ interface Pooled {
   client: SQSClient;
   /** Queue URL by name, as GetQueueUrl or ListQueues answered. */
   urls: Map<string, string>;
-  /** Origins a queue URL given as the destination may have: the endpoint, or SQS's own hosts in the region. */
+  /** Origins a queue URL given as the destination may have: the endpoint, SQS's own hosts in the region, and the hosts of the queue URLs SQS answered with. */
   origins: Set<string>;
+  /** Aborted when the client is replaced or closed, with the reason, so the tails on it end rather than go on with old keys or an old host. */
+  retired: AbortController;
 }
 
 const pool = new Map<string, Pooled>();
 
 function regionOf(c: QueueConnection): string {
-  const region = c.region.trim() || (c.endpoint.trim() ? 'us-east-1' : '');
+  const region = sqsRegion(c.region, c.endpoint);
   if (!region) throw new QuiverError('INVALID_INPUT', 'The connection has no region; set one such as eu-west-1');
   return region;
 }
@@ -93,6 +104,12 @@ function config(c: QueueConnection, s: QueueSecrets): SQSClientConfig {
   const accessKeyId = c.accessKeyId.trim();
   if (accessKeyId) {
     if (!s.secretAccessKey) throw new QuiverError('INVALID_INPUT', `Access key ${accessKeyId} needs its secret: store it as the secret secretAccessKey`);
+    // The key stays with the endpoint and region it was stored for: a pulled commit that points the connection
+    // elsewhere does not take the key (or its session token) along.
+    const bound = s[SQS_SECRET_BINDING];
+    if (bound && bound !== sqsSecretBinding(c)) {
+      throw new QuiverError('AUTH_FAILED', `The secret of access key ${accessKeyId} was stored for ${bound} and the connection now points at ${sqsSecretBinding(c)}; re-enter the secret for the new endpoint`);
+    }
     out.credentials = { accessKeyId, secretAccessKey: s.secretAccessKey, sessionToken: s.sessionToken || undefined };
   } else if (endpoint) {
     // An endpoint comes with the committed connection, so it never gets the profile's or the environment's credentials.
@@ -104,55 +121,41 @@ function config(c: QueueConnection, s: QueueSecrets): SQSClientConfig {
   return out;
 }
 
-function originsOf(c: QueueConnection): Set<string> {
-  const endpoint = c.endpoint.trim();
-  if (endpoint) {
-    try {
-      return new Set([new URL(endpoint).origin]);
-    } catch {
-      return new Set();
-    }
-  }
-  const region = regionOf(c);
-  return new Set([`https://sqs.${region}.amazonaws.com`, `https://sqs.${region}.amazonaws.com.cn`, `https://${region}.queue.amazonaws.com`]);
-}
-
 function pooled(c: QueueConnection, s: QueueSecrets): Pooled {
-  const key = JSON.stringify([c.region, c.endpoint, c.profile, c.accessKeyId, s.secretAccessKey ?? '', s.sessionToken ?? '']);
+  const key = JSON.stringify([c.region, c.endpoint, c.profile, c.accessKeyId, s.secretAccessKey ?? '', s.sessionToken ?? '', s[SQS_SECRET_BINDING] ?? '']);
   const existing = pool.get(c.id);
   if (existing?.key === key) return existing;
-  existing?.client.destroy();
-  const p: Pooled = { key, client: new SQSClient(config(c, s)), urls: new Map(), origins: originsOf(c) };
+  // Settings that are refused leave the pooled client (and the tails on it) as they were.
+  const cfg = config(c, s);
+  // A destroyed v3 client still sends, so the tails holding it are told to end.
+  if (existing) retire(existing, new QuiverError('CONFLICT', 'The connection changed; start the tail again'));
+  const p: Pooled = { key, client: new SQSClient(cfg), urls: new Map(), origins: new Set(sqsQueueOrigins(c.endpoint, regionOf(c))), retired: new AbortController() };
   pool.set(c.id, p);
   return p;
 }
 
-const NOT_FOUND = new Set(['QueueDoesNotExist', 'AWS.SimpleQueueService.NonExistentQueue']);
-const CONFLICT = new Set(['QueueAlreadyExists', 'QueueNameExists', 'QueueDeletedRecently', 'AWS.SimpleQueueService.QueueDeletedRecently', 'PurgeQueueInProgress', 'AWS.SimpleQueueService.PurgeQueueInProgress']);
-const AUTH = new Set([
-  'InvalidClientTokenId',
-  'UnrecognizedClientException',
-  'SignatureDoesNotMatch',
-  'InvalidSecurity',
-  'AccessDenied',
-  'AccessDeniedException',
-  'ExpiredToken',
-  'ExpiredTokenException',
-  'CredentialsProviderError',
-]);
-const INVALID = new Set(['InvalidParameterValue', 'InvalidAttributeName', 'InvalidAttributeValue', 'InvalidMessageContents', 'MissingParameter', 'InvalidParameterCombination', 'ValidationException', 'InvalidAddress', 'UnsupportedOperation']);
+function retire(p: Pooled, reason: QuiverError): void {
+  p.retired.abort(reason);
+  p.client.destroy();
+}
+
+/** Remember the host of a queue URL SQS answered with, so the URL is taken as a destination too. */
+function rememberUrl(p: Pooled, url: string): void {
+  p.urls.set(sqsQueueName(url), url);
+  try {
+    p.origins.add(new URL(url).origin);
+  } catch {
+    // Not a URL: only its name is kept.
+  }
+}
 
 /** AWS errors as Quiver errors: a missing queue is NOT_FOUND, an existing one CONFLICT, refused credentials AUTH_FAILED. */
 function quiverError(err: unknown, destination?: string): QuiverError {
   if (err instanceof QuiverError) return err;
   const e = err as { name?: string; message?: string };
-  const name = e.name ?? '';
+  const code = sqsErrorCode(e.name ?? '');
   const message = e.message || String(err);
-  if (NOT_FOUND.has(name)) return new QuiverError('NOT_FOUND', destination ? `Queue ${destination} not found` : message);
-  if (CONFLICT.has(name)) return new QuiverError('CONFLICT', message);
-  if (AUTH.has(name)) return new QuiverError('AUTH_FAILED', message);
-  if (INVALID.has(name)) return new QuiverError('INVALID_INPUT', message);
-  return new QuiverError('REQUEST_FAILED', message);
+  return new QuiverError(code, code === 'NOT_FOUND' && destination ? `Queue ${destination} not found` : message);
 }
 
 function fail(err: unknown, destination?: string): never {
@@ -183,6 +186,7 @@ async function queueUrl(p: Pooled, destination: string): Promise<string> {
   if (cached) return cached;
   const { QueueUrl } = await p.client.send(new GetQueueUrlCommand({ QueueName: destination }));
   if (!QueueUrl) throw new QuiverError('NOT_FOUND', `Queue ${destination} not found`);
+  rememberUrl(p, QueueUrl);
   p.urls.set(destination, QueueUrl);
   return QueueUrl;
 }
@@ -196,7 +200,7 @@ async function attributes(p: Pooled, url: string, names: readonly string[]): Pro
 async function listUrls(p: Pooled): Promise<string[]> {
   const page = await p.client.send(new ListQueuesCommand({ MaxResults: LIST_MAX }));
   const urls = page.QueueUrls ?? [];
-  for (const url of urls) p.urls.set(sqsQueueName(url), url);
+  for (const url of urls) rememberUrl(p, url);
   return urls;
 }
 
@@ -229,28 +233,42 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promis
   return out;
 }
 
-/**
- * Receive as a peek does: rounds of up to ten, each long polling a second so SQS looks at every server, until
- * `enough` are seen, a round brings fewer than it asked for (nothing more to hand out) or nothing new (SQS keeps
- * handing back the same ones), or the deadline. Each message is received about once, not once per round.
- */
-async function collect(p: Pooled, url: string, enough: number, deadline: number): Promise<Message[]> {
-  const seen = new Map<string, Message>();
-  while (seen.size < enough && Date.now() < deadline) {
-    const max = Math.min(RECEIVE_MAX, enough - seen.size);
-    const { Messages = [] } = await receive(p, url, 1, max);
-    let fresh = 0;
-    for (const m of Messages) {
-      if (!m.MessageId || seen.has(m.MessageId)) continue;
-      seen.set(m.MessageId, m);
-      fresh++;
-    }
-    if (Messages.length < max || !fresh) break;
-  }
-  return [...seen.values()];
+const receiveCount = (m: Message) => Number(m.Attributes?.ApproximateReceiveCount ?? 0);
+
+/** What a queue's peek or tail reads before it receives: the redrive limit, and how many messages are visible. */
+async function receiveLimits(p: Pooled, url: string): Promise<{ redrive: SqsRedrive | null; visible?: number }> {
+  const a = await attributes(p, url, ['RedrivePolicy', 'ApproximateNumberOfMessages']);
+  const visible = a.ApproximateNumberOfMessages === undefined ? NaN : Number(a.ApproximateNumberOfMessages);
+  return { redrive: sqsRedrive(a.RedrivePolicy), visible: Number.isFinite(visible) ? visible : undefined };
 }
 
-const receiveCount = (m: Message) => Number(m.Attributes?.ApproximateReceiveCount ?? 0);
+/**
+ * Receive as a peek does: rounds of up to ten, each long polling a second so SQS looks at every server, until
+ * `enough` are seen, a round brings nothing, as many as the queue held are seen, three rounds in a row bring
+ * nothing new (SQS keeps handing back the same ones; one round on a queue with a redrive policy), or the deadline
+ * (`sqsCollectStop`). A short round goes on: SQS often hands back fewer than asked with more waiting. Each message
+ * is received about once, but a later round can hand back one already seen, so once any message seen is one receive
+ * short of the redrive limit no further round is made, and it comes back as `near`.
+ */
+async function collect(p: Pooled, url: string, enough: number, deadline: number, redrive: SqsRedrive | null, visible?: number): Promise<{ messages: Message[]; near?: Message }> {
+  const seen = new Map<string, Message>();
+  let near: Message | undefined;
+  let stale = 0;
+  for (;;) {
+    const { Messages = [] } = await receive(p, url, 1, Math.min(RECEIVE_MAX, enough - seen.size));
+    let fresh = 0;
+    for (const m of Messages) {
+      if (!m.MessageId) continue;
+      if (!seen.has(m.MessageId)) fresh++;
+      // The latest copy, with the receive count this round left it at.
+      seen.set(m.MessageId, m);
+      if (!near && sqsNearRedrive(receiveCount(m), redrive)) near = m;
+    }
+    stale = fresh ? 0 : stale + 1;
+    if (sqsCollectStop({ seen: seen.size, enough, visible, got: Messages.length, stale, redrive: Boolean(redrive), nearRedrive: Boolean(near) }) || Date.now() >= deadline) break;
+  }
+  return { messages: [...seen.values()], near };
+}
 
 /** The error a tail ends with rather than receive a message once more and so move it to the dead-letter queue. */
 function nearRedriveError(destination: string, m: Message, redrive: SqsRedrive): QuiverError {
@@ -328,19 +346,18 @@ export const sqsDriver: QueueDriver = {
       const p = pooled(c, s);
       const url = await queueUrl(p, destination);
       const name = sqsQueueName(url);
+      // The redrive limit, so the peek stops before its own rounds move a message to the dead-letter queue.
+      const { redrive, visible } = await receiveLimits(p, url);
       // A FIFO queue hands out each group from its oldest message, and at visibility 0 those stay first in line, so
       // past ten messages the newest are never handed out: refused before receiving anything, rather than answered
       // with the oldest as though they were the newest.
-      if (from === 'latest' && sqsIsFifo(name)) {
-        const held = Number((await attributes(p, url, ['ApproximateNumberOfMessages'])).ApproximateNumberOfMessages ?? 0);
-        if (held > RECEIVE_MAX) {
-          throw new QuiverError('INVALID_INPUT', `${name} is a FIFO queue holding ${held} messages; SQS hands them out oldest first per group, so its newest cannot be peeked. Peek from earliest instead.`);
-        }
+      if (from === 'latest' && sqsIsFifo(name) && (visible ?? 0) > RECEIVE_MAX) {
+        throw new QuiverError('INVALID_INPUT', `${name} is a FIFO queue holding ${visible} messages; SQS hands them out oldest first per group, so its newest cannot be peeked. Peek from earliest instead.`);
       }
       // `limit` of the oldest, or up to 500 to find the newest among, since SQS hands out older ones first.
       const enough = from === 'earliest' ? limit : Math.max(limit, PEEK_COLLECT_MAX);
-      const got = await collect(p, url, enough, Date.now() + PEEK_TIMEOUT_MS);
-      return sqsMergePeek(got.map((m) => sqsMessage(name, m)), limit, from);
+      const { messages } = await collect(p, url, enough, Date.now() + PEEK_TIMEOUT_MS, redrive, visible);
+      return sqsMergePeek(messages.map((m) => sqsMessage(name, m)), limit, from);
     }, destination),
 
   produce: (c, s, destination, message) =>
@@ -372,7 +389,7 @@ export const sqsDriver: QueueDriver = {
       const name = sqsQueueName(url);
       const startedAt = Date.now();
       // The redrive limit, so the tail stops before its own receives move a message to the dead-letter queue.
-      const redrive = sqsRedrive((await attributes(p, url, ['RedrivePolicy'])).RedrivePolicy);
+      const { redrive, visible } = await receiveLimits(p, url);
       const abort = new AbortController();
       const seen = new Set<string>();
       const remember = (id: string) => {
@@ -382,23 +399,33 @@ export const sqsDriver: QueueDriver = {
       const sentAt = (m: Message) => Number(m.Attributes?.SentTimestamp ?? 0);
       // From latest, what is already on the queue does not count: what a first look like a peek's sees (but not what
       // was sent while it long polled), and anything sent well before the tail started that the look missed.
+      // The look stops before a round that could receive a message past the limit, and the tail does not start.
       if (from === 'latest') {
-        const there = await collect(p, url, PEEK_COLLECT_MAX, Date.now() + PEEK_TIMEOUT_MS);
+        const { messages: there, near } = await collect(p, url, PEEK_COLLECT_MAX, Date.now() + PEEK_TIMEOUT_MS, redrive, visible);
+        if (near && redrive) throw nearRedriveError(destination, near, redrive);
         for (const m of there) if (m.MessageId && !(sentAt(m) >= startedAt)) remember(m.MessageId);
-        const near = redrive && there.find((m) => sqsNearRedrive(receiveCount(m), redrive));
-        if (near) throw nearRedriveError(destination, near, redrive);
       }
       let ended = false;
       const end = (error?: Error) => {
         if (ended) return;
         ended = true;
         abort.abort();
+        p.retired.signal.removeEventListener('abort', onRetired);
         onEnd(error);
       };
+      // The pooled client was replaced (the connection's settings or keys changed) or closed: this tail would go on
+      // sending with the old keys to the old host, so it ends.
+      const onRetired = () => end(p.retired.signal.reason as Error);
+      if (p.retired.signal.aborted) throw p.retired.signal.reason;
+      p.retired.signal.addEventListener('abort', onRetired, { once: true });
       void (async () => {
         let idle = TAIL_IDLE_MS;
         let retry = TAIL_RETRY_MS;
         while (!abort.signal.aborted) {
+          if (pool.get(c.id) !== p) {
+            end(new QuiverError('CONFLICT', 'The connection changed; start the tail again'));
+            break;
+          }
           let fresh = 0;
           let got = 0;
           const asked = Date.now();
@@ -422,10 +449,10 @@ export const sqsDriver: QueueDriver = {
             }
           } catch (err) {
             if (abort.signal.aborted) break;
-            // Throttling, a network drop or an SQS hiccup is retried; a deleted queue or refused credentials end the tail.
-            const e = quiverError(err, destination);
-            if (e.code !== 'REQUEST_FAILED') {
-              end(e);
+            // Throttling, a network drop or an SQS hiccup is retried; a deleted queue, refused or expired credentials,
+            // an unusable KMS key or any other answer that would come again ends the tail.
+            if (!sqsRetryable(err as SqsFailure)) {
+              end(quiverError(err, destination));
               break;
             }
             await sleep(retry, abort.signal);
@@ -466,13 +493,13 @@ export const sqsDriver: QueueDriver = {
       const exists = await p.client.send(new GetQueueUrlCommand({ QueueName: destination })).then(
         (r) => Boolean(r.QueueUrl),
         (err: { name?: string }) => {
-          if (NOT_FOUND.has(err.name ?? '')) return false;
+          if (sqsErrorCode(err.name ?? '') === 'NOT_FOUND') return false;
           throw err;
         },
       );
       if (exists) throw new QuiverError('CONFLICT', `Queue ${destination} already exists`);
       const { QueueUrl } = await p.client.send(new CreateQueueCommand({ QueueName: destination, Attributes: named ? { FifoQueue: 'true' } : undefined }));
-      if (QueueUrl) p.urls.set(destination, QueueUrl);
+      if (QueueUrl) rememberUrl(p, QueueUrl);
     }, destination),
 
   remove: (c, s, destination) =>
@@ -488,12 +515,12 @@ export const sqsDriver: QueueDriver = {
     const p = pool.get(connectionId);
     if (!p) return;
     pool.delete(connectionId);
-    p.client.destroy();
+    retire(p, new QuiverError('CONFLICT', 'The connection was closed'));
   },
 };
 
 /** Close every pooled client, when the app quits. */
 export async function sqsCloseAll(): Promise<void> {
-  for (const p of pool.values()) p.client.destroy();
+  for (const p of pool.values()) retire(p, new QuiverError('CONFLICT', 'Quiver is quitting'));
   pool.clear();
 }

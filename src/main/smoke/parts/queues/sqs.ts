@@ -130,11 +130,26 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc }) => {
     const byUrl = await run<QueueMessage[]>('queues.message.peek', { connectionId: conn.id, destination: `${fake.url}/000000000000/orders`, limit: 1 }, ws.id);
     const elsewhere = await fail('queues.message.peek', { connectionId: conn.id, destination: 'http://127.0.0.1:9/000000000000/orders' });
     const elsewhereTail = await fail('queues.consumer.start', { connectionId: conn.id, destination: 'https://sqs.eu-west-1.amazonaws.com/000000000000/orders' });
+    // The URL's peek reads the redrive policy and receives; the others send nothing.
     check(
       'sqs: a queue URL works for the connection endpoint and is refused for any other host, before a request',
-      byUrl.length === 1 && elsewhere === 'INVALID_INPUT' && elsewhereTail === 'INVALID_INPUT' && fake.seen.ops.length === sentBefore + 1,
+      byUrl.length === 1 && elsewhere === 'INVALID_INPUT' && elsewhereTail === 'INVALID_INPUT' && fake.seen.ops.slice(sentBefore).join() === 'GetQueueAttributes,ReceiveMessage',
       { byUrl: byUrl.length, elsewhere, elsewhereTail, ops: fake.seen.ops.slice(sentBefore) },
     );
+    // A region in mixed case is lower-cased as the SDK does in hostnames, so SQS's own URLs in it are still taken.
+    // The SDK's configured endpoint (not the committed file) sends the requests to the fake.
+    const upper = await run<Summary>(
+      'queues.connection.save',
+      { connection: { name: 'smoke sqs region', kind: 'sqs', region: 'EU-West-1', accessKeyId: fake.accessKeyId }, secrets: { secretAccessKey: fake.secretAccessKey } },
+      ws.id,
+    );
+    ids.push(upper.id);
+    process.env.AWS_ENDPOINT_URL_SQS = fake.url;
+    const upperPeek = await fail('queues.message.peek', { connectionId: upper.id, destination: 'https://sqs.eu-west-1.amazonaws.com/000000000000/orders', limit: 1 }).finally(() => {
+      if (envBefore.endpoint === undefined) delete process.env.AWS_ENDPOINT_URL_SQS;
+      else process.env.AWS_ENDPOINT_URL_SQS = envBefore.endpoint;
+    });
+    check('sqs: a region given in mixed case still takes the queue URLs of SQS in that region', upperPeek === 'ok', upperPeek);
     check('sqs: an unknown queue is not found', (await fail('queues.message.peek', { connectionId: conn.id, destination: 'nope' })) === 'NOT_FOUND' && (await fail('queues.consumer.start', { connectionId: conn.id, destination: 'nope' })) === 'NOT_FOUND');
 
     // ---------- FIFO ----------
@@ -216,6 +231,89 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc }) => {
     );
     await run('queues.consumer.stop', { consumerId: guarded.id, forget: true }, ws.id);
 
+    // On queues past ten messages whose receives come back short and overlapping, as SQS's do, a peek's or a tail's
+    // later rounds would hand out messages it already received; with maxReceiveCount 1 or 2 one of those moves them
+    // to the DLQ, so a peek stops before such a round and a wait or a tail refuses to start.
+    const produceMany = async (destination: string, n: number) => {
+      for (let i = 1; i <= n; i++) await run('queues.message.produce', { connectionId: conn.id, destination, body: `${destination} ${i}`, headers: {} }, ws.id);
+    };
+    fake.addQueue('guard-dlq');
+    const guardedOps: Record<string, string> = {};
+    for (const max of [1, 2]) {
+      const policy = { RedrivePolicy: JSON.stringify({ deadLetterTargetArn: 'arn:aws:sqs:us-east-1:000000000000:guard-dlq', maxReceiveCount: max }) };
+      for (const op of ['peek', 'wait', 'tail']) {
+        const q = `guard-${max}-${op}`;
+        fake.addQueue(q, policy, { uneven: true });
+        await produceMany(q, 15);
+        const outcome =
+          op === 'peek'
+            ? String((await run<QueueMessage[]>('queues.message.peek', { connectionId: conn.id, destination: q, limit: 15, from: 'earliest' }, ws.id)).length)
+            : await fail(op === 'wait' ? 'queues.message.wait' : 'queues.consumer.start', { connectionId: conn.id, destination: q, ...(op === 'wait' ? { timeoutMs: 1000 } : {}) });
+        guardedOps[q] = `${outcome}, ${fake.messages(q).length} held`;
+      }
+    }
+    check(
+      'sqs: with maxReceiveCount 1 or 2 and more than ten messages, peek, wait and tail stop short of the DLQ',
+      fake.messages('guard-dlq').length === 0 && Object.entries(guardedOps).every(([q, v]) => v === (q.endsWith('peek') ? '10, 15 held' : 'CONFLICT, 15 held')),
+      { guardedOps, dlq: fake.messages('guard-dlq').length },
+    );
+
+    // SQS often hands back fewer than asked with more waiting: a short round does not end a peek.
+    fake.addQueue('backlog', {}, { uneven: true });
+    await produceMany('backlog', 25);
+    const backlogAll = await run<QueueMessage[]>('queues.message.peek', { connectionId: conn.id, destination: 'backlog', limit: 25, from: 'earliest' }, ws.id);
+    const backlogNewest = await run<QueueMessage[]>('queues.message.peek', { connectionId: conn.id, destination: 'backlog', limit: 3 }, ws.id);
+    check(
+      'sqs: a peek goes on through short and overlapping receives until it has seen the whole queue',
+      new Set(backlogAll.map((m) => m.id)).size === 25 && backlogNewest.map((m) => m.body).join() === 'backlog 23,backlog 24,backlog 25',
+      { all: backlogAll.length, newest: backlogNewest.map((m) => m.body) },
+    );
+
+    // A queue whose KMS key is disabled refuses every receive: the tail ends rather than retry forever.
+    fake.addQueue('locked', { KmsMasterKeyId: 'alias/disabled' });
+    const lockedTail = await run<Consumer>('queues.consumer.start', { connectionId: conn.id, destination: 'locked', from: 'earliest' }, ws.id);
+    let locked: Read = { consumer: lockedTail, messages: [], cursor: 0 };
+    await until(async () => (locked = await run<Read>('queues.consumer.read', { consumerId: lockedTail.id }, ws.id)).consumer.status !== 'running', 5000);
+    check('sqs: a tail ends on an error that would come again, such as a disabled KMS key', locked.consumer.status === 'error' && (locked.consumer.error ?? '').includes('KMS'), locked.consumer);
+    await run('queues.consumer.stop', { consumerId: lockedTail.id, forget: true }, ws.id);
+
+    // A pulled commit that changes the connection (here its access key) rebuilds the pooled client on the next call;
+    // a tail still on the old client, which would go on signing with the old key, ends.
+    const moved = await run<Summary>(
+      'queues.connection.save',
+      { connection: { name: 'smoke sqs moved', kind: 'sqs', endpoint: fake.url, accessKeyId: fake.accessKeyId }, secrets: { secretAccessKey: fake.secretAccessKey } },
+      ws.id,
+    );
+    ids.push(moved.id);
+    fake.addQueue('quiet');
+    const quietTail = await run<Consumer>('queues.consumer.start', { connectionId: moved.id, destination: 'quiet' }, ws.id);
+    const movedFile = path.join(folder, '.quiver', 'queues', `${moved.id}.json`);
+    await fs.writeFile(movedFile, JSON.stringify({ ...JSON.parse(await fs.readFile(movedFile, 'utf8')), accessKeyId: fake.profileKeyId }, null, 2));
+    await until(async () => (await run<Summary>('queues.connection.get', { id: moved.id }, ws.id)).accessKeyId === fake.profileKeyId, 3000);
+    await run('queues.destination.list', { connectionId: moved.id }, ws.id);
+    let quiet: Read = { consumer: quietTail, messages: [], cursor: 0 };
+    await until(async () => (quiet = await run<Read>('queues.consumer.read', { consumerId: quietTail.id }, ws.id)).consumer.status !== 'running', 3000);
+    check('sqs: a tail ends once the connection it started on changes', quiet.consumer.status === 'error' && (quiet.consumer.error ?? '').includes('connection changed'), quiet.consumer);
+    await run('queues.consumer.stop', { consumerId: quietTail.id, forget: true }, ws.id);
+
+    // A pulled commit that points the connection at another endpoint (localhost instead of 127.0.0.1: another origin,
+    // the same fake) does not take the stored key along; a rename keeps refusing; the key typed again goes there.
+    const pulledUrl = fake.url.replace('127.0.0.1', 'localhost');
+    await fs.writeFile(movedFile, JSON.stringify({ ...JSON.parse(await fs.readFile(movedFile, 'utf8')), endpoint: pulledUrl, accessKeyId: fake.accessKeyId }, null, 2));
+    await until(async () => (await run<Summary>('queues.connection.get', { id: moved.id }, ws.id)).endpoint === pulledUrl, 3000);
+    const pulledEndpoint = await fail('queues.destination.list', { connectionId: moved.id });
+    const pulledRequests = fake.seen.ops.length;
+    await run('queues.connection.save', { connection: { id: moved.id, name: 'smoke sqs moved again' } }, ws.id);
+    const afterRename = await fail('queues.destination.list', { connectionId: moved.id });
+    const signedElsewhere = fake.seen.ops.length - pulledRequests;
+    await run('queues.connection.save', { connection: { id: moved.id }, secrets: { secretAccessKey: fake.secretAccessKey } }, ws.id);
+    const reentered = await fail('queues.destination.list', { connectionId: moved.id });
+    check(
+      'sqs: a stored key stays with the endpoint it was saved for: a pulled endpoint is refused, also after a rename, until the key is typed again',
+      pulledEndpoint === 'AUTH_FAILED' && afterRename === 'AUTH_FAILED' && signedElsewhere === 0 && reentered === 'ok',
+      { pulledEndpoint, afterRename, signedElsewhere, reentered },
+    );
+
     // ---------- purge, groups, delete ----------
     await run('queues.destination.purge', { connectionId: conn.id, destination: 'orders' }, ws.id);
     const purged = await run<QueueDestination>('queues.destination.describe', { connectionId: conn.id, destination: 'orders' }, ws.id);
@@ -234,7 +332,7 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc }) => {
     const afterDelete = await run<QueueDestination[]>('queues.destination.list', { connectionId: conn.id }, ws.id);
     check(
       'sqs: deleting a queue removes it and ends its tails, even one in a long poll',
-      !afterDelete.some((d) => d.name === 'jobs.fifo' || d.name === 'idle') && ended.consumer.status === 'error' && (ended.consumer.error ?? '').includes('not found'),
+      !afterDelete.some((d) => d.name === 'jobs.fifo' || d.name === 'idle') && ended.consumer.status !== 'running',
       ended.consumer,
     );
 

@@ -5,7 +5,10 @@ import type { AddressInfo } from 'node:net';
 // A fake of the SQS JSON protocol (AWS JSON 1.0, `X-Amz-Target: AmazonSQS.<Operation>`), covering what the SQS
 // driver calls: queues with attributes, FIFO groups and deduplication, delays, visibility timeouts, long polling,
 // redrive to a dead-letter queue past maxReceiveCount, and purge. It checks the access key id in the signature,
-// not the signature itself. It listens on 127.0.0.1 only.
+// not the signature itself. It listens on 127.0.0.1 only. A queue hands out its visible messages in order, as many
+// as asked, unless it is made uneven: then, as SQS sampling its servers does, every other receive hands out half
+// what was asked, and each starts partway into the last one's messages, so rounds overlap and come back short.
+// A queue whose KmsMasterKeyId is `alias/disabled` refuses receives as SQS does when its KMS key is disabled.
 
 const ACCOUNT = '000000000000';
 const DEFAULT_VISIBILITY_S = 30;
@@ -36,6 +39,8 @@ interface FakeQueue {
   dedup: Map<string, { id: string; at: number; sequence?: string }>;
   /** Long polls waiting for a message. */
   waiters: Set<() => void>;
+  /** Receives so far and where the next starts, on an uneven queue. */
+  uneven?: { round: number; cursor: number };
 }
 
 export interface FakeSqs {
@@ -48,8 +53,8 @@ export interface FakeSqs {
   profileKeyId: string;
   /** What the driver did: operations by name, the visibility timeouts its receives asked for, the access key ids it signed with. */
   seen: { ops: string[]; visibility: (number | undefined)[]; keys: string[] };
-  /** Make a queue directly, with attributes (a redrive policy, say) the driver does not set. */
-  addQueue(name: string, attributes?: Record<string, string>): string;
+  /** Make a queue directly, with attributes (a redrive policy, say) the driver does not set; `uneven` makes its receives short and overlapping. */
+  addQueue(name: string, attributes?: Record<string, string>, options?: { uneven?: boolean }): string;
   setAttributes(name: string, attributes: Record<string, string>): void;
   /** The messages a queue holds, received or not. */
   messages(name: string): FakeMessage[];
@@ -78,10 +83,19 @@ export async function startFakeSqs(): Promise<FakeSqs> {
   const urlOf = (name: string) => `${base}/${ACCOUNT}/${name}`;
   const arnOf = (name: string) => `arn:aws:sqs:us-east-1:${ACCOUNT}:${name}`;
 
-  function addQueue(name: string, attributes: Record<string, string> = {}): string {
+  function addQueue(name: string, attributes: Record<string, string> = {}, options: { uneven?: boolean } = {}): string {
     if (!queues.has(name)) {
       const now = Date.now();
-      queues.set(name, { name, attributes: { VisibilityTimeout: String(DEFAULT_VISIBILITY_S), ...attributes }, messages: [], createdAt: now, lastPurge: 0, dedup: new Map(), waiters: new Set() });
+      queues.set(name, {
+        name,
+        attributes: { VisibilityTimeout: String(DEFAULT_VISIBILITY_S), ...attributes },
+        messages: [],
+        createdAt: now,
+        lastPurge: 0,
+        dedup: new Map(),
+        waiters: new Set(),
+        uneven: options.uneven ? { round: 0, cursor: 0 } : undefined,
+      });
     }
     return urlOf(name);
   }
@@ -139,8 +153,16 @@ export async function startFakeSqs(): Promise<FakeSqs> {
     // As SQS does: a message received maxReceiveCount times moves to the dead-letter queue on the next receive instead.
     const redrive = redriveOf(q);
     const moved = new Set<FakeMessage>();
-    for (const m of q.messages) {
-      if (out.length >= max) break;
+    let order = q.messages;
+    let cap = max;
+    const u = q.uneven;
+    if (u && !fifo(q)) {
+      if (++u.round % 2 === 0) cap = Math.ceil(max / 2);
+      const start = q.messages.length ? u.cursor % q.messages.length : 0;
+      order = [...q.messages.slice(start), ...q.messages.slice(0, start)];
+    }
+    for (const m of order) {
+      if (out.length >= cap) break;
       if (m.visibleAt > now || blocked.has(m.groupId)) continue;
       if (redrive && redrive.max > 0 && m.received >= redrive.max) {
         moved.add(m);
@@ -152,6 +174,7 @@ export async function startFakeSqs(): Promise<FakeSqs> {
       m.visibleAt = now + visibility * 1000;
       out.push(m);
     }
+    if (u && !fifo(q)) u.cursor += Math.ceil(out.length / 2);
     if (moved.size) {
       q.messages = q.messages.filter((m) => !moved.has(m));
       for (const w of redrive!.dlq.waiters) w();
@@ -247,6 +270,7 @@ export async function startFakeSqs(): Promise<FakeSqs> {
       const max = Number(input.MaxNumberOfMessages ?? 1);
       const visibility = input.VisibilityTimeout === undefined ? Number(q.attributes.VisibilityTimeout) : Number(input.VisibilityTimeout);
       seen.visibility.push(input.VisibilityTimeout as number | undefined);
+      if (q.attributes.KmsMasterKeyId === 'alias/disabled') throw new SqsError('KmsDisabled', 'The request was rejected because the specified KMS key is disabled.', 'KMS.DisabledException');
       const wait = Number(input.WaitTimeSeconds ?? q.attributes.ReceiveMessageWaitTimeSeconds ?? 0);
       let got = take(q, max, visibility);
       if (!got.length && wait > 0) {

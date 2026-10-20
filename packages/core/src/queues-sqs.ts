@@ -1,3 +1,4 @@
+import type { QuiverErrorCode } from './errors';
 import type { QueueDestination, QueueMessage } from './models/queues';
 
 // Shaping for the SQS driver, kept apart from the AWS SDK so it can be tested without a queue. SQS hands
@@ -44,6 +45,168 @@ export function sqsRedrive(policy: string | undefined): SqsRedrive | null {
  */
 export function sqsNearRedrive(receiveCount: number, redrive: SqsRedrive | null): boolean {
   return Boolean(redrive && redrive.maxReceiveCount > 0 && receiveCount >= redrive.maxReceiveCount - 1);
+}
+
+/** Rounds in a row that bring nothing new before a peek settles for what it has: SQS keeps handing back the same ones. */
+export const SQS_COLLECT_STALE_ROUNDS = 3;
+
+/** Where a peek's rounds of receives stand after one of them. */
+export interface SqsCollectState {
+  /** Distinct messages received so far, and how many are wanted. */
+  seen: number;
+  enough: number;
+  /** The queue's approximate visible count when the peek began, when SQS gave one. */
+  visible?: number;
+  /** Messages the last round brought, seen before or not. */
+  got: number;
+  /** Rounds in a row that brought nothing new. */
+  stale: number;
+  /** The queue has a redrive policy. */
+  redrive: boolean;
+  /** A message received so far is one receive short of the dead-letter queue. */
+  nearRedrive: boolean;
+}
+
+/**
+ * Why a peek receives no further round, or null to receive again (the deadline is the caller's). SQS often hands back
+ * fewer than asked even with more waiting, so a short round does not end it; an empty one, as many as the queue
+ * holds, or rounds of only messages already seen do (one such round on a queue with a redrive policy, where every
+ * receive brings a message closer to the dead-letter queue). Before all of that, a message one receive short of
+ * the dead-letter queue: another round could hand it out again and move it there.
+ */
+export function sqsCollectStop(s: SqsCollectState): 'near-redrive' | 'enough' | 'drained' | 'stale' | null {
+  if (s.nearRedrive) return 'near-redrive';
+  if (s.seen >= s.enough) return 'enough';
+  if (s.got === 0 || (s.visible !== undefined && s.seen >= s.visible)) return 'drained';
+  if (s.stale >= (s.redrive ? 1 : SQS_COLLECT_STALE_ROUNDS)) return 'stale';
+  return null;
+}
+
+/** The region as the SDK puts it in hostnames: trimmed and lower case; us-east-1 with an endpoint and none set, else empty. */
+export function sqsRegion(region: string, endpoint: string): string {
+  return region.trim().toLowerCase() || (endpoint.trim() ? 'us-east-1' : '');
+}
+
+/** The origins a queue URL given as a destination may have: the endpoint's, or SQS's own hosts in the region. */
+export function sqsQueueOrigins(endpoint: string, region: string): string[] {
+  const e = endpoint.trim();
+  if (e) {
+    try {
+      return [new URL(e).origin];
+    } catch {
+      return [];
+    }
+  }
+  const r = sqsRegion(region, '');
+  return r ? [`https://sqs.${r}.amazonaws.com`, `https://sqs.${r}.amazonaws.com.cn`, `https://${r}.queue.amazonaws.com`] : [];
+}
+
+/**
+ * Not a secret a user stores: the name under which the commands hand the driver what a stored access key was saved
+ * for (`sqsSecretBinding`), so a committed change of endpoint or region does not take the key along. Secret names are
+ * letters and digits, so it cannot clash with one.
+ */
+export const SQS_SECRET_BINDING = 'sqs:boundTo';
+
+/** What a stored access key is bound to, readably: the endpoint's origin (or AWS) and the region, `http://localhost:4566 (us-east-1)`. */
+export function sqsSecretBinding(c: { endpoint: string; region: string }): string {
+  const e = c.endpoint.trim();
+  let where = 'AWS';
+  if (e) {
+    try {
+      where = new URL(e).origin;
+    } catch {
+      where = e;
+    }
+  }
+  return `${where} (${sqsRegion(c.region, c.endpoint)})`;
+}
+
+const SQS_ERRORS: [QuiverErrorCode, string[]][] = [
+  ['NOT_FOUND', ['QueueDoesNotExist', 'AWS.SimpleQueueService.NonExistentQueue']],
+  ['CONFLICT', ['QueueAlreadyExists', 'QueueNameExists', 'QueueDeletedRecently', 'AWS.SimpleQueueService.QueueDeletedRecently', 'PurgeQueueInProgress', 'AWS.SimpleQueueService.PurgeQueueInProgress']],
+  [
+    'AUTH_FAILED',
+    [
+      'InvalidClientTokenId',
+      'UnrecognizedClientException',
+      'SignatureDoesNotMatch',
+      'InvalidSecurity',
+      'AccessDenied',
+      'AccessDeniedException',
+      'ExpiredToken',
+      'ExpiredTokenException',
+      'CredentialsProviderError',
+      'TokenProviderError',
+      'UnauthorizedException',
+      'InvalidGrantException',
+      'KmsAccessDenied',
+      'KMS.AccessDeniedException',
+    ],
+  ],
+  [
+    'INVALID_INPUT',
+    [
+      'InvalidParameterValue',
+      'InvalidAttributeName',
+      'InvalidAttributeValue',
+      'InvalidMessageContents',
+      'MissingParameter',
+      'InvalidParameterCombination',
+      'ValidationException',
+      'InvalidAddress',
+      'UnsupportedOperation',
+      // The queue's KMS key cannot be used: disabled, deleted, in the wrong state or not opted in to.
+      'KmsDisabled',
+      'KmsInvalidKeyUsage',
+      'KmsInvalidState',
+      'KmsNotFound',
+      'KmsOptInRequired',
+      'KMS.DisabledException',
+      'KMS.InvalidKeyUsageException',
+      'KMS.KMSInvalidStateException',
+      'KMS.NotFoundException',
+      'KMS.OptInRequired',
+    ],
+  ],
+];
+
+/** The Quiver code of an AWS error by its name: a missing queue NOT_FOUND, refused credentials or KMS key AUTH_FAILED, anything unknown REQUEST_FAILED. */
+export function sqsErrorCode(name: string): QuiverErrorCode {
+  return SQS_ERRORS.find(([, names]) => names.includes(name))?.[0] ?? 'REQUEST_FAILED';
+}
+
+const SQS_THROTTLING = new Set([
+  'Throttling',
+  'ThrottlingException',
+  'ThrottledException',
+  'RequestThrottled',
+  'RequestThrottledException',
+  'TooManyRequestsException',
+  'RequestLimitExceeded',
+  'SlowDown',
+  'KmsThrottled',
+  'KMS.ThrottlingException',
+]);
+
+/** An SDK error as far as deciding on a retry goes. */
+export interface SqsFailure {
+  name?: string;
+  $retryable?: object;
+  $metadata?: { httpStatusCode?: number };
+}
+
+/**
+ * Whether a tail retries a failed receive: throttling, what the SDK marks retryable, a 5xx, or a failure with no
+ * answer at all (a network drop; the SDK's retries give those a `$metadata` without a status). Refused or expired
+ * credentials, a missing queue, an unusable KMS key and other 4xx answers would fail the same way again, so they end it.
+ */
+export function sqsRetryable(err: SqsFailure): boolean {
+  const name = err.name ?? '';
+  if (SQS_THROTTLING.has(name) || err.$retryable !== undefined) return true;
+  if (sqsErrorCode(name) !== 'REQUEST_FAILED') return false;
+  const status = err.$metadata?.httpStatusCode;
+  return status === undefined || status === 429 || status >= 500;
 }
 
 const count = (v: string | undefined): number | undefined => {
