@@ -111,14 +111,9 @@ export const memoryDriver: QueueDriver = {
   },
 
   consume: async (c, _s, destination, { from }, onMessage, onEnd) => {
-    const b = broker(c);
-    let t = b.get(destination);
-    if (!t) {
-      t = newTopic(destination);
-      b.set(destination, t);
-    }
+    // Like the Kafka consumer, a tail of a topic that does not exist is not found rather than making the topic.
+    const topic = topicOf(c, destination);
     if (from === 'earliest') for (const m of await memoryDriver.peek(c, {}, destination, { limit: TOPIC_LIMIT, from: 'earliest' })) onMessage(m);
-    const topic = t;
     let stopped = false;
     const listener: Listener = {
       onMessage,
@@ -158,3 +153,8 @@ export const memoryDriver: QueueDriver = {
     brokers.delete(connectionId);
   },
 };
+
+/** Drop every broker, when the app quits. */
+export async function memoryCloseAll(): Promise<void> {
+  for (const id of [...brokers.keys()]) await memoryDriver.close!(id);
+}

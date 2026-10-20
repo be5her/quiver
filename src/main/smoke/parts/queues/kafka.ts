@@ -53,7 +53,7 @@ const section: SmokeSection = async ({ check, run, ws }) => {
     check('kafka: wait returns the matching message', waited.message?.body === 'a needle in kafka', waited);
 
     const groups = await run<QueueConsumerGroup[]>('queues.group.list', { connectionId: conn.id }, ws.id);
-    check('kafka: group list leaves out the throwaway peek groups', !groups.some((g) => g.id.startsWith('quiver-peek-')), groups.map((g) => g.id));
+    check('kafka: group list leaves out the throwaway peek, tail and wait groups', !groups.some((g) => g.id.startsWith('quiver-')), groups.map((g) => g.id));
 
     await run('queues.consumer.stop', { consumerId: tail.id, forget: true }, ws.id);
     await run('queues.destination.purge', { connectionId: conn.id, destination: topic }, ws.id);

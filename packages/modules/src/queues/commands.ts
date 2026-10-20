@@ -24,6 +24,8 @@ import {
 import { z } from 'zod';
 import { QueueConsumers, waitForMessage } from './consumers';
 import { DRIVERS } from './drivers';
+import { kafkaCloseAll } from './drivers/kafka';
+import { memoryCloseAll } from './drivers/memory';
 
 /** `.quiver/queues/<id>.json`, one committed file per connection. */
 export const QUEUES_COLLECTION = 'queues';
@@ -113,10 +115,19 @@ function driverFor(c: QueueConnection): QueueDriver {
   return DRIVERS[c.kind];
 }
 
-/** The connection, its driver and its secrets, ready for a driver call. */
-async function open(ctx: CommandContext, connectionId: string): Promise<{ connection: QueueConnection; driver: QueueDriver; secrets: QueueSecrets }> {
+/**
+ * Drivers keep state per connection id (the memory broker's topics, Kafka's pooled clients), and a connection file is
+ * committed, so two checkouts of one repository opened at once carry the same id. The id a driver sees is scoped by
+ * workspace, so closing one checkout cannot wipe the other's broker.
+ */
+function driverId(w: WorkspaceApi, connectionId: string): string {
+  return `${w.id}/${connectionId}`;
+}
+
+/** The connection, its driver and its secrets, ready for a driver call; `target` is the connection as the driver gets it (scoped id). */
+async function open(ctx: CommandContext, connectionId: string): Promise<{ connection: QueueConnection; target: QueueConnection; driver: QueueDriver; secrets: QueueSecrets }> {
   const connection = await getConnection(ws(ctx), connectionId);
-  return { connection, driver: driverFor(connection), secrets: await readSecrets(ws(ctx), ctx.host, connectionId) };
+  return { connection, target: { ...connection, id: driverId(ws(ctx), connectionId) }, driver: driverFor(connection), secrets: await readSecrets(ws(ctx), ctx.host, connectionId) };
 }
 
 function unsupported(c: QueueConnection, what: string): never {
@@ -221,7 +232,7 @@ const connectionDelete = defineCommand({
     const item = await w.store.get<QueueConnection>(QUEUES_COLLECTION, id);
     await consumers.stopConnection(w.id, id);
     const kind = QueueKindSchema.safeParse(item?.kind);
-    await DRIVERS[kind.success ? kind.data : 'memory'].close?.(id);
+    await DRIVERS[kind.success ? kind.data : 'memory'].close?.(driverId(w, id));
     await writeSecrets(w, ctx.host, id, Object.fromEntries(Object.keys((await secretNames(w))[id] ?? {}).map((n) => [n, null])));
     const deleted = await w.store.remove(QUEUES_COLLECTION, id);
     changed(ctx, 'connections', id);
@@ -268,8 +279,8 @@ const destinationList = defineCommand({
   scope: 'workspace',
   input: ConnectionInput,
   handler: async ({ connectionId }, ctx) => {
-    const { connection, driver, secrets } = await open(ctx, connectionId);
-    return driver.listDestinations(connection, secrets);
+    const { target, driver, secrets } = await open(ctx, connectionId);
+    return driver.listDestinations(target, secrets);
   },
 });
 
@@ -280,8 +291,8 @@ const destinationDescribe = defineCommand({
   scope: 'workspace',
   input: QueueDestinationInputSchema,
   handler: async ({ connectionId, destination }, ctx) => {
-    const { connection, driver, secrets } = await open(ctx, connectionId);
-    return driver.describe(connection, secrets, destination);
+    const { target, driver, secrets } = await open(ctx, connectionId);
+    return driver.describe(target, secrets, destination);
   },
 });
 
@@ -293,9 +304,9 @@ const destinationPurge = defineCommand({
   mutating: true,
   input: QueueDestinationInputSchema,
   handler: async ({ connectionId, destination }, ctx) => {
-    const { connection, driver, secrets } = await open(ctx, connectionId);
+    const { connection, target, driver, secrets } = await open(ctx, connectionId);
     if (!driver.purge) unsupported(connection, 'purge');
-    await driver.purge(connection, secrets, destination);
+    await driver.purge(target, secrets, destination);
     await record(ctx, connection, { action: 'purge', destination });
     changed(ctx, 'messages', connectionId);
     return { purged: true };
@@ -310,13 +321,13 @@ const destinationCreate = defineCommand({
   mutating: true,
   input: QueueCreateInputSchema,
   handler: async ({ connectionId, destination, partitions, fifo }, ctx) => {
-    const { connection, driver, secrets } = await open(ctx, connectionId);
+    const { connection, target, driver, secrets } = await open(ctx, connectionId);
     if (!driver.create) unsupported(connection, 'create destinations');
     if (!destination.trim()) throw new QuiverError('INVALID_INPUT', 'Give the name of the topic or queue');
-    await driver.create(connection, secrets, destination, { partitions, fifo });
+    await driver.create(target, secrets, destination, { partitions, fifo });
     await record(ctx, connection, { action: 'create', destination });
     changed(ctx, 'connections', connectionId);
-    return driver.describe(connection, secrets, destination);
+    return driver.describe(target, secrets, destination);
   },
 });
 
@@ -328,9 +339,9 @@ const destinationDelete = defineCommand({
   mutating: true,
   input: QueueDestinationInputSchema,
   handler: async ({ connectionId, destination }, ctx) => {
-    const { connection, driver, secrets } = await open(ctx, connectionId);
+    const { connection, target, driver, secrets } = await open(ctx, connectionId);
     if (!driver.remove) unsupported(connection, 'delete destinations');
-    await driver.remove(connection, secrets, destination);
+    await driver.remove(target, secrets, destination);
     await record(ctx, connection, { action: 'delete', destination });
     changed(ctx, 'connections', connectionId);
     return { deleted: true };
@@ -347,8 +358,8 @@ const messagePeek = defineCommand({
   scope: 'workspace',
   input: QueuePeekInputSchema,
   handler: async ({ connectionId, destination, ...options }, ctx) => {
-    const { connection, driver, secrets } = await open(ctx, connectionId);
-    return driver.peek(connection, secrets, destination, options);
+    const { target, driver, secrets } = await open(ctx, connectionId);
+    return driver.peek(target, secrets, destination, options);
   },
 });
 
@@ -356,13 +367,13 @@ const messageProduce = defineCommand({
   id: 'queues.message.produce',
   title: 'Produce message',
   description:
-    'Sends one message to a topic or queue, with an optional key, headers and partition (Kafka), group and deduplication ids and delay (SQS), or exchange (RabbitMQ, with the destination as routing key). Returns the id the broker gave it. The message is kept in the history.',
+    'Sends one message to a topic or queue, with an optional key, headers and partition (Kafka), group and deduplication ids and delay (SQS), or exchange (RabbitMQ, with the destination as routing key). Returns the id the broker gave it. The message is kept in the history. A Kafka topic that does not exist is created by the first message when the broker allows it; the memory broker always creates it.',
   scope: 'workspace',
   mutating: true,
   input: QueueProduceInputSchema,
   handler: async ({ connectionId, destination, ...message }, ctx) => {
-    const { connection, driver, secrets } = await open(ctx, connectionId);
-    const result = await driver.produce(connection, secrets, destination, message);
+    const { connection, target, driver, secrets } = await open(ctx, connectionId);
+    const result = await driver.produce(target, secrets, destination, message);
     const truncated = message.body.length > HISTORY_BODY_LIMIT;
     await record(ctx, connection, {
       action: 'produce',
@@ -387,13 +398,13 @@ const messageWait = defineCommand({
   id: 'queues.message.wait',
   title: 'Wait for a message',
   description:
-    'Blocks until a new message arrives on a topic or queue whose body, key or a header value contains `match` (ignoring case; any message when empty), or until `timeoutMs`. Only messages that arrive after the call count. Returns `{ message, timedOut }`. Kafka reads with a throwaway group; SQS and RabbitMQ consumers may take the message off the queue.',
+    'Blocks until a new message arrives on a topic or queue whose body, key or a header value contains `match` (ignoring case; any message when empty), or until `timeoutMs`, counted from when the consumer is in place (a Kafka group join takes a few seconds). Only messages that arrive after the call count. Returns `{ message, timedOut }`. Kafka reads with a throwaway group; SQS and RabbitMQ consumers may take the message off the queue.',
   scope: 'workspace',
   input: QueueWaitInputSchema,
   handler: async ({ connectionId, destination, match, timeoutMs }, ctx) => {
-    const { connection, driver, secrets } = await open(ctx, connectionId);
+    const { target, driver, secrets } = await open(ctx, connectionId);
     try {
-      return await waitForMessage(driver, connection, secrets, destination, match, timeoutMs);
+      return await waitForMessage(driver, target, secrets, destination, match, timeoutMs);
     } catch (err) {
       if (err instanceof QuiverError) throw err;
       throw new QuiverError('REQUEST_FAILED', (err as Error).message || String(err));
@@ -415,12 +426,12 @@ const consumerStart = defineCommand({
   id: 'queues.consumer.start',
   title: 'Start a live tail',
   description:
-    'Starts a live consumer on a topic or queue, from new messages (`latest`) or from the start (`earliest`), and returns it. Read what arrives with queues.consumer.read; the last 1000 messages are kept. Kafka tails use a throwaway group that commits nothing.',
+    'Starts a live consumer on a topic or queue, from new messages (`latest`) or from the start (`earliest`), and returns it. Read what arrives with queues.consumer.read; the last 1000 messages are kept. At most 20 tails run per workspace, and one nobody read for 10 minutes is stopped (its messages stay readable). Kafka tails use a throwaway group that commits nothing.',
   scope: 'workspace',
   input: QueueConsumeInputSchema,
   handler: async ({ connectionId, destination, from }, ctx) => {
-    const { connection, driver, secrets } = await open(ctx, connectionId);
-    return consumers.start(ctx.host, ws(ctx).id, driver, connection, secrets, destination, from);
+    const { connection, target, driver, secrets } = await open(ctx, connectionId);
+    return consumers.start(ctx.host, ws(ctx).id, connection.id, destination, from, (onMessage, onEnd) => driver.consume(target, secrets, destination, { from }, onMessage, onEnd));
   },
 });
 
@@ -461,13 +472,13 @@ const consumerList = defineCommand({
 const groupList = defineCommand({
   id: 'queues.group.list',
   title: 'List consumer groups',
-  description: "Kafka consumer groups with their state, member count and lag per topic partition (committed offset against the partition's end). Quiver's own throwaway peek groups are left out.",
+  description: "Kafka consumer groups with their state, member count and lag per topic partition (committed offset against the partition's end). Quiver's own throwaway groups (peeks, tails and waits) are left out.",
   scope: 'workspace',
   input: ConnectionInput,
   handler: async ({ connectionId }, ctx) => {
-    const { connection, driver, secrets } = await open(ctx, connectionId);
+    const { connection, target, driver, secrets } = await open(ctx, connectionId);
     if (!driver.groups) unsupported(connection, 'list consumer groups');
-    return driver.groups(connection, secrets);
+    return driver.groups(target, secrets);
   },
 });
 
@@ -504,9 +515,15 @@ export async function closeQueues(w: WorkspaceApi): Promise<void> {
   await Promise.all(
     items.map((c) => {
       const kind = QueueKindSchema.safeParse(c.kind);
-      return DRIVERS[kind.success ? kind.data : 'memory'].close?.(c.id).catch(() => undefined);
+      return DRIVERS[kind.success ? kind.data : 'memory'].close?.(driverId(w, c.id)).catch(() => undefined);
     }),
   );
+}
+
+/** Stop every tail and release every broker client, when the app quits. */
+export async function stopQueues(): Promise<void> {
+  await consumers.stopAll();
+  await Promise.all([kafkaCloseAll(), memoryCloseAll()]);
 }
 
 export const queueCommands: CommandDefinition[] = [

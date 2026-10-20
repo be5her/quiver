@@ -117,6 +117,15 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc, toolNa
     check('queues: tails announce what they receive', queueEvents('consumer').some((e) => (e.payload as HostEvents['queues.changed']).consumerId === tail.id));
     const listedTails = await run<Consumer[]>('queues.consumer.list', { connectionId: mem.id }, ws.id);
     check('queues: live tails are listed', listedTails.length === 2, listedTails.length);
+    check('queues: a tail of a topic that does not exist is not found rather than creating it', (await fail('queues.consumer.start', { connectionId: mem.id, destination: 'nope' })) === 'NOT_FOUND' && (await fail('queues.message.peek', { connectionId: mem.id, destination: 'nope' })) === 'NOT_FOUND');
+    // Tails are not mutating, so their number is capped per workspace.
+    const extra: Consumer[] = [];
+    while (extra.length + listedTails.length < 20) extra.push(await run<Consumer>('queues.consumer.start', { connectionId: mem.id, destination: 'orders' }, ws.id));
+    const capped = await host.invoke('queues.consumer.start', { connectionId: mem.id, destination: 'orders' }, { caller: 'ui', workspaceId: ws.id });
+    for (const c of extra) await run('queues.consumer.stop', { consumerId: c.id, forget: true }, ws.id);
+    const afterStop = await run<Consumer>('queues.consumer.start', { connectionId: mem.id, destination: 'orders' }, ws.id);
+    await run('queues.consumer.stop', { consumerId: afterStop.id, forget: true }, ws.id);
+    check('queues: at most 20 tails run per workspace, and stopping one makes room', !capped.ok && capped.error.code === 'CONFLICT' && capped.error.message.includes('20') && afterStop.status === 'running', capped);
 
     const waiting = run<Wait>('queues.message.wait', { connectionId: mem.id, destination: 'orders', match: 'needle', timeoutMs: 3000 }, ws.id);
     await new Promise((r) => setTimeout(r, 50));
@@ -180,12 +189,27 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc, toolNa
     );
 
     const otherFolder = await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-queues-'));
+    const twinFolder = await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-queues-twin-'));
     try {
       let other = await run<WorkspaceInfo>('workspace.open', { path: otherFolder }, null);
       const c = await run<Summary>('queues.connection.save', { connection: { name: 'closing', kind: 'memory' } }, other.id);
       await run('queues.message.produce', { connectionId: c.id, destination: 'kept-in-memory', body: 'x', headers: {} }, other.id);
       await run('queues.consumer.start', { connectionId: c.id, destination: 'kept-in-memory' }, other.id);
+      // A second checkout of the same project carries the same committed connection file; its broker is its own.
+      await fs.mkdir(path.join(twinFolder, '.quiver', 'queues'), { recursive: true });
+      await fs.copyFile(path.join(otherFolder, '.quiver', 'queues', `${c.id}.json`), path.join(twinFolder, '.quiver', 'queues', `${c.id}.json`));
+      const twin = await run<WorkspaceInfo>('workspace.open', { path: twinFolder }, null);
+      const twinBefore = await run<QueueDestination[]>('queues.destination.list', { connectionId: c.id }, twin.id);
+      await run('queues.message.produce', { connectionId: c.id, destination: 'twin-only', body: 'y', headers: {} }, twin.id);
       await run('workspace.close', { id: other.id }, null);
+      const twinAfter = await run<QueueDestination[]>('queues.destination.list', { connectionId: c.id }, twin.id);
+      check(
+        'queues: two workspaces with the same connection id have brokers of their own, and closing one leaves the other',
+        twinBefore.length === 0 && twinAfter.map((d) => d.name).join() === 'twin-only',
+        { twinBefore: twinBefore.map((d) => d.name), twinAfter: twinAfter.map((d) => d.name) },
+      );
+      await run('workspace.close', { id: twin.id }, null);
+      await run('workspace.forgetRecent', { path: twinFolder }, null);
       other = await run<WorkspaceInfo>('workspace.open', { path: otherFolder }, null);
       const left = await run<QueueDestination[]>('queues.destination.list', { connectionId: c.id }, other.id);
       const tails = await run<Consumer[]>('queues.consumer.list', {}, other.id);
@@ -194,6 +218,7 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc, toolNa
       await run('workspace.forgetRecent', { path: otherFolder }, null);
     } finally {
       await fs.rm(otherFolder, { recursive: true, force: true }).catch(() => {});
+      await fs.rm(twinFolder, { recursive: true, force: true }).catch(() => {});
     }
   } finally {
     host.emit = emit;

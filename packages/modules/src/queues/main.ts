@@ -1,9 +1,9 @@
 import { defineModule } from '@quiver/core';
-import { closeQueues, consumers, queueCommands } from './commands';
+import { closeQueues, queueCommands, stopQueues } from './commands';
 
 export const queuesModule = defineModule({
   id: 'queues',
   commands: [...queueCommands],
   onWorkspaceClose: (workspace) => closeQueues(workspace),
-  onStop: () => consumers.stopAll(),
+  onStop: () => stopQueues(),
 });

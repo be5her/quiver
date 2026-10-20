@@ -1,6 +1,6 @@
 import { ConfigResourceTypes, Kafka, logLevel, type Admin, type Consumer, type KafkaConfig, type KafkaMessage, type Producer, type SASLOptions } from 'kafkajs';
 import { QuiverError, newId, type QueueConnection, type QueueConsumerGroup, type QueueDestination, type QueueDriver, type QueueMessage, type QueueSecrets } from '@quiver/core';
-import { kafkaGroupLag, kafkaMergePeek, kafkaPeekRanges, kafkaRangesDone, kafkaTopicSize, type PartitionOffsets } from '../../../../core/src/queues-kafka';
+import { kafkaGroupLag, kafkaMergePeek, kafkaPeekRanges, kafkaRangesDone, kafkaTopicSize, type PartitionOffsets } from '@quiver/core';
 
 // Kafka through kafkajs. Admin and producer clients are pooled per connection and rebuilt when its settings or
 // password change. Peeks and live tails each join a throwaway consumer group (`quiver-peek-…`, `quiver-tail-…`)
@@ -12,8 +12,10 @@ const REQUEST_TIMEOUT_MS = 15_000;
 const PEEK_TIMEOUT_MS = 20_000;
 /** How long a live tail waits for its group join before handing back the subscription anyway. */
 const JOIN_TIMEOUT_MS = 15_000;
-export const KAFKA_PEEK_GROUP = 'quiver-peek-';
-export const KAFKA_TAIL_GROUP = 'quiver-tail-';
+/** Every throwaway group Quiver makes starts with this; `groups` leaves them out. */
+export const KAFKA_GROUP_PREFIX = 'quiver-';
+export const KAFKA_PEEK_GROUP = `${KAFKA_GROUP_PREFIX}peek-`;
+export const KAFKA_TAIL_GROUP = `${KAFKA_GROUP_PREFIX}tail-`;
 
 interface Pooled {
   key: string;
@@ -331,7 +333,7 @@ export const kafkaDriver: QueueDriver = {
   groups: (c, s) =>
     guard(async () => {
       const a = await admin(c, s);
-      const ids = (await a.listGroups()).groups.map((g) => g.groupId).filter((id) => !id.startsWith(KAFKA_PEEK_GROUP));
+      const ids = (await a.listGroups()).groups.map((g) => g.groupId).filter((id) => !id.startsWith(KAFKA_GROUP_PREFIX));
       if (!ids.length) return [];
       const { groups } = await a.describeGroups(ids);
       const ends = new Map<string, PartitionOffsets[]>();
@@ -355,3 +357,10 @@ export const kafkaDriver: QueueDriver = {
     await release(p);
   },
 };
+
+/** Disconnect every pooled client, when the app quits. */
+export async function kafkaCloseAll(): Promise<void> {
+  const all = [...pool.values()];
+  pool.clear();
+  await Promise.all(all.map((p) => release(p)));
+}

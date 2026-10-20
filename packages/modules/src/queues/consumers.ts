@@ -1,11 +1,20 @@
-import { newId, nowIso, type HostApi, type QueueConnection, type QueueDriver, type QueueMessage, type QueueSecrets, type QueueSubscription } from '@quiver/core';
-import { QueueTail, queueMessageMatches } from '../../../core/src/queues-messages';
+import { QueueTail, QuiverError, newId, nowIso, queueMessageMatches, type HostApi, type QueueConnection, type QueueDriver, type QueueMessage, type QueueSecrets, type QueueSubscription } from '@quiver/core';
 
 // Live consumers: a tail of one destination kept in memory with a read cursor, per workspace. They are not
 // persisted; closing the workspace or deleting the connection stops them.
 
 /** At most this many `queues.changed{consumer}` events per second per consumer while messages pour in. */
 const EMIT_INTERVAL_MS = 250;
+/**
+ * Running tails per workspace. Starting one is not mutating, and each holds a consumer (and, on Kafka, a group) on
+ * the broker, so without a cap an agent in a loop could pile hundreds onto a production cluster.
+ */
+export const MAX_TAILS = 20;
+/** A tail nobody read for this long is stopped (its buffer stays readable), so a forgotten one does not hold its consumer for the day. */
+export const TAIL_IDLE_MS = 10 * 60 * 1000;
+
+/** How a driver is asked to subscribe for a tail: the driver and its connection are bound by the caller. */
+export type Subscribe = (onMessage: (m: QueueMessage) => void, onEnd: (error?: Error) => void) => Promise<QueueSubscription>;
 
 export type QueueConsumerStatus = 'running' | 'stopped' | 'error';
 
@@ -38,6 +47,7 @@ interface Live {
   tail: QueueTail;
   subscription: QueueSubscription | null;
   emitTimer: NodeJS.Timeout | null;
+  idleTimer: NodeJS.Timeout | null;
 }
 
 export class QueueConsumers {
@@ -54,20 +64,26 @@ export class QueueConsumers {
     } else l.emitTimer ??= setTimeout(fire, EMIT_INTERVAL_MS);
   }
 
-  async start(host: HostApi, workspaceId: string, driver: QueueDriver, connection: QueueConnection, secrets: QueueSecrets, destination: string, from: 'latest' | 'earliest'): Promise<QueueConsumerSummary> {
+  /** A tail nobody reads for `TAIL_IDLE_MS` is stopped; every read starts the clock again. */
+  private touch(l: Live): void {
+    if (l.idleTimer) clearTimeout(l.idleTimer);
+    l.idleTimer = l.summary.status === 'running' ? setTimeout(() => void this.stop(l), TAIL_IDLE_MS) : null;
+    l.idleTimer?.unref?.();
+  }
+
+  async start(host: HostApi, workspaceId: string, connectionId: string, destination: string, from: 'latest' | 'earliest', subscribe: Subscribe): Promise<QueueConsumerSummary> {
+    const running = this.list(workspaceId).filter((c) => c.status === 'running').length;
+    if (running >= MAX_TAILS) throw new QuiverError('CONFLICT', `${MAX_TAILS} live tails are already running in this workspace; stop one first (queues.consumer.stop)`);
     const l: Live = {
-      summary: { id: newId(), connectionId: connection.id, destination, from, status: 'running', error: null, startedAt: nowIso(), stoppedAt: null, received: 0 },
+      summary: { id: newId(), connectionId, destination, from, status: 'running', error: null, startedAt: nowIso(), stoppedAt: null, received: 0 },
       workspaceId,
       host,
       tail: new QueueTail(),
       subscription: null,
       emitTimer: null,
+      idleTimer: null,
     };
-    l.subscription = await driver.consume(
-      connection,
-      secrets,
-      destination,
-      { from },
+    l.subscription = await subscribe(
       (m) => {
         l.tail.push(m);
         l.summary.received = l.tail.total;
@@ -79,10 +95,12 @@ export class QueueConsumers {
         l.summary.error = error ? error.message || String(error) : null;
         l.summary.stoppedAt = nowIso();
         l.subscription = null;
+        this.touch(l);
         this.emit(l, true);
       },
     );
     this.live.set(l.summary.id, l);
+    this.touch(l);
     this.emit(l, true);
     return { ...l.summary };
   }
@@ -97,6 +115,7 @@ export class QueueConsumers {
   }
 
   read(l: Live, cursor: number, limit: number, match: string): QueueConsumerRead {
+    this.touch(l);
     const page = l.tail.read(cursor, limit);
     return { consumer: { ...l.summary }, messages: match ? page.messages.filter((m) => queueMessageMatches(m, match)) : page.messages, cursor: page.cursor, dropped: page.dropped };
   }
@@ -112,6 +131,8 @@ export class QueueConsumers {
     await sub?.stop().catch(() => undefined);
     if (l.emitTimer) clearTimeout(l.emitTimer);
     l.emitTimer = null;
+    if (l.idleTimer) clearTimeout(l.idleTimer);
+    l.idleTimer = null;
     if (forget) this.live.delete(l.summary.id);
     this.emit(l, true);
     return { ...l.summary };
@@ -149,7 +170,7 @@ export async function waitForMessage(
     reject = rej;
   });
   found.catch(() => undefined);
-  const timer = setTimeout(() => resolve(null), timeoutMs);
+  let timer: NodeJS.Timeout | undefined;
   let sub: QueueSubscription | null = null;
   try {
     sub = await driver.consume(
@@ -163,6 +184,9 @@ export async function waitForMessage(
       // A consumer that ends before a match (the broker went away, the destination was deleted) fails the wait.
       (error) => reject(error ?? new Error(`The consumer of ${destination} ended`)),
     );
+    // The clock starts once the consumer is in place: a Kafka group join takes a few seconds, and a short timeout
+    // that ran during it would expire before the wait could see anything.
+    timer = setTimeout(() => resolve(null), timeoutMs);
     const message = await found;
     return { message, timedOut: message === null };
   } finally {
