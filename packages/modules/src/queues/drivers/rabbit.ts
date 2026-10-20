@@ -12,6 +12,7 @@ import {
   rabbitMessage,
   rabbitPeekSelect,
   rabbitQueueDestination,
+  rabbitStreamOffset,
   rabbitTailBindings,
   rabbitTarget,
   type RabbitApiBinding,
@@ -28,18 +29,24 @@ import {
 // Destinations are queues by name and exchanges as `exchange:<name>`. A peek takes messages with basic.get and
 // requeues them (nack with requeue), which marks them redelivered and, on quorum queues, counts a delivery. A live
 // tail never consumes: it binds an exclusive queue of its own (`quiver-tail-…`) to what routes to the destination,
-// or reads a stream queue from an offset.
+// or reads a stream queue from an offset; exchanges that pick one queue per message (consistent hash, random) are
+// refused, since a queue bound there would take messages instead of copying them.
 
 const CONNECT_TIMEOUT_MS = 5000;
 const HTTP_TIMEOUT_MS = 10_000;
+/** How long one AMQP call (a channel, a check, a publish confirm) may take: amqplib has no timeouts of its own once connected. */
+const CALL_TIMEOUT_MS = 15_000;
 /** How long a peek may take in all. */
 const PEEK_TIMEOUT_MS = 15_000;
 /** A `latest` peek reads at most this many from the head of a queue and keeps the newest `limit` of them. */
 const PEEK_SCAN_LIMIT = 1000;
-/** A stream peek ends once nothing arrived for this long. */
+/** A stream peek ends once nothing arrived for this long after the first message, or when none came this long. */
 const STREAM_IDLE_MS = 750;
+const STREAM_FIRST_MS = 3000;
 /** A tail from `earliest` of a classic or quorum queue first replays up to this many of the messages already in it. */
 const REPLAY_LIMIT = 1000;
+/** A tail's own queue keeps at most this many (the newest) if Quiver falls behind, so it never piles up on the broker. */
+const TAIL_QUEUE_LIMIT = 1000;
 
 interface Pooled {
   key: string;
@@ -47,6 +54,8 @@ interface Pooled {
   confirm: Promise<ConfirmChannel> | null;
   /** Message ids of mandatory publishes the broker returned as unroutable. */
   returned: Set<string>;
+  /** Why the broker blocked the connection (a memory or disk alarm), while it does: publishes would wait until it ends. */
+  blocked: string | null;
 }
 
 const pool = new Map<string, Pooled>();
@@ -61,7 +70,7 @@ function client(c: QueueConnection, s: QueueSecrets): Pooled {
   const existing = pool.get(c.id);
   if (existing?.key === key) return existing;
   if (existing) void release(existing);
-  const pooled: Pooled = { key, model: null, confirm: null, returned: new Set() };
+  const pooled: Pooled = { key, model: null, confirm: null, returned: new Set(), blocked: null };
   pool.set(c.id, pooled);
   return pooled;
 }
@@ -70,12 +79,22 @@ async function release(p: Pooled): Promise<void> {
   const model = p.model;
   p.model = null;
   p.confirm = null;
+  p.blocked = null;
   await model?.then((m) => m.close()).catch(() => undefined);
 }
 
+/** amqplib sets the TLS server name itself for a host name (not for an IP address) and verifies the certificate. */
 function open(c: QueueConnection, s: QueueSecrets): Promise<ChannelModel> {
-  const o = amqpOptions(c, s);
-  return connect(o, { timeout: CONNECT_TIMEOUT_MS, servername: o.protocol === 'amqps' ? o.hostname : undefined, clientProperties: { connection_name: 'quiver' } });
+  return connect(amqpOptions(c, s), { timeout: CONNECT_TIMEOUT_MS, clientProperties: { connection_name: 'quiver' } });
+}
+
+/** `promise`, or a REQUEST_FAILED once `ms` passed: a broker that stops answering must not hang a command. */
+function within<T>(promise: Promise<T>, what: string, ms = CALL_TIMEOUT_MS): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new QuiverError('REQUEST_FAILED', `RabbitMQ did not answer ${what} within ${ms / 1000}s`)), ms);
+  });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
 }
 
 /** The pooled AMQP connection; one that fails or closes is forgotten so the next call connects again. */
@@ -84,10 +103,17 @@ function model(c: QueueConnection, s: QueueSecrets): Promise<ChannelModel> {
   if (!p.model) {
     const ready = open(c, s).then((m) => {
       m.on('error', () => undefined);
+      m.on('blocked', (reason?: string) => {
+        if (p.model === ready) p.blocked = reason || 'resource alarm';
+      });
+      m.on('unblocked', () => {
+        if (p.model === ready) p.blocked = null;
+      });
       m.on('close', () => {
         if (p.model === ready) {
           p.model = null;
           p.confirm = null;
+          p.blocked = null;
         }
       });
       return m;
@@ -104,7 +130,7 @@ function confirmChannel(c: QueueConnection, s: QueueSecrets): Promise<ConfirmCha
   const p = client(c, s);
   if (!p.confirm) {
     const ready = model(c, s).then(async (m) => {
-      const ch = await m.createConfirmChannel();
+      const ch = await within(m.createConfirmChannel(), 'opening a channel');
       ch.on('error', () => undefined);
       ch.on('close', () => {
         if (p.confirm === ready) p.confirm = null;
@@ -123,14 +149,22 @@ function confirmChannel(c: QueueConnection, s: QueueSecrets): Promise<ConfirmCha
   return p.confirm;
 }
 
-/** A channel of its own for one call, closed afterwards; a channel the broker closed on an error is fine to drop. */
-async function withChannel<T>(c: QueueConnection, s: QueueSecrets, fn: (ch: Channel) => Promise<T>): Promise<T> {
-  const ch = await (await model(c, s)).createChannel();
+/** A channel that is closed and forgotten: one the broker already closed on an error, or that does not answer, is fine to drop. */
+async function closeChannel(ch: Channel): Promise<void> {
+  await within(ch.close(), 'closing a channel', 2000).catch(() => undefined);
+}
+
+/**
+ * A channel of its own for one call, closed afterwards. The call may take `ms` in all (a peek takes longer than a
+ * check); past that it fails, and the channel's close gives back whatever it held.
+ */
+async function withChannel<T>(c: QueueConnection, s: QueueSecrets, fn: (ch: Channel) => Promise<T>, ms = CALL_TIMEOUT_MS): Promise<T> {
+  const ch = await within((await model(c, s)).createChannel(), 'opening a channel');
   ch.on('error', () => undefined);
   try {
-    return await fn(ch);
+    return await within(fn(ch), 'the call', ms);
   } finally {
-    await ch.close().catch(() => undefined);
+    await closeChannel(ch);
   }
 }
 
@@ -178,6 +212,8 @@ async function api<T>(c: QueueConnection, s: QueueSecrets, path: string, missing
     res = await fetch(base + path, {
       headers: { authorization: `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`, accept: 'application/json' },
       signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+      // The basic auth header must go nowhere but the URL the connection names.
+      redirect: 'error',
     });
   } catch (err) {
     const cause = (err as { cause?: { message?: string } }).cause?.message ?? (err as Error).message;
@@ -203,13 +239,18 @@ function exchangeInfo(c: QueueConnection, s: QueueSecrets, name: string): Promis
   return api<RabbitApiExchange>(c, s, rabbitApiPath('exchanges', vhostOf(c), name), `Exchange ${name} not found`);
 }
 
-/** The queue's type from the management API, or `classic` when it cannot be reached (AMQP alone does not say). */
-async function queueType(c: QueueConnection, s: QueueSecrets, name: string): Promise<string> {
+/**
+ * The queue's type and count from the management API. A missing queue is NOT_FOUND; any other failure (unreachable, or
+ * a user without the management tag, common for application users) gives `classic` with no count, since AMQP alone
+ * does not say and basic.get works on classic and quorum queues alike.
+ */
+async function queueKind(c: QueueConnection, s: QueueSecrets, name: string): Promise<{ type: string; messages?: number }> {
   try {
-    return (await queueInfo(c, s, name)).type ?? 'classic';
+    const q = await queueInfo(c, s, name);
+    return { type: q.type ?? 'classic', messages: typeof q.messages === 'number' ? q.messages : undefined };
   } catch (err) {
-    if (err instanceof QuiverError && (err.details as { reason?: string } | undefined)?.reason === 'unreachable') return 'classic';
-    throw err;
+    if (err instanceof QuiverError && err.code === 'NOT_FOUND') throw err;
+    return { type: 'classic' };
   }
 }
 
@@ -233,18 +274,29 @@ async function getAndRequeue(c: QueueConnection, s: QueueSecrets, queue: string,
         got.push(m);
       }
     } finally {
-      if (got.length) ch.nackAll(true);
+      // On a channel the broker already closed this throws, and the close requeues them anyway.
+      if (got.length) {
+        try {
+          ch.nackAll(true);
+        } catch {
+          // closed
+        }
+      }
     }
     return got;
-  });
+  }, PEEK_TIMEOUT_MS + CALL_TIMEOUT_MS);
 }
 
-/** A stream queue cannot be read with basic.get: consume it from the first offset and stop when it goes quiet. */
-async function readStream(c: QueueConnection, s: QueueSecrets, queue: string, limit: number, from: 'earliest' | 'latest'): Promise<Message[]> {
+/**
+ * A stream queue cannot be read with basic.get: consume it from `rabbitStreamOffset` (the first offset, or `limit`
+ * before the end by the management API's count) and stop when it goes quiet after the first message, or when none came.
+ */
+async function readStream(c: QueueConnection, s: QueueSecrets, queue: string, limit: number, from: 'earliest' | 'latest', count: number | undefined): Promise<Message[]> {
   return withChannel(c, s, async (ch) => {
     await ch.prefetch(100);
     const got: Message[] = [];
-    let last = Date.now();
+    const started = Date.now();
+    let last: number | undefined;
     let done!: () => void;
     const finished = new Promise<void>((r) => (done = r));
     const { consumerTag } = await ch.consume(
@@ -257,20 +309,21 @@ async function readStream(c: QueueConnection, s: QueueSecrets, queue: string, li
         if (from === 'earliest' && got.length >= limit) done();
         if (got.length >= PEEK_SCAN_LIMIT * 5) got.splice(0, got.length - limit);
       },
-      { noAck: false, arguments: { 'x-stream-offset': 'first' } },
+      { noAck: false, arguments: { 'x-stream-offset': rabbitStreamOffset(from, limit, count) } },
     );
-    const deadline = Date.now() + PEEK_TIMEOUT_MS;
-    while (Date.now() < deadline && Date.now() - last < STREAM_IDLE_MS) {
+    const deadline = started + PEEK_TIMEOUT_MS;
+    const quiet = () => (last === undefined ? Date.now() - started >= STREAM_FIRST_MS : Date.now() - last >= STREAM_IDLE_MS);
+    while (Date.now() < deadline && !quiet()) {
       if (await Promise.race([finished.then(() => true), sleep(100).then(() => false)])) break;
     }
     await ch.cancel(consumerTag).catch(() => undefined);
     return got;
-  });
+  }, PEEK_TIMEOUT_MS + CALL_TIMEOUT_MS);
 }
 
 async function peekQueue(c: QueueConnection, s: QueueSecrets, queue: string, limit: number, from: 'earliest' | 'latest'): Promise<QueueMessage[]> {
-  const type = await queueType(c, s, queue);
-  const got = type === 'stream' ? await readStream(c, s, queue, limit, from) : await getAndRequeue(c, s, queue, (count) => (from === 'earliest' ? limit : count));
+  const { type, messages } = await queueKind(c, s, queue);
+  const got = type === 'stream' ? await readStream(c, s, queue, limit, from, messages) : await getAndRequeue(c, s, queue, (count) => (from === 'earliest' ? limit : count));
   return rabbitPeekSelect(
     got.map((m, i) => toMessage(queue, i + 1, m)),
     limit,
@@ -379,19 +432,28 @@ export const rabbitDriver: QueueDriver = {
       if (target?.kind === 'queue' && message.key) throw new QuiverError('INVALID_INPUT', "A message sent straight to a queue is routed by the queue's name; give `exchange` to publish with a routing key of your own");
       if (message.partition !== undefined) throw new QuiverError('INVALID_INPUT', 'RabbitMQ queues have no partitions');
       if (message.delaySeconds) throw new QuiverError('INVALID_INPUT', 'RabbitMQ has no per-message delay (short of the delayed-message plugin)');
+      const p = client(c, s);
+      // A blocked connection takes the publish and never confirms it until the alarm clears: say so at once.
+      const blocked = () => {
+        if (p.blocked) throw new QuiverError('REQUEST_FAILED', `RabbitMQ is blocking publishes on this connection (${p.blocked}); try again once the alarm clears`);
+      };
+      blocked();
       // A publish to a missing exchange would close the pooled channel; check first so the error is NOT_FOUND.
       await withChannel(c, s, (ch) => (exchange ? ch.checkExchange(exchange) : ch.checkQueue(destination)));
-      const p = client(c, s);
       const ch = await confirmChannel(c, s);
+      blocked();
       const id = newId();
-      await new Promise<void>((resolve, reject) =>
-        ch.publish(
-          exchange,
-          routingKey,
-          Buffer.from(message.body),
-          { headers: message.headers, messageId: id, timestamp: Math.floor(Date.now() / 1000), persistent: true, mandatory: true },
-          (err) => (err ? reject(err) : resolve()),
+      await within(
+        new Promise<void>((resolve, reject) =>
+          ch.publish(
+            exchange,
+            routingKey,
+            Buffer.from(message.body),
+            { headers: message.headers, messageId: id, timestamp: Math.floor(Date.now() / 1000), persistent: true, mandatory: true },
+            (err) => (err ? reject(err) : resolve()),
+          ),
         ),
+        'the publish with a confirm',
       );
       if (p.returned.delete(id)) throw new QuiverError('REQUEST_FAILED', `No queue is bound to exchange ${exchange} for routing key "${routingKey}"; the message was dropped`);
       return { id };
@@ -400,20 +462,31 @@ export const rabbitDriver: QueueDriver = {
 
   consume: (c, s, destination, { from }, onMessage, onEnd) => {
     const target = rabbitTarget(destination);
+    // What to bind comes from the management API (bindings and exchange types), so a tail needs it; AMQP cannot list them.
     return guard(async () => {
       let stream = false;
       let bindings: RabbitApiBinding[] = [];
-      let exchangeType: string | undefined;
+      const exchanges: Record<string, RabbitApiExchange> = {};
+      const vhost = vhostOf(c);
       if (target.kind === 'exchange') {
-        exchangeType = (await exchangeInfo(c, s, target.name)).type;
-        if (exchangeType !== 'fanout' && exchangeType !== 'topic' && exchangeType !== 'headers') {
-          bindings = await api<RabbitApiBinding[]>(c, s, rabbitApiPath('exchanges', vhostOf(c), target.name, 'bindings', 'source'), `${label(target)} not found`);
+        const e = await exchangeInfo(c, s, target.name);
+        exchanges[e.name] = e;
+        if (e.type !== 'fanout' && e.type !== 'topic' && e.type !== 'headers') {
+          bindings = await api<RabbitApiBinding[]>(c, s, rabbitApiPath('exchanges', vhost, target.name, 'bindings', 'source'), `${label(target)} not found`);
         }
       } else {
         stream = (await queueInfo(c, s, target.name)).type === 'stream';
-        if (!stream) bindings = await api<RabbitApiBinding[]>(c, s, rabbitApiPath('queues', vhostOf(c), target.name, 'bindings'), `${label(target)} not found`);
+        if (!stream) {
+          // The source exchanges' types decide whether a copy of their bindings takes messages from the queue.
+          const [bound, all] = await Promise.all([
+            api<RabbitApiBinding[]>(c, s, rabbitApiPath('queues', vhost, target.name, 'bindings'), `${label(target)} not found`),
+            api<RabbitApiExchange[]>(c, s, `${rabbitApiPath('exchanges', vhost)}?columns=name,type,arguments`, `Virtual host ${vhost} not found`),
+          ]);
+          bindings = bound;
+          for (const e of all) exchanges[e.name] = e;
+        }
       }
-      const copies = stream ? [] : rabbitTailBindings(target, exchangeType, bindings);
+      const copies = stream ? [] : rabbitTailBindings(target, exchanges, bindings);
       if (!stream && !copies.length) {
         throw new QuiverError(
           'NOT_SUPPORTED',
@@ -423,7 +496,7 @@ export const rabbitDriver: QueueDriver = {
         );
       }
 
-      const ch = await (await model(c, s)).createChannel();
+      const ch = await within((await model(c, s)).createChannel(), 'opening a channel');
       let seq = 0;
       let ended = false;
       let stopping = false;
@@ -436,43 +509,53 @@ export const rabbitDriver: QueueDriver = {
       ch.on('close', () => end(stopping ? undefined : new Error('The RabbitMQ channel closed')));
       try {
         if (stream) {
-          await ch.prefetch(100);
-          await ch.consume(
-            target.name,
-            (m) => {
-              if (!m) return end(new Error(`The broker cancelled the tail of ${target.name}`));
-              ch.ack(m);
-              onMessage(toMessage(destination, ++seq, m));
-            },
-            { noAck: false, arguments: { 'x-stream-offset': from === 'earliest' ? 'first' : 'next' } },
+          await within(ch.prefetch(100), 'setting the prefetch');
+          await within(
+            ch.consume(
+              target.name,
+              (m) => {
+                if (!m) return end(new Error(`The broker cancelled the tail of ${target.name}`));
+                ch.ack(m);
+                onMessage(toMessage(destination, ++seq, m));
+              },
+              { noAck: false, arguments: { 'x-stream-offset': from === 'earliest' ? 'first' : 'next' } },
+            ),
+            'starting the tail',
           );
         } else {
           const own = `${RABBIT_TAIL_PREFIX}${newId()}`;
-          await ch.assertQueue(own, { exclusive: true, autoDelete: true, durable: false });
-          for (const b of copies) await ch.bindQueue(own, b.source, b.pattern, b.args);
+          // Capped, dropping the oldest: a tail that falls behind a busy exchange must not fill the broker's memory.
+          await within(
+            ch.assertQueue(own, { exclusive: true, autoDelete: true, durable: false, arguments: { 'x-max-length': TAIL_QUEUE_LIMIT, 'x-overflow': 'drop-head' } }),
+            'declaring the tail queue',
+          );
+          for (const b of copies) await within(ch.bindQueue(own, b.source, b.pattern, b.args), 'binding the tail queue');
           // Bound first, then replayed: a message routed in between can show up twice, but none is missed.
           if (from === 'earliest' && target.kind === 'queue') {
             for (const m of await getAndRequeue(c, s, target.name, (count) => Math.min(count, REPLAY_LIMIT))) onMessage(toMessage(destination, ++seq, m));
           }
-          await ch.consume(
-            own,
-            (m) => {
-              if (!m) return end(new Error(`The broker cancelled the tail of ${destination}`));
-              onMessage(toMessage(destination, ++seq, m));
-            },
-            { noAck: true },
+          await within(
+            ch.consume(
+              own,
+              (m) => {
+                if (!m) return end(new Error(`The broker cancelled the tail of ${destination}`));
+                onMessage(toMessage(destination, ++seq, m));
+              },
+              { noAck: true },
+            ),
+            'starting the tail',
           );
         }
       } catch (err) {
         stopping = true;
-        await ch.close().catch(() => undefined);
+        await closeChannel(ch);
         throw err;
       }
       return {
         stop: async () => {
           if (ended) return;
           stopping = true;
-          await ch.close().catch(() => undefined);
+          await closeChannel(ch);
           end();
         },
       };

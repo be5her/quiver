@@ -11,6 +11,7 @@ import {
   rabbitMessage,
   rabbitPeekSelect,
   rabbitQueueDestination,
+  rabbitStreamOffset,
   rabbitTailBindings,
   rabbitTarget,
   type RabbitApiBinding,
@@ -28,13 +29,24 @@ describe('rabbitTarget', () => {
     expect(() => rabbitTarget('exchange:')).toThrow(/default exchange/);
     expect(() => rabbitTarget('')).toThrow(/required/);
   });
+
+  it('refuses . and .., which the management API would read as path segments', () => {
+    for (const d of ['.', '..', 'exchange:.', 'exchange:..']) expect(() => rabbitTarget(d)).toThrow(/cannot be addressed/);
+    expect(rabbitTarget('...')).toEqual({ kind: 'queue', name: '...' });
+  });
 });
 
 describe('rabbitAmqpOptions', () => {
   it('builds the options from the fields, with the default ports', () => {
-    expect(rabbitAmqpOptions(base, 'pw')).toEqual({ protocol: 'amqp', hostname: 'rabbit.local', port: 5672, username: 'app', password: 'pw', vhost: '/' });
+    expect(rabbitAmqpOptions(base, 'pw')).toEqual({ protocol: 'amqp', hostname: 'rabbit.local', port: 5672, username: 'app', password: 'pw', vhost: '%2F' });
     expect(rabbitAmqpOptions({ ...base, ssl: true, vhost: 'staging' }, 'pw')).toMatchObject({ protocol: 'amqps', port: 5671, vhost: 'staging' });
-    expect(rabbitAmqpOptions({ ...base, port: 5673, vhost: '' }, 'pw')).toMatchObject({ port: 5673, vhost: '/' });
+    expect(rabbitAmqpOptions({ ...base, port: 5673, vhost: '' }, 'pw')).toMatchObject({ port: 5673, vhost: '%2F' });
+  });
+
+  it('escapes the vhost, so amqplib unescaping it gives back the name as it is', () => {
+    const vhost = rabbitAmqpOptions({ ...base, vhost: 'a%2Fb c' }, 'pw').vhost;
+    expect(vhost).toBe('a%252Fb%20c');
+    expect(decodeURIComponent(vhost)).toBe('a%2Fb c');
   });
 
   it('falls back to guest/guest only when neither user nor password is set', () => {
@@ -58,6 +70,11 @@ describe('rabbitManagementUrl', () => {
 
   it('refuses a URL with credentials', () => {
     expect(() => rabbitManagementUrl({ ...base, managementUrl: 'http://u:p@mq:15672' })).toThrow(/user or password/);
+  });
+
+  it('refuses http:// when the connection uses ssl, since the password would go in the clear', () => {
+    expect(() => rabbitManagementUrl({ ...base, ssl: true, managementUrl: 'HTTP://mq:15672' })).toThrow(/https/);
+    expect(rabbitManagementUrl({ ...base, ssl: true, managementUrl: 'https://mq:15671' })).toBe('https://mq:15671');
   });
 });
 
@@ -100,29 +117,55 @@ describe('rabbitTailBindings', () => {
     { source: 'events', destination: 'other', destination_type: 'queue', routing_key: 'other' },
   ];
 
+  const exchanges = { events: { type: 'topic' }, legacy: { type: 'headers' } };
+
   it('copies the bindings of a queue except the default exchange, once each', () => {
-    expect(rabbitTailBindings({ kind: 'queue', name: 'orders' }, undefined, bindings)).toEqual([
+    expect(rabbitTailBindings({ kind: 'queue', name: 'orders' }, exchanges, bindings)).toEqual([
       { source: 'events', pattern: 'order.*' },
       { source: 'legacy', pattern: 'x', args: { 'x-match': 'any', kind: 'order' } },
     ]);
   });
 
   it('finds nothing to copy for a queue reached only through the default exchange', () => {
-    expect(rabbitTailBindings({ kind: 'queue', name: 'orders' }, undefined, bindings.slice(0, 1))).toEqual([]);
+    expect(rabbitTailBindings({ kind: 'queue', name: 'orders' }, exchanges, bindings.slice(0, 1))).toEqual([]);
   });
 
   it('binds to everything on fanout, topic and headers exchanges', () => {
     const x = { kind: 'exchange' as const, name: 'events' };
-    expect(rabbitTailBindings(x, 'fanout', [])).toEqual([{ source: 'events', pattern: '' }]);
-    expect(rabbitTailBindings(x, 'topic', [])).toEqual([{ source: 'events', pattern: '#' }]);
-    expect(rabbitTailBindings(x, 'headers', [])).toEqual([{ source: 'events', pattern: '', args: { 'x-match': 'all' } }]);
+    expect(rabbitTailBindings(x, { events: { type: 'fanout' } }, [])).toEqual([{ source: 'events', pattern: '' }]);
+    expect(rabbitTailBindings(x, { events: { type: 'topic' } }, [])).toEqual([{ source: 'events', pattern: '#' }]);
+    expect(rabbitTailBindings(x, { events: { type: 'headers' } }, [])).toEqual([{ source: 'events', pattern: '', args: { 'x-match': 'all' } }]);
   });
 
   it('copies the routing keys a direct exchange is bound with', () => {
-    expect(rabbitTailBindings({ kind: 'exchange', name: 'events' }, 'direct', bindings)).toEqual([
+    expect(rabbitTailBindings({ kind: 'exchange', name: 'events' }, { events: { type: 'direct' } }, bindings)).toEqual([
       { source: 'events', pattern: 'order.*' },
       { source: 'events', pattern: 'other' },
     ]);
+  });
+
+  it('routes a delayed-message exchange by its x-delayed-type', () => {
+    const delayed = { events: { type: 'x-delayed-message', arguments: { 'x-delayed-type': 'topic' } } };
+    expect(rabbitTailBindings({ kind: 'exchange', name: 'events' }, delayed, [])).toEqual([{ source: 'events', pattern: '#' }]);
+    expect(rabbitTailBindings({ kind: 'queue', name: 'orders' }, { ...exchanges, ...delayed }, bindings.slice(0, 2))).toEqual([{ source: 'events', pattern: 'order.*' }]);
+  });
+
+  it('refuses exchanges that send each message to one queue, since a tail would take messages from the real ones', () => {
+    for (const type of ['x-consistent-hash', 'x-modulus-hash', 'x-random']) {
+      expect(() => rabbitTailBindings({ kind: 'exchange', name: 'events' }, { events: { type } }, bindings)).toThrow(/one bound queue only/);
+      expect(() => rabbitTailBindings({ kind: 'queue', name: 'orders' }, { ...exchanges, legacy: { type } }, bindings)).toThrow(/Queue orders is bound to exchange legacy/);
+    }
+    expect(() => rabbitTailBindings({ kind: 'exchange', name: 'events' }, { events: { type: 'x-delayed-message', arguments: { 'x-delayed-type': 'x-random' } } }, [])).toThrow(/one bound queue only/);
+    expect(() => rabbitTailBindings({ kind: 'queue', name: 'orders' }, { events: { type: 'topic' } }, bindings)).toThrow(/type unknown/);
+  });
+});
+
+describe('rabbitStreamOffset', () => {
+  it('starts the oldest at first and the newest limit before the end, or at first without a count', () => {
+    expect(rabbitStreamOffset('earliest', 10, 500)).toBe('first');
+    expect(rabbitStreamOffset('latest', 10, 500)).toBe(490);
+    expect(rabbitStreamOffset('latest', 10, 4)).toBe(0);
+    expect(rabbitStreamOffset('latest', 10, undefined)).toBe('first');
   });
 });
 

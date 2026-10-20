@@ -15,15 +15,16 @@ export interface RabbitTarget {
   name: string;
 }
 
-/** What a destination string names: `exchange:<name>` is an exchange, anything else a queue. */
+/**
+ * What a destination string names: `exchange:<name>` is an exchange, anything else a queue. `.` and `..` are refused:
+ * the management API's URLs would resolve them as path segments and ask for something else.
+ */
 export function rabbitTarget(destination: string): RabbitTarget {
-  if (destination.startsWith(RABBIT_EXCHANGE_PREFIX)) {
-    const name = destination.slice(RABBIT_EXCHANGE_PREFIX.length);
-    if (!name) throw new QuiverError('INVALID_INPUT', 'The default exchange cannot be addressed; name a queue instead');
-    return { kind: 'exchange', name };
-  }
-  if (!destination) throw new QuiverError('INVALID_INPUT', 'A queue name is required');
-  return { kind: 'queue', name: destination };
+  const exchange = destination.startsWith(RABBIT_EXCHANGE_PREFIX);
+  const name = exchange ? destination.slice(RABBIT_EXCHANGE_PREFIX.length) : destination;
+  if (!name) throw new QuiverError('INVALID_INPUT', exchange ? 'The default exchange cannot be addressed; name a queue instead' : 'A queue name is required');
+  if (name === '.' || name === '..') throw new QuiverError('INVALID_INPUT', `"${name}" cannot be addressed as a queue or exchange name`);
+  return { kind: exchange ? 'exchange' : 'queue', name };
 }
 
 /** The AMQP options the driver connects with, built from the connection's fields; never a URL with the password in it. */
@@ -33,6 +34,7 @@ export interface RabbitAmqpOptions {
   port: number;
   username: string;
   password: string;
+  /** Escaped (`/` is `%2F`): amqplib unescapes the vhost it is given, so a raw `%` in a name would change it. */
   vhost: string;
 }
 
@@ -52,15 +54,19 @@ export function rabbitAmqpOptions(c: Pick<QueueConnection, 'host' | 'port' | 'vh
     port: c.port ?? (c.ssl ? 5671 : 5672),
     username: anonymous ? 'guest' : c.username,
     password: anonymous ? 'guest' : (password ?? ''),
-    vhost: c.vhost || '/',
+    vhost: encodeURIComponent(c.vhost || '/'),
   };
 }
 
-/** The management API's base URL without a trailing slash: `managementUrl`, or `http://<host>:15672` (`https`, 15671 with ssl). */
+/**
+ * The management API's base URL without a trailing slash: `managementUrl`, or `http://<host>:15672` (`https`, 15671 with
+ * ssl). With ssl an `http://` URL is refused: the password goes to the management API as basic auth, in the clear.
+ */
 export function rabbitManagementUrl(c: Pick<QueueConnection, 'host' | 'ssl' | 'managementUrl'>): string {
   const given = c.managementUrl.trim();
   if (given) {
     if (urlHasCredentials(given)) throw new QuiverError('INVALID_INPUT', 'The management URL must not contain a user or password');
+    if (c.ssl && /^http:/i.test(given)) throw new QuiverError('INVALID_INPUT', 'The connection uses ssl, so the management URL must be https://; over http:// the password would be sent in the clear');
     return given.replace(/\/+$/, '');
   }
   const host = c.host.trim();
@@ -168,23 +174,48 @@ export interface RabbitTailBinding {
   args?: Record<string, unknown>;
 }
 
+/** The exchange types that hand every matching queue its own copy of a message. */
+const COPYING_TYPES = new Set(['direct', 'topic', 'fanout', 'headers']);
+
+/**
+ * How an exchange routes when a tail may bind to it: `direct`, `topic`, `fanout` and `headers` give every matching queue
+ * a copy, and so does a delayed-message exchange by its `x-delayed-type`. Undefined for consistent-hash, modulus-hash,
+ * random and other plugin types, which pick one queue per message: a tail's queue bound there would take its share of
+ * the messages away from the real queues.
+ */
+export function rabbitCopyingType(e: Pick<RabbitApiExchange, 'type' | 'arguments'>): string | undefined {
+  const type = e.type === 'x-delayed-message' ? valueText(e.arguments?.['x-delayed-type']) : e.type;
+  return COPYING_TYPES.has(type) ? type : undefined;
+}
+
+function notCopying(name: string, e: Pick<RabbitApiExchange, 'type'> | undefined, queue?: string): QuiverError {
+  const exchange = `exchange ${name} (${e?.type || 'type unknown'})`;
+  const why = 'sends each message to one bound queue only, so a tail bound to it would take messages away from the real queues';
+  return new QuiverError('NOT_SUPPORTED', queue ? `Queue ${queue} is bound to ${exchange}, which ${why}` : `The ${exchange} ${why}`);
+}
+
 /**
  * What a live tail binds its exclusive queue to, so it receives a copy of what is routed and consumes nothing:
  * - a queue: the same bindings the queue has, except the default exchange, which routes by queue name and cannot be copied
  * - a fanout, topic or headers exchange: everything (`''`, `#`, `x-match: all` with no headers)
- * - a direct or other exchange: the routing keys and arguments it is bound with now
- * An empty result means the tail would never see a message.
+ * - a direct exchange: the routing keys and arguments it is bound with now
+ * `exchanges` gives the type of the target and of every source exchange; one that picks a single queue per message
+ * (`rabbitCopyingType`) is refused as NOT_SUPPORTED. An empty result means the tail would never see a message.
  */
-export function rabbitTailBindings(target: RabbitTarget, exchangeType: string | undefined, bindings: RabbitApiBinding[]): RabbitTailBinding[] {
+export function rabbitTailBindings(target: RabbitTarget, exchanges: Record<string, Pick<RabbitApiExchange, 'type' | 'arguments'>>, bindings: RabbitApiBinding[]): RabbitTailBinding[] {
   if (target.kind === 'exchange') {
-    if (exchangeType === 'fanout') return [{ source: target.name, pattern: '' }];
-    if (exchangeType === 'topic') return [{ source: target.name, pattern: '#' }];
-    if (exchangeType === 'headers') return [{ source: target.name, pattern: '', args: { 'x-match': 'all' } }];
+    const e = exchanges[target.name];
+    const type = e && rabbitCopyingType(e);
+    if (!type) throw notCopying(target.name, e);
+    if (type === 'fanout') return [{ source: target.name, pattern: '' }];
+    if (type === 'topic') return [{ source: target.name, pattern: '#' }];
+    if (type === 'headers') return [{ source: target.name, pattern: '', args: { 'x-match': 'all' } }];
   }
   const out: RabbitTailBinding[] = [];
   const seen = new Set<string>();
   for (const b of bindings) {
     if (target.kind === 'queue' ? b.source === '' || b.destination !== target.name : b.source !== target.name) continue;
+    if (target.kind === 'queue' && !rabbitCopyingType(exchanges[b.source] ?? { type: '' })) throw notCopying(b.source, exchanges[b.source], target.name);
     const source = target.kind === 'queue' ? b.source : target.name;
     const args = b.arguments && Object.keys(b.arguments).length ? b.arguments : undefined;
     const key = JSON.stringify([source, b.routing_key, args ?? null]);
@@ -265,6 +296,16 @@ export function rabbitMessage(destination: string, seq: number, m: RabbitRawMess
     timestamp: timestampIso(p.timestamp),
     attributes,
   };
+}
+
+/**
+ * Where a stream peek starts reading: `first` for the oldest, and for the newest the offset `limit` before the end by
+ * the management API's count. Offsets keep counting after retention drops old segments, so that offset is at or before
+ * the newest `limit` and the peek reads on to the end; without a count it reads from the first offset.
+ */
+export function rabbitStreamOffset(from: 'earliest' | 'latest', limit: number, count: number | undefined): 'first' | number {
+  if (from === 'earliest' || count === undefined || !Number.isFinite(count)) return 'first';
+  return Math.max(0, count - limit);
 }
 
 /** The `limit` oldest (`earliest`) or newest (`latest`) of messages read from the head of a queue. */

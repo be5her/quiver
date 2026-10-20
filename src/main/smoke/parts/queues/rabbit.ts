@@ -1,3 +1,5 @@
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import { connect } from 'amqplib';
 import type { QueueConnection, QueueDestination, QueueMessage } from '@quiver/core';
 import { startFakeRabbitMgmt } from '../../fake-rabbit-mgmt';
@@ -16,7 +18,7 @@ const section: SmokeSection = async (t) => {
   await live(t);
 };
 
-async function management({ host, check, run, ws }: SmokeContext): Promise<void> {
+async function management({ host, check, run, ws, folder, rpc }: SmokeContext): Promise<void> {
   const code = async (id: string, input: unknown): Promise<string> => {
     const out = await host.invoke(id, input, { caller: 'ui', workspaceId: ws.id });
     return out.ok ? 'ok' : out.error.code;
@@ -37,12 +39,29 @@ async function management({ host, check, run, ws }: SmokeContext): Promise<void>
       ws.id,
     );
     check('rabbit: a pasted amqp:// URL as host is refused rather than connected to', !pasted.ok && pasted.message.includes('plain host name'), pasted);
+    const connDir = path.join(folder, '.quiver', 'queues');
+    const filesBefore = (await fs.readdir(connDir).catch(() => [] as string[])).length;
+    const savedPasted = await code('queues.connection.save', { connection: { name: 'smoke rabbit pasted', ...fields, host: 'amqp://user:pa55-in-url@127.0.0.1' }, secrets: {} });
+    const committed = await Promise.all((await fs.readdir(connDir).catch(() => [] as string[])).map((f) => fs.readFile(path.join(connDir, f), 'utf8')));
+    check(
+      'rabbit: saving a pasted amqp://user:pass@host as host is INVALID_INPUT and commits nothing',
+      savedPasted === 'INVALID_INPUT' && committed.length === filesBefore && !committed.some((text) => text.includes('pa55-in-url')),
+      { savedPasted, files: committed.length, filesBefore },
+    );
+    const asked = () => fake.seen.length + fake.refused;
+    const askedBefore = asked();
+    const sslOverHttp = await run<{ ok: boolean; message: string }>('queues.connection.test', { connection: { ...fields, ssl: true }, secrets: { password: fake.password } }, ws.id);
+    check(
+      'rabbit: with ssl an http:// management URL is refused, so the password never goes in the clear',
+      !sslOverHttp.ok && sslOverHttp.message.includes('must be https://') && asked() === askedBefore,
+      sslOverHttp,
+    );
 
     const listed = await run<QueueDestination[]>('queues.destination.list', { connectionId: conn.id }, ws.id);
     const orders = listed.find((d) => d.name === 'orders');
     check(
       'rabbit: list has queues with counts and exchanges as exchange:<name>, without the default, amq.* or tail queues',
-      listed.map((d) => d.name).join() === 'direct-only,events.stream,orders,exchange:audit,exchange:shop' && orders?.messages === 3 && orders.consumers === 1 && listed.find((d) => d.name === 'exchange:shop')?.kind === 'exchange',
+      listed.map((d) => d.name).join() === 'direct-only,events.stream,orders,sharded,exchange:audit,exchange:shard,exchange:shop' && orders?.messages === 3 && orders.consumers === 1 && listed.find((d) => d.name === 'exchange:shop')?.kind === 'exchange',
       listed.map((d) => `${d.kind}:${d.name}`),
     );
     check('rabbit: the management API is asked for the vhost / as %2F with the connection user', fake.seen.some((p) => p.startsWith('/api/queues/%2F?columns=')) && fake.seen.includes('/api/exchanges/%2F'), fake.seen);
@@ -68,10 +87,42 @@ async function management({ host, check, run, ws }: SmokeContext): Promise<void>
       (await code('queues.consumer.start', { connectionId: conn.id, destination: 'direct-only' })) === 'NOT_SUPPORTED',
     );
     check('rabbit: a tail of a missing queue is NOT_FOUND', (await code('queues.consumer.start', { connectionId: conn.id, destination: 'nope' })) === 'NOT_FOUND');
+    check(
+      'rabbit: a tail of a consistent-hash exchange, or of a queue it feeds, is NOT_SUPPORTED, since its queue would take a share of the messages',
+      (await code('queues.consumer.start', { connectionId: conn.id, destination: 'exchange:shard' })) === 'NOT_SUPPORTED' &&
+        (await code('queues.consumer.start', { connectionId: conn.id, destination: 'sharded' })) === 'NOT_SUPPORTED',
+    );
+    check(
+      'rabbit: . and .. are refused as names, rather than resolved as management API path segments',
+      (await code('queues.destination.describe', { connectionId: conn.id, destination: '..' })) === 'INVALID_INPUT' &&
+        (await code('queues.destination.describe', { connectionId: conn.id, destination: 'exchange:.' })) === 'INVALID_INPUT',
+    );
     check('rabbit: a key on a message sent straight to a queue is refused', (await code('queues.message.produce', { connectionId: conn.id, destination: 'orders', key: 'k', body: 'x' })) === 'INVALID_INPUT');
 
     const refusedBefore = fake.refused;
     check('rabbit: a wrong password is AUTH_FAILED', (await code('queues.destination.list', { connectionId: wrong.id })) === 'AUTH_FAILED' && fake.refused > refusedBefore);
+    // A user without the management tag is refused there too; peek then goes on over AMQP (nothing listens here).
+    const refusedPeek = await host.invoke('queues.message.peek', { connectionId: wrong.id, destination: 'orders' }, { caller: 'ui', workspaceId: ws.id });
+    check(
+      'rabbit: a peek the management API refuses goes on over AMQP as a classic queue',
+      !refusedPeek.ok && refusedPeek.error.code === 'REQUEST_FAILED' && !refusedPeek.error.message.includes('management API'),
+      refusedPeek,
+    );
+
+    // ---------- agents ----------
+    const toolText = async (name: string, args: unknown) => {
+      const out = await rpc('tools/call', { name, arguments: args });
+      return { error: out.result?.isError === true, text: out.result?.content?.[0]?.text ?? '' };
+    };
+    const agentPeek = await toolText('queues_message_peek', { connectionId: conn.id, destination: 'orders' });
+    const agentReplay = await toolText('queues_consumer_start', { connectionId: conn.id, destination: 'orders', from: 'earliest' });
+    check(
+      'rabbit: mcp blocks a peek and an earliest tail by default, since requeueing marks messages redelivered and counts deliveries',
+      agentPeek.error && agentPeek.text.includes('MUTATION_BLOCKED') && agentReplay.error && agentReplay.text.includes('MUTATION_BLOCKED'),
+      { agentPeek, agentReplay },
+    );
+    const agentTail = await toolText('queues_consumer_start', { connectionId: conn.id, destination: 'sharded' });
+    check('rabbit: mcp may start a tail from latest (refused here for the hash exchange, not for mutations)', agentTail.error && agentTail.text.includes('NOT_SUPPORTED'), agentTail);
   } finally {
     await run('queues.connection.delete', { id: conn.id }, ws.id);
     await run('queues.connection.delete', { id: wrong.id }, ws.id);

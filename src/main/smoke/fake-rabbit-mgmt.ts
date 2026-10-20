@@ -21,6 +21,7 @@ const QUEUES: RabbitApiQueue[] = [
   { name: 'events.stream', type: 'stream', state: 'running', messages: 10, consumers: 0, durable: true, arguments: { 'x-queue-type': 'stream' } },
   { name: 'direct-only', type: 'quorum', state: 'running', messages: 0, messages_ready: 0, messages_unacknowledged: 0, consumers: 0, durable: true, arguments: {} },
   { name: 'quiver-tail-left-over', type: 'classic', state: 'running', messages: 0, consumers: 1, exclusive: true, auto_delete: true, arguments: {} },
+  { name: 'sharded', type: 'classic', state: 'running', messages: 0, messages_ready: 0, messages_unacknowledged: 0, consumers: 1, durable: true, arguments: {} },
 ];
 
 const EXCHANGES: RabbitApiExchange[] = [
@@ -29,6 +30,8 @@ const EXCHANGES: RabbitApiExchange[] = [
   { name: 'amq.direct', type: 'direct', durable: true },
   { name: 'shop', type: 'topic', durable: true },
   { name: 'audit', type: 'fanout', durable: false, auto_delete: true },
+  // Sends each message to one bound queue: a tail must not bind to it, or to what it feeds.
+  { name: 'shard', type: 'x-consistent-hash', durable: true },
 ];
 
 const BINDINGS: RabbitApiBinding[] = [
@@ -36,6 +39,8 @@ const BINDINGS: RabbitApiBinding[] = [
   { source: 'shop', destination: 'orders', destination_type: 'queue', routing_key: 'order.*', arguments: {} },
   { source: 'shop', destination: 'audit', destination_type: 'exchange', routing_key: '#', arguments: {} },
   { source: '', destination: 'direct-only', destination_type: 'queue', routing_key: 'direct-only', arguments: {} },
+  { source: '', destination: 'sharded', destination_type: 'queue', routing_key: 'sharded', arguments: {} },
+  { source: 'shard', destination: 'sharded', destination_type: 'queue', routing_key: '10', arguments: {} },
 ];
 
 export function startFakeRabbitMgmt(): Promise<FakeRabbitMgmt> {
