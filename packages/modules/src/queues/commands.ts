@@ -233,8 +233,11 @@ const connectionTest = defineCommand({
   id: 'queues.connection.test',
   title: 'Test queue connection',
   description:
-    'Connects to the broker and reports `{ ok, message }`. Give `id` to test a saved connection, `connection` (and `secrets`) to test unsaved settings, or both to test changes on top of a saved one.',
+    'Connects to the broker and reports `{ ok, message }`. Give `id` to test a saved connection, `connection` (and `secrets`) to test unsaved settings, or both to test changes on top of a saved one. The last form is mutating: it sends the saved secrets to whatever the changes point at.',
   scope: 'workspace',
+  // A draft on top of a saved connection reaches the stored password; pointing the draft at another broker would hand
+  // it over (SASL plain sends it as is). Testing a saved connection as it is, or a draft with secrets of its own, does not.
+  mutating: ({ id, connection }) => Boolean(id && connection),
   input: z.object({ id: z.string().optional(), connection: QueueConnectionDraftSchema.optional(), secrets: SecretsInput.optional() }),
   handler: async ({ id, connection, secrets }, ctx) => {
     const w = ws(ctx);

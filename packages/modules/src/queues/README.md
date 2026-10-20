@@ -5,7 +5,7 @@ Kafka topics, SQS queues and RabbitMQ queues: list them with their counts, peek 
 <!-- lane:Q1 -->
 ## Connections, messages and Kafka
 
-**Connections** are committed one per file under `.quiver/queues/<id>.json` (`queues.connection.save` changes only the fields it is given). Passwords and keys are passed as `secrets` by name (`password` for Kafka SASL and RabbitMQ, `secretAccessKey` for SQS), encrypted with `host.secrets` into `.quiver/local/queues-secrets.json`, and never returned: the commands list only the names of the secrets a connection has. A URL with a user or password in it is refused. `queues.connection.test` tries a saved connection, unsaved settings, or changes on top of a saved one.
+**Connections** are committed one per file under `.quiver/queues/<id>.json` (`queues.connection.save` changes only the fields it is given). Passwords and keys are passed as `secrets` by name (`password` for Kafka SASL and RabbitMQ, `secretAccessKey` for SQS), encrypted with `host.secrets` into `.quiver/local/queues-secrets.json`, and never returned: the commands list only the names of the secrets a connection has. A URL with a user or password in it is refused. `queues.connection.test` tries a saved connection, unsaved settings, or changes on top of a saved one; the last form is mutating, since it sends the saved secrets to whatever the changes point at.
 
 **Commands**, the same for every broker through its `QueueDriver` (`drivers/`); what a broker cannot do answers `NOT_SUPPORTED`:
 
@@ -50,7 +50,7 @@ To be written by lane QU.
 <!-- lane:agents -->
 ## Agents
 
-Listing, describing, peeking and tailing are allowed. Producing, purging, creating and deleting destinations, and saving or deleting connections, are gated as mutating.
+Listing, describing, peeking and tailing are allowed, as is testing a saved connection or a draft with secrets of its own. Producing, purging, creating and deleting destinations, saving or deleting connections, and testing a draft on top of a saved connection (which would send its secrets to the draft's broker) are gated as mutating.
 <!-- /lane:agents -->
 
 ## Verified by
