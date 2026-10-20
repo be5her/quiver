@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { QueueMessage } from './models/queues';
-import { sqsDestination, sqsIsFifo, sqsMergePeek, sqsMessage, sqsMessageAttributes, sqsQueueName, sqsRedrive } from './queues-sqs';
+import { sqsDestination, sqsIsFifo, sqsMergePeek, sqsMessage, sqsMessageAttributes, sqsNearRedrive, sqsQueueName, sqsRedrive } from './queues-sqs';
 
 describe('sqsQueueName', () => {
   it('takes the name from a queue URL or an ARN', () => {
@@ -33,6 +33,22 @@ describe('sqsRedrive', () => {
     expect(sqsRedrive('')).toBeNull();
     expect(sqsRedrive('{nope')).toBeNull();
     expect(sqsRedrive('{}')).toBeNull();
+  });
+});
+
+describe('sqsNearRedrive', () => {
+  const redrive = (maxReceiveCount: number) => ({ deadLetterQueue: 'dlq', deadLetterArn: 'arn:aws:sqs:us-east-1:1:dlq', maxReceiveCount });
+
+  it('is true one receive before SQS would move the message', () => {
+    expect(sqsNearRedrive(3, redrive(5))).toBe(false);
+    expect(sqsNearRedrive(4, redrive(5))).toBe(true);
+    expect(sqsNearRedrive(9, redrive(5))).toBe(true);
+    expect(sqsNearRedrive(1, redrive(1))).toBe(true);
+  });
+
+  it('is false without a redrive policy', () => {
+    expect(sqsNearRedrive(1000, null)).toBe(false);
+    expect(sqsNearRedrive(1000, redrive(0))).toBe(false);
   });
 });
 
@@ -101,6 +117,12 @@ describe('sqsMessage', () => {
       timestamp: '2023-11-14T22:13:20.123Z',
       attributes: { 'receive count': '2', 'group id': 'g1', 'sequence number': '18800000000000000001', sender: 'AID' },
     });
+  });
+
+  it('encodes a 200 KB binary attribute without overflowing the stack', () => {
+    const bytes = new Uint8Array(200 * 1024).map((_, i) => i % 256);
+    const m = sqsMessage('q', { MessageId: 'big', MessageAttributes: { blob: { DataType: 'Binary', BinaryValue: bytes } } });
+    expect(Buffer.from(m.headers.blob!, 'base64').equals(Buffer.from(bytes))).toBe(true);
   });
 });
 

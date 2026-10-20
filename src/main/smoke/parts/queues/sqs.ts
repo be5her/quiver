@@ -19,7 +19,8 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc }) => {
   };
   const fake = await startFakeSqs();
   const awsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-sqs-aws-'));
-  const envBefore = { config: process.env.AWS_CONFIG_FILE, credentials: process.env.AWS_SHARED_CREDENTIALS_FILE };
+  const envBefore = { config: process.env.AWS_CONFIG_FILE, credentials: process.env.AWS_SHARED_CREDENTIALS_FILE, endpoint: process.env.AWS_ENDPOINT_URL_SQS };
+  const mcpBefore = host.config.get().mcp;
   const ids: string[] = [];
   try {
     // ---------- connections and auth ----------
@@ -46,11 +47,29 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc }) => {
     await fs.writeFile(path.join(awsDir, 'config'), '[profile smoke-sqs]\nregion = eu-west-1\n');
     process.env.AWS_SHARED_CREDENTIALS_FILE = path.join(awsDir, 'credentials');
     process.env.AWS_CONFIG_FILE = path.join(awsDir, 'config');
-    const byProfile = await run<Summary>('queues.connection.save', { connection: { name: 'smoke sqs profile', kind: 'sqs', region: 'eu-west-1', endpoint: fake.url, profile: 'smoke-sqs' } }, ws.id);
-    ids.push(byProfile.id);
+    // A connection's own endpoint never gets profile or environment credentials; the SDK's configured endpoint (the
+    // user's own setting, not the committed file) points the profile connection at the fake instead.
     const keysBefore = fake.seen.keys.length;
-    const profileTest = await run<Tested>('queues.connection.test', { id: byProfile.id }, ws.id);
-    check('sqs: a connection can sign with an AWS profile instead of a stored key', profileTest.ok && fake.seen.keys.slice(keysBefore).includes(fake.profileKeyId) && byProfile.secrets.length === 0, profileTest);
+    const profileAtEndpoint = await run<Tested>('queues.connection.test', { connection: { kind: 'sqs', endpoint: fake.url, profile: 'smoke-sqs' } }, ws.id);
+    const ambientAtEndpoint = await run<Tested>('queues.connection.test', { connection: { kind: 'sqs', endpoint: fake.url } }, ws.id);
+    const byProfile = await run<Summary>('queues.connection.save', { connection: { name: 'smoke sqs profile', kind: 'sqs', region: 'eu-west-1', profile: 'smoke-sqs' } }, ws.id);
+    ids.push(byProfile.id);
+    process.env.AWS_ENDPOINT_URL_SQS = fake.url;
+    const profileTest = await run<Tested>('queues.connection.test', { id: byProfile.id }, ws.id).finally(() => {
+      if (envBefore.endpoint === undefined) delete process.env.AWS_ENDPOINT_URL_SQS;
+      else process.env.AWS_ENDPOINT_URL_SQS = envBefore.endpoint;
+    });
+    check(
+      'sqs: a connection can sign with an AWS profile instead of a stored key, but one with an endpoint needs a key of its own',
+      profileTest.ok &&
+        fake.seen.keys.slice(keysBefore).join() === fake.profileKeyId &&
+        byProfile.secrets.length === 0 &&
+        !profileAtEndpoint.ok &&
+        profileAtEndpoint.message.includes('access key') &&
+        !ambientAtEndpoint.ok &&
+        ambientAtEndpoint.message.includes('access key'),
+      { profileTest, profileAtEndpoint, ambientAtEndpoint, keys: fake.seen.keys.slice(keysBefore) },
+    );
 
     // ---------- create, describe, DLQ ----------
     const created = await run<QueueDestination>('queues.destination.create', { connectionId: conn.id, destination: 'orders' }, ws.id);
@@ -61,12 +80,13 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc }) => {
     check('sqs: a FIFO queue needs a name ending in .fifo, and is made FIFO', fifoName === 'INVALID_INPUT' && jobs.fifo === true, { fifoName, jobs });
 
     fake.addQueue('orders-dlq');
-    fake.setAttributes('orders', { RedrivePolicy: JSON.stringify({ deadLetterTargetArn: 'arn:aws:sqs:us-east-1:000000000000:orders-dlq', maxReceiveCount: 5 }), MessageRetentionPeriod: '345600' });
+    // A limit well above what the peeks and tails below add up to; the redrive section further down runs into one.
+    fake.setAttributes('orders', { RedrivePolicy: JSON.stringify({ deadLetterTargetArn: 'arn:aws:sqs:us-east-1:000000000000:orders-dlq', maxReceiveCount: 50 }), MessageRetentionPeriod: '345600' });
     const orders = await run<QueueDestination>('queues.destination.describe', { connectionId: conn.id, destination: 'orders' }, ws.id);
     const dlq = await run<QueueDestination>('queues.destination.describe', { connectionId: conn.id, destination: 'orders-dlq' }, ws.id);
     check(
       'sqs: describe shows the redrive policy, the queues a DLQ serves and the settings',
-      orders.details?.['dead-letter queue'] === 'orders-dlq' && orders.details['max receive count'] === '5' && orders.details.retention === '4 d' && dlq.details?.['dead-letter source queues'] === 'orders',
+      orders.details?.['dead-letter queue'] === 'orders-dlq' && orders.details['max receive count'] === '50' && orders.details.retention === '4 d' && dlq.details?.['dead-letter source queues'] === 'orders',
       { orders: orders.details, dlq: dlq.details },
     );
 
@@ -101,6 +121,20 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc }) => {
       again.length === 3 && fake.messages('orders').length === 4 && fake.seen.visibility.every((v) => v === 0) && !fake.seen.ops.includes('DeleteMessage'),
       { again: again.length, held: fake.messages('orders').length, visibility: [...new Set(fake.seen.visibility)] },
     );
+    // Three peeks: the newest two and the 50 newest saw all three once each, the oldest two only orders 1 and 2.
+    const receives = fake.messages('orders').map((m) => m.received).join();
+    check('sqs: a peek receives each message once, not once per round', receives === '3,3,2,0', receives);
+
+    // A queue URL is taken only for the connection's own endpoint, so a destination cannot aim the signed request elsewhere.
+    const sentBefore = fake.seen.ops.length;
+    const byUrl = await run<QueueMessage[]>('queues.message.peek', { connectionId: conn.id, destination: `${fake.url}/000000000000/orders`, limit: 1 }, ws.id);
+    const elsewhere = await fail('queues.message.peek', { connectionId: conn.id, destination: 'http://127.0.0.1:9/000000000000/orders' });
+    const elsewhereTail = await fail('queues.consumer.start', { connectionId: conn.id, destination: 'https://sqs.eu-west-1.amazonaws.com/000000000000/orders' });
+    check(
+      'sqs: a queue URL works for the connection endpoint and is refused for any other host, before a request',
+      byUrl.length === 1 && elsewhere === 'INVALID_INPUT' && elsewhereTail === 'INVALID_INPUT' && fake.seen.ops.length === sentBefore + 1,
+      { byUrl: byUrl.length, elsewhere, elsewhereTail, ops: fake.seen.ops.slice(sentBefore) },
+    );
     check('sqs: an unknown queue is not found', (await fail('queues.message.peek', { connectionId: conn.id, destination: 'nope' })) === 'NOT_FOUND' && (await fail('queues.consumer.start', { connectionId: conn.id, destination: 'nope' })) === 'NOT_FOUND');
 
     // ---------- FIFO ----------
@@ -115,6 +149,16 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc }) => {
       'sqs: FIFO produce needs a group (the key will do) and a dedup id, takes no delay, and deduplicates',
       noGroup === 'INVALID_INPUT' && noDedup === 'INVALID_INPUT' && withDelay === 'INVALID_INPUT' && first.id === dup.id && fifoPeek.map((m) => `${m.key}:${m.body}`).join() === 'g1:job 1,g2:job 2' && fifoPeek[0]!.attributes?.['deduplication id'] === 'd1' && Boolean(fifoPeek[0]!.offset),
       { noGroup, noDedup, withDelay, fifoPeek },
+    );
+    // Past ten messages a FIFO queue only ever hands out the oldest of each group, so its newest cannot be peeked.
+    for (let i = 3; i <= 11; i++) await run('queues.message.produce', { connectionId: conn.id, destination: 'jobs.fifo', body: `job ${i}`, groupId: 'g3', dedupId: `d${i}` }, ws.id);
+    const fifoReceives = fake.seen.visibility.length;
+    const fifoLatest = await fail('queues.message.peek', { connectionId: conn.id, destination: 'jobs.fifo' });
+    const fifoEarliest = await run<QueueMessage[]>('queues.message.peek', { connectionId: conn.id, destination: 'jobs.fifo', from: 'earliest', limit: 3 }, ws.id);
+    check(
+      'sqs: a FIFO queue past ten messages refuses a peek for the newest before receiving, and peeks the oldest',
+      fifoLatest === 'INVALID_INPUT' && fifoEarliest.map((m) => m.body).join() === 'job 1,job 2,job 3' && fake.seen.visibility.length === fifoReceives + 1,
+      { fifoLatest, fifoEarliest: fifoEarliest.map((m) => m.body) },
     );
 
     // ---------- live tails and wait ----------
@@ -144,6 +188,34 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc }) => {
     const waited = await waiting;
     check('sqs: wait returns the first new message that matches', waited.message?.body === 'a needle in sqs' && !waited.timedOut, waited);
 
+    // ---------- receive counts and the dead-letter queue ----------
+    // Every receive counts, even at visibility 0: a tail stops one receive short of the limit, and peeks past it
+    // move the message to the DLQ as SQS does.
+    fake.addQueue('retries-dlq');
+    fake.addQueue('retries', { RedrivePolicy: JSON.stringify({ deadLetterTargetArn: 'arn:aws:sqs:us-east-1:000000000000:retries-dlq', maxReceiveCount: 3 }) });
+    await run('queues.message.produce', { connectionId: conn.id, destination: 'retries', body: 'flaky', headers: {} }, ws.id);
+    const firstLook = await run<QueueMessage[]>('queues.message.peek', { connectionId: conn.id, destination: 'retries' }, ws.id);
+    const guarded = await run<Consumer>('queues.consumer.start', { connectionId: conn.id, destination: 'retries', from: 'earliest' }, ws.id);
+    let stopped: Read = { consumer: guarded, messages: [], cursor: 0 };
+    await until(async () => (stopped = await run<Read>('queues.consumer.read', { consumerId: guarded.id }, ws.id)).consumer.status !== 'running', 5000);
+    const atLimit = await run<QueueMessage[]>('queues.message.peek', { connectionId: conn.id, destination: 'retries' }, ws.id);
+    const pastLimit = await run<QueueMessage[]>('queues.message.peek', { connectionId: conn.id, destination: 'retries' }, ws.id);
+    const inDlq = await run<QueueMessage[]>('queues.message.peek', { connectionId: conn.id, destination: 'retries-dlq' }, ws.id);
+    check(
+      'sqs: a tail ends one receive before the DLQ, and receives past maxReceiveCount move the message there',
+      firstLook[0]?.attributes?.['receive count'] === '1' &&
+        stopped.consumer.status === 'error' &&
+        (stopped.consumer.error ?? '').includes('dead-letter queue retries-dlq') &&
+        stopped.messages.map((m) => m.body).join() === 'flaky' &&
+        atLimit[0]?.attributes?.['receive count'] === '3' &&
+        pastLimit.length === 0 &&
+        fake.messages('retries').length === 0 &&
+        inDlq[0]?.body === 'flaky' &&
+        (inDlq[0]?.attributes?.['dead-letter source'] ?? '').endsWith(':retries'),
+      { firstLook: firstLook[0]?.attributes, stopped: stopped.consumer, atLimit: atLimit[0]?.attributes, pastLimit: pastLimit.length, inDlq: inDlq[0]?.attributes },
+    );
+    await run('queues.consumer.stop', { consumerId: guarded.id, forget: true }, ws.id);
+
     // ---------- purge, groups, delete ----------
     await run('queues.destination.purge', { connectionId: conn.id, destination: 'orders' }, ws.id);
     const purged = await run<QueueDestination>('queues.destination.describe', { connectionId: conn.id, destination: 'orders' }, ws.id);
@@ -167,15 +239,28 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc }) => {
     );
 
     // ---------- agents ----------
+    // An SQS receive moves receive counts towards the DLQ, so peeks, tails and waits are mutations for agents.
     const agentPeek = await rpc('tools/call', { name: 'queues_message_peek', arguments: { connectionId: conn.id, destination: 'orders-dlq' } });
+    const agentTail = await rpc('tools/call', { name: 'queues_consumer_start', arguments: { connectionId: conn.id, destination: 'orders-dlq' } });
+    const agentWait = await rpc('tools/call', { name: 'queues_message_wait', arguments: { connectionId: conn.id, destination: 'orders-dlq', timeoutMs: 100 } });
+    const agentList = await rpc('tools/call', { name: 'queues_destination_list', arguments: { connectionId: conn.id } });
     const agentConn = await rpc('tools/call', { name: 'queues_connection_get', arguments: { id: conn.id } });
     const agentProduce = await rpc('tools/call', { name: 'queues_message_produce', arguments: { connectionId: conn.id, destination: 'orders', body: 'x' } });
+    const blocked = (r: typeof agentPeek) => (r.result?.content?.[0]?.text ?? '').includes('MUTATION_BLOCKED');
+    await run('config.update', { patch: { mcp: { ...mcpBefore, allowMutating: true } } }, null);
+    const allowedPeek = await host.invoke('queues.message.peek', { connectionId: conn.id, destination: 'retries-dlq' }, { caller: 'mcp', workspaceId: ws.id }).finally(() => run('config.update', { patch: { mcp: mcpBefore } }, null));
     check(
-      'sqs: agents may peek, see the secret name but never its value, and are refused produce',
-      !agentPeek.result?.isError &&
+      'sqs: agents list queues and see the secret name but never its value; peek, tail, wait and produce need mutations, and peek works once allowed',
+      blocked(agentPeek) &&
+        blocked(agentTail) &&
+        blocked(agentWait) &&
+        blocked(agentProduce) &&
+        !agentList.result?.isError &&
         !(agentConn.result?.content?.[0]?.text ?? '').includes(fake.secretAccessKey) &&
         (agentConn.result?.content?.[0]?.text ?? '').includes('secretAccessKey') &&
-        (agentProduce.result?.content?.[0]?.text ?? '').includes('MUTATION_BLOCKED'),
+        allowedPeek.ok &&
+        (allowedPeek.result as QueueMessage[])[0]?.body === 'flaky',
+      { agentPeek: agentPeek.result?.content?.[0]?.text?.slice(0, 120), allowedPeek: allowedPeek.ok ? 'ok' : allowedPeek.error },
     );
 
     await run('queues.consumer.stop', { consumerId: tail.id, forget: true }, ws.id);

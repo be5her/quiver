@@ -38,6 +38,14 @@ export function sqsRedrive(policy: string | undefined): SqsRedrive | null {
   }
 }
 
+/**
+ * True when a message SQS has handed out `receiveCount` times is one receive away from the dead-letter queue: SQS
+ * moves it on the receive that takes the count past `maxReceiveCount`, so a tail stops here with a receive to spare.
+ */
+export function sqsNearRedrive(receiveCount: number, redrive: SqsRedrive | null): boolean {
+  return Boolean(redrive && redrive.maxReceiveCount > 0 && receiveCount >= redrive.maxReceiveCount - 1);
+}
+
 const count = (v: string | undefined): number | undefined => {
   if (v === undefined || v === '') return undefined;
   const n = Number(v);
@@ -134,6 +142,13 @@ const MESSAGE_ATTRIBUTES: [string, string][] = [
   ['AWSTraceHeader', 'trace header'],
 ];
 
+/** Bytes as base64, a slice at a time: spreading a whole 256 KiB attribute into one call overflows the stack. */
+function base64(bytes: Uint8Array): string {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
 /**
  * A received message as a queue message: message attributes become headers (binary ones base64), the group id
  * is the key, and system attributes such as the receive count go in `attributes`.
@@ -141,7 +156,7 @@ const MESSAGE_ATTRIBUTES: [string, string][] = [
 export function sqsMessage(destination: string, m: SqsReceived): QueueMessage {
   const headers: Record<string, string> = {};
   for (const [name, v] of Object.entries(m.MessageAttributes ?? {})) {
-    headers[name] = v.StringValue ?? (v.BinaryValue ? btoa(String.fromCharCode(...v.BinaryValue)) : '');
+    headers[name] = v.StringValue ?? (v.BinaryValue ? base64(v.BinaryValue) : '');
   }
   const a = m.Attributes ?? {};
   const attributes: Record<string, string> = {};

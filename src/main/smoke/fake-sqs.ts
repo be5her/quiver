@@ -3,8 +3,9 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net';
 
 // A fake of the SQS JSON protocol (AWS JSON 1.0, `X-Amz-Target: AmazonSQS.<Operation>`), covering what the SQS
-// driver calls: queues with attributes, FIFO groups and deduplication, delays, visibility timeouts, long polling
-// and purge. It checks the access key id in the signature, not the signature itself.
+// driver calls: queues with attributes, FIFO groups and deduplication, delays, visibility timeouts, long polling,
+// redrive to a dead-letter queue past maxReceiveCount, and purge. It checks the access key id in the signature,
+// not the signature itself. It listens on 127.0.0.1 only.
 
 const ACCOUNT = '000000000000';
 const DEFAULT_VISIBILITY_S = 30;
@@ -21,6 +22,8 @@ interface FakeMessage {
   groupId?: string;
   dedupId?: string;
   sequence?: string;
+  /** The ARN of the queue it was redriven from, on a dead-letter queue. */
+  deadLetterSource?: string;
 }
 
 interface FakeQueue {
@@ -120,18 +123,38 @@ export async function startFakeSqs(): Promise<FakeSqs> {
     return Object.fromEntries(Object.entries(all).filter(([k]) => names.includes(k)));
   }
 
+  /** The redrive policy's dead-letter queue and limit, when the queue has one. */
+  function redriveOf(q: FakeQueue): { dlq: FakeQueue; max: number } | null {
+    if (!q.attributes.RedrivePolicy) return null;
+    const p = JSON.parse(q.attributes.RedrivePolicy) as { deadLetterTargetArn?: string; maxReceiveCount?: number | string };
+    const dlq = queues.get(String(p.deadLetterTargetArn ?? '').split(':').pop() ?? '');
+    return dlq ? { dlq, max: Number(p.maxReceiveCount ?? 0) } : null;
+  }
+
   function take(q: FakeQueue, max: number, visibility: number): FakeMessage[] {
     const now = Date.now();
     const out: FakeMessage[] = [];
     // FIFO: a group with a message in flight hands out nothing until it is back.
     const blocked = new Set(fifo(q) ? q.messages.filter((m) => m.visibleAt > now && m.received).map((m) => m.groupId) : []);
+    // As SQS does: a message received maxReceiveCount times moves to the dead-letter queue on the next receive instead.
+    const redrive = redriveOf(q);
+    const moved = new Set<FakeMessage>();
     for (const m of q.messages) {
       if (out.length >= max) break;
       if (m.visibleAt > now || blocked.has(m.groupId)) continue;
+      if (redrive && redrive.max > 0 && m.received >= redrive.max) {
+        moved.add(m);
+        redrive.dlq.messages.push({ ...m, received: 0, firstReceivedAt: 0, visibleAt: now, deadLetterSource: arnOf(q.name) });
+        continue;
+      }
       m.received++;
       if (!m.firstReceivedAt) m.firstReceivedAt = now;
       m.visibleAt = now + visibility * 1000;
       out.push(m);
+    }
+    if (moved.size) {
+      q.messages = q.messages.filter((m) => !moved.has(m));
+      for (const w of redrive!.dlq.waiters) w();
     }
     return out;
   }
@@ -146,6 +169,7 @@ export async function startFakeSqs(): Promise<FakeSqs> {
     if (m.groupId) attributes.MessageGroupId = m.groupId;
     if (m.dedupId) attributes.MessageDeduplicationId = m.dedupId;
     if (m.sequence) attributes.SequenceNumber = m.sequence;
+    if (m.deadLetterSource) attributes.DeadLetterQueueSourceArn = m.deadLetterSource;
     return { MessageId: m.id, ReceiptHandle: `${m.id}#${m.received}`, MD5OfBody: md5(m.body), Body: m.body, Attributes: attributes, MessageAttributes: Object.keys(m.attributes).length ? m.attributes : undefined };
   }
 
