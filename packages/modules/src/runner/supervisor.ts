@@ -81,6 +81,8 @@ interface Run {
   /** Resolves when the current process has exited. */
   exited: Promise<void>;
   ready: RegExp | null;
+  /** The sequence number of the last line before the current process started; a pattern wait looks only after it. */
+  firstSeq: number;
   restartTimer: NodeJS.Timeout | null;
   restartAt?: string;
   portTimer: NodeJS.Timeout | null;
@@ -157,13 +159,74 @@ async function profileEnv(ws: WorkspaceApi, cwd: string, profile: string): Promi
   throw new QuiverError('NOT_FOUND', `No env file for the profile ${profile}`);
 }
 
-function compileReady(task: RunnerTask): RegExp | null {
-  if (!task.readyPattern) return null;
+/** A pattern longer than this is refused before it is even looked at. */
+const MAX_PATTERN_LENGTH = 512;
+
+/**
+ * Compiles a pattern (a task's ready pattern, or the one an agent waits for), case-insensitive, after refusing what
+ * could backtrack for ages on a long line and freeze the main process: a repeated group with a repeat inside
+ * (`(a+)+`, `(\w*,?)*`) or a backreference. Checked here because `wait` is open to agents and every line of the run
+ * is tested against it.
+ */
+export function compilePattern(source: string, what: string): RegExp {
+  if (source.length > MAX_PATTERN_LENGTH) throw new QuiverError('INVALID_INPUT', `${what} is longer than ${MAX_PATTERN_LENGTH} characters`);
+  const why = unsafePattern(source);
+  if (why) throw new QuiverError('INVALID_INPUT', `${what} ${why}, which could take forever on a long line; write it without that`);
   try {
-    return new RegExp(task.readyPattern, 'i');
+    return new RegExp(source, 'i');
   } catch (err) {
-    throw new QuiverError('INVALID_INPUT', `The ready pattern is not a valid regular expression: ${(err as Error).message}`);
+    throw new QuiverError('INVALID_INPUT', `${what} is not a valid regular expression: ${(err as Error).message}`);
   }
+}
+
+/**
+ * Why a pattern is refused, or null: an unbounded repeat (`*`, `+`, `{n,}`) of a group that already has a repeat
+ * inside, or a backreference. A bounded one (`(a+)?`, `(a+){2,3}`) is fine.
+ */
+function unsafePattern(source: string): string | null {
+  const quantifierAt = (i: number) => /^(?:[*+?]|\{\d+(?:,\d*)?\})/.test(source.slice(i, i + 16));
+  const unboundedAt = (i: number) => /^(?:[*+]|\{\d+,\})/.test(source.slice(i, i + 16));
+  /** For every open group: whether something before it in the enclosing group was quantified. */
+  const outer: boolean[] = [];
+  let quantified = false;
+  let i = 0;
+  while (i < source.length) {
+    const ch = source[i];
+    if (ch === '\\') {
+      const next = source[i + 1] ?? '';
+      if (/[1-9]/.test(next) || (next === 'k' && source[i + 2] === '<')) return 'uses a backreference';
+      i += 2;
+    } else if (ch === '[') {
+      i++;
+      if (source[i] === '^') i++;
+      if (source[i] === ']') i++;
+      while (i < source.length && source[i] !== ']') i += source[i] === '\\' ? 2 : 1;
+      i++;
+    } else if (ch === '(') {
+      outer.push(quantified);
+      quantified = false;
+      i++;
+      // (?:…), (?=…), (?!…), (?<=…), (?<!…) and (?<name>…) are groups like any other; the prefix holds no quantifier.
+      if (source[i] === '?') {
+        i++;
+        if (source[i] === '<' && source[i + 1] !== '=' && source[i + 1] !== '!') i = source.indexOf('>', i) + 1 || source.length;
+        else i++;
+      }
+    } else if (ch === ')') {
+      const inside = quantified;
+      quantified = outer.pop() ?? false;
+      i++;
+      if (inside && unboundedAt(i)) return 'repeats a group that repeats inside';
+    } else if (quantifierAt(i)) {
+      quantified = true;
+      i += ch === '{' ? source.indexOf('}', i) + 1 - i : 1;
+    } else i++;
+  }
+  return null;
+}
+
+function compileReady(task: RunnerTask): RegExp | null {
+  return task.readyPattern ? compilePattern(task.readyPattern, 'The ready pattern') : null;
 }
 
 // ---------- output ----------
@@ -296,14 +359,19 @@ async function launch(run: Run): Promise<void> {
   run.proc.exitCode = undefined;
   run.proc.startedAt = nowIso();
   run.proc.state = 'starting';
+  run.firstSeq = run.out.last;
   let resolveExit!: () => void;
   run.exited = new Promise((resolve) => (resolveExit = resolve));
 
   let child: ChildProcess;
+  // A port that something else already holds cannot tell when this task is ready: the task's own server will not
+  // get it, and an open port would mark the task ready at once. The ready pattern, when there is one, still counts.
+  let portHeld = false;
   try {
     const cwd = insideWorkspace(ws, task.cwd);
     const env: Record<string, string> = task.envProfile ? await profileEnv(ws, cwd, task.envProfile) : {};
     for (const kv of task.env) if (kv.enabled && kv.key) env[kv.key] = kv.value;
+    portHeld = task.port !== undefined && (await portOpen(task.port));
     // A stop that came while the environment was read (an auto restart) wins.
     if (run.stopping) {
       run.ended = true;
@@ -313,6 +381,7 @@ async function launch(run: Run): Promise<void> {
       return;
     }
     record(run, 'system', `$ ${task.command}${task.cwd ? `  (in ${task.cwd})` : ''}`);
+    if (portHeld) record(run, 'system', `Port ${task.port} is already in use by another process, so it cannot tell when this task is ready`);
     child = spawnTree(task.command, [], { cwd, env, shell: true, stdio: ['pipe', 'pipe', 'pipe'] });
   } catch (err) {
     fail(run, (err as Error).message);
@@ -332,8 +401,9 @@ async function launch(run: Run): Promise<void> {
     }
   });
   child.once('spawn', () => {
-    if (!run.ready && run.task.port === undefined) setState(run, 'running');
-    else if (run.task.port !== undefined) pollPort(run, run.task.port);
+    const byPort = run.task.port !== undefined && !portHeld;
+    if (!run.ready && !byPort) setState(run, 'running');
+    else if (byPort) pollPort(run, run.task.port!);
   });
   // `close` comes after the output streams ended, so the last lines are in before the run is marked ended.
   child.once('close', (code, signal) => {
@@ -415,6 +485,7 @@ function newRun(ws: WorkspaceApi, host: HostApi, task: RunnerTask): Run {
     ended: true,
     exited: Promise.resolve(),
     ready: compileReady(task),
+    firstSeq: 0,
     restartTimer: null,
     portTimer: null,
     outputTimer: null,
@@ -508,14 +579,7 @@ export function writeInput(ws: WorkspaceApi, taskId: string, text: string): Runn
 export function waitFor(ws: WorkspaceApi, taskId: string, opts: { pattern?: string; timeoutMs: number }): Promise<RunnerWaitResult> {
   const run = currentRun(ws.id, taskId);
   if (!run) throw new QuiverError('NOT_FOUND', `The task ${taskId} has not run`);
-  let pattern: RegExp | null = null;
-  if (opts.pattern) {
-    try {
-      pattern = new RegExp(opts.pattern, 'i');
-    } catch (err) {
-      throw new QuiverError('INVALID_INPUT', `Not a valid regular expression: ${(err as Error).message}`);
-    }
-  }
+  const pattern = opts.pattern ? compilePattern(opts.pattern, 'The pattern') : null;
   const matches = (line: RunnerOutputLine) => line.stream !== 'system' && pattern!.test(stripAnsi(line.text));
   return new Promise((resolve) => {
     let timer: NodeJS.Timeout | undefined;
@@ -535,8 +599,10 @@ export function waitFor(ws: WorkspaceApi, taskId: string, opts: { pattern?: stri
         return false;
       },
     };
+    // Lines printed before the call count, but only the current process's: after an automatic restart the run's buffer
+    // still holds what the crashed process printed, and a "ready" line of that one must not answer for the new one.
     if (pattern) {
-      for (const line of run.out.values()) if (matches(line)) return void finish({ matched: true, timedOut: false, line });
+      for (const { value: line } of run.out.read(run.firstSeq).items) if (matches(line)) return void finish({ matched: true, timedOut: false, line });
     }
     if (waiter.check(run)) return;
     run.waiters.add(waiter);
@@ -564,3 +630,6 @@ export async function onStop(): Promise<void> {
   await stopAll([...workspaces.values()].flatMap((tasks) => [...tasks.values()].flatMap((t) => t.runs)));
   workspaces.clear();
 }
+
+/** The supervisor's lifecycle, spread into the runner module next to any other lane's. */
+export const procLifecycle = { onWorkspaceClose, onStop };

@@ -63,6 +63,9 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc, toolNa
   await store.put('runner', task({ id: 'smoke-port', command: `${node} runner-fixture.cjs ${port2}`, env: asNode, port: port2 }));
   await store.put('runner', task({ id: 'smoke-echo', command: 'echo hello from %RUNNER_WORD%$RUNNER_WORD', env: [{ id: 'w', key: 'RUNNER_WORD', value: 'quiver', enabled: true }] }));
   await store.put('runner', task({ id: 'smoke-bad', command: 'exit 7' }));
+  // A task whose port the fixture server already holds: it must not be called ready because of it.
+  await store.put('runner', task({ id: 'smoke-held', command: `${node} -e "setTimeout(() => {}, 20000)"`, env: asNode, port }));
+  await store.put('runner', task({ id: 'smoke-unsafe', command: 'exit 0', readyPattern: '(a+)+$' }));
 
   // Count what the supervisor announces.
   // Count what the supervisor announces, and look at the task the moment its state changes: a state that lasts a
@@ -117,6 +120,22 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc, toolNa
     check('runner: input goes to stdin, and the answer is read from the cursor on', echoed.matched && after.lines.some((l) => l.text === 'echo hello agent') && after.lines[0].seq === first.next + 1, after.lines);
     const timedOut = await wait('smoke-srv', 'never printed', 300);
     check('runner: wait gives up after its timeout', timedOut.timedOut && !timedOut.matched && timedOut.proc?.state === 'ready');
+    const failures = async (calls: (() => Promise<unknown>)[]) => Promise.all(calls.map((call) => call().then(() => '', (err: Error) => err.message)));
+    const [unsafeWait, backref, unsafeReady] = await failures([
+      () => wait('smoke-srv', '(a+)+$', 1000),
+      () => wait('smoke-srv', String.raw`(\w+)\s\1`, 1000),
+      () => run('runner.proc.start', { taskId: 'smoke-unsafe' }, ws.id),
+    ]);
+    check('runner: a pattern that could backtrack forever is refused, as a wait and as a ready pattern', /repeats/.test(unsafeWait) && /backreference/.test(backref) && /repeats/.test(unsafeReady), { unsafeWait, backref, unsafeReady });
+    const fine = await wait('smoke-srv', '(?:ready|prompt)+ (on \\d+|>)?', 1000);
+    check('runner: ordinary groups and quantifiers are still accepted', fine.matched, fine);
+
+    // ---------- a port held by something else does not mean ready ----------
+    const held = await run<Proc>('runner.proc.start', { taskId: 'smoke-held' }, ws.id);
+    const heldRunning = await until(async () => (await run<Proc[]>('runner.proc.list', {}, ws.id)).some((p) => p.taskId === 'smoke-held' && p.state === 'running'), 5000);
+    const heldNote = (await output('smoke-held')).lines.some((l) => l.stream === 'system' && l.text.includes('already in use'));
+    check('runner: a port another process already holds does not mark the task ready, and the output says so', held.state !== 'ready' && heldRunning && heldNote, held);
+    await run('runner.proc.stop', { taskId: 'smoke-held' }, ws.id);
 
     // ---------- the ring buffer and throttled output events ----------
     const outputEventsBefore = events.filter((e) => e.reason === 'output').length;
@@ -142,6 +161,9 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc, toolNa
     check('runner: auto restart starts the crashed task again after a backoff, in the same run', back && restarted?.runId === started.runId && restarted.pid !== started.pid && Date.now() - crashAt >= 900, restarted);
     const crashLog = (await output('smoke-srv')).lines.map((l) => l.text);
     check('runner: the output notes the exit and the restart', crashLog.some((t) => t.includes('exited with code 3')) && crashLog.some((t) => /Restarting in 1 s/.test(t)));
+    // The crashed process printed "crashing" last; it is still in the buffer, but a wait must not take it for the new one.
+    const stale = await wait('smoke-srv', '^crashing$', 300);
+    check('runner: a pattern wait ignores what the process printed before its restart', stale.timedOut && !stale.matched && crashLog.includes('crashing'), { stale, inLog: crashLog.includes('crashing') });
 
     // ---------- agents over MCP ----------
     check('mcp lists runner process tools', ['runner_proc_list', 'runner_proc_start', 'runner_proc_stop', 'runner_proc_restart', 'runner_proc_output', 'runner_proc_wait', 'runner_proc_input'].every((n) => toolNames.includes(n)));
