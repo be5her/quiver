@@ -34,7 +34,29 @@ The smoke section [`parts/git/local.ts`](../../../../src/main/smoke/parts/git/lo
 <!-- lane:G2 -->
 ## Pull requests
 
-To be written by lane G2.
+Pull requests of the workspace's GitHub repository, through the GitHub CLI ([`pr.ts`](pr.ts), commands in [`commands-pr.ts`](commands-pr.ts)). gh runs signed in as you, with your own `gh auth login`, so Quiver never sees or stores a GitHub token. Every call is its own gh process run in the repository root with stdin closed (or holding a body), prompts and update notices off (`GH_PROMPT_DISABLED`, `GH_NO_UPDATE_NOTIFIER`), and asks for `--json`, which `packages/core/src/gh-parse.ts` reads. gh is found on PATH, then in `C:\Program Files\GitHub CLI` on Windows; `QUIVER_GH_PATH` overrides it with a path or a quoted command line, which is how the smoke points it at its fake. Nothing is stored.
+
+The repository is picked from the configured remotes the way gh picks it (the one `gh repo set-default` marked, then `upstream`, `github`, `origin`, then the first) and handed to every call as `--repo`, so gh never guesses and no input can point it at another repository. Remotes on github.com count, plus a GitHub Enterprise host gh is signed in to (or `GH_HOST`).
+
+| Command | What it gives or does |
+| --- | --- |
+| `git.pr.status` | `{ installed, authenticated, user, repo, message }`: whether gh is installed, signed in (the active account) and the workspace is a GitHub repository, with what to do next when something is missing. Never fails for a missing piece. |
+| `git.pr.list` | Pull requests, newest first: `filter` mine (`--author @me`), review-requested (`review-requested:@me`) or all; `state` open, closed, merged or all; `limit` up to 100. Each has its review decision, labels and a roll-up of the head commit's checks (`failure` when any failed, else `pending` when any runs, else `success`; cancelled and timed-out count as failed, as GitHub counts them). |
+| `git.pr.get` | One pull request with its body, line counts, files, reviews and comments. |
+| `git.pr.checks` | The checks on the head commit (gh's exit codes 1 and 8 for failed and pending checks are read as such, not as errors). `failedLogs` adds, for up to 5 failed Actions jobs, the last 60 lines of `gh run view --job <id> --log-failed` without timestamps or colours, under `## <step>` headings, or `logError` saying why there is none. |
+| `git.pr.diff` | The pull request's changes as `git.diff` gives them, read from `gh pr diff`: status, line counts and patch per file, a patch over 512 KB left out and marked `truncated`. |
+| `git.pr.open` | `gh pr view --web`: the page opens in your browser. |
+| `git.pr.checkout` | `gh pr checkout`: fetches the branch (from a fork too) and switches to it; gives back the new `git.status`. |
+| `git.pr.create` | A pull request from the current branch, which must be pushed: its upstream says where the head is, so a branch pushed to a fork goes as `owner:branch`. `base`, `draft`, `labels`. The title and labels are passed as `--flag=value` and the body on stdin, so none of them can be read as an option. |
+| `git.pr.comment` | Adds a comment to the conversation; the body goes on stdin. Gives back the comment's address. |
+
+When gh is not installed the commands fail with `NOT_FOUND` and `details.reason: 'no-gh'`; when it is signed out with `AUTH_REQUIRED` and `details.reason: 'gh-signed-out'`; in a repository with no GitHub remote with `NOT_FOUND` and `details.reason: 'not-github'` (and `not-a-repo` outside a repository, as the local commands); any other gh failure is `REQUEST_FAILED` with gh's own message.
+
+Polling is driven by the view, so nothing runs while no view is open: while the pull requests are on screen it calls the hidden `git.pr.refresh` every 60 seconds (`force` for a refresh button). The host then asks gh for a fingerprint of the open pull requests (number, last update and check states, since a finished check run does not change `updatedAt`), at most every 30 seconds per workspace however many views ask, and emits `git.changed` with reason `prs` when it differs from the last one; every view reloads on that event. Create and comment emit it straight away; checkout emits `status` and `branches`.
+
+Agents may call `git.pr.status`, `git.pr.list`, `git.pr.get`, `git.pr.checks`, `git.pr.diff` and `git.pr.open`. `git.pr.checkout`, `git.pr.create` and `git.pr.comment` are mutating and refused until mutations are enabled. `git.pr.refresh` is plumbing and not listed. A checkout made by an agent runs with `GCM_INTERACTIVE=never`, as the local fetch, pull and push do.
+
+The smoke section [`parts/git/pr.ts`](../../../../src/main/smoke/parts/git/pr.ts) runs against [`fake-gh.ts`](../../../../src/main/smoke/fake-gh.ts), a Node script that answers from a state file, exits like gh and refuses any repository but its own; the section writes it to a temporary folder and removes it, and restores `QUIVER_GH_PATH`, in its `after` hook. It checks the status and errors with gh missing, signed out and in a repository whose only remote is not on GitHub, the list with its filters and roll-up, a pull request's detail and a missing one, checks of a failing (with the failed log's excerpt, and a non-Actions check's `logError`), a pending and a checkless pull request, the diff, open, the refresh announcing a finished check run once and honouring its limit, create refusing an unpushed branch and an option-like label and then creating from a fork branch with the title and body kept literal, comment, checkout switching the branch with its events, every call carrying `--repo` and running in the repository root, and agents reading lists and checks while create, comment and checkout are gated and never reach gh.
 <!-- /lane:G2 -->
 
 <!-- lane:GU -->
