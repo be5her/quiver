@@ -46,7 +46,22 @@ To be written by lane Q3.
 <!-- lane:QU -->
 ## The panel
 
-To be written by lane QU.
+**Sidebar**: the connections, each with its kind (`MEM`, `KAFKA`, `SQS`, `AMQP`) and name, opening to its topics or queues with their message counts (and `FIFO` on SQS FIFO queues). The counts follow what is produced, purged, created or deleted from Quiver; the row's Refresh asks the broker again for what other clients did. The `+` of the header asks for a name and a broker and opens the new connection's settings; a connection's `+` creates a topic (with its partitions) or a queue (standard or FIFO on SQS); its `…` and right-click menu also test, edit and delete it. A topic or queue's menu opens it on its messages, the producer, the live tail or (Kafka) its consumer groups, and purges or deletes it.
+
+**Connection tab**: the fields of its broker (Kafka brokers, client id, TLS, SASL and user; SQS region, profile or access key id, and an endpoint for LocalStack; RabbitMQ host, port, virtual host, TLS, user and management API; nothing for the memory broker), saved with Ctrl+S. The password or secret access key is a password box: what is typed goes to `queues.connection.save` as a secret and is cleared, the stored one is never read back (the box says whether one is stored, and "Remove on save" drops it). Test tries what is on screen: the saved connection, or the unsaved changes on top of it with a newly typed secret. A Kafka connection has a Consumer groups view: every group with its state, members and total lag, opening to committed offset, end and lag per partition.
+
+**Destination tab**: the topic or queue with its counts, partitions and consumers, and Refresh, Purge and Delete. Views:
+
+- **Messages**: a peek (`queues.message.peek`) as a table of position (partition:offset, or the broker's id), key, header count, body and time; newest or oldest first, 10 to 500, and one partition or all on a topic. A message opens beside the table with its key, headers and attributes and the body pretty-printed when it is JSON; Produce again copies it into the producer. It peeks again after each change made from Quiver. On RabbitMQ it waits for a click and says why: a RabbitMQ peek requeues, which marks the messages redelivered.
+- **Produce**: key, headers and a JSON or text body (Format pretty-prints it, a warning says when it does not parse), plus the partition on a topic (by key or round robin otherwise), the message group and deduplication ids on an SQS FIFO queue (the group is required) or a delay on a standard one, and the exchange on RabbitMQ (empty for the default exchange, with the queue as routing key). Ctrl+Enter sends; the broker's id is shown. "Sent before" reloads a message from this machine's history.
+- **Live tail**: a consumer from new messages or from the start, with Start and Stop and a text filter on body, key and header values that applies to what was already received. It reads as the host announces new messages and once a minute while quiet, so an open tail is not stopped as idle; it keeps running while another view is on screen (a dot on the view says so) and stops when the tab closes. SQS and RabbitMQ tails say that they take messages off the queue.
+- **Consumer groups** (Kafka): the groups reading this topic and their lag on its partitions.
+
+**Confirmations**: purging and deleting a topic or queue, and deleting a connection, ask first; creating a topic or queue asks for its name in a dialog first.
+
+**Palette**: "New queue connection", and "Open topic or queue", which picks the connection and takes a name, listing the matches as it is typed (a name that does not exist yet opens too, so the first message can create it).
+
+The smoke's `ui` section (with `--shots`) drives the panel on a memory connection: creating it from the sidebar's dialog and testing it, the Kafka form's fields and password box, creating a topic with three partitions, starting a live tail, producing a message with a key, a header and a partition, seeing it in the tail (and its filter) and in the peek table with the body pretty-printed, the count in the sidebar, Purge's confirmation (Cancel keeps the message, Purge empties the topic), and deleting the topic and the connection after their confirmations. Screenshots `30a` to `30f`.
 <!-- /lane:QU -->
 
 <!-- lane:agents -->
