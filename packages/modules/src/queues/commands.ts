@@ -4,6 +4,7 @@ import {
   QueueConsumeInputSchema,
   QueueCreateInputSchema,
   QueueDestinationInputSchema,
+  QueueHostSchema,
   QueueKindSchema,
   QueuePeekInputSchema,
   QueueProduceInputSchema,
@@ -26,6 +27,8 @@ import { QueueConsumers, waitForMessage } from './consumers';
 import { DRIVERS } from './drivers';
 import { kafkaCloseAll } from './drivers/kafka';
 import { memoryCloseAll } from './drivers/memory';
+import { rabbitCloseAll } from './drivers/rabbit';
+import { sqsCloseAll } from './drivers/sqs';
 
 /** `.quiver/queues/<id>.json`, one committed file per connection. */
 export const QUEUES_COLLECTION = 'queues';
@@ -134,8 +137,21 @@ function unsupported(c: QueueConnection, what: string): never {
   throw new QuiverError('NOT_SUPPORTED', `${c.kind} connections cannot ${what}`);
 }
 
-function changed(ctx: CommandContext, reason: 'connections' | 'messages', connectionId?: string): void {
-  ctx.host.emit('queues.changed', { workspaceId: ws(ctx).id, reason, connectionId });
+function changed(ctx: CommandContext, reason: 'connections' | 'messages', connectionId?: string, destination?: string): void {
+  ctx.host.emit('queues.changed', { workspaceId: ws(ctx).id, reason, connectionId, ...(destination !== undefined ? { destination } : {}) });
+}
+
+/**
+ * Whether reading a destination changes it on the broker. SQS has no read that leaves a message alone: every receive
+ * adds to its receive count, which moves it to the dead-letter queue past maxReceiveCount. A RabbitMQ peek (and a tail
+ * replaying from earliest) gets and requeues, which marks messages redelivered and, on a quorum queue, counts toward
+ * its delivery limit. Agents get those refused until mutations are enabled; Kafka and memory reads stay open.
+ */
+async function readTouchesBroker(ctx: CommandContext, connectionId: string, replays: boolean): Promise<boolean> {
+  const item = await ws(ctx).store.get<QueueConnection>(QUEUES_COLLECTION, connectionId);
+  const kind = QueueKindSchema.safeParse(item?.kind);
+  if (!kind.success) return false;
+  return kind.data === 'sqs' || (kind.data === 'rabbit' && replays);
 }
 
 async function record(ctx: CommandContext, c: QueueConnection, entry: Pick<QueueHistoryEntry, 'action' | 'destination' | 'message'>): Promise<void> {
@@ -157,8 +173,9 @@ const QueueConnectionDraftSchema = z.object({
   profile: z.string().optional(),
   accessKeyId: z.string().optional(),
   endpoint: CommittedUrlSchema.optional(),
-  host: z.string().optional(),
-  port: z.number().int().min(1).max(65535).optional(),
+  host: QueueHostSchema.optional(),
+  /** null removes a stored port, back to the default. */
+  port: z.number().int().min(1).max(65535).nullable().optional(),
   vhost: z.string().optional(),
   managementUrl: CommittedUrlSchema.optional(),
 });
@@ -169,7 +186,10 @@ const SecretsInput = z
   .describe('Secrets by name (`password` for Kafka SASL and RabbitMQ, `secretAccessKey` for SQS); null or empty removes one. Stored encrypted on this machine, never committed or returned.');
 
 function merge(existing: QueueConnection | undefined, draft: QueueConnectionDraft, id: string): QueueConnection {
-  const merged = QueueConnectionSchema.parse({ ...(existing ?? {}), ...compact(draft), id });
+  const { port, ...rest } = draft;
+  const base: Partial<QueueConnection> = { ...(existing ?? {}) };
+  if (port === null) delete base.port;
+  const merged = QueueConnectionSchema.parse({ ...base, ...compact({ ...rest, ...(port !== null ? { port } : {}) }), id });
   if (!merged.name.trim()) merged.name = 'Connection';
   merged.brokers = merged.brokers.map((b) => b.trim()).filter(Boolean);
   return merged;
@@ -308,7 +328,7 @@ const destinationPurge = defineCommand({
     if (!driver.purge) unsupported(connection, 'purge');
     await driver.purge(target, secrets, destination);
     await record(ctx, connection, { action: 'purge', destination });
-    changed(ctx, 'messages', connectionId);
+    changed(ctx, 'messages', connectionId, destination);
     return { purged: true };
   },
 });
@@ -326,7 +346,7 @@ const destinationCreate = defineCommand({
     if (!destination.trim()) throw new QuiverError('INVALID_INPUT', 'Give the name of the topic or queue');
     await driver.create(target, secrets, destination, { partitions, fifo });
     await record(ctx, connection, { action: 'create', destination });
-    changed(ctx, 'connections', connectionId);
+    changed(ctx, 'connections', connectionId, destination);
     return driver.describe(target, secrets, destination);
   },
 });
@@ -343,7 +363,7 @@ const destinationDelete = defineCommand({
     if (!driver.remove) unsupported(connection, 'delete destinations');
     await driver.remove(target, secrets, destination);
     await record(ctx, connection, { action: 'delete', destination });
-    changed(ctx, 'connections', connectionId);
+    changed(ctx, 'connections', connectionId, destination);
     return { deleted: true };
   },
 });
@@ -354,8 +374,9 @@ const messagePeek = defineCommand({
   id: 'queues.message.peek',
   title: 'Peek at messages',
   description:
-    'Reads up to `limit` messages without consuming them: the newest (`from: latest`) or the oldest (`earliest`), across partitions or from one. Kafka reads with a throwaway consumer group that commits nothing; SQS with a zero visibility timeout; RabbitMQ gets and requeues, which marks the messages redelivered.',
+    'Reads up to `limit` messages without consuming them: the newest (`from: latest`) or the oldest (`earliest`), across partitions or from one. Kafka reads with a throwaway consumer group that commits nothing; SQS with a zero visibility timeout, which still adds to the receive count of each message (and can move it to a dead-letter queue); RabbitMQ gets and requeues, which marks the messages redelivered and counts toward the delivery limit of a quorum queue. Mutating on SQS and RabbitMQ for that reason.',
   scope: 'workspace',
+  mutating: ({ connectionId }, ctx) => readTouchesBroker(ctx, connectionId, true),
   input: QueuePeekInputSchema,
   handler: async ({ connectionId, destination, ...options }, ctx) => {
     const { target, driver, secrets } = await open(ctx, connectionId);
@@ -389,7 +410,7 @@ const messageProduce = defineCommand({
         id: result.id,
       },
     });
-    changed(ctx, 'messages', connectionId);
+    changed(ctx, 'messages', connectionId, destination);
     return result;
   },
 });
@@ -398,8 +419,9 @@ const messageWait = defineCommand({
   id: 'queues.message.wait',
   title: 'Wait for a message',
   description:
-    'Blocks until a new message arrives on a topic or queue whose body, key or a header value contains `match` (ignoring case; any message when empty), or until `timeoutMs`, counted from when the consumer is in place (a Kafka group join takes a few seconds). Only messages that arrive after the call count. Returns `{ message, timedOut }`. Kafka reads with a throwaway group; SQS and RabbitMQ consumers may take the message off the queue.',
+    'Blocks until a new message arrives on a topic or queue whose body, key or a header value contains `match` (ignoring case; any message when empty), or until `timeoutMs`, counted from when the consumer is in place (a Kafka group join takes a few seconds). Only messages that arrive after the call count. Returns `{ message, timedOut }`. Nothing is consumed: Kafka reads with a throwaway group, RabbitMQ with a queue of its own bound like the destination, SQS with a zero visibility timeout (which adds to receive counts, so it is mutating on SQS).',
   scope: 'workspace',
+  mutating: ({ connectionId }, ctx) => readTouchesBroker(ctx, connectionId, false),
   input: QueueWaitInputSchema,
   handler: async ({ connectionId, destination, match, timeoutMs }, ctx) => {
     const { target, driver, secrets } = await open(ctx, connectionId);
@@ -426,8 +448,9 @@ const consumerStart = defineCommand({
   id: 'queues.consumer.start',
   title: 'Start a live tail',
   description:
-    'Starts a live consumer on a topic or queue, from new messages (`latest`) or from the start (`earliest`), and returns it. Read what arrives with queues.consumer.read; the last 1000 messages are kept. At most 20 tails run per workspace, and one nobody read for 10 minutes is stopped (its messages stay readable). Kafka tails use a throwaway group that commits nothing.',
+    'Starts a live consumer on a topic or queue, from new messages (`latest`) or from the start (`earliest`), and returns it. Read what arrives with queues.consumer.read; the last 1000 messages are kept. At most 20 tails run per workspace, and one nobody read for 10 minutes is stopped (its messages stay readable). Kafka tails use a throwaway group that commits nothing; RabbitMQ tails a queue of their own bound like the destination. Mutating on SQS (receives add to receive counts) and on RabbitMQ from earliest (the replay requeues).',
   scope: 'workspace',
+  mutating: ({ connectionId, from }, ctx) => readTouchesBroker(ctx, connectionId, from === 'earliest'),
   input: QueueConsumeInputSchema,
   handler: async ({ connectionId, destination, from }, ctx) => {
     const { connection, target, driver, secrets } = await open(ctx, connectionId);
@@ -523,7 +546,7 @@ export async function closeQueues(w: WorkspaceApi): Promise<void> {
 /** Stop every tail and release every broker client, when the app quits. */
 export async function stopQueues(): Promise<void> {
   await consumers.stopAll();
-  await Promise.all([kafkaCloseAll(), memoryCloseAll()]);
+  await Promise.all([kafkaCloseAll(), memoryCloseAll(), rabbitCloseAll(), sqsCloseAll()]);
 }
 
 export const queueCommands: CommandDefinition[] = [

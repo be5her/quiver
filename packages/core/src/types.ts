@@ -306,8 +306,8 @@ export interface HostEvents {
   'git.changed': { workspaceId: string; reason: 'status' | 'branches' | 'prs' };
   /** Process runner: saved tasks changed (`tasks`), a process changed state (`state`), or a run printed output (`output`, throttled). */
   'runner.changed': { workspaceId: string; reason: 'tasks' | 'state' | 'output'; taskId?: string; runId?: string };
-  /** Queues: connections changed (`connections`), messages were produced or purged (`messages`), or a live consumer got messages or ended (`consumer`). */
-  'queues.changed': { workspaceId: string; reason: 'connections' | 'messages' | 'consumer'; connectionId?: string; consumerId?: string };
+  /** Queues: connections changed (`connections`), messages were produced or purged (`messages`), or a live consumer got messages or ended (`consumer`); `destination` when one topic or queue was touched. */
+  'queues.changed': { workspaceId: string; reason: 'connections' | 'messages' | 'consumer'; connectionId?: string; consumerId?: string; destination?: string };
   /** The in-app updater moved: checking, a version found, download progress, downloaded, or an error. */
   'app.update': UpdateState;
 }
