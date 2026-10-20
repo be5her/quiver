@@ -115,7 +115,7 @@ const section: SmokeSection = async (t) => {
     await fs.writeFile(path.join(folder, 'readme.txt'), 'hi\n');
     await sh('add', '.');
     await sh('commit', '-q', '-m', 'first');
-    await sh('remote', 'add', 'origin', 'https://gitlab.com/smoke/quiver.git');
+    await sh('remote', 'add', 'origin', 'https://oauth2:glpat-smoke-token@gitlab.com/smoke/quiver.git');
     ws = await run<WorkspaceInfo>('workspace.open', { path: folder }, null);
     const id = ws.id;
 
@@ -137,6 +137,7 @@ const section: SmokeSection = async (t) => {
     check('git pr: status says when no remote is on GitHub', notGithub.authenticated && !notGithub.repo && (notGithub.message ?? '').includes('No remote of this repository is on GitHub'), notGithub);
     const notGithubList = await failure(() => run('git.pr.list', {}, id));
     check('git pr: commands fail clearly when the repository is not on GitHub', notGithubList.includes('NOT_FOUND') && notGithubList.includes('gitlab.com'), notGithubList);
+    check('git pr: a token in a remote URL is not shown', !`${notGithub.message} ${notGithubList}`.includes('glpat-smoke-token'), { notGithub, notGithubList });
 
     await sh('remote', 'set-url', 'origin', `https://github.com/${REPO}.git`);
     await fake.update((s) => {
@@ -225,6 +226,13 @@ const section: SmokeSection = async (t) => {
     check('git pr: create from a branch that was never pushed says to push it', unpushed.includes('has not been pushed'), unpushed);
     const optionLike = await failure(() => run('git.pr.create', { title: 'New', labels: ['--web'] }, id));
     check('git pr: an option-like label is refused', optionLike.includes('INVALID_INPUT') || optionLike.includes('must not start with'), optionLike);
+    const commaLabel = await failure(() => run('git.pr.create', { title: 'New', labels: ['needs review, urgent'] }, id));
+    check('git pr: a label with a comma (which gh would split) is refused', commaLabel.includes('INVALID_INPUT') && commaLabel.includes('comma'), commaLabel);
+    // git checkout -b x origin/main tracks origin/main: that says nothing about x being pushed.
+    await sh('config', 'branch.feat/new.remote', 'origin');
+    await sh('config', 'branch.feat/new.merge', 'refs/heads/main');
+    const tracksBase = await failure(() => run('git.pr.create', { title: 'New', base: 'main' }, id));
+    check('git pr: a branch whose upstream is the base itself counts as not pushed', tracksBase.includes('has not been pushed'), tracksBase);
     await sh('remote', 'add', 'fork', 'git@github.com:forker/quiver.git');
     await sh('config', 'branch.feat/new.remote', 'fork');
     await sh('config', 'branch.feat/new.merge', 'refs/heads/feat/new');

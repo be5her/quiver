@@ -38,7 +38,18 @@ const MAX_PATCH_BYTES = 512 * 1024;
 const MAX_FAILED_LOGS = 5;
 const FAILED_LOG_LINES = 60;
 
-const ENV: Record<string, string> = { GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1', GH_NO_EXTENSION_UPDATE_NOTIFIER: '1', GH_SPINNER_DISABLED: '1', NO_COLOR: '1' };
+// Colour, a TTY or a pager forced from the user's environment would break the JSON and hang `pr diff`.
+const ENV: Record<string, string> = {
+  GH_PROMPT_DISABLED: '1',
+  GH_NO_UPDATE_NOTIFIER: '1',
+  GH_NO_EXTENSION_UPDATE_NOTIFIER: '1',
+  GH_SPINNER_DISABLED: '1',
+  NO_COLOR: '1',
+  CLICOLOR_FORCE: '0',
+  GH_FORCE_TTY: '',
+  GH_PAGER: 'cat',
+  GIT_TERMINAL_PROMPT: '0',
+};
 /** For a checkout an agent made: keep Git Credential Manager from opening a window nobody asked for (see local.ts). */
 const NON_INTERACTIVE_ENV: Record<string, string> = { GCM_INTERACTIVE: 'never' };
 
@@ -92,7 +103,8 @@ export async function gh(cwd: string, args: string[], options: GhRunOptions = {}
   const result = await runToEnd(program, [...fixed, ...args], { cwd, env: { ...ENV, ...options.env }, input: options.input, timeoutMs, maxBytes: options.maxBytes ?? MAX_OUTPUT_BYTES });
   if (result.error) throw new QuiverError('NOT_FOUND', `gh could not be started: ${result.error}. ${INSTALL_HINT}`, { reason: 'no-gh' });
   if (result.timedOut) throw new QuiverError('REQUEST_FAILED', `gh ${args.slice(0, 2).join(' ')} took longer than ${Math.round(timeoutMs / 1000)}s and was stopped`);
-  if (result.code !== 0 && !options.allowFailure) throw failure(result, args);
+  // Output over the cap kills gh, so its exit code says nothing; the caller gets what arrived, marked truncated.
+  if (result.code !== 0 && !result.truncated && !options.allowFailure) throw failure(result, args);
   return result;
 }
 
@@ -158,10 +170,16 @@ export async function prRepo(cwd: string): Promise<PrRepo> {
   let picked = pickRemote(list, ['github.com', ...(process.env.GH_HOST ? [process.env.GH_HOST] : [])]);
   if (!picked && list.length) picked = pickRemote(list, await knownHosts(root));
   if (!picked) {
-    const named = list.map((r) => `${r.name}: ${r.url}`).join(', ');
+    // Without the user part of the URL: remotes often carry a token there (https://oauth2:<token>@host/…).
+    const named = list.map((r) => `${r.name}: ${withoutCredentials(r.url)}`).join(', ');
     throw new QuiverError('NOT_FOUND', named ? `No remote of this repository is on GitHub (${named}).` : 'This repository has no remote on GitHub. Add one with git remote add origin <url>.', { reason: 'not-github' });
   }
   return { root, remote: picked.remote, repo: picked.repo, arg: repoArg(picked.repo) };
+}
+
+/** A remote URL without the user and password of `scheme://user:pass@host/…`. */
+export function withoutCredentials(url: string): string {
+  return url.replace(/^([a-z][\w+.-]*:\/\/)[^@/]*@/i, '$1');
 }
 
 // ---------- reads ----------
@@ -277,11 +295,25 @@ export async function create(cwd: string, input: { title: string; body: string; 
   const repo = await prRepo(cwd);
   const branch = (await local.status(repo.root)).branch;
   if (!branch) throw new QuiverError('INVALID_INPUT', 'HEAD is detached; switch to the branch the pull request is for');
-  const upstreamRemote = (await local.git(repo.root, ['config', '--get', `branch.${branch}.remote`], { allowFailure: true })).stdout.trim();
-  if (!upstreamRemote) throw new QuiverError('INVALID_INPUT', `${branch} has not been pushed. Push it first (git.push with setUpstream), then create the pull request.`);
+  const config = async (key: string) => (await local.git(repo.root, ['config', '--get', `branch.${branch}.${key}`], { allowFailure: true })).stdout.trim();
+  const notPushed = new QuiverError('INVALID_INPUT', `${branch} has not been pushed. Push it first (git.push with setUpstream), then create the pull request.`);
+  const upstreamRemote = await config('remote');
   const pushedTo = (await remotes(repo.root)).find((r) => r.name === upstreamRemote);
-  const headRepo = pushedTo ? pickRemote([pushedTo], [repo.repo.host])?.repo : undefined;
-  const head = headRepo && headRepo.owner.toLowerCase() !== repo.repo.owner.toLowerCase() ? `${headRepo.owner}:${branch}` : branch;
+  // A branch made from origin/main tracks origin/main, and "." tracks a local branch: neither says the branch was pushed.
+  const remoteBranch = /^refs\/heads\/(.+)$/.exec(await config('merge'))?.[1];
+  if (!pushedTo || !remoteBranch) throw notPushed;
+  // Tracking a branch of another name is fine (local fix -> origin/feature/fix), unless it is the base itself.
+  const remoteHead = (await local.git(repo.root, ['symbolic-ref', '--short', '--quiet', `refs/remotes/${pushedTo.name}/HEAD`], { allowFailure: true })).stdout.trim();
+  const base = input.base ?? remoteHead.slice(pushedTo.name.length + 1);
+  if (remoteBranch !== branch && remoteBranch === base) throw notPushed;
+  // gh opens the pull request from what is on the remote; commits not pushed yet would be missing from it.
+  const upstreamRef = `refs/remotes/${pushedTo.name}/${remoteBranch}`;
+  if ((await local.git(repo.root, ['rev-parse', '--verify', '--quiet', upstreamRef], { allowFailure: true })).stdout.trim()) {
+    const ahead = Number((await local.git(repo.root, ['rev-list', '--count', `${upstreamRef}..HEAD`], { allowFailure: true })).stdout.trim() || 0);
+    if (ahead > 0) throw new QuiverError('INVALID_INPUT', `${branch} has ${ahead} commit${ahead === 1 ? '' : 's'} not pushed to ${pushedTo.name}/${remoteBranch}. Push first, then create the pull request.`);
+  }
+  const headRepo = pickRemote([pushedTo], [repo.repo.host])?.repo;
+  const head = headRepo && headRepo.owner.toLowerCase() !== repo.repo.owner.toLowerCase() ? `${headRepo.owner}:${remoteBranch}` : remoteBranch;
   const args = ['pr', 'create', '--repo', repo.arg, `--head=${head}`, `--title=${input.title}`, '--body-file', '-'];
   if (input.base) args.push(`--base=${input.base}`);
   if (input.draft) args.push('--draft');
@@ -289,7 +321,7 @@ export async function create(cwd: string, input: { title: string; body: string; 
   const { stdout } = await gh(repo.root, args, { input: input.body, timeoutMs: NETWORK_TIMEOUT_MS });
   const number = numberFromUrl(stdout);
   const view = await gh(repo.root, ['pr', 'view', String(number), '--repo', repo.arg, '--json', GH_PR_FIELDS]);
-  return parsePullRequest(parseGhJson(view.stdout) as Record<string, unknown>);
+  return parsePullRequest((parseGhJson(view.stdout) ?? {}) as Record<string, unknown>);
 }
 
 /** Add a comment to a pull request's conversation; gives back the comment's address. The body goes on stdin. */

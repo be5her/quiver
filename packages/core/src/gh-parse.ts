@@ -202,7 +202,7 @@ export function parsePullRequestList(out: string): GitPullRequest[] {
 
 /** `gh pr view <n> --json GH_PR_DETAIL_FIELDS`. */
 export function parsePullRequestDetail(out: string): GitPullRequestDetail {
-  const raw = parseGhJson(out) as Json;
+  const raw = (parseGhJson(out) ?? {}) as Json;
   return {
     ...parsePullRequest(raw),
     body: str(raw.body),

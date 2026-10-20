@@ -157,6 +157,7 @@ export const GitPrCreateInputSchema = z.object({
   body: z.string().default(''),
   base: GitArgSchema.optional(),
   draft: z.boolean().default(false),
-  labels: z.array(GitArgSchema).default([]),
+  // gh splits --label on commas and reads quotes as CSV, so such a label would become other labels or an error.
+  labels: z.array(GitArgSchema.refine((s) => !/[,"]/.test(s), { message: 'must not contain a comma or a double quote' })).default([]),
 });
 export const GitPrCommentInputSchema = GitPrRefInputSchema.extend({ body: z.string().trim().min(1) });
