@@ -8,6 +8,7 @@ import {
   RingBuffer,
   RunnerTaskSchema,
   dotenvToMap,
+  hasNestedRepetition,
   newId,
   nowIso,
   parseDotenv,
@@ -180,49 +181,17 @@ export function compilePattern(source: string, what: string): RegExp {
 }
 
 /**
- * Why a pattern is refused, or null: an unbounded repeat (`*`, `+`, `{n,}`) of a group that already has a repeat
- * inside, or a backreference. A bounded one (`(a+)?`, `(a+){2,3}`) is fine.
+ * Why a pattern is refused, or null: a repeated group with a repeat inside (`hasNestedRepetition`, the same rule the
+ * API module's checks use), or a backreference, which backtracks the same way.
  */
 function unsafePattern(source: string): string | null {
-  const quantifierAt = (i: number) => /^(?:[*+?]|\{\d+(?:,\d*)?\})/.test(source.slice(i, i + 16));
-  const unboundedAt = (i: number) => /^(?:[*+]|\{\d+,\})/.test(source.slice(i, i + 16));
-  /** For every open group: whether something before it in the enclosing group was quantified. */
-  const outer: boolean[] = [];
-  let quantified = false;
-  let i = 0;
-  while (i < source.length) {
-    const ch = source[i];
-    if (ch === '\\') {
-      const next = source[i + 1] ?? '';
-      if (/[1-9]/.test(next) || (next === 'k' && source[i + 2] === '<')) return 'uses a backreference';
-      i += 2;
-    } else if (ch === '[') {
-      i++;
-      if (source[i] === '^') i++;
-      if (source[i] === ']') i++;
-      while (i < source.length && source[i] !== ']') i += source[i] === '\\' ? 2 : 1;
-      i++;
-    } else if (ch === '(') {
-      outer.push(quantified);
-      quantified = false;
-      i++;
-      // (?:…), (?=…), (?!…), (?<=…), (?<!…) and (?<name>…) are groups like any other; the prefix holds no quantifier.
-      if (source[i] === '?') {
-        i++;
-        if (source[i] === '<' && source[i + 1] !== '=' && source[i + 1] !== '!') i = source.indexOf('>', i) + 1 || source.length;
-        else i++;
-      }
-    } else if (ch === ')') {
-      const inside = quantified;
-      quantified = outer.pop() ?? false;
-      i++;
-      if (inside && unboundedAt(i)) return 'repeats a group that repeats inside';
-    } else if (quantifierAt(i)) {
-      quantified = true;
-      i += ch === '{' ? source.indexOf('}', i) + 1 - i : 1;
-    } else i++;
+  for (let i = 0; i < source.length; i++) {
+    if (source[i] !== '\\') continue;
+    const next = source[i + 1] ?? '';
+    if (/[1-9]/.test(next) || (next === 'k' && source[i + 2] === '<')) return 'uses a backreference';
+    i++;
   }
-  return null;
+  return hasNestedRepetition(source) ? 'repeats a group that repeats inside' : null;
 }
 
 function compileReady(task: RunnerTask): RegExp | null {
