@@ -1,9 +1,10 @@
 import { Component, computed, inject, input } from '@angular/core';
 import type { QueueDestination } from '@quiver/core';
-import { Button, ContextMenu, Icon, IconButton, SectionHeader, Spinner, TreeState, injectHostEvent, invokeResource } from '@quiver/ui';
+import { Button, ContextMenu, Icon, IconButton, SectionHeader, Spinner, TreeState, invokeResource } from '@quiver/ui';
 import { ChevronDown, ChevronRight, Ellipsis, Inbox, Plus, RefreshCw } from 'lucide';
 import { DbRow } from '../../db/ui/db-row';
 import { QueuesActions } from './queues-actions';
+import { injectQueuesChanged } from './queues-events';
 import { KIND_BADGE, countOf, describeQueueConnection, destinationWord, kindClass, type QueueConnectionSummary } from './queues-format';
 
 /** A connection: its kind and name, expanding to its topics or queues with their counts. */
@@ -76,7 +77,7 @@ export class QueuesConnectionNode {
   constructor() {
     // Counts follow produces, purges, creates and deletes made here; what other clients do shows on Refresh. A tail's
     // events (four a second while it receives) are left out, so a busy Kafka topic does not cost an admin call each.
-    injectHostEvent('queues.changed', (p) => {
+    injectQueuesChanged((p) => {
       if (this.open() && p.reason !== 'consumer' && (!p.connectionId || p.connectionId === this.conn().id)) this.destinations.reload();
     });
   }
@@ -151,6 +152,6 @@ export class QueuesSidebar {
   });
 
   constructor() {
-    injectHostEvent('queues.changed', (p) => p.reason === 'connections' && this.connections.reload());
+    injectQueuesChanged((p) => p.reason === 'connections' && this.connections.reload());
   }
 }

@@ -58,7 +58,7 @@ export class QueuesMessageDetail {
   imports: [Badge, QueuesMessageDetail],
   template: `
     <div class="flex-1 min-w-0 overflow-auto" [attr.data-testid]="testId()">
-      <table class="w-full text-xs table-fixed">
+      <table class="w-full text-xs table-fixed" aria-label="Messages">
         <thead class="sticky top-0 bg-canvas text-muted text-[11px] z-10">
           <tr class="border-b border-edge">
             <th class="text-left font-normal px-2 py-1 w-24">{{ positionLabel() }}</th>
@@ -69,14 +69,19 @@ export class QueuesMessageDetail {
           </tr>
         </thead>
         <tbody>
-          @for (m of messages(); track m.id + ':' + $index) {
+          <!-- Tracked by the message itself: a tail prepends, and an index would rebuild every row on each arrival. -->
+          @for (m of messages(); track m) {
             @let count = headerCount(m);
             <tr
-              class="border-b border-edge/60 hover:bg-elevated cursor-pointer"
+              class="border-b border-edge/60 hover:bg-elevated cursor-pointer focus-visible:outline focus-visible:outline-1 focus-visible:outline-accent"
               [class.bg-elevated]="key(m) === selectedKey()"
+              tabindex="0"
+              [attr.aria-selected]="key(m) === selectedKey()"
               data-testid="queues-message"
               [attr.data-id]="m.id"
               (click)="pick(m)"
+              (keydown.enter)="pick(m)"
+              (keydown.space)="pick(m); $event.preventDefault()"
             >
               <td class="px-2 py-1 font-mono text-muted truncate">{{ position(m) }}</td>
               <td class="px-2 py-1 font-mono truncate" [title]="m.key ?? ''">{{ m.key ?? '' }}</td>

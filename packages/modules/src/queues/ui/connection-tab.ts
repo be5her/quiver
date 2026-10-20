@@ -5,6 +5,7 @@ import { Button, Checkbox, HostBridge, Icon, Input, Label, Segment, Segmented, S
 import { Layers, PlugZap, Plus, Save, Trash2 } from 'lucide';
 import { QueuesGroupLag } from './group-lag';
 import { QueuesActions } from './queues-actions';
+import { injectQueuesChanged } from './queues-events';
 import { KIND_LABEL, QUEUE_KINDS, describeQueueConnection, destinationWord, secretNameOf, type QueueConnectionSummary } from './queues-format';
 
 /** What the fields edit: the connection's settings as text, so every field binds to a plain input. */
@@ -46,9 +47,10 @@ function draftOf(c: QueueConnection): ConnectionDraft {
   };
 }
 
-/** The draft as `queues.connection.save` takes it. */
+/** The draft as `queues.connection.save` takes it. An empty port is `null`, which removes a stored one. */
 function connectionOf(d: ConnectionDraft): Record<string, unknown> {
-  const port = Number.parseInt(d.port, 10);
+  const typed = d.port.trim();
+  const port = typed === '' ? null : Number(typed);
   return {
     name: d.name,
     kind: d.kind,
@@ -65,10 +67,18 @@ function connectionOf(d: ConnectionDraft): Record<string, unknown> {
     accessKeyId: d.accessKeyId,
     endpoint: d.endpoint.trim(),
     host: d.host.trim(),
-    ...(Number.isFinite(port) ? { port } : {}),
+    port,
     vhost: d.vhost,
     managementUrl: d.managementUrl.trim(),
   };
+}
+
+/** Why the typed port cannot be saved, or null when it is empty (the default) or a valid port. */
+function portProblem(d: ConnectionDraft): string | null {
+  const typed = d.port.trim();
+  if (typed === '') return null;
+  const n = Number(typed);
+  return /^\d+$/.test(typed) && n >= 1 && n <= 65535 ? null : 'The port must be a number from 1 to 65535, or empty for the default';
 }
 
 const EMPTY: ConnectionDraft = draftOf({
@@ -224,7 +234,7 @@ type View = 'settings' | 'groups';
               }
 
               @if (secretName(); as name) {
-                @if (d.kind !== 'kafka' || d.sasl !== 'none') {
+                @if (secretVisible()) {
                   <div>
                     <label qLabel for="queues-secret">{{ name === 'secretAccessKey' ? 'Secret access key' : 'Password' }}</label>
                     <input
@@ -242,11 +252,17 @@ type View = 'settings' | 'groups';
                     <div class="flex items-center gap-2 mt-1 min-h-7">
                       <span class="text-[11px]" [class]="hasSecret() && !secret().clear ? 'text-success' : 'text-muted'" data-testid="queues-secret-state">{{ secretState() }}</span>
                       @if (hasSecret()) {
-                        <label class="flex items-center gap-1 text-[11px] text-muted"><input type="checkbox" qCheckbox [checked]="secret().clear" (change)="clearSecret($event)" /> Remove on save</label>
+                        <label class="flex items-center gap-1 text-[11px] text-muted"><input type="checkbox" qCheckbox [checked]="secret().clear" (change)="clearSecret($event)" data-testid="queues-secret-clear" /> Remove on save</label>
                       }
                     </div>
                   </div>
                 }
+              }
+              @if (unused().length) {
+                <div class="flex items-center gap-2 text-[11px] text-muted min-h-7" data-testid="queues-secret-unused">
+                  <span>Also stored on this machine, not used by these settings: {{ unused().join(', ') }}</span>
+                  <label class="flex items-center gap-1"><input type="checkbox" qCheckbox [checked]="removeUnused()" (change)="pickRemoveUnused($event)" /> Remove on save</label>
+                </div>
               }
 
               @if (testResult(); as r) {
@@ -282,10 +298,8 @@ export class QueuesConnectionTab implements TabComponent {
   protected readonly kinds = QUEUE_KINDS;
   protected readonly kindLabel = KIND_LABEL;
   private readonly connectionId = computed(() => String(this.tab().data?.['id'] ?? ''));
-  protected readonly summary = invokeResource<QueueConnectionSummary>('queues.connection.get', () => ({ id: this.connectionId() }), {
-    refreshOn: ['queues'],
-    refreshOnEvents: ['queues.changed'],
-  });
+  /** The file is announced by the store; secrets changing (or the connection going) by `queues.changed{connections}`. */
+  protected readonly summary = invokeResource<QueueConnectionSummary>('queues.connection.get', () => ({ id: this.connectionId() }), { refreshOn: ['queues'] });
   private readonly saved = computed(() => {
     const c = this.summary.value();
     return c ? draftOf(c) : undefined;
@@ -302,17 +316,19 @@ export class QueuesConnectionTab implements TabComponent {
   protected readonly connectionForm = form(this.draft);
   /** The secret typed here: sent with the next save, then cleared; the stored one is never read back. */
   protected readonly secret = signal({ value: '', clear: false });
+  /** Whether stored secrets these settings do not use go with the next save. */
+  protected readonly removeUnused = signal(false);
   protected readonly view = signal<View>('settings');
   protected readonly testing = signal(false);
   protected readonly testResult = signal<{ ok: boolean; message: string } | null>(null);
   private readonly saving = signal(false);
 
   /** The settings on screen as one value, so a reload that brings the same settings back changes nothing. */
-  private readonly settingsKey = computed(() => JSON.stringify([this.draft(), this.secret()]));
+  private readonly settingsKey = computed(() => JSON.stringify([this.draft(), this.typedSecret()]));
   protected readonly dirty = computed(() => {
     const saved = this.saved();
-    const s = this.secret();
-    return Boolean(saved && (JSON.stringify(this.draft()) !== JSON.stringify(saved) || s.value !== '' || s.clear));
+    const s = this.typedSecret();
+    return Boolean(saved && (JSON.stringify(this.draft()) !== JSON.stringify(saved) || s.value !== '' || s.clear || (this.removeUnused() && this.unused().length > 0)));
   });
   protected readonly where = computed(() => {
     const c = this.summary.value();
@@ -320,6 +336,18 @@ export class QueuesConnectionTab implements TabComponent {
   });
   protected readonly word = computed(() => destinationWord(this.draft().kind));
   protected readonly secretName = computed(() => secretNameOf(this.draft().kind));
+  /** The secret box shows where the settings use it: not on the memory broker, nor on Kafka without SASL. */
+  protected readonly secretVisible = computed(() => {
+    const d = this.draft();
+    return this.secretName() !== null && (d.kind !== 'kafka' || d.sasl !== 'none');
+  });
+  /** What was typed or ticked in the box, counted only while the box shows, so a hidden box sends nothing. */
+  private readonly typedSecret = computed(() => (this.secretVisible() ? this.secret() : { value: '', clear: false }));
+  /** Secrets stored for this connection that these settings do not use (another broker's, or Kafka without SASL). */
+  protected readonly unused = computed(() => {
+    const used = this.secretVisible() ? this.secretName() : null;
+    return (this.summary.value()?.secrets ?? []).filter((n) => n !== used);
+  });
   protected readonly hasSecret = computed(() => {
     const name = this.secretName();
     return Boolean(name && this.summary.value()?.secrets.includes(name));
@@ -332,6 +360,9 @@ export class QueuesConnectionTab implements TabComponent {
   });
 
   constructor() {
+    injectQueuesChanged((p) => {
+      if (p.reason === 'connections' && p.connectionId === this.connectionId()) this.summary.reload();
+    });
     // A test result is about the settings it was run with.
     effect(() => {
       this.settingsKey();
@@ -371,23 +402,40 @@ export class QueuesConnectionTab implements TabComponent {
     this.secret.set({ value: '', clear });
   }
 
-  /** The secret change to send, by name: the typed value, null to remove it, or nothing. */
-  private secretChanges(): Record<string, string | null> | undefined {
+  protected pickRemoveUnused(event: Event): void {
+    this.removeUnused.set((event.target as HTMLInputElement).checked);
+  }
+
+  /** The change to the box's secret, by name: the typed value, null to remove it, or nothing (also while it is hidden). */
+  private typedSecretChange(): Record<string, string | null> {
     const name = this.secretName();
-    const { value, clear } = this.secret();
-    if (!name) return undefined;
+    const { value, clear } = this.typedSecret();
+    if (!name || !this.secretVisible()) return {};
     if (clear) return { [name]: null };
-    return value ? { [name]: value } : undefined;
+    return value ? { [name]: value } : {};
+  }
+
+  /** What a save sends: the box's change, and the unused secrets when they are to go. */
+  private secretChanges(): Record<string, string | null> | undefined {
+    const changes: Record<string, string | null> = { ...this.typedSecretChange() };
+    if (this.removeUnused()) for (const name of this.unused()) changes[name] = null;
+    return Object.keys(changes).length ? changes : undefined;
   }
 
   protected async save(): Promise<void> {
     if (this.saving() || !this.dirty()) return;
+    const problem = portProblem(this.draft());
+    if (problem) {
+      this.toasts.notify(problem, 'error');
+      return;
+    }
     this.saving.set(true);
     this.testResult.set(null);
     try {
       const secrets = this.secretChanges();
       const stored = await this.host.invoke<QueueConnectionSummary>('queues.connection.save', { connection: { id: this.connectionId(), ...connectionOf(this.draft()) }, ...(secrets ? { secrets } : {}) });
       this.secret.set({ value: '', clear: false });
+      this.removeUnused.set(false);
       this.draft.set(draftOf(stored));
       this.summary.reload();
       this.toasts.notify('Saved', 'success');
@@ -400,10 +448,16 @@ export class QueuesConnectionTab implements TabComponent {
 
   /** Test what is on screen: the saved connection, or the unsaved changes on top of it with a newly typed secret. */
   protected async test(): Promise<void> {
+    const problem = portProblem(this.draft());
+    if (problem) {
+      this.testResult.set({ ok: false, message: problem });
+      return;
+    }
     this.testing.set(true);
     this.testResult.set(null);
     try {
-      const secrets = this.secretChanges();
+      const typed = this.typedSecretChange();
+      const secrets = Object.keys(typed).length ? typed : undefined;
       const changed = JSON.stringify(this.draft()) !== JSON.stringify(this.saved());
       const r = await this.host.invoke<{ ok: boolean; message: string }>('queues.connection.test', {
         id: this.connectionId(),

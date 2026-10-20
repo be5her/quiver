@@ -1,13 +1,15 @@
 import { Component, computed, inject, input, linkedSignal, signal, untracked } from '@angular/core';
 import type { QueueDestination, QueueMessage } from '@quiver/core';
-import { Button, Icon, Segment, Segmented, Spinner, injectHostEvent, invokeResource, type Tab, type TabComponent } from '@quiver/ui';
+import { Button, Icon, Segment, Segmented, Spinner, invokeResource, type Tab, type TabComponent } from '@quiver/ui';
 import { Eraser, Inbox, RefreshCw, Trash2 } from 'lucide';
 import { QueuesGroupLag } from './group-lag';
 import { QueuesLiveTail } from './live-tail';
 import { QueuesPeekView } from './peek-view';
 import { QueuesProducer, type ProducerPreset } from './producer';
 import { QueuesActions } from './queues-actions';
+import { concernsDestination, injectQueuesChanged } from './queues-events';
 import { KIND_BADGE, destinationWord, kindClass, type QueueConnectionSummary } from './queues-format';
+import { QueuesTails } from './queues-tails';
 
 type View = 'messages' | 'produce' | 'tail' | 'groups';
 const VIEWS: View[] = ['messages', 'produce', 'tail', 'groups'];
@@ -45,18 +47,28 @@ const VIEWS: View[] = ['messages', 'produce', 'tail', 'groups'];
             @case ('messages') {
               <q-queues-peek-view [connectionId]="c.id" [destination]="destination()" [kind]="c.kind" [info]="info.value()" (produceAgain)="produceAgain($event)" />
             }
-            @case ('produce') {
-              <q-queues-producer [connectionId]="c.id" [destination]="destination()" [kind]="c.kind" [info]="info.value()" [preset]="preset()" />
-            }
             @case ('groups') {
               @if (c.kind === 'kafka') {
                 <q-queues-group-lag [connectionId]="c.id" [topic]="destination()" />
               }
             }
           }
+          @if (producerVisited()) {
+            <!-- Kept while the tab is open, so a message being written survives a look at another view. -->
+            <q-queues-producer [class.hidden]="view() !== 'produce'" [connectionId]="c.id" [destination]="destination()" [kind]="c.kind" [info]="info.value()" [preset]="preset()" />
+          }
           @if (tailVisited()) {
             <!-- Kept while the tab is open, so switching views does not stop the tail. -->
-            <q-queues-live-tail [class.hidden]="view() !== 'tail'" [connectionId]="c.id" [destination]="destination()" [kind]="c.kind" (produceAgain)="produceAgain($event)" (runningChange)="tailRunning.set($event)" />
+            <q-queues-live-tail
+              [class.hidden]="view() !== 'tail'"
+              [connectionId]="c.id"
+              [destination]="destination()"
+              [kind]="c.kind"
+              [scope]="scope()"
+              [tabId]="tab().id"
+              (produceAgain)="produceAgain($event)"
+              (runningChange)="tailRunning.set($event)"
+            />
           }
         </div>
       </div>
@@ -68,6 +80,7 @@ const VIEWS: View[] = ['messages', 'produce', 'tail', 'groups'];
 })
 export class QueuesDestinationTab implements TabComponent {
   protected readonly actions = inject(QueuesActions);
+  private readonly tails = inject(QueuesTails);
 
   readonly tab = input.required<Tab>();
   readonly scope = input.required<string>();
@@ -85,8 +98,16 @@ export class QueuesDestinationTab implements TabComponent {
       return VIEWS.find((v) => v === asked) ?? previous?.value ?? 'messages';
     },
   });
-  /** The tail is created the first time it is shown and then kept, so it runs while another view is on screen. */
-  protected readonly tailVisited = linkedSignal<View, boolean>({ source: this.view, computation: (view, previous) => (previous?.value ?? false) || view === 'tail' });
+  /**
+   * The tail is created the first time it is shown and then kept, so it runs while another view is on screen; a tail
+   * held while the workspace was off screen brings it back at once.
+   */
+  protected readonly tailVisited = linkedSignal<View, boolean>({
+    source: this.view,
+    computation: (view, previous) => (previous?.value ?? untracked(() => this.tails.has(`${this.scope()}/${this.tab().id}`))) || view === 'tail',
+  });
+  /** The producer likewise, so what is being written is still there after a look at the messages. */
+  protected readonly producerVisited = linkedSignal<View, boolean>({ source: this.view, computation: (view, previous) => (previous?.value ?? false) || view === 'produce' });
   protected readonly tailRunning = signal(false);
   protected readonly preset = signal<ProducerPreset | null>(null);
   protected readonly badge = computed(() => {
@@ -116,8 +137,8 @@ export class QueuesDestinationTab implements TabComponent {
   });
 
   constructor() {
-    injectHostEvent('queues.changed', (p) => {
-      if (p.connectionId === this.connectionId() && p.reason !== 'consumer') this.info.reload();
+    injectQueuesChanged((p) => {
+      if (p.reason !== 'consumer' && concernsDestination(p, this.connectionId(), this.destination())) this.info.reload();
     });
   }
 

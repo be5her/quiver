@@ -1,8 +1,18 @@
-import { Component, computed, input, linkedSignal, output, signal } from '@angular/core';
+import { Component, computed, input, output, signal, untracked } from '@angular/core';
 import type { QueueDestination, QueueKind, QueueMessage } from '@quiver/core';
-import { Button, Icon, Select, injectHostEvent, invokeResource } from '@quiver/ui';
+import { Button, Icon, Select, invokeResource } from '@quiver/ui';
 import { Eye, RefreshCw, TriangleAlert } from 'lucide';
 import { QueuesMessageList } from './message-list';
+import { concernsDestination, injectQueuesChanged } from './queues-events';
+import { peeksFreely } from './queues-format';
+
+interface PeekInput {
+  connectionId: string;
+  destination: string;
+  limit: number;
+  from: 'latest' | 'earliest';
+  partition?: number;
+}
 
 const LIMITS = [10, 50, 100, 200, 500];
 
@@ -33,9 +43,9 @@ const LIMITS = [10, 50, 100, 200, 500];
       <span class="flex-1"></span>
       <button qButton size="sm" [variant]="armed() ? 'ghost' : 'primary'" [icon]="armed() ? icons.RefreshCw : icons.Eye" [loading]="peek.isLoading()" data-testid="queues-peek" (click)="run()">{{ armed() ? 'Refresh' : 'Peek' }}</button>
     </div>
-    @if (kind() === 'rabbit') {
-      <p class="flex items-center gap-2 px-3 py-1.5 text-[11px] text-warning border-b border-edge shrink-0">
-        <svg [qIcon]="icons.TriangleAlert" class="size-3.5 shrink-0"></svg> RabbitMQ has no read-only peek: messages are fetched and requeued, which marks them redelivered and can reorder them.
+    @if (warning(); as w) {
+      <p class="flex items-center gap-2 px-3 py-1.5 text-[11px] text-warning border-b border-edge shrink-0" data-testid="queues-peek-warning">
+        <svg [qIcon]="icons.TriangleAlert" class="size-3.5 shrink-0"></svg> {{ w }}
       </p>
     }
     @if (peek.error(); as error) {
@@ -64,15 +74,28 @@ export class QueuesPeekView {
   protected readonly limit = signal(50);
   protected readonly from = signal<'latest' | 'earliest'>('latest');
   protected readonly partition = signal<number | undefined>(undefined);
-  /** RabbitMQ waits for a click, since its peek requeues; the others read on open and after each change made here. */
-  protected readonly armed = linkedSignal(() => this.kind() !== 'rabbit');
+  /** Kafka and the memory broker read on open, on every setting and after each change made here to this destination. */
+  private readonly free = computed(() => peeksFreely(this.kind()));
+  /** SQS and RabbitMQ peek only on a click, with the settings of that click: their peeks leave a mark on the messages. */
+  private readonly asked = signal<PeekInput | null>(null);
+  protected readonly armed = computed(() => this.free() || this.asked() !== null);
   protected readonly partitions = computed(() => this.info()?.partitions ?? 0);
   protected readonly partitionList = computed(() => Array.from({ length: this.partitions() }, (_, i) => i));
-  protected readonly peek = invokeResource<QueueMessage[]>(
-    'queues.message.peek',
-    () => ({ connectionId: this.connectionId(), destination: this.destination(), limit: this.limit(), from: this.from(), ...(this.partition() === undefined ? {} : { partition: this.partition() }) }),
-    { enabled: () => this.armed() },
-  );
+  private readonly settings = computed<PeekInput>(() => ({
+    connectionId: this.connectionId(),
+    destination: this.destination(),
+    limit: this.limit(),
+    from: this.from(),
+    ...(this.partition() === undefined ? {} : { partition: this.partition() }),
+  }));
+  protected readonly peek = invokeResource<QueueMessage[]>('queues.message.peek', () => (this.free() ? this.settings() : this.asked()), { enabled: () => this.armed() });
+  protected readonly warning = computed(() => {
+    const kind = this.kind();
+    if (kind === 'rabbit') return 'RabbitMQ has no read-only peek: messages are fetched and requeued, which marks them redelivered and can reorder them. Peek reads on a click only.';
+    if (kind === 'sqs')
+      return 'SQS has no read-only peek: messages are received with a zero visibility timeout, and every receive adds to their receive count, which a redrive policy counts towards moving them to the dead-letter queue. Peek reads on a click only.';
+    return null;
+  });
   /** Newest first when reading the newest, oldest first otherwise. */
   protected readonly messages = computed(() => {
     const list = this.peek.value() ?? [];
@@ -86,14 +109,18 @@ export class QueuesPeekView {
   });
 
   constructor() {
-    injectHostEvent('queues.changed', (p) => {
-      if (p.reason === 'messages' && p.connectionId === this.connectionId() && this.armed() && this.kind() !== 'rabbit') this.peek.reload();
+    injectQueuesChanged((p) => {
+      if (p.reason === 'messages' && this.free() && concernsDestination(p, this.connectionId(), this.destination())) this.peek.reload();
     });
   }
 
   protected run(): void {
-    if (this.armed()) this.peek.reload();
-    else this.armed.set(true);
+    if (this.free()) return this.peek.reload();
+    const next = this.settings();
+    const same = JSON.stringify(next) === JSON.stringify(untracked(this.asked));
+    this.asked.set(next);
+    // The same settings as the last click leave the resource's input as it was, so it has to be asked again.
+    if (same) this.peek.reload();
   }
 
   protected pickFrom(event: Event): 'latest' | 'earliest' {

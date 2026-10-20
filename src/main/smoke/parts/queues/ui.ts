@@ -6,8 +6,8 @@ import type { SmokeSection } from '../../part';
 type Summary = QueueConnection & { secrets: string[] };
 
 // The Queues panel, driven on the in-memory broker: a connection made from the sidebar, a topic created from a
-// dialog, a message produced from the composer and seen in the live tail and the peek table, and the confirmations
-// before purging and deleting.
+// dialog, a password saved through the secret box, a message produced from the composer and seen in the live tail and
+// the peek table, the confirmations before purging and deleting, and the tail stopped when its tab closes.
 const section: SmokeSection = async ({ check, run, ws, folder }) => ({
   ui: async ({ js, wait, shot }) => {
     const setInput = `(el, value) => { const proto = el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, value); el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }`;
@@ -63,6 +63,55 @@ const section: SmokeSection = async ({ check, run, ws, folder }) => ({
     await wait(200);
     const clean = await js(`document.querySelector('[data-testid=queues-save]')?.textContent.trim() ?? ''`);
     check('queues ui: putting the fields back leaves nothing to save', clean === 'Save', clean);
+
+    // A password typed in the box goes to host.secrets on save, never into the committed file, and the box clears.
+    const setField = (testId: string, value: string) =>
+      js(`(() => { const set = ${setInput}; const el = document.querySelector('[data-testid=${testId}]'); if (el) set(el, ${JSON.stringify(value)}); return Boolean(el); })()`);
+    const saveButton = () => js(`document.querySelector('[data-testid=queues-save]')?.click()`);
+    await setField('queues-kind', 'kafka');
+    await wait(150);
+    await setField('queues-sasl', 'plain');
+    await wait(150);
+    const typedSecret = await setField('queues-secret', 'ui-s3cret-pass');
+    await wait(150);
+    await saveButton();
+    await wait(700);
+    const withSecret = await run<Summary>('queues.connection.get', { id: conn.id }, ws.id);
+    const committed = await fs.readFile(path.join(folder, '.quiver', 'queues', `${conn.id}.json`), 'utf8').catch(() => '');
+    const local = await fs.readFile(path.join(folder, '.quiver', 'local', 'queues-secrets.json'), 'utf8').catch(() => '');
+    const box = await js(
+      `({ value: document.querySelector('[data-testid=queues-secret]')?.value ?? null, state: document.querySelector('[data-testid=queues-secret-state]')?.textContent.trim() ?? null, save: document.querySelector('[data-testid=queues-save]')?.textContent.trim() ?? '' })`,
+    );
+    check(
+      'queues ui: the password box saves to host.secrets (listed by name, encrypted, not in the committed file) and clears',
+      typedSecret === true &&
+        withSecret.kind === 'kafka' &&
+        withSecret.secrets.join() === 'password' &&
+        committed.includes('"kafka"') &&
+        !committed.includes('ui-s3cret-pass') &&
+        local.includes(conn.id) &&
+        !local.includes('ui-s3cret-pass') &&
+        JSON.stringify(box) === JSON.stringify({ value: '', state: 'Stored on this machine', save: 'Save' }),
+      { typedSecret, kind: withSecret.kind, secrets: withSecret.secrets, box },
+    );
+
+    // Back to the memory broker: the password it no longer uses is listed, and "Remove on save" drops it.
+    await setField('queues-sasl', 'none');
+    await wait(150);
+    await setField('queues-kind', 'memory');
+    await wait(200);
+    const unusedText = await js(`document.querySelector('[data-testid=queues-secret-unused]')?.textContent ?? null`);
+    await js(`document.querySelector('[data-testid=queues-secret-unused] input[type=checkbox]')?.click()`);
+    await wait(150);
+    await saveButton();
+    await wait(700);
+    const withoutSecret = await run<Summary>('queues.connection.get', { id: conn.id }, ws.id);
+    const unusedAfter = await js(`Boolean(document.querySelector('[data-testid=queues-secret-unused]'))`);
+    check(
+      'queues ui: a stored secret the settings no longer use is shown and removed on save',
+      typeof unusedText === 'string' && unusedText.includes('password') && withoutSecret.kind === 'memory' && withoutSecret.secrets.length === 0 && unusedAfter === false,
+      { unusedText, kind: withoutSecret.kind, secrets: withoutSecret.secrets, unusedAfter },
+    );
 
     // A topic from the connection's + in the sidebar, through the name and partitions dialog.
     const connRow = `[...document.querySelectorAll('[data-testid=queues-connection-row]')].find((r) => r.textContent.includes('ui memory'))`;
@@ -186,7 +235,8 @@ const section: SmokeSection = async ({ check, run, ws, folder }) => ({
     await js(`document.documentElement.classList.remove('dark')`);
     await wait(200);
 
-    // Deleting the topic and then the connection both ask first, and close their tabs.
+    // Deleting the topic and then the connection both ask first, and close their tabs; the closed tab's tail goes too.
+    const tailsBefore = await run<{ destination: string; status: string }[]>('queues.consumer.list', { connectionId: conn.id }, ws.id);
     await js(`${visibleTab}?.querySelector('[data-testid=queues-delete-destination]')?.click()`);
     await wait(300);
     const deleteTitle = await dialogTitle();
@@ -195,6 +245,12 @@ const section: SmokeSection = async ({ check, run, ws, folder }) => ({
     const topicsLeft = await run<{ name: string }[]>('queues.destination.list', { connectionId: conn.id }, ws.id);
     const destTabOpen = await js(`Boolean(document.querySelector('[data-testid=queues-destination-tab]'))`);
     check('queues ui: Delete topic asks first, deletes it and closes its tab', deleteTitle === 'Delete topic "ui-orders"?' && topicsLeft.length === 0 && destTabOpen === false, { deleteTitle, topicsLeft, destTabOpen });
+    const tailsAfter = await run<{ destination: string }[]>('queues.consumer.list', { connectionId: conn.id }, ws.id);
+    check(
+      'queues ui: closing the tab stops its live tail and forgets it on the host',
+      tailsBefore.filter((t) => t.destination === 'ui-orders').length === 1 && tailsAfter.filter((t) => t.destination === 'ui-orders').length === 0,
+      { tailsBefore, tailsAfter },
+    );
 
     const menuOpened = await js(`(() => { const b = (${connRow})?.querySelector('[data-testid=queues-connection-menu]'); b?.click(); return Boolean(b); })()`);
     await wait(300);

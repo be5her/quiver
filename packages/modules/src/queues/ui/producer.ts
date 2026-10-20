@@ -1,9 +1,10 @@
 import { Component, computed, effect, inject, input, signal, untracked } from '@angular/core';
 import { FormField, form } from '@angular/forms/signals';
 import { newId, type KeyValue, type QueueDestination, type QueueKind, type QueueMessage } from '@quiver/core';
-import { Button, CodeEditor, HostBridge, Input, KeyValueEditor, Label, Select, Toasts, injectHostEvent, invokeResource } from '@quiver/ui';
+import { Button, CodeEditor, HostBridge, Input, KeyValueEditor, Label, Select, Toasts, invokeResource } from '@quiver/ui';
 import { Braces, Send } from 'lucide';
-import { formatTime, previewBody, type QueueHistoryEntry } from './queues-format';
+import { concernsDestination, injectQueuesChanged } from './queues-events';
+import { formatTime, isRabbitExchange, previewBody, type QueueHistoryEntry } from './queues-format';
 
 interface Composer {
   key: string;
@@ -29,7 +30,7 @@ function headerRows(headers: Record<string, string>): KeyValue[] {
 
 /** What a message to send is made of, filled from a message seen elsewhere ("Produce again"). */
 export interface ProducerPreset {
-  message: Pick<QueueMessage, 'key' | 'headers' | 'body' | 'partition'>;
+  message: Pick<QueueMessage, 'key' | 'headers' | 'body' | 'partition' | 'attributes'>;
   nonce: number;
 }
 
@@ -45,10 +46,10 @@ export interface ProducerPreset {
     <div class="flex-1 min-h-0 overflow-y-auto">
       <div class="flex flex-col gap-3 p-3 max-w-4xl">
         <div class="flex items-end gap-2 flex-wrap">
-          @if (kind() !== 'sqs') {
+          @if (hasKey()) {
             <div class="w-64">
-              <label qLabel for="queues-produce-key">{{ kind() === 'rabbit' ? 'Message id' : 'Key' }}</label>
-              <input qInput id="queues-produce-key" class="font-mono h-7 text-xs" placeholder="optional" [formField]="composerForm.key" data-testid="queues-produce-key" />
+              <label qLabel for="queues-produce-key">{{ kind() === 'rabbit' ? 'Routing key' : 'Key' }}</label>
+              <input qInput id="queues-produce-key" class="font-mono h-7 text-xs" [placeholder]="kind() === 'rabbit' ? 'empty for none' : 'optional'" [formField]="composerForm.key" data-testid="queues-produce-key" />
             </div>
           }
           @if (topic()) {
@@ -79,7 +80,7 @@ export interface ProducerPreset {
               </div>
             }
           }
-          @if (kind() === 'rabbit') {
+          @if (kind() === 'rabbit' && !exchangeDestination()) {
             <div class="w-56">
               <label qLabel for="queues-produce-exchange">Exchange</label>
               <input qInput id="queues-produce-exchange" class="font-mono h-7 text-xs" placeholder="default (routes by queue name)" [formField]="composerForm.exchange" data-testid="queues-produce-exchange" />
@@ -87,7 +88,7 @@ export interface ProducerPreset {
           }
           <span class="flex-1"></span>
           @if (recent().length > 0) {
-            <select qSelect class="h-7 text-xs w-56" title="Load a message sent before" data-testid="queues-produce-history" (change)="loadRecent($event)">
+            <select qSelect class="h-7 text-xs w-56" title="Load a message sent before" aria-label="Load a message sent before" data-testid="queues-produce-history" (change)="loadRecent($event)">
               <option value="">Sent before…</option>
               @for (e of recent(); track e.id) {
                 <option [value]="e.id">{{ time(e.at) }} · {{ preview(e.message?.body ?? '') || '(empty)' }}</option>
@@ -146,6 +147,10 @@ export class QueuesProducer {
   protected readonly sending = signal(false);
   protected readonly lastId = signal<string | null>(null);
   protected readonly topic = computed(() => this.kind() === 'kafka' || this.kind() === 'memory');
+  /** RabbitMQ `exchange:<name>`: published there with the routing key typed; a queue is reached by its name instead. */
+  protected readonly exchangeDestination = computed(() => isRabbitExchange(this.kind(), this.destination()));
+  /** A key goes with the message on topics; on RabbitMQ only as the routing key of an exchange; SQS has none. */
+  protected readonly hasKey = computed(() => this.topic() || this.exchangeDestination());
   protected readonly fifo = computed(() => this.info()?.fifo ?? this.destination().endsWith('.fifo'));
   protected readonly partitionList = computed(() => Array.from({ length: Math.max(1, this.info()?.partitions ?? 1) }, (_, i) => i));
   protected readonly jsonError = computed(() => {
@@ -164,7 +169,7 @@ export class QueuesProducer {
   protected readonly preview = (body: string) => previewBody(body).slice(0, 60);
 
   constructor() {
-    injectHostEvent('queues.changed', (p) => p.reason === 'messages' && p.connectionId === this.connectionId() && this.history.reload());
+    injectQueuesChanged((p) => p.reason === 'messages' && concernsDestination(p, this.connectionId(), this.destination()) && this.history.reload());
     effect(() => {
       const preset = this.preset();
       if (preset) untracked(() => this.load(preset.message));
@@ -173,12 +178,17 @@ export class QueuesProducer {
 
   private load(m: ProducerPreset['message']): void {
     const body = m.body ?? '';
+    // A RabbitMQ message's key is the routing key it came with. To a queue it goes again through the exchange it came
+    // from (with the queue's name as routing key), since a key of its own would be refused there.
+    const rabbitQueue = this.kind() === 'rabbit' && !this.exchangeDestination();
+    const from = m.attributes?.['exchange'];
     this.composer.set({
       ...EMPTY,
-      key: m.key ?? '',
+      key: rabbitQueue ? '' : (m.key ?? ''),
       headers: headerRows(m.headers ?? {}),
       body,
       format: /^\s*[[{]/.test(body) ? 'json' : 'text',
+      exchange: rabbitQueue && from && from !== '(default)' ? from : '',
     });
   }
 
@@ -223,11 +233,11 @@ export class QueuesProducer {
         destination: this.destination(),
         body: c.body,
         headers,
-        ...(c.key && kind !== 'sqs' ? { key: c.key } : {}),
+        ...(c.key && this.hasKey() ? { key: c.key } : {}),
         ...(this.topic() && Number.isFinite(partition) ? { partition } : {}),
         ...(kind === 'sqs' && this.fifo() ? { groupId: c.groupId.trim(), ...(c.dedupId.trim() ? { dedupId: c.dedupId.trim() } : {}) } : {}),
         ...(kind === 'sqs' && !this.fifo() && Number.isFinite(delay) ? { delaySeconds: delay } : {}),
-        ...(kind === 'rabbit' && c.exchange.trim() ? { exchange: c.exchange.trim() } : {}),
+        ...(kind === 'rabbit' && !this.exchangeDestination() && c.exchange.trim() ? { exchange: c.exchange.trim() } : {}),
       });
       this.lastId.set(result.id);
     } catch (err) {

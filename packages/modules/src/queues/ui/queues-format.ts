@@ -1,4 +1,4 @@
-import type { QueueConnection, QueueDestination, QueueKind, QueueMessage } from '@quiver/core';
+import { RABBIT_EXCHANGE_PREFIX, type QueueConnection, type QueueDestination, type QueueKind, type QueueMessage } from '@quiver/core';
 import type { CodeLanguage } from '@quiver/ui';
 
 // The shapes the queues commands answer with that live beside the host code rather than in core; the panel only reads them.
@@ -95,9 +95,19 @@ export function formatBody(body: string): { text: string; language: CodeLanguage
   return { text: body, language: 'text' };
 }
 
-/** A body on one line, for a table cell. */
+/** A body on one line, for a table cell. Only its start is looked at, so a body of megabytes costs no more than a short one. */
 export function previewBody(body: string): string {
-  return body.replace(/\s+/g, ' ').slice(0, 300);
+  return body.slice(0, 600).replace(/\s+/g, ' ').slice(0, 300);
+}
+
+/** Peeks that read without side effects run on their own; SQS (receive counts) and RabbitMQ (requeues) wait for a click. */
+export function peeksFreely(kind: QueueKind): boolean {
+  return kind === 'kafka' || kind === 'memory';
+}
+
+/** A RabbitMQ destination that names an exchange (`exchange:<name>`) rather than a queue. */
+export function isRabbitExchange(kind: QueueKind, destination: string): boolean {
+  return kind === 'rabbit' && destination.startsWith(RABBIT_EXCHANGE_PREFIX);
 }
 
 export function formatTime(iso: string | undefined): string {

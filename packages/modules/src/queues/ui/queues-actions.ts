@@ -1,4 +1,4 @@
-import { Service, inject, untracked } from '@angular/core';
+import { Service, inject, signal, untracked } from '@angular/core';
 import type { QueueDestination, QueueKind } from '@quiver/core';
 import { AppState, Dialogs, HostBridge, TabsState, Toasts, TreeState, type ContextMenuItem } from '@quiver/ui';
 import { KIND_LABEL, QUEUE_KINDS, destinationWord, type QueueConnectionSummary } from './queues-format';
@@ -181,19 +181,28 @@ export class QueuesActions {
     }
   }
 
-  /** The palette's "Open topic or queue": pick the connection, type the name; the hint lists what matches. */
+  /**
+   * The palette's "Open topic or queue": pick the connection, type the name; the hint lists what matches. The dialog
+   * opens at once and each connection's names arrive as its broker answers, so one that is down does not hold it up.
+   */
   async pickDestination(): Promise<void> {
     try {
       const connections = await this.host.invoke<QueueConnectionSummary[]>('queues.connection.list', {});
       if (!connections.length) return this.createConnection();
-      const names = new Map<string, string[]>();
-      await Promise.all(
-        connections.map(async (c) => {
-          const list = await this.host.invoke<QueueDestination[]>('queues.destination.list', { connectionId: c.id }).catch(() => [] as QueueDestination[]);
-          names.set(c.id, list.map((d) => d.name));
-        }),
-      );
-      const matches = (text: string, connectionId: string) => (names.get(connectionId) ?? []).filter((n) => n.toLowerCase().includes(text.trim().toLowerCase()));
+      // A signal, so the hint (computed by the dialog) follows the lists as they come in.
+      const names = signal(new Map<string, string[] | 'failed'>());
+      for (const c of connections) {
+        void this.host
+          .invoke<QueueDestination[]>('queues.destination.list', { connectionId: c.id })
+          .then((list) => list.map((d) => d.name))
+          .catch(() => 'failed' as const)
+          .then((found) => names.update((m) => new Map(m).set(c.id, found)));
+      }
+      const listed = (connectionId: string): string[] => {
+        const found = names().get(connectionId);
+        return Array.isArray(found) ? found : [];
+      };
+      const matches = (text: string, connectionId: string) => listed(connectionId).filter((n) => n.toLowerCase().includes(text.trim().toLowerCase()));
       const answer = await this.dialogs.promptWithChoice({
         title: 'Open topic or queue',
         label: 'Name',
@@ -204,8 +213,11 @@ export class QueuesActions {
           options: connections.map((c) => ({ value: c.id, label: c.name })),
           defaultValue: connections[0].id,
           hint: (text, choice) => {
+            const state = names().get(choice);
+            if (state === undefined) return 'Listing…';
+            if (state === 'failed') return 'Could not list; a name typed in full still opens';
             const found = matches(text, choice);
-            if (!found.length) return names.get(choice)?.length ? 'No match' : 'Nothing listed yet';
+            if (!found.length) return state.length ? 'No match' : 'Nothing listed yet';
             return found.slice(0, 4).join(', ') + (found.length > 4 ? ` +${found.length - 4}` : '');
           },
         },
