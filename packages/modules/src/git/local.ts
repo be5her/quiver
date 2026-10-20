@@ -33,6 +33,12 @@ const WATCH_DEBOUNCE_MS = 250;
 /** Settings for every call: no colour, paths unquoted, no optional locks so a status never fights the user's own git. */
 const BASE_ARGS = ['-c', 'color.ui=false', '-c', 'core.quotepath=false'];
 const ENV: Record<string, string> = { GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', GIT_MERGE_AUTOEDIT: 'no' };
+/**
+ * For a network call an agent made: `GIT_TERMINAL_PROMPT=0` only stops terminal prompts, while Git Credential Manager
+ * opens a window when it has nothing stored, which would leave the call hanging behind a dialog nobody asked for. A
+ * call from the UI keeps the dialog, since that is how a first sign-in happens.
+ */
+const NON_INTERACTIVE_ENV: Record<string, string> = { GCM_INTERACTIVE: 'never' };
 
 let gitPath: string | null = null;
 
@@ -48,11 +54,16 @@ interface GitRunOptions {
   timeoutMs?: number;
   /** Give back a failed run instead of throwing, for callers that read the exit code. */
   allowFailure?: boolean;
+  /** Added to the environment of this call. */
+  env?: Record<string, string>;
 }
 
-/** Run git in a folder. A non-zero exit throws with git's own message, unless `allowFailure`. */
+/**
+ * Run git in a folder. A non-zero exit throws with git's own message, unless `allowFailure`. Commands run in the
+ * repository's root (`repoDirs().root`), so the paths git prints and the paths it is given mean the same thing.
+ */
 export async function git(cwd: string, args: string[], options: GitRunOptions = {}): Promise<RunToEndResult> {
-  const result = await runToEnd(gitProgram(), [...BASE_ARGS, ...args], { cwd, env: ENV, input: options.input, timeoutMs: options.timeoutMs ?? READ_TIMEOUT_MS, maxBytes: MAX_OUTPUT_BYTES });
+  const result = await runToEnd(gitProgram(), [...BASE_ARGS, ...args], { cwd, env: { ...ENV, ...options.env }, input: options.input, timeoutMs: options.timeoutMs ?? READ_TIMEOUT_MS, maxBytes: MAX_OUTPUT_BYTES });
   if (result.error) {
     gitPath = null;
     throw new QuiverError('NOT_FOUND', `git could not be started: ${result.error}`, { reason: 'no-git' });
@@ -70,31 +81,44 @@ interface RepoDirs {
   gitDir: string;
   /** The folder holding refs and packed-refs. */
   commonDir: string;
+  /**
+   * The top folder of the working tree, where every command runs. `status` and `diff` print paths relative to it
+   * whatever the current folder, so `add`, `restore` and `log -- <path>` are run there too, and one path means the
+   * same thing everywhere, also when the workspace is a subfolder of the repository.
+   */
+  root: string;
 }
 
 /** Where the repository keeps its files, or a clear error when the folder is not inside one. */
 export async function repoDirs(cwd: string): Promise<RepoDirs> {
-  const result = await git(cwd, ['rev-parse', '--absolute-git-dir', '--git-common-dir'], { allowFailure: true });
+  const result = await git(cwd, ['rev-parse', '--absolute-git-dir', '--git-common-dir', '--show-toplevel'], { allowFailure: true });
   if (result.code !== 0) {
     const stderr = result.stderr.trim().replace(/^fatal: /, '');
     if (/not a git repository/i.test(stderr)) throw new QuiverError('NOT_FOUND', `${cwd} is not a git repository. Run git init there, or open the repository's folder.`, { reason: 'not-a-repo' });
     throw new QuiverError('REQUEST_FAILED', stderr || 'git rev-parse failed', { exitCode: result.code });
   }
-  const [gitDir, common] = result.stdout.split(/\r?\n/);
-  return { gitDir, commonDir: path.resolve(cwd, common || gitDir) };
+  const [gitDir, common, top] = result.stdout.split(/\r?\n/);
+  return { gitDir, commonDir: path.resolve(cwd, common || gitDir), root: top ? path.resolve(top) : cwd };
+}
+
+/** The repository root of a workspace folder, for commands that run git themselves. */
+export async function repoRoot(cwd: string): Promise<string> {
+  return (await repoDirs(cwd)).root;
 }
 
 export async function status(cwd: string): Promise<GitStatus> {
   const dirs = await repoDirs(cwd);
-  const { stdout } = await git(cwd, ['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=all']);
+  // Untracked folders are listed as one entry (`new/`), as git itself does: `all` would list every file of an
+  // unignored node_modules on each status.
+  const { stdout } = await git(dirs.root, ['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=normal']);
   const parsed = parseStatusV2(stdout);
   const operation = detectOperation((name) => existsSync(path.join(dirs.gitDir, name)));
   return operation ? { ...parsed, operation } : parsed;
 }
 
 export async function branches(cwd: string): Promise<GitBranch[]> {
-  await repoDirs(cwd);
-  const { stdout } = await git(cwd, ['for-each-ref', `--format=${GIT_BRANCH_FORMAT}`, '--sort=-committerdate', 'refs/heads', 'refs/remotes']);
+  const root = await repoRoot(cwd);
+  const { stdout } = await git(root, ['for-each-ref', `--format=${GIT_BRANCH_FORMAT}`, '--sort=-committerdate', 'refs/heads', 'refs/remotes']);
   return parseBranches(stdout);
 }
 
@@ -105,17 +129,19 @@ export interface GitLogPage {
 }
 
 export async function log(cwd: string, input: { ref?: string; path?: string; limit: number; skip: number }): Promise<GitLogPage> {
-  await repoDirs(cwd);
+  const root = await repoRoot(cwd);
   // A branch with no commits yet has no history; git log would fail on it.
-  if (!input.ref && (await git(cwd, ['rev-parse', '--verify', '--quiet', 'HEAD'], { allowFailure: true })).code !== 0) return { commits: [], hasMore: false };
-  const args = ['log', `--format=${GIT_LOG_FORMAT}`, `--skip=${input.skip}`, `--max-count=${input.limit + 1}`, input.ref ?? 'HEAD'];
-  if (input.path) args.push('--', input.path);
-  const commits = parseLog((await git(cwd, args)).stdout);
+  if (!input.ref && (await git(root, ['rev-parse', '--verify', '--quiet', 'HEAD'], { allowFailure: true })).code !== 0) return { commits: [], hasMore: false };
+  // The `--` is always there, so a ref that is also a file name is not an ambiguous argument.
+  const args = ['log', `--format=${GIT_LOG_FORMAT}`, `--skip=${input.skip}`, `--max-count=${input.limit + 1}`, input.ref ?? 'HEAD', '--'];
+  if (input.path) args.push(input.path);
+  const commits = parseLog((await git(root, args)).stdout);
   return { commits: commits.slice(0, input.limit), hasMore: commits.length > input.limit };
 }
 
-export async function commitInfo(cwd: string, ref: string): Promise<GitCommit> {
-  const [commit] = parseLog((await git(cwd, ['log', '-1', `--format=${GIT_LOG_FORMAT}`, ref, '--'])).stdout);
+/** One commit; `root` is the repository root from `repoDirs`. */
+export async function commitInfo(root: string, ref: string): Promise<GitCommit> {
+  const [commit] = parseLog((await git(root, ['log', '-1', `--format=${GIT_LOG_FORMAT}`, ref, '--'])).stdout);
   if (!commit) throw new QuiverError('NOT_FOUND', `No commit ${ref}`);
   return commit;
 }
@@ -138,8 +164,7 @@ async function diffFiles(cwd: string, range: string[], filePath: string | undefi
 
 export async function diff(cwd: string, input: { staged: boolean; from?: string; to?: string; path?: string; statOnly: boolean }): Promise<GitDiffFile[]> {
   const range = diffRange(input);
-  await repoDirs(cwd);
-  return diffFiles(cwd, range, input.path, input.statOnly);
+  return diffFiles(await repoRoot(cwd), range, input.path, input.statOnly);
 }
 
 async function emptyTree(cwd: string): Promise<string> {
@@ -153,10 +178,10 @@ export interface GitShowResult {
 }
 
 export async function show(cwd: string, ref: string, statOnly: boolean): Promise<GitShowResult> {
-  await repoDirs(cwd);
-  const commit = await commitInfo(cwd, ref);
-  const base = commit.parents[0] ?? (await emptyTree(cwd));
-  return { commit, files: await diffFiles(cwd, [base, commit.hash], undefined, statOnly) };
+  const root = await repoRoot(cwd);
+  const commit = await commitInfo(root, ref);
+  const base = commit.parents[0] ?? (await emptyTree(root));
+  return { commit, files: await diffFiles(root, [base, commit.hash], undefined, statOnly) };
 }
 
 /** What a command that talks to a remote printed; git writes its progress to stderr. */
@@ -176,12 +201,25 @@ export async function requireRemote(cwd: string, remote: string): Promise<string
   throw new QuiverError('INVALID_INPUT', names.length ? `${remote} is not a remote of this repository (${names.join(', ')})` : `${remote} is not a remote of this repository, which has none`);
 }
 
-/** Run a fetch, pull or push; `remote`, when the caller named one, must be a configured remote (see `requireRemote`). */
-export async function remoteOp(cwd: string, args: string[], remote?: string): Promise<GitRemoteResult> {
-  await repoDirs(cwd);
-  if (remote !== undefined) await requireRemote(cwd, remote);
-  const result = await git(cwd, args, { timeoutMs: NETWORK_TIMEOUT_MS });
-  return { output: [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join('\n'), status: await status(cwd) };
+/**
+ * A branch as a plain name, or a clear error. Git reads the branch argument of push and pull as a refspec, where
+ * `:main` deletes the remote branch, `+x:main` forces it (past `forceWithLease`), `main:other` writes another local
+ * ref and `^` or `*` select refs by pattern; none of that is what a "branch" input promises.
+ */
+export function requireBranchName(name: string): string {
+  if (/[:^*\s]/.test(name) || name.startsWith('+')) throw new QuiverError('INVALID_INPUT', `${name} is not a branch name: give the branch alone, not a refspec`);
+  return name;
+}
+
+/**
+ * Run a fetch, pull or push; `remote`, when the caller named one, must be a configured remote (see `requireRemote`).
+ * `interactive` false keeps credential helpers from opening a window (a call made by an agent).
+ */
+export async function remoteOp(cwd: string, args: string[], remote: string | undefined, interactive: boolean): Promise<GitRemoteResult> {
+  const root = await repoRoot(cwd);
+  if (remote !== undefined) await requireRemote(root, remote);
+  const result = await git(root, args, { timeoutMs: NETWORK_TIMEOUT_MS, env: interactive ? undefined : NON_INTERACTIVE_ENV });
+  return { output: [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join('\n'), status: await status(root) };
 }
 
 // ---------- watcher ----------

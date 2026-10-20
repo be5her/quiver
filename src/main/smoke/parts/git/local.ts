@@ -119,6 +119,47 @@ const section: SmokeSection = async (t) => {
     const optionLike = await failure(() => run('git.log', { ref: '--output=pwned.txt' }, ws!.id));
     check('git: a ref that looks like an option is refused', optionLike.length > 0 && !(await fs.stat(path.join(folder, 'pwned.txt')).catch(() => null)), optionLike);
 
+    // A commit message is kept as written: a line starting with # is not a comment, and a ref that is also a file name is not ambiguous.
+    await fs.writeFile(path.join(folder, 'main'), 'a file named like the branch\n');
+    await run('git.stage', { paths: ['main'] }, ws.id);
+    const hashed = await run<GitCommit>('git.commit', { message: '#42 keep hash lines\n\n# not a comment either' }, ws.id);
+    check('git: a commit message keeps lines that start with #', hashed.subject === '#42 keep hash lines' && hashed.body === '# not a comment either', hashed);
+    const sameName = await run<LogPage>('git.log', { ref: 'main' }, ws.id);
+    check('git: log of a ref that is also a file name works', sameName.commits[0]?.hash === first.hash, sameName.commits.map((c) => c.subject));
+
+    // Untracked folders are one entry each, as in git status.
+    await fs.mkdir(path.join(folder, 'newdir'));
+    await fs.writeFile(path.join(folder, 'newdir', 'a.txt'), 'a\n');
+    await fs.writeFile(path.join(folder, 'newdir', 'b.txt'), 'b\n');
+    const untracked = (await run<GitStatus>('git.status', {}, ws.id)).files.filter((f) => f.index === '?').map((f) => f.path);
+    check('git: an untracked folder is listed once, not file by file', untracked.includes('newdir/') && !untracked.some((p) => p.startsWith('newdir/a')), untracked);
+    await fs.rm(path.join(folder, 'newdir'), { recursive: true, force: true });
+
+    // A workspace that is a subfolder of the repository: paths mean the same thing in status, diff, stage and log.
+    await fs.mkdir(path.join(folder, 'sub'));
+    await fs.writeFile(path.join(folder, 'sub', 'inner.txt'), 'inner\n');
+    const sub = await run<WorkspaceInfo>('workspace.open', { path: path.join(folder, 'sub') }, null);
+    try {
+      const subStatus = await run<GitStatus>('git.status', {}, sub.id);
+      const subStaged = await run<GitStatus>('git.stage', { paths: ['sub/inner.txt'] }, sub.id);
+      const subDiff = await run<GitDiffFile[]>('git.diff', { staged: true, path: 'sub/inner.txt' }, sub.id);
+      const subCommit = await run<GitCommit>('git.commit', { message: 'Inner file' }, sub.id);
+      const subLog = await run<LogPage>('git.log', { path: 'sub/inner.txt' }, sub.id);
+      check(
+        'git: in a subfolder workspace, status paths are repository-relative and stage, diff and log take them as such',
+        subStatus.files.some((f) => f.path === 'sub/' && f.index === '?') &&
+          subStaged.files.some((f) => f.path === 'sub/inner.txt' && f.index === 'A') &&
+          subDiff.length === 1 &&
+          subDiff[0].path === 'sub/inner.txt' &&
+          subLog.commits.length === 1 &&
+          subLog.commits[0].hash === subCommit.hash,
+        { status: subStatus.files, staged: subStaged.files, diff: subDiff.map((f) => f.path), log: subLog.commits.map((c) => c.subject) },
+      );
+    } finally {
+      await run('workspace.close', { id: sub.id }, null).catch(() => {});
+      await run('workspace.forgetRecent', { path: path.join(folder, 'sub') }, null).catch(() => {});
+    }
+
     // A remote must be one the repository has: git would otherwise fetch from any URL or folder into FETCH_HEAD.
     const bare = await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-smoke-git-remote-'));
     await sh('clone', '-q', '--bare', folder, bare);
@@ -129,6 +170,18 @@ const section: SmokeSection = async (t) => {
     const fetched = await run<{ output: string; status: GitStatus }>('git.fetch', { remote: 'origin' }, ws.id);
     const remoteBranches = await run<GitBranch[]>('git.branch.list', {}, ws.id);
     check('git: fetch of a configured remote brings its branches in', fetched.status.branch === 'feat/x' && remoteBranches.some((b) => b.remote && b.name === 'origin/main'), remoteBranches.map((b) => b.name));
+    // The branch of push and pull is a name, never a refspec: git would otherwise delete (`:main`) or force (`+x:main`).
+    const bareBranches = async () => (await runToEnd('git', ['branch', '--list'], { cwd: bare })).stdout;
+    const before = await bareBranches();
+    const refusals = await Promise.all(
+      [
+        () => run('git.push', { remote: 'origin', branch: ':main' }, ws!.id),
+        () => run('git.push', { remote: 'origin', branch: '+feat/x:main' }, ws!.id),
+        () => run('git.push', { remote: 'origin', branch: 'refs/heads/*' }, ws!.id),
+        () => run('git.pull', { remote: 'origin', branch: 'main:other' }, ws!.id),
+      ].map(failure),
+    );
+    check('git: push and pull refuse a refspec as the branch, and the remote is untouched', refusals.every((r) => r.includes('not a branch name')) && (await bareBranches()) === before && before.includes('main'), refusals);
     await fs.rm(bare, { recursive: true, force: true }).catch(() => {});
 
     // Agents: reads go through, anything that changes the repository is refused until mutations are allowed.

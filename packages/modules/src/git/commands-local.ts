@@ -32,6 +32,11 @@ function workspace(ctx: CommandContext): WorkspaceApi {
   return ctx.workspace;
 }
 
+/** A call from the UI may open a credential window; one from an agent must not hang behind a dialog nobody sees coming. */
+function interactive(ctx: CommandContext): boolean {
+  return ctx.caller !== 'mcp';
+}
+
 /** Announce a change at once; the watcher's debounced event follows, but the view should not wait for it. */
 function changed(ctx: CommandContext, ws: WorkspaceApi, ...reasons: ('status' | 'branches')[]): void {
   for (const reason of reasons) ctx.host.emit('git.changed', { workspaceId: ws.id, reason });
@@ -41,7 +46,7 @@ const status = defineCommand({
   id: 'git.status',
   title: 'Git status',
   description:
-    'The workspace repository: current branch (null when detached), HEAD, upstream with ahead/behind counts, the operation in progress (merge, rebase, cherry-pick, revert) and every changed file with its index and worktree codes (M modified, A added, D deleted, R renamed, U unmerged, ? untracked, . unchanged).',
+    'The workspace repository: current branch (null when detached), HEAD, upstream with ahead/behind counts, the operation in progress (merge, rebase, cherry-pick, revert) and every changed file with its index and worktree codes (M modified, A added, D deleted, R renamed, U unmerged, ? untracked, . unchanged). Paths are relative to the repository root (an untracked folder is one entry, "new/"), and every other git command takes them that way.',
   scope: 'workspace',
   input: z.object({}),
   handler: async (_i, ctx): Promise<GitStatus> => local.status(workspace(ctx).path),
@@ -93,7 +98,7 @@ const fetch = defineCommand({
   input: GitRemoteInputSchema.pick({ remote: true }),
   handler: async ({ remote }, ctx): Promise<local.GitRemoteResult> => {
     const ws = workspace(ctx);
-    const result = await local.remoteOp(ws.path, ['fetch', '--prune', ...(remote ? [remote] : [])], remote);
+    const result = await local.remoteOp(ws.path, ['fetch', '--prune', ...(remote ? [remote] : [])], remote, interactive(ctx));
     changed(ctx, ws, 'branches', 'status');
     return result;
   },
@@ -108,8 +113,7 @@ const checkout = defineCommand({
   input: GitCheckoutInputSchema,
   handler: async ({ ref }, ctx): Promise<GitStatus> => {
     const ws = workspace(ctx);
-    await local.repoDirs(ws.path);
-    await local.git(ws.path, ['checkout', ref, '--']);
+    await local.git(await local.repoRoot(ws.path), ['checkout', ref, '--']);
     changed(ctx, ws, 'status', 'branches');
     return local.status(ws.path);
   },
@@ -124,8 +128,7 @@ const branchCreate = defineCommand({
   input: GitBranchCreateInputSchema,
   handler: async ({ name, from, checkout: switchTo }, ctx): Promise<GitStatus> => {
     const ws = workspace(ctx);
-    await local.repoDirs(ws.path);
-    await local.git(ws.path, switchTo ? ['checkout', '-b', name, ...(from ? [from] : []), '--'] : ['branch', name, ...(from ? [from] : [])]);
+    await local.git(await local.repoRoot(ws.path), switchTo ? ['checkout', '-b', name, ...(from ? [from] : []), '--'] : ['branch', name, ...(from ? [from] : [])]);
     changed(ctx, ws, 'status', 'branches');
     return local.status(ws.path);
   },
@@ -134,14 +137,13 @@ const branchCreate = defineCommand({
 const stage = defineCommand({
   id: 'git.stage',
   title: 'Stage files',
-  description: 'Adds files (new, changed or deleted) to the index, ready for the next commit. Paths are relative to the workspace; a folder stages everything in it.',
+  description: 'Adds files (new, changed or deleted) to the index, ready for the next commit. Paths are relative to the repository root, as git.status and git.diff give them; a folder stages everything in it.',
   scope: 'workspace',
   mutating: true,
   input: GitPathsInputSchema,
   handler: async ({ paths }, ctx): Promise<GitStatus> => {
     const ws = workspace(ctx);
-    await local.repoDirs(ws.path);
-    await local.git(ws.path, ['add', '--all', '--', ...paths]);
+    await local.git(await local.repoRoot(ws.path), ['add', '--all', '--', ...paths]);
     changed(ctx, ws, 'status');
     return local.status(ws.path);
   },
@@ -156,9 +158,10 @@ const unstage = defineCommand({
   input: GitPathsInputSchema,
   handler: async ({ paths }, ctx): Promise<GitStatus> => {
     const ws = workspace(ctx);
-    const before = await local.status(ws.path);
+    const root = await local.repoRoot(ws.path);
+    const before = await local.status(root);
     // Before the first commit there is no HEAD to restore from; the files just leave the index.
-    await local.git(ws.path, before.head ? ['restore', '--staged', '--', ...paths] : ['rm', '--cached', '-r', '--quiet', '--', ...paths]);
+    await local.git(root, before.head ? ['restore', '--staged', '--', ...paths] : ['rm', '--cached', '-r', '--quiet', '--', ...paths]);
     changed(ctx, ws, 'status');
     return local.status(ws.path);
   },
@@ -173,25 +176,27 @@ const commit = defineCommand({
   input: GitCommitInputSchema,
   handler: async ({ message, amend }, ctx): Promise<GitCommit> => {
     const ws = workspace(ctx);
-    await local.repoDirs(ws.path);
-    // The message goes through stdin so no part of it can be read as an option.
-    await local.git(ws.path, ['commit', '--file=-', '--cleanup=strip', ...(amend ? ['--amend'] : [])], { input: message });
+    const root = await local.repoRoot(ws.path);
+    // The message goes through stdin so no part of it can be read as an option. `whitespace` trims it like an editor
+    // would but keeps lines starting with `#` (`strip` would drop "#42 fix …" as a comment).
+    await local.git(root, ['commit', '--file=-', '--cleanup=whitespace', ...(amend ? ['--amend'] : [])], { input: message });
     changed(ctx, ws, 'status', 'branches');
-    return local.commitInfo(ws.path, 'HEAD');
+    return local.commitInfo(root, 'HEAD');
   },
 });
 
 const pull = defineCommand({
   id: 'git.pull',
   title: 'Git pull',
-  description: "Fetches and merges (or rebases, per the repository's pull settings) the upstream of the current branch, or remote and branch when given. Never opens an editor; stops on conflicts, leaving them in git.status.",
+  description: "Fetches and merges (or rebases, per the repository's pull settings) the upstream of the current branch, or remote and branch when given (a branch name, not a refspec). Never opens an editor; stops on conflicts, leaving them in git.status.",
   scope: 'workspace',
   mutating: true,
   input: GitRemoteInputSchema,
   handler: async ({ remote, branch }, ctx): Promise<local.GitRemoteResult> => {
     const ws = workspace(ctx);
     if (branch && !remote) throw new QuiverError('INVALID_INPUT', 'A pull of a branch needs its remote too');
-    const result = await local.remoteOp(ws.path, ['pull', '--no-edit', ...(remote ? [remote] : []), ...(branch ? [branch] : [])], remote);
+    if (branch) local.requireBranchName(branch);
+    const result = await local.remoteOp(ws.path, ['pull', '--no-edit', ...(remote ? [remote] : []), ...(branch ? [branch] : [])], remote, interactive(ctx));
     changed(ctx, ws, 'status', 'branches');
     return result;
   },
@@ -201,7 +206,7 @@ const push = defineCommand({
   id: 'git.push',
   title: 'Git push',
   description:
-    'Pushes the current branch to its upstream, or to remote and branch when given. setUpstream makes that the upstream (remote defaults to origin, branch to the current one). forceWithLease overwrites the remote branch only if it is where it was last fetched.',
+    'Pushes the current branch to its upstream, or to remote and branch when given (a branch name, not a refspec: nothing is deleted or forced through it). setUpstream makes that the upstream (remote defaults to origin, branch to the current one). forceWithLease overwrites the remote branch only if it is where it was last fetched.',
   scope: 'workspace',
   mutating: true,
   input: GitPushInputSchema,
@@ -215,8 +220,9 @@ const push = defineCommand({
       if (!ref) throw new QuiverError('INVALID_INPUT', 'HEAD is detached; name the branch to push');
     }
     if (ref && !target) throw new QuiverError('INVALID_INPUT', 'A push of a branch needs its remote too');
+    if (ref) local.requireBranchName(ref);
     const args = ['push', ...(setUpstream ? ['--set-upstream'] : []), ...(forceWithLease ? ['--force-with-lease'] : []), ...(target ? [target] : []), ...(ref ? [ref] : [])];
-    const result = await local.remoteOp(ws.path, args, target);
+    const result = await local.remoteOp(ws.path, args, target, interactive(ctx));
     changed(ctx, ws, 'status', 'branches');
     return result;
   },
