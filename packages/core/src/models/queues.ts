@@ -21,8 +21,25 @@ export function urlHasCredentials(url: string): boolean {
 /** A URL that gets committed with the connection, so it must not carry a user or password: those go in `host.secrets`. */
 export const CommittedUrlSchema = z.string().refine((s) => !urlHasCredentials(s), { message: 'must not contain a user or password; the password goes in the connection secret' });
 
-/** A plain host name, so a pasted `amqp://user:pass@host` never reaches the committed file. */
-export const QueueHostSchema = z.string().refine((s) => !/[\s/@]/.test(s.trim()), { message: 'must be a plain host name; the password goes in the connection secret' });
+/**
+ * A plain host: letters, digits, dots, hyphens and underscores (Docker service names), or an IPv6 address, bare or in
+ * brackets. Nothing a URL reads as a delimiter (`/`, `\`, `?`, `#`, `@`, `:` outside IPv6, whitespace) gets through, so
+ * a URL derived from the host cannot name another host, and a pasted `amqp://user:pass@host` is refused.
+ */
+export function isPlainHost(host: string): boolean {
+  const h = host.trim();
+  if (/^[A-Za-z0-9._-]+$/.test(h)) return true;
+  const v6 = /^\[([0-9A-Fa-f:.]+)\]$/.exec(h)?.[1] ?? (/^[0-9A-Fa-f:.]+$/.test(h) && h.includes(':') ? h : undefined);
+  if (!v6) return false;
+  try {
+    return new URL(`http://[${v6}]/`).hostname.startsWith('[');
+  } catch {
+    return false;
+  }
+}
+
+/** A plain host (`isPlainHost`) or nothing, so a pasted `amqp://user:pass@host` never reaches the committed file. */
+export const QueueHostSchema = z.string().refine((s) => s.trim() === '' || isPlainHost(s), { message: 'must be a plain host name or IP address; the password goes in the connection secret' });
 
 export const QueueConnectionSchema = z.object({
   id: z.string(),

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { isPlainHost } from './models/queues';
 import {
   rabbitAmqpOptions,
   rabbitApiPath,
@@ -59,6 +60,22 @@ describe('rabbitAmqpOptions', () => {
     expect(() => rabbitAmqpOptions({ ...base, host: 'u:p@rabbit' }, '')).toThrow(/plain host name/);
     expect(() => rabbitAmqpOptions({ ...base, host: ' ' }, '')).toThrow(/no host/);
   });
+
+  it('takes host names, IPv4 and IPv6 (without brackets for amqplib), and refuses anything a URL would read differently', () => {
+    for (const host of ['localhost', 'rabbit-1.internal.example.com', 'rabbit_mq', '10.0.0.7']) expect(rabbitAmqpOptions({ ...base, host }, 'pw').hostname).toBe(host);
+    expect(rabbitAmqpOptions({ ...base, host: '[::1]' }, 'pw').hostname).toBe('::1');
+    expect(rabbitAmqpOptions({ ...base, host: 'fe80::1' }, 'pw').hostname).toBe('fe80::1');
+    for (const host of ['attacker.example\\rabbit.internal', 'attacker.example?rabbit', 'attacker.example#x', 'rabbit:5672', 'a b', 'rabbit%2e', '[::1', 'cafe:zz']) {
+      expect(() => rabbitAmqpOptions({ ...base, host }, 'pw'), host).toThrow(/plain host name/);
+    }
+  });
+});
+
+describe('isPlainHost', () => {
+  it('is what the committed host field takes', () => {
+    expect(['localhost', 'rabbit.local', '127.0.0.1', '::1', '[2001:db8::1]', ' rabbit '].every(isPlainHost)).toBe(true);
+    expect(['amqp://u:p@rabbit', 'u:p@rabbit', 'evil\\rabbit', 'evil?x', 'evil#x', 'host:5672', '', '[nope]'].some(isPlainHost)).toBe(false);
+  });
 });
 
 describe('rabbitManagementUrl', () => {
@@ -75,6 +92,25 @@ describe('rabbitManagementUrl', () => {
   it('refuses http:// when the connection uses ssl, since the password would go in the clear', () => {
     expect(() => rabbitManagementUrl({ ...base, ssl: true, managementUrl: 'HTTP://mq:15672' })).toThrow(/https/);
     expect(rabbitManagementUrl({ ...base, ssl: true, managementUrl: 'https://mq:15671' })).toBe('https://mq:15671');
+  });
+
+  it('derives the URL only for the connection host itself, so the password cannot go to another host', () => {
+    expect(rabbitManagementUrl({ ...base, host: 'Rabbit.Local' })).toBe('http://rabbit.local:15672');
+    expect(rabbitManagementUrl({ ...base, host: '::1' })).toBe('http://[::1]:15672');
+    expect(rabbitManagementUrl({ ...base, host: '[::1]', ssl: true })).toBe('https://[::1]:15671');
+    for (const host of ['attacker.example\\rabbit.internal', 'attacker.example?.rabbit', 'attacker.example#', 'attacker.example:80', 'u@rabbit']) {
+      expect(() => rabbitManagementUrl({ ...base, host }), host).toThrow(/plain host name/);
+    }
+    // Numeric forms a URL parser rewrites to another address are refused rather than followed.
+    expect(() => rabbitManagementUrl({ ...base, host: '0x7f.1' })).toThrow(/management URL of its own/);
+  });
+
+  it('takes only an http(s) management URL without a query or fragment, keeping a path', () => {
+    expect(rabbitManagementUrl({ ...base, managementUrl: 'https://proxy.example/rabbitmq/' })).toBe('https://proxy.example/rabbitmq');
+    expect(() => rabbitManagementUrl({ ...base, managementUrl: 'ftp://mq' })).toThrow(/http:\/\/ or https:\/\//);
+    expect(() => rabbitManagementUrl({ ...base, managementUrl: 'mq:15672' })).toThrow(/http:\/\/ or https:\/\//);
+    expect(() => rabbitManagementUrl({ ...base, managementUrl: 'not a url' })).toThrow(/not a URL/);
+    expect(() => rabbitManagementUrl({ ...base, managementUrl: 'http://mq:15672/?x=1' })).toThrow(/query or fragment/);
   });
 });
 
@@ -130,23 +166,34 @@ describe('rabbitTailBindings', () => {
     expect(rabbitTailBindings({ kind: 'queue', name: 'orders' }, exchanges, bindings.slice(0, 1))).toEqual([]);
   });
 
-  it('binds to everything on fanout, topic and headers exchanges', () => {
+  it('copies the routing keys of every exchange type, never a catch-all that would make unroutable messages routable', () => {
     const x = { kind: 'exchange' as const, name: 'events' };
-    expect(rabbitTailBindings(x, { events: { type: 'fanout' } }, [])).toEqual([{ source: 'events', pattern: '' }]);
-    expect(rabbitTailBindings(x, { events: { type: 'topic' } }, [])).toEqual([{ source: 'events', pattern: '#' }]);
-    expect(rabbitTailBindings(x, { events: { type: 'headers' } }, [])).toEqual([{ source: 'events', pattern: '', args: { 'x-match': 'all' } }]);
+    for (const type of ['direct', 'topic', 'fanout']) {
+      expect(rabbitTailBindings(x, { events: { type } }, bindings)).toEqual([
+        { source: 'events', pattern: 'order.*' },
+        { source: 'events', pattern: 'other' },
+      ]);
+    }
+    const headers: RabbitApiBinding[] = [
+      { source: 'events', destination: 'a', destination_type: 'queue', routing_key: '', arguments: { 'x-match': 'any', kind: 'order' } },
+      { source: 'events', destination: 'audit', destination_type: 'exchange', routing_key: '', arguments: { kind: 'refund' } },
+    ];
+    expect(rabbitTailBindings(x, { events: { type: 'headers' } }, headers)).toEqual([
+      { source: 'events', pattern: '', args: { 'x-match': 'any', kind: 'order' } },
+      { source: 'events', pattern: '', args: { kind: 'refund' } },
+    ]);
   });
 
-  it('copies the routing keys a direct exchange is bound with', () => {
-    expect(rabbitTailBindings({ kind: 'exchange', name: 'events' }, { events: { type: 'direct' } }, bindings)).toEqual([
-      { source: 'events', pattern: 'order.*' },
-      { source: 'events', pattern: 'other' },
-    ]);
+  it('finds nothing to copy on an exchange with no bindings, or only other tails', () => {
+    const x = { kind: 'exchange' as const, name: 'events' };
+    for (const type of ['direct', 'topic', 'fanout', 'headers']) expect(rabbitTailBindings(x, { events: { type } }, [])).toEqual([]);
+    const tailOnly: RabbitApiBinding[] = [{ source: 'events', destination: 'quiver-tail-1', destination_type: 'queue', routing_key: '#' }];
+    expect(rabbitTailBindings(x, { events: { type: 'topic' } }, tailOnly)).toEqual([]);
   });
 
   it('routes a delayed-message exchange by its x-delayed-type', () => {
     const delayed = { events: { type: 'x-delayed-message', arguments: { 'x-delayed-type': 'topic' } } };
-    expect(rabbitTailBindings({ kind: 'exchange', name: 'events' }, delayed, [])).toEqual([{ source: 'events', pattern: '#' }]);
+    expect(rabbitTailBindings({ kind: 'exchange', name: 'events' }, delayed, bindings.slice(1, 2))).toEqual([{ source: 'events', pattern: 'order.*' }]);
     expect(rabbitTailBindings({ kind: 'queue', name: 'orders' }, { ...exchanges, ...delayed }, bindings.slice(0, 2))).toEqual([{ source: 'events', pattern: 'order.*' }]);
   });
 

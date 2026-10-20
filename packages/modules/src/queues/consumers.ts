@@ -52,6 +52,8 @@ interface Live {
 
 export class QueueConsumers {
   private readonly live = new Map<string, Live>();
+  /** Tails still subscribing, per workspace: they count toward the cap, so starts made at once cannot pass it. */
+  private readonly starting = new Map<string, number>();
 
   private emit(l: Live, now = false): void {
     const fire = () => {
@@ -72,8 +74,20 @@ export class QueueConsumers {
   }
 
   async start(host: HostApi, workspaceId: string, connectionId: string, destination: string, from: 'latest' | 'earliest', subscribe: Subscribe): Promise<QueueConsumerSummary> {
-    const running = this.list(workspaceId).filter((c) => c.status === 'running').length;
+    const pending = this.starting.get(workspaceId) ?? 0;
+    const running = this.list(workspaceId).filter((c) => c.status === 'running').length + pending;
     if (running >= MAX_TAILS) throw new QuiverError('CONFLICT', `${MAX_TAILS} live tails are already running in this workspace; stop one first (queues.consumer.stop)`);
+    this.starting.set(workspaceId, pending + 1);
+    try {
+      return await this.subscribe(host, workspaceId, connectionId, destination, from, subscribe);
+    } finally {
+      const left = (this.starting.get(workspaceId) ?? 1) - 1;
+      if (left > 0) this.starting.set(workspaceId, left);
+      else this.starting.delete(workspaceId);
+    }
+  }
+
+  private async subscribe(host: HostApi, workspaceId: string, connectionId: string, destination: string, from: 'latest' | 'earliest', subscribe: Subscribe): Promise<QueueConsumerSummary> {
     const l: Live = {
       summary: { id: newId(), connectionId, destination, from, status: 'running', error: null, startedAt: nowIso(), stoppedAt: null, received: 0 },
       workspaceId,

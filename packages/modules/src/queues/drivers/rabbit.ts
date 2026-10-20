@@ -1,6 +1,7 @@
 import { connect, type Channel, type ChannelModel, type ConfirmChannel, type Message } from 'amqplib';
 import { QuiverError, newId, type QueueConnection, type QueueDestination, type QueueDriver, type QueueMessage, type QueueSecrets } from '@quiver/core';
 import {
+  RABBIT_TAIL_NO_DLX,
   RABBIT_TAIL_PREFIX,
   rabbitAmqpOptions,
   rabbitApiPath,
@@ -28,9 +29,10 @@ import {
 //
 // Destinations are queues by name and exchanges as `exchange:<name>`. A peek takes messages with basic.get and
 // requeues them (nack with requeue), which marks them redelivered and, on quorum queues, counts a delivery. A live
-// tail never consumes: it binds an exclusive queue of its own (`quiver-tail-…`) to what routes to the destination,
-// or reads a stream queue from an offset; exchanges that pick one queue per message (consistent hash, random) are
-// refused, since a queue bound there would take messages instead of copying them.
+// tail never consumes: it binds an exclusive queue of its own (`quiver-tail-…`) with copies of the bindings that
+// route to the destination now, or reads a stream queue from an offset; exchanges that pick one queue per message
+// (consistent hash, random) are refused, since a queue bound there would take messages instead of copying them, and
+// so is an exchange with no bindings, since a binding of a tail's own would take what goes to its alternate exchange.
 
 const CONNECT_TIMEOUT_MS = 5000;
 const HTTP_TIMEOUT_MS = 10_000;
@@ -47,6 +49,10 @@ const STREAM_FIRST_MS = 3000;
 const REPLAY_LIMIT = 1000;
 /** A tail's own queue keeps at most this many (the newest) if Quiver falls behind, so it never piles up on the broker. */
 const TAIL_QUEUE_LIMIT = 1000;
+/** A tail's queue left without a consumer (its setup failed and the delete did not get through) expires after this. */
+const TAIL_QUEUE_EXPIRES_MS = 60_000;
+/** How often a tail checks that its queue or exchange still exists; RabbitMQ does not tell a copy that its source went. */
+const TAIL_CHECK_MS = 5000;
 
 interface Pooled {
   key: string;
@@ -126,12 +132,32 @@ function model(c: QueueConnection, s: QueueSecrets): Promise<ChannelModel> {
   return p.model;
 }
 
+/**
+ * A channel being opened, within the call timeout. One that opens after the timeout is closed when it arrives, rather
+ * than left open on the pooled connection. Its errors are caught here; callers that want the reason listen too.
+ */
+async function openChannel<T extends Channel>(opening: Promise<T>): Promise<T> {
+  try {
+    const ch = await within(opening, 'opening a channel');
+    ch.on('error', () => undefined);
+    return ch;
+  } catch (err) {
+    void opening.then(
+      (late) => {
+        late.on('error', () => undefined);
+        return closeChannel(late);
+      },
+      () => undefined,
+    );
+    throw err;
+  }
+}
+
 function confirmChannel(c: QueueConnection, s: QueueSecrets): Promise<ConfirmChannel> {
   const p = client(c, s);
   if (!p.confirm) {
     const ready = model(c, s).then(async (m) => {
-      const ch = await within(m.createConfirmChannel(), 'opening a channel');
-      ch.on('error', () => undefined);
+      const ch = await openChannel(m.createConfirmChannel());
       ch.on('close', () => {
         if (p.confirm === ready) p.confirm = null;
       });
@@ -159,8 +185,12 @@ async function closeChannel(ch: Channel): Promise<void> {
  * check); past that it fails, and the channel's close gives back whatever it held.
  */
 async function withChannel<T>(c: QueueConnection, s: QueueSecrets, fn: (ch: Channel) => Promise<T>, ms = CALL_TIMEOUT_MS): Promise<T> {
-  const ch = await within((await model(c, s)).createChannel(), 'opening a channel');
-  ch.on('error', () => undefined);
+  return onChannel(await model(c, s), fn, ms);
+}
+
+/** `withChannel` on a given AMQP connection, for a tail's side calls on the connection that holds its queue. */
+async function onChannel<T>(m: ChannelModel, fn: (ch: Channel) => Promise<T>, ms = CALL_TIMEOUT_MS): Promise<T> {
+  const ch = await openChannel(m.createChannel());
   try {
     return await within(fn(ch), 'the call', ms);
   } finally {
@@ -471,9 +501,7 @@ export const rabbitDriver: QueueDriver = {
       if (target.kind === 'exchange') {
         const e = await exchangeInfo(c, s, target.name);
         exchanges[e.name] = e;
-        if (e.type !== 'fanout' && e.type !== 'topic' && e.type !== 'headers') {
-          bindings = await api<RabbitApiBinding[]>(c, s, rabbitApiPath('exchanges', vhost, target.name, 'bindings', 'source'), `${label(target)} not found`);
-        }
+        bindings = await api<RabbitApiBinding[]>(c, s, rabbitApiPath('exchanges', vhost, target.name, 'bindings', 'source'), `${label(target)} not found`);
       } else {
         stream = (await queueInfo(c, s, target.name)).type === 'stream';
         if (!stream) {
@@ -492,21 +520,28 @@ export const rabbitDriver: QueueDriver = {
           'NOT_SUPPORTED',
           target.kind === 'queue'
             ? `Queue ${target.name} is reached only through the default exchange, so it cannot be tailed without consuming its messages; bind it to an exchange, or peek it`
-            : `Exchange ${target.name} has no bindings to copy, so a tail would see nothing`,
+            : `Exchange ${target.name} has no bindings, so nothing it gets is routed (it goes to its alternate exchange, back to a mandatory publisher, or is dropped); a tail's own binding there would take those messages, so it cannot be tailed`,
         );
       }
 
-      const ch = await within((await model(c, s)).createChannel(), 'opening a channel');
+      // The tail's queue is exclusive to this connection, so its side calls (the delete on failure, the checks) use it too.
+      const amqp = await model(c, s);
+      const ch = await openChannel(amqp.createChannel());
       let seq = 0;
       let ended = false;
       let stopping = false;
+      let watch: NodeJS.Timeout | undefined;
       const end = (error?: Error) => {
         if (ended) return;
         ended = true;
+        clearInterval(watch);
         onEnd(error);
       };
-      ch.on('error', () => undefined);
-      ch.on('close', () => end(stopping ? undefined : new Error('The RabbitMQ channel closed')));
+      // amqplib's close event carries no reason; the error before it (a broker's channel close, say) does.
+      let lastError: Error | undefined;
+      ch.on('error', (err: Error) => (lastError = err));
+      ch.on('close', () => end(stopping ? undefined : new Error(lastError ? `The RabbitMQ channel closed: ${lastError.message}` : 'The RabbitMQ channel closed')));
+      let own: string | undefined;
       try {
         if (stream) {
           await within(ch.prefetch(100), 'setting the prefetch');
@@ -523,38 +558,81 @@ export const rabbitDriver: QueueDriver = {
             'starting the tail',
           );
         } else {
-          const own = `${RABBIT_TAIL_PREFIX}${newId()}`;
-          // Capped, dropping the oldest: a tail that falls behind a busy exchange must not fill the broker's memory.
+          const name = `${RABBIT_TAIL_PREFIX}${newId()}`;
+          own = name;
+          // Capped, dropping the oldest: a tail that falls behind a busy exchange must not fill the broker's memory. What
+          // it drops (or a policy's TTL expires) is dead-lettered to an exchange that does not exist, which drops it,
+          // rather than to a policy's dead-letter exchange, where copies would land among the real failures. It expires
+          // once unused for a minute, should a failed setup leave it behind.
           await within(
-            ch.assertQueue(own, { exclusive: true, autoDelete: true, durable: false, arguments: { 'x-max-length': TAIL_QUEUE_LIMIT, 'x-overflow': 'drop-head' } }),
+            ch.assertQueue(name, {
+              exclusive: true,
+              autoDelete: true,
+              durable: false,
+              arguments: { 'x-max-length': TAIL_QUEUE_LIMIT, 'x-overflow': 'drop-head', 'x-dead-letter-exchange': RABBIT_TAIL_NO_DLX, 'x-expires': TAIL_QUEUE_EXPIRES_MS },
+            }),
             'declaring the tail queue',
           );
-          for (const b of copies) await within(ch.bindQueue(own, b.source, b.pattern, b.args), 'binding the tail queue');
-          // Bound first, then replayed: a message routed in between can show up twice, but none is missed.
-          if (from === 'earliest' && target.kind === 'queue') {
-            for (const m of await getAndRequeue(c, s, target.name, (count) => Math.min(count, REPLAY_LIMIT))) onMessage(toMessage(destination, ++seq, m));
-          }
+          // Consumed before it is bound, so nothing waits in it; during a replay what arrives is held and passed on after.
+          const replay = from === 'earliest' && target.kind === 'queue';
+          let held: Message[] | null = replay ? [] : null;
+          const deliver = (msg: Message) => onMessage(toMessage(destination, ++seq, msg));
           await within(
             ch.consume(
-              own,
-              (m) => {
-                if (!m) return end(new Error(`The broker cancelled the tail of ${destination}`));
-                onMessage(toMessage(destination, ++seq, m));
+              name,
+              (msg) => {
+                if (!msg) return end(new Error(`The broker cancelled the tail of ${destination}`));
+                if (!held) return deliver(msg);
+                held.push(msg);
+                if (held.length > TAIL_QUEUE_LIMIT) held.shift();
               },
               { noAck: true },
             ),
             'starting the tail',
           );
+          for (const b of copies) await within(ch.bindQueue(name, b.source, b.pattern, b.args), 'binding the tail queue');
+          // Bound first, then replayed: a message routed in between can show up twice, but none is missed.
+          if (replay) {
+            for (const msg of await getAndRequeue(c, s, target.name, (count) => Math.min(count, REPLAY_LIMIT))) deliver(msg);
+            const waiting = held ?? [];
+            held = null;
+            for (const msg of waiting) deliver(msg);
+          }
         }
       } catch (err) {
         stopping = true;
         await closeChannel(ch);
+        // Closing the channel cancels the consumer, which deletes an auto-delete queue; one never consumed stays on the
+        // pooled connection, bound, until deleted here (or it expires).
+        if (own) {
+          const name = own;
+          await onChannel(amqp, (side) => side.deleteQueue(name), 5000).catch(() => undefined);
+        }
         throw err;
+      }
+      if (!stream) {
+        // A copy of a queue's bindings would outlive the queue, still making what it was bound for routable; end the tail
+        // once its queue or exchange is gone. Other failures of the check (a busy broker) are left to the next one.
+        let checking = false;
+        watch = setInterval(() => {
+          if (checking || ended) return;
+          checking = true;
+          onChannel(amqp, (side) => (target.kind === 'queue' ? side.checkQueue(target.name) : side.checkExchange(target.name)))
+            .catch((err) => {
+              if ((err as { code?: number }).code !== 404 || ended) return;
+              stopping = true;
+              end(new Error(`${label(target)} was deleted`));
+              void closeChannel(ch);
+            })
+            .finally(() => (checking = false));
+        }, TAIL_CHECK_MS);
+        watch.unref?.();
       }
       return {
         stop: async () => {
           if (ended) return;
           stopping = true;
+          clearInterval(watch);
           await closeChannel(ch);
           end();
         },

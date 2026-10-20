@@ -1,5 +1,5 @@
 import { QuiverError } from './errors';
-import { urlHasCredentials, type QueueConnection, type QueueDestination, type QueueMessage } from './models/queues';
+import { isPlainHost, urlHasCredentials, type QueueConnection, type QueueDestination, type QueueMessage } from './models/queues';
 
 // Pure parts of the RabbitMQ driver, kept apart from amqplib and the management API so they can be tested
 // without a broker: naming, connection options built from the fields, management API rows as destinations,
@@ -9,6 +9,13 @@ import { urlHasCredentials, type QueueConnection, type QueueDestination, type Qu
 export const RABBIT_EXCHANGE_PREFIX = 'exchange:';
 /** The exclusive queues Quiver's live tails declare start with this; listings leave them out. */
 export const RABBIT_TAIL_PREFIX = 'quiver-tail-';
+/**
+ * The dead-letter exchange a tail's queue names, which does not exist: a queue's own argument overrides a policy's
+ * dead-letter exchange, and RabbitMQ drops what is dead-lettered to a missing exchange, so what a tail's queue drops
+ * (past its length cap, or by a policy's TTL) never lands in the broker's real dead-letter queues. It shares the tail
+ * queues' prefix, so a user allowed to bind those (write permission) may name it too.
+ */
+export const RABBIT_TAIL_NO_DLX = `${RABBIT_TAIL_PREFIX}no-dlx`;
 
 export interface RabbitTarget {
   kind: 'queue' | 'exchange';
@@ -39,14 +46,23 @@ export interface RabbitAmqpOptions {
 }
 
 /**
- * Connection options from the fields. A host that looks like a pasted URL (`amqp://user:pass@host`) is refused: the
- * user and password belong in `username` and the secret. With neither user nor password set, RabbitMQ's default
- * `guest`/`guest` is used, which a broker accepts from localhost only.
+ * The connection's host, checked to be a plain host name or IP address (`isPlainHost`); an IPv6 address comes back
+ * without brackets. Anything else, such as a pasted URL (`amqp://user:pass@host`), is refused: the user and password
+ * belong in `username` and the secret.
+ */
+function plainHost(host: string): string {
+  const h = host.trim();
+  if (!h) throw new QuiverError('INVALID_INPUT', 'The connection has no host; add the RabbitMQ host name');
+  if (!isPlainHost(h)) throw new QuiverError('INVALID_INPUT', 'The host must be a plain host name or IP address, not a URL; put the user in username and the password in the connection secret');
+  return h.replace(/^\[|\]$/g, '');
+}
+
+/**
+ * Connection options from the fields, the host checked by `plainHost`. With neither user nor password set, RabbitMQ's
+ * default `guest`/`guest` is used, which a broker accepts from localhost only.
  */
 export function rabbitAmqpOptions(c: Pick<QueueConnection, 'host' | 'port' | 'vhost' | 'ssl' | 'username'>, password: string | undefined): RabbitAmqpOptions {
-  const hostname = c.host.trim();
-  if (!hostname) throw new QuiverError('INVALID_INPUT', 'The connection has no host; add the RabbitMQ host name');
-  if (/[\s/@]/.test(hostname)) throw new QuiverError('INVALID_INPUT', 'The host must be a plain host name, not a URL; put the user in username and the password in the connection secret');
+  const hostname = plainHost(c.host);
   const anonymous = !c.username && !password;
   return {
     protocol: c.ssl ? 'amqps' : 'amqp',
@@ -59,19 +75,35 @@ export function rabbitAmqpOptions(c: Pick<QueueConnection, 'host' | 'port' | 'vh
 }
 
 /**
- * The management API's base URL without a trailing slash: `managementUrl`, or `http://<host>:15672` (`https`, 15671 with
- * ssl). With ssl an `http://` URL is refused: the password goes to the management API as basic auth, in the clear.
+ * The management API's base URL without a trailing slash: `managementUrl` (http or https, no user or password, no query
+ * or fragment, since API paths are appended to it), or `http://<host>:15672` (`https`, 15671 with ssl). The password goes
+ * there as basic auth, so with ssl an `http://` URL is refused (it would go in the clear), and a derived URL must name
+ * the connection's host and nothing else.
  */
 export function rabbitManagementUrl(c: Pick<QueueConnection, 'host' | 'ssl' | 'managementUrl'>): string {
   const given = c.managementUrl.trim();
   if (given) {
     if (urlHasCredentials(given)) throw new QuiverError('INVALID_INPUT', 'The management URL must not contain a user or password');
-    if (c.ssl && /^http:/i.test(given)) throw new QuiverError('INVALID_INPUT', 'The connection uses ssl, so the management URL must be https://; over http:// the password would be sent in the clear');
-    return given.replace(/\/+$/, '');
+    let url: URL;
+    try {
+      url = new URL(given);
+    } catch {
+      throw new QuiverError('INVALID_INPUT', `The management URL is not a URL: ${given}`);
+    }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new QuiverError('INVALID_INPUT', 'The management URL must be http:// or https://');
+    if (c.ssl && url.protocol === 'http:') throw new QuiverError('INVALID_INPUT', 'The connection uses ssl, so the management URL must be https://; over http:// the password would be sent in the clear');
+    if (url.search || url.hash) throw new QuiverError('INVALID_INPUT', 'The management URL must not have a query or fragment; API paths are appended to it');
+    return `${url.origin}${url.pathname}`.replace(/\/+$/, '');
   }
-  const host = c.host.trim();
-  if (!host || /[\s/@]/.test(host)) throw new QuiverError('INVALID_INPUT', 'The connection has no management URL and no host to derive it from');
-  return c.ssl ? `https://${host}:15671` : `http://${host}:15672`;
+  if (!c.host.trim()) throw new QuiverError('INVALID_INPUT', 'The connection has no management URL and no host to derive it from');
+  const host = plainHost(c.host);
+  const v6 = host.includes(':');
+  const port = c.ssl ? '15671' : '15672';
+  const url = new URL(`${c.ssl ? 'https' : 'http'}://${v6 ? `[${host}]` : host}:${port}`);
+  // A URL parser reading the host as something else (another host, a port, a path) would send the password there.
+  const same = v6 ? url.hostname.startsWith('[') : url.hostname === host.toLowerCase();
+  if (!same || url.port !== port || url.pathname !== '/') throw new QuiverError('INVALID_INPUT', `The host ${host} does not give a management URL of its own; set the management URL`);
+  return url.origin;
 }
 
 /** A management API path, every segment encoded: the default vhost `/` becomes `%2F`. */
@@ -197,24 +229,24 @@ function notCopying(name: string, e: Pick<RabbitApiExchange, 'type'> | undefined
 /**
  * What a live tail binds its exclusive queue to, so it receives a copy of what is routed and consumes nothing:
  * - a queue: the same bindings the queue has, except the default exchange, which routes by queue name and cannot be copied
- * - a fanout, topic or headers exchange: everything (`''`, `#`, `x-match: all` with no headers)
- * - a direct exchange: the routing keys and arguments it is bound with now
- * `exchanges` gives the type of the target and of every source exchange; one that picks a single queue per message
- * (`rabbitCopyingType`) is refused as NOT_SUPPORTED. An empty result means the tail would never see a message.
+ * - an exchange of any type: the routing keys and arguments it is bound with now (`bindings` are its `bindings/source`),
+ *   leaving out other tails' queues
+ * Only copies, never a catch-all (`#`, `x-match: all`): a binding of its own would make messages routable that no binding
+ * routes now, so they would no longer go to the exchange's alternate exchange, and mandatory publishers would stop
+ * getting them back. `exchanges` gives the type of the target and of every source exchange; one that picks a single
+ * queue per message (`rabbitCopyingType`) is refused as NOT_SUPPORTED. An empty result means nothing can be copied.
  */
 export function rabbitTailBindings(target: RabbitTarget, exchanges: Record<string, Pick<RabbitApiExchange, 'type' | 'arguments'>>, bindings: RabbitApiBinding[]): RabbitTailBinding[] {
   if (target.kind === 'exchange') {
     const e = exchanges[target.name];
-    const type = e && rabbitCopyingType(e);
-    if (!type) throw notCopying(target.name, e);
-    if (type === 'fanout') return [{ source: target.name, pattern: '' }];
-    if (type === 'topic') return [{ source: target.name, pattern: '#' }];
-    if (type === 'headers') return [{ source: target.name, pattern: '', args: { 'x-match': 'all' } }];
+    if (!e || !rabbitCopyingType(e)) throw notCopying(target.name, e);
   }
   const out: RabbitTailBinding[] = [];
   const seen = new Set<string>();
   for (const b of bindings) {
     if (target.kind === 'queue' ? b.source === '' || b.destination !== target.name : b.source !== target.name) continue;
+    // Another tail's binding goes away with it; copying it would outlive it.
+    if (target.kind === 'exchange' && b.destination_type === 'queue' && b.destination.startsWith(RABBIT_TAIL_PREFIX)) continue;
     if (target.kind === 'queue' && !rabbitCopyingType(exchanges[b.source] ?? { type: '' })) throw notCopying(b.source, exchanges[b.source], target.name);
     const source = target.kind === 'queue' ? b.source : target.name;
     const args = b.arguments && Object.keys(b.arguments).length ? b.arguments : undefined;

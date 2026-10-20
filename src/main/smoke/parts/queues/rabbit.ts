@@ -45,6 +45,15 @@ async function management({ host, check, run, ws, folder, rpc }: SmokeContext): 
       savedPasted === 'INVALID_INPUT' && committed.length === filesBefore && !committed.some((text) => text.includes('pa55-in-url')),
       { savedPasted, files: committed.length, filesBefore },
     );
+    // A host a URL parser reads as another host (`\` is `/` in http URLs) would send the password there with a derived management URL.
+    const savedSmuggled = await code('queues.connection.save', { connection: { name: 'smoke rabbit smuggled', ...fields, host: '127.0.0.1\\evil.example', managementUrl: '' }, secrets: {} });
+    const testedSmuggled = await code('queues.connection.test', { connection: { ...fields, host: '127.0.0.1?.evil.example', managementUrl: '' }, secrets: { password: fake.password } });
+    const committedAfter = (await fs.readdir(connDir).catch(() => [] as string[])).length;
+    check(
+      'rabbit: a host with URL delimiters in it is INVALID_INPUT at save and test, and commits nothing',
+      savedSmuggled === 'INVALID_INPUT' && testedSmuggled === 'INVALID_INPUT' && committedAfter === filesBefore,
+      { savedSmuggled, testedSmuggled },
+    );
     const asked = () => fake.seen.length + fake.refused;
     const askedBefore = asked();
     const sslOverHttp = await run<{ ok: boolean; message: string }>('queues.connection.test', { connection: { ...fields, ssl: true }, secrets: { password: fake.password } }, ws.id);
@@ -53,12 +62,14 @@ async function management({ host, check, run, ws, folder, rpc }: SmokeContext): 
       !sslOverHttp.ok && sslOverHttp.message.includes('must be https://') && asked() === askedBefore,
       sslOverHttp,
     );
+    const withQuery = await run<{ ok: boolean; message: string }>('queues.connection.test', { connection: { ...fields, managementUrl: `${fake.url}/?next=x` }, secrets: { password: fake.password } }, ws.id);
+    check('rabbit: a management URL with a query is refused before any request', !withQuery.ok && withQuery.message.includes('query or fragment') && asked() === askedBefore, withQuery);
 
     const listed = await run<QueueDestination[]>('queues.destination.list', { connectionId: conn.id }, ws.id);
     const orders = listed.find((d) => d.name === 'orders');
     check(
       'rabbit: list has queues with counts and exchanges as exchange:<name>, without the default, amq.* or tail queues',
-      listed.map((d) => d.name).join() === 'direct-only,events.stream,orders,sharded,exchange:audit,exchange:shard,exchange:shop' && orders?.messages === 3 && orders.consumers === 1 && listed.find((d) => d.name === 'exchange:shop')?.kind === 'exchange',
+      listed.map((d) => d.name).join() === 'direct-only,events.stream,orders,sharded,exchange:audit,exchange:shard,exchange:shop,exchange:unrouted' && orders?.messages === 3 && orders.consumers === 1 && listed.find((d) => d.name === 'exchange:shop')?.kind === 'exchange',
       listed.map((d) => `${d.kind}:${d.name}`),
     );
     check('rabbit: the management API is asked for the vhost / as %2F with the connection user', fake.seen.some((p) => p.startsWith('/api/queues/%2F?columns=')) && fake.seen.includes('/api/exchanges/%2F'), fake.seen);
@@ -88,6 +99,20 @@ async function management({ host, check, run, ws, folder, rpc }: SmokeContext): 
       'rabbit: a tail of a consistent-hash exchange, or of a queue it feeds, is NOT_SUPPORTED, since its queue would take a share of the messages',
       (await code('queues.consumer.start', { connectionId: conn.id, destination: 'exchange:shard' })) === 'NOT_SUPPORTED' &&
         (await code('queues.consumer.start', { connectionId: conn.id, destination: 'sharded' })) === 'NOT_SUPPORTED',
+    );
+    const unrouted = await host.invoke('queues.consumer.start', { connectionId: conn.id, destination: 'exchange:unrouted' }, { caller: 'ui', workspaceId: ws.id });
+    const fanoutAlone = await code('queues.consumer.start', { connectionId: conn.id, destination: 'exchange:audit' });
+    check(
+      'rabbit: a tail of an exchange with no bindings (other tails aside) is NOT_SUPPORTED, since its binding would take what goes to the alternate exchange',
+      !unrouted.ok && unrouted.error.code === 'NOT_SUPPORTED' && unrouted.error.message.includes('alternate exchange') && fanoutAlone === 'NOT_SUPPORTED',
+      { unrouted, fanoutAlone },
+    );
+    const seenBefore = fake.seen.length;
+    const shopTail = await code('queues.consumer.start', { connectionId: conn.id, destination: 'exchange:shop' });
+    check(
+      'rabbit: a tail of a topic exchange copies its bindings (asked of the API) and goes on to AMQP rather than binding #',
+      shopTail === 'REQUEST_FAILED' && fake.seen.slice(seenBefore).includes('/api/exchanges/%2F/shop/bindings/source'),
+      { shopTail, seen: fake.seen.slice(seenBefore) },
     );
     check(
       'rabbit: . and .. are refused as names, rather than resolved as management API path segments',
@@ -153,6 +178,7 @@ async function live({ host, check, run, ws }: SmokeContext): Promise<void> {
   const queue = `quiver-smoke-${stamp}`;
   const stream = `quiver-smoke-stream-${stamp}`;
   const exchange = `quiver-smoke-x-${stamp}`;
+  const doomedQueue = `quiver-smoke-doomed-${stamp}`;
   // The smoke binds and declares a stream with amqplib itself: Quiver has no command for bindings.
   const admin = await connect(url);
   const ch = await admin.createChannel();
@@ -199,7 +225,11 @@ async function live({ host, check, run, ws }: SmokeContext): Promise<void> {
       fromQueue.messages.map((m) => m.body),
     );
     const fromExchange = await readAll(exchangeTail.id, 3);
-    check('rabbit live: a tail of a topic exchange gets everything published to it', fromExchange.messages.length === 3, fromExchange.messages.map((m) => m.body));
+    check('rabbit live: a tail of a topic exchange gets what its bindings route', fromExchange.messages.length === 3, fromExchange.messages.map((m) => m.body));
+    check(
+      'rabbit live: while a tail of the exchange runs, a publish no binding routes is still refused (the tail copies bindings, it does not catch all)',
+      (await code('queues.message.produce', { connectionId: conn.id, destination: 'nowhere', exchange, headers: {}, body: 'lost' })) === 'REQUEST_FAILED',
+    );
 
     const waiting = run<Wait>('queues.message.wait', { connectionId: conn.id, destination: `exchange:${exchange}`, match: 'needle', timeoutMs: 10_000 }, ws.id);
     await new Promise((r) => setTimeout(r, 300));
@@ -220,7 +250,7 @@ async function live({ host, check, run, ws }: SmokeContext): Promise<void> {
     );
 
     for (const id of [queueTail.id, exchangeTail.id, streamTail.id]) await run('queues.consumer.stop', { consumerId: id, forget: true }, ws.id);
-    check('rabbit live: a publish nothing routes is refused (once no tail is bound to the exchange)', (await code('queues.message.produce', { connectionId: conn.id, destination: 'nowhere', exchange, headers: {}, body: 'lost' })) === 'REQUEST_FAILED');
+    check('rabbit live: a publish nothing routes is refused (and still once the tails stopped)', (await code('queues.message.produce', { connectionId: conn.id, destination: 'nowhere', exchange, headers: {}, body: 'lost' })) === 'REQUEST_FAILED');
     const listed = await run<QueueDestination[]>('queues.destination.list', { connectionId: conn.id }, ws.id);
     check('rabbit live: list has the queue and the exchange, and no tail queue', listed.some((d) => d.name === queue) && listed.some((d) => d.name === `exchange:${exchange}`) && !listed.some((d) => d.name.startsWith('quiver-tail-')), listed.map((d) => d.name));
 
@@ -228,12 +258,25 @@ async function live({ host, check, run, ws }: SmokeContext): Promise<void> {
     const purged = await run<QueueDestination>('queues.destination.describe', { connectionId: conn.id, destination: queue }, ws.id);
     check('rabbit live: purge empties the queue', purged.messages === 0, purged);
 
+    // Deleted by another client, so Quiver's delete (which stops the tails itself) plays no part.
+    await run('queues.destination.create', { connectionId: conn.id, destination: doomedQueue }, ws.id);
+    await ch.bindQueue(doomedQueue, exchange, 'doomed.#');
+    const doomed = await run<Consumer>('queues.consumer.start', { connectionId: conn.id, destination: doomedQueue }, ws.id);
+    await ch.deleteQueue(doomedQueue);
+    let after = await run<Read>('queues.consumer.read', { consumerId: doomed.id }, ws.id);
+    for (const end = Date.now() + 12_000; after.consumer.status === 'running' && Date.now() < end; await new Promise((r) => setTimeout(r, 500))) {
+      after = await run<Read>('queues.consumer.read', { consumerId: doomed.id }, ws.id);
+    }
+    check('rabbit live: a tail of a queue another client deletes ends, rather than keep its copied bindings', after.consumer.status === 'error' && /was deleted/.test(after.consumer.error ?? ''), after.consumer);
+    await run('queues.consumer.stop', { consumerId: doomed.id, forget: true }, ws.id);
+
     await run('queues.destination.delete', { connectionId: conn.id, destination: queue }, ws.id);
     await run('queues.destination.delete', { connectionId: conn.id, destination: `exchange:${exchange}` }, ws.id);
     check('rabbit live: deleted queue and exchange are gone', (await code('queues.destination.describe', { connectionId: conn.id, destination: queue })) === 'NOT_FOUND' && (await code('queues.destination.describe', { connectionId: conn.id, destination: `exchange:${exchange}` })) === 'NOT_FOUND');
   } finally {
     await ch.deleteQueue(queue).catch(() => undefined);
     await ch.deleteQueue(stream).catch(() => undefined);
+    await ch.deleteQueue(doomedQueue).catch(() => undefined);
     await ch.deleteExchange(exchange).catch(() => undefined);
     await admin.close().catch(() => undefined);
     await run('queues.connection.delete', { id: conn.id }, ws.id);

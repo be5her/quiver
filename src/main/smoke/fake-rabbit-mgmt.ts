@@ -32,6 +32,8 @@ const EXCHANGES: RabbitApiExchange[] = [
   { name: 'audit', type: 'fanout', durable: false, auto_delete: true },
   // Sends each message to one bound queue: a tail must not bind to it, or to what it feeds.
   { name: 'shard', type: 'x-consistent-hash', durable: true },
+  // Routes nothing but to its alternate exchange (and a tail's leftover queue): a tail's binding would take those.
+  { name: 'unrouted', type: 'topic', durable: true, arguments: { 'alternate-exchange': 'audit' } },
 ];
 
 const BINDINGS: RabbitApiBinding[] = [
@@ -41,6 +43,7 @@ const BINDINGS: RabbitApiBinding[] = [
   { source: '', destination: 'direct-only', destination_type: 'queue', routing_key: 'direct-only', arguments: {} },
   { source: '', destination: 'sharded', destination_type: 'queue', routing_key: 'sharded', arguments: {} },
   { source: 'shard', destination: 'sharded', destination_type: 'queue', routing_key: '10', arguments: {} },
+  { source: 'unrouted', destination: 'quiver-tail-left-over', destination_type: 'queue', routing_key: '#', arguments: {} },
 ];
 
 export function startFakeRabbitMgmt(): Promise<FakeRabbitMgmt> {
