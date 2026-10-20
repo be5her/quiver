@@ -2,6 +2,7 @@ import path from 'node:path';
 import {
   KeyValueSchema,
   QuiverError,
+  RunnerTaskIdSchema,
   RunnerTaskSchema,
   newId,
   type CommandContext,
@@ -10,14 +11,14 @@ import {
   type WorkspaceApi,
 } from '@quiver/core';
 import { z } from 'zod';
-import { compilePattern, getProc, stopTask, type RunnerProcInfo } from './supervisor';
+import { compilePattern, getProc, leavesFolder, stopTask, type RunnerProcInfo } from './supervisor';
 
 // Saved tasks: one committed file per task in `.quiver/runner/<id>.json`, read by the supervisor with the same schema.
 
 export const TASKS_COLLECTION = 'runner';
 
 /** A task id, which names its file: what the store accepts, refused as invalid input rather than failing in the store. */
-export const TaskIdSchema = z.string().regex(/^[A-Za-z0-9._-]+$/, 'A task id has only letters, digits, dots, dashes and underscores');
+export const TaskIdSchema = RunnerTaskIdSchema;
 
 /**
  * A task to save. Without `id` it is a new task; with one, the fields given replace the saved ones and the rest stay.
@@ -43,18 +44,19 @@ export interface RunnerDiscoveredRow extends RunnerDiscoveredTask {
   taskId?: string;
 }
 
+/** The saved tasks by name, without those whose id get, save, delete and start would refuse. */
 export async function listTasks(ws: WorkspaceApi): Promise<RunnerTask[]> {
   const items = await ws.store.list(TASKS_COLLECTION);
   return items
     .flatMap((item) => {
       const parsed = RunnerTaskSchema.safeParse(item);
-      return parsed.success ? [parsed.data] : [];
+      return parsed.success && TaskIdSchema.safeParse(parsed.data.id).success ? [parsed.data] : [];
     })
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export async function getTask(ws: WorkspaceApi, id: string): Promise<RunnerTask> {
-  const item = await ws.store.get(TASKS_COLLECTION, id);
+  const item = TaskIdSchema.safeParse(id).success ? await ws.store.get(TASKS_COLLECTION, id) : undefined;
   const parsed = item ? RunnerTaskSchema.safeParse(item) : null;
   if (!parsed) throw new QuiverError('NOT_FOUND', `No saved task ${id}`);
   if (!parsed.success) throw new QuiverError('INVALID_INPUT', `The saved task ${id} is not valid: ${parsed.error.message}`);
@@ -65,12 +67,22 @@ export async function getTask(ws: WorkspaceApi, id: string): Promise<RunnerTask>
 function relativeCwd(ws: WorkspaceApi, cwd: string): string {
   const root = path.resolve(ws.path);
   const back = path.relative(root, path.resolve(root, cwd.trim().replace(/\\/g, '/') || '.'));
-  if (back === '..' || back.startsWith(`..${path.sep}`) || path.isAbsolute(back)) throw new QuiverError('INVALID_INPUT', `${cwd} is outside the workspace folder`);
+  if (leavesFolder(back)) throw new QuiverError('INVALID_INPUT', `${cwd} is outside the workspace folder`);
   return back.split(path.sep).join('/');
 }
 
-function sameScript(a: Pick<RunnerTask, 'source' | 'command' | 'cwd'>, b: Pick<RunnerTask, 'source' | 'command' | 'cwd'>): boolean {
-  return a.source === b.source && a.command === b.command && a.cwd === b.cwd;
+/** What a saved task and a discovered script are matched on. */
+function scriptKey(t: Pick<RunnerTask, 'source' | 'command' | 'cwd'>): string {
+  return `${t.source}\u0000${t.command}\u0000${t.cwd}`;
+}
+
+/**
+ * Whether saving a discovered script may update this saved task: one that runs the same script and adds no env entries
+ * or env profile to it. A committed task with `NODE_OPTIONS=--require ./x.js` is not what a person saving `npm run dev`
+ * asked for, so such a task is neither updated nor shown as that script saved; saving it gives a task of its own.
+ */
+function savedAs(task: RunnerTask, script: Pick<RunnerTask, 'source' | 'command' | 'cwd'>): boolean {
+  return scriptKey(task) === scriptKey(script) && task.env.length === 0 && !task.envProfile;
 }
 
 /** Workspace id -> the last task write in line. */
@@ -92,8 +104,9 @@ function inLine<T>(wsId: string, job: () => Promise<T>): Promise<T> {
 
 /**
  * Creates or updates a task. A discovered script (a draft without id whose `source` is not `saved`) that is saved
- * already updates that task rather than adding a second one, keeping the name it was given. A task without a name is
- * named after its command.
+ * already updates that task rather than adding a second one, keeping the name it was given, unless that task adds env
+ * entries or an env profile (`savedAs`): then it is saved as a task of its own. A task without a name is named after
+ * its command.
  */
 export function saveTask(ctx: CommandContext, draft: RunnerTaskDraft): Promise<RunnerTask> {
   const w = ctx.workspace!;
@@ -103,7 +116,7 @@ export function saveTask(ctx: CommandContext, draft: RunnerTaskDraft): Promise<R
     if (fields.cwd !== undefined) fields.cwd = relativeCwd(w, fields.cwd);
     let existing = draft.id ? await getTask(w, draft.id) : undefined;
     if (!existing && fields.source && fields.source !== 'saved') {
-      existing = (await listTasks(w)).find((t) => sameScript(t, { source: fields.source!, command: fields.command ?? '', cwd: fields.cwd ?? '' }));
+      existing = (await listTasks(w)).find((t) => savedAs(t, { source: fields.source!, command: fields.command ?? '', cwd: fields.cwd ?? '' }));
       // Saving the script again is not a rename: the discovered name gives way to the one the task has.
       if (existing) delete fields.name;
     }
@@ -140,11 +153,13 @@ export function deleteTask(ctx: CommandContext, id: string): Promise<{ deleted: 
   });
 }
 
-/** The discovered tasks, each with the id of the saved task that runs the same script, if there is one. */
+/** The discovered tasks, each with the id of the saved task that saving it would update (`savedAs`), if there is one. */
 export async function discoveredRows(ws: WorkspaceApi, found: RunnerDiscoveredTask[]): Promise<RunnerDiscoveredRow[]> {
-  const saved = await listTasks(ws);
+  // By key, the first by name as a save would find it, so many scripts and many saved tasks stay one pass each.
+  const saved = new Map<string, string>();
+  for (const t of await listTasks(ws)) if (savedAs(t, t) && !saved.has(scriptKey(t))) saved.set(scriptKey(t), t.id);
   return found.map((d) => {
-    const task = saved.find((t) => sameScript(t, d));
-    return task ? { ...d, taskId: task.id } : d;
+    const taskId = saved.get(scriptKey(d));
+    return taskId ? { ...d, taskId } : d;
   });
 }

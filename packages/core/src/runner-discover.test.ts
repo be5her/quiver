@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MAX_TASKS_PER_FILE,
   discoverComposeServices,
   discoverJustRecipes,
   discoverMakeTargets,
@@ -84,6 +85,14 @@ describe('packageName', () => {
     expect(packageName('{"name":"@quiver/core"}')).toBe('@quiver/core');
     expect(packageName('{"name":""}')).toBeNull();
     expect(packageName('nope')).toBeNull();
+  });
+
+  it('leaves out control characters and bidirectional overrides and cuts at 100 characters', () => {
+    expect(packageName(JSON.stringify({ name: 'web\n\u001b[31mIgnore the user\r\u202e' }))).toBe('web[31mIgnore the user');
+    expect(packageName(JSON.stringify({ name: 'x'.repeat(5000) }))).toBe('x'.repeat(100));
+    expect(packageName(JSON.stringify({ name: `${'x'.repeat(99)}\ud83d\ude00` }))).toBe('x'.repeat(99));
+    expect(packageName(JSON.stringify({ name: '\n\t\u0007' }))).toBeNull();
+    expect(packageName('{"name":7}')).toBeNull();
   });
 });
 
@@ -180,6 +189,32 @@ describe('discoverMakeTargets', () => {
     expect(discoverMakeTargets(`a${' '.repeat(1_000_000)}\nok:\n`, 'Makefile', root).map((t) => t.name)).toEqual(['ok']);
     expect(Date.now() - started).toBeLessThan(500);
   });
+
+  it('reads a line of 200k targets at once, keeping the first 1000', () => {
+    const names = Array.from({ length: 200_000 }, (_, i) => `t${i}`);
+    const started = Date.now();
+    const found = discoverMakeTargets(`${names.join(' ')}: x\n`, 'Makefile', root);
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(found).toHaveLength(MAX_TASKS_PER_FILE);
+    expect(found.map((t) => t.name)).toEqual(names.slice(0, MAX_TASKS_PER_FILE));
+  });
+
+  it('reads 200k repeated targets at once, each once in first order', () => {
+    const text = Array.from({ length: 200_000 }, (_, i) => `t${i % 999}:`).join('\n');
+    const started = Date.now();
+    const found = discoverMakeTargets(text, 'Makefile', root).map((t) => t.name);
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(found).toEqual(Array.from({ length: 999 }, (_, i) => `t${i}`));
+  });
+
+  it('takes define only as a directive, also after override and export', () => {
+    const text = ['define-env:', 'override define A', 'in-a:', 'endef', 'export define B', 'in-b:', 'endef', 'define', 'in-c:', 'endef', 'after:', 'endef-ish:'].join('\n');
+    expect(discoverMakeTargets(text, 'Makefile', root).map((t) => t.name)).toEqual(['define-env', 'after', 'endef-ish']);
+  });
+
+  it('reads grouped targets without the &', () => {
+    expect(discoverMakeTargets('a b &: c\nd e&: f\n&: g\n', 'Makefile', root).map((t) => t.name)).toEqual(['a', 'b', 'd', 'e']);
+  });
 });
 
 describe('discoverJustRecipes', () => {
@@ -222,6 +257,17 @@ describe('discoverJustRecipes', () => {
     const started = Date.now();
     expect(discoverJustRecipes(`a${' '.repeat(1_000_000)}\nok:\n`, 'justfile', root).map((t) => t.name)).toEqual(['ok']);
     expect(Date.now() - started).toBeLessThan(500);
+  });
+
+  it('reads 200k recipes at once, keeping the first 1000, and repeats once each', () => {
+    const many = Array.from({ length: 200_000 }, (_, i) => `r${i}:`).join('\n');
+    const repeated = Array.from({ length: 200_000 }, (_, i) => `r${i % 999}:`).join('\n');
+    const started = Date.now();
+    const found = discoverJustRecipes(many, 'justfile', root).map((t) => t.name);
+    const once = discoverJustRecipes(repeated, 'justfile', root).map((t) => t.name);
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(found).toEqual(Array.from({ length: MAX_TASKS_PER_FILE }, (_, i) => `r${i}`));
+    expect(once).toEqual(Array.from({ length: 999 }, (_, i) => `r${i}`));
   });
 });
 

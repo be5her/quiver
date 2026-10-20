@@ -135,12 +135,19 @@ export async function readTask(ws: WorkspaceApi, taskId: string): Promise<Runner
   return parsed.data;
 }
 
+/**
+ * Whether a path relative to a folder (`path.relative(folder, p)`) leaves it: `..` or `../x`, or another drive. A
+ * folder named `..cache` inside it does not. The runner's one test for this, for saved, started and discovered paths.
+ */
+export function leavesFolder(back: string): boolean {
+  return back === '..' || back.startsWith(`..${path.sep}`) || path.isAbsolute(back);
+}
+
 /** A path inside the workspace folder; one that climbs out of it is refused. */
 function insideWorkspace(ws: WorkspaceApi, rel: string): string {
   const root = path.resolve(ws.path);
   const abs = path.resolve(root, rel || '.');
-  const back = path.relative(root, abs);
-  if (back.startsWith('..') || path.isAbsolute(back)) throw new QuiverError('INVALID_INPUT', `${rel} is outside the workspace folder`);
+  if (leavesFolder(path.relative(root, abs))) throw new QuiverError('INVALID_INPUT', `${rel} is outside the workspace folder`);
   return abs;
 }
 

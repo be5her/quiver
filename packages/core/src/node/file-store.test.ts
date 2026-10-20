@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FileStore, collectionOf } from './file-store';
 
 const dirs: string[] = [];
@@ -101,6 +101,30 @@ describe('FileStore external changes', () => {
     await fs.writeFile(path.join(root, 'collections', 'c.json'), JSON.stringify({ id: 'c', name: 'new folder' }));
     await until(() => changes.includes('collections'));
     expect((await store.list('collections')).map((r) => r.id)).toEqual(['c']);
+  });
+});
+
+describe('FileStore item files', () => {
+  it('leaves out an item whose id does not name its file, so edits and deletes of that id stick', async () => {
+    const { store, root } = await tempStore();
+    await store.put('runner', { id: 'b', command: 'echo safe' });
+    // A committed file claiming to be `b`, and one with an id no file could be saved as.
+    await fs.writeFile(path.join(root, 'runner', 'z.json'), JSON.stringify({ id: 'b', command: 'echo hostile' }));
+    await fs.writeFile(path.join(root, 'runner', 'y.json'), JSON.stringify({ id: '../y', command: 'echo hostile' }));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await store.reload('runner');
+      expect(await store.list('runner')).toEqual([{ id: 'b', command: 'echo safe' }]);
+      await store.put('runner', { id: 'b', command: 'echo edited' });
+      store.invalidate('runner');
+      expect(await store.get('runner', 'b')).toEqual({ id: 'b', command: 'echo edited' });
+      expect(await store.remove('runner', 'b')).toBe(true);
+      store.invalidate('runner');
+      expect(await store.list('runner')).toEqual([]);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('z.json'));
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 

@@ -44,6 +44,9 @@ export const MAKEFILES = ['GNUmakefile', 'makefile', 'Makefile'];
 export const JUSTFILES = ['justfile', 'Justfile', '.justfile'];
 export const COMPOSE_FILES = ['compose.yaml', 'compose.yml', 'docker-compose.yml', 'docker-compose.yaml'];
 
+/** The tasks one file gives at most: no one writes more by hand, and a generated file with 300k cannot hold up discovery. */
+export const MAX_TASKS_PER_FILE = 1000;
+
 function join(dir: string, file: string): string {
   return dir ? `${dir}/${file}` : file;
 }
@@ -92,10 +95,24 @@ export function pickPackageManager(packageJson: string | null, files: Iterable<s
   return LOCKFILES.find(([file]) => present.has(file))?.[1] ?? 'npm';
 }
 
-/** The package name of a package.json, or null. */
+/** How long a package name may be as the label of its tasks; the rest is cut. */
+const MAX_LABEL = 100;
+
+/** Control characters, line and paragraph separators and bidirectional overrides, which would garble a task name. */
+// eslint-disable-next-line no-control-regex
+const LABEL_JUNK = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+
+/**
+ * The package name of a package.json as the label of its tasks, or null: without control characters, line breaks or
+ * bidirectional overrides and at most 100 characters, since it goes into the task names agents read.
+ */
 export function packageName(packageJson: string): string | null {
   const name = parseJsonObject(packageJson)?.['name'];
-  return typeof name === 'string' && name ? name : null;
+  if (typeof name !== 'string') return null;
+  let label = name.slice(0, MAX_LABEL * 4).replace(LABEL_JUNK, '').trim().slice(0, MAX_LABEL);
+  // Not half of a character outside the BMP.
+  if (/[\ud800-\udbff]$/.test(label)) label = label.slice(0, -1);
+  return label.trim() || null;
 }
 
 /**
@@ -184,20 +201,28 @@ export function discoverPackageScripts(packageJson: string, pm: PackageManager, 
         const word = shellWord(name);
         return word ? [{ source: 'npm' as const, name: named(place, name), command: `${pm} run ${word}`, cwd: place.cwd, file: join(place.cwd, 'package.json') }] : [];
       })
+      .slice(0, MAX_TASKS_PER_FILE)
   );
 }
 
+/** The start of a `define` block, also as `override define` or `export define`; not a target such as `define-env:`. */
+const DEFINE = /^\s*(?:(?:override|export)\s+)*define(?:\s|$)/;
+const ENDEF = /^\s*endef(?:\s|$)/;
+
 /**
  * The targets of a Makefile that a person would run: explicit targets, not special ones (`.PHONY`), pattern rules
- * (`%.o`), targets built from variables, or variable assignments, and nothing inside `define` blocks.
+ * (`%.o`), targets built from variables, or variable assignments, and nothing inside `define` blocks. Each of grouped
+ * targets (`a b &: c`) counts. At most `MAX_TASKS_PER_FILE`.
  */
 export function discoverMakeTargets(text: string, file: string, place: DiscoverPlace): RunnerDiscoveredTask[] {
-  const targets: string[] = [];
+  // A Set keeps the first order and sees a repeat at once, so a line of 300k targets is read in one pass.
+  const targets = new Set<string>();
   let inDefine = false;
   for (const raw of text.split(/\r?\n/)) {
-    if (/^\s*define\b/.test(raw)) inDefine = true;
+    if (targets.size >= MAX_TASKS_PER_FILE) break;
+    if (DEFINE.test(raw)) inDefine = true;
     if (inDefine) {
-      if (/^\s*endef\b/.test(raw)) inDefine = false;
+      if (ENDEF.test(raw)) inDefine = false;
       continue;
     }
     // Recipe lines start with a tab; comments and directives have no rule colon.
@@ -206,12 +231,16 @@ export function discoverMakeTargets(text: string, file: string, place: DiscoverP
     // could take the same characters as another, so a long line cannot make it backtrack.
     const m = /^([^\s:=#][^:=#]*)::?(?![:=])/.exec(raw);
     if (!m) continue;
-    for (const target of m[1].trim().split(/\s+/)) {
+    // The `&` of grouped targets (`a b &: c`, `a b&: c`) belongs to the colon, not to a target.
+    let head = m[1].trim();
+    if (head.endsWith('&')) head = head.slice(0, -1);
+    for (const target of head.split(/\s+/)) {
       if (!target || target.startsWith('.') || /[%$()]/.test(target) || target.includes('\\')) continue;
-      if (!targets.includes(target)) targets.push(target);
+      targets.add(target);
+      if (targets.size >= MAX_TASKS_PER_FILE) break;
     }
   }
-  return targets.flatMap((target) => {
+  return [...targets].flatMap((target) => {
     const word = shellWord(target);
     return word ? [{ source: 'make' as const, name: named(place, target), command: `make ${word}`, cwd: place.cwd, file: join(place.cwd, file) }] : [];
   });
@@ -220,11 +249,15 @@ export function discoverMakeTargets(text: string, file: string, place: DiscoverP
 /** A just attribute line that makes the next recipe private: `[private]`, or `private` in a list (`[no-cd, private]`). */
 const PRIVATE_ATTRIBUTE = /^\[(?:[^\]]*,)?\s*private\s*[,\]]/;
 
-/** The public recipes of a justfile: not those starting with `_` or marked `[private]`, nor settings, aliases or variables. */
+/**
+ * The public recipes of a justfile: not those starting with `_` or marked `[private]`, nor settings, aliases or
+ * variables. At most `MAX_TASKS_PER_FILE`.
+ */
 export function discoverJustRecipes(text: string, file: string, place: DiscoverPlace): RunnerDiscoveredTask[] {
-  const recipes: string[] = [];
+  const recipes = new Set<string>();
   let hidden = false;
   for (const raw of text.split(/\r?\n/)) {
+    if (recipes.size >= MAX_TASKS_PER_FILE) break;
     // Recipe bodies are indented; blank lines and comments do not end a run of attributes.
     if (/^\s/.test(raw) || !raw.trim() || raw.startsWith('#')) continue;
     if (raw.startsWith('[')) {
@@ -236,9 +269,9 @@ export function discoverJustRecipes(text: string, file: string, place: DiscoverP
     const wasHidden = hidden;
     hidden = false;
     if (!m || wasHidden || m[1].startsWith('_')) continue;
-    if (!recipes.includes(m[1])) recipes.push(m[1]);
+    recipes.add(m[1]);
   }
-  return recipes.map((recipe) => ({ source: 'just' as const, name: named(place, recipe), command: `just ${recipe}`, cwd: place.cwd, file: join(place.cwd, file) }));
+  return [...recipes].map((recipe) => ({ source: 'just' as const, name: named(place, recipe), command: `just ${recipe}`, cwd: place.cwd, file: join(place.cwd, file) }));
 }
 
 /** A service name as Docker Compose allows it; anything else is left out rather than quoted. */
@@ -254,7 +287,7 @@ export function discoverComposeServices(text: string, file: string, place: Disco
   }
   const services = doc && typeof doc === 'object' ? (doc as { services?: unknown }).services : undefined;
   if (!services || typeof services !== 'object' || Array.isArray(services)) return [];
-  return Object.keys(services).filter((service) => COMPOSE_SERVICE.test(service)).map((service) => ({
+  return Object.keys(services).filter((service) => COMPOSE_SERVICE.test(service)).slice(0, MAX_TASKS_PER_FILE).map((service) => ({
     source: 'compose' as const,
     name: named(place, service),
     command: `docker compose -f ${file} up ${service}`,

@@ -74,7 +74,14 @@ export class FileStore implements StoreApi {
     for (const file of files) {
       if (!file.endsWith('.json')) continue;
       const item = await readJson<Entity>(path.join(dir, file));
-      if (item && typeof item.id === 'string') map.set(item.id, item);
+      if (!item || typeof item.id !== 'string') continue;
+      // put and remove act on `<id>.json`, so an item in a file of another name (a committed `z.json` saying it is
+      // `b`) would win over `b.json` on every load: edits and deletes of `b` would not stick. Such files are left out.
+      if (!SAFE_NAME.test(item.id) || file !== `${item.id}.json`) {
+        console.warn(`[quiver] ignored .quiver/${collection}/${file}: its id ${JSON.stringify(item.id.slice(0, 100))} is not its file name`);
+        continue;
+      }
+      map.set(item.id, item);
     }
     this.cache.set(collection, map);
     return map;

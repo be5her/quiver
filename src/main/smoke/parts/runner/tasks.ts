@@ -39,6 +39,11 @@ const FILES: Record<string, string> = {
   Makefile: '.PHONY: test\nCC := gcc\ntest: build\n\techo test\nlint:\n\techo lint\n%.o: %.c\n',
   justfile: 'set shell := ["bash", "-c"]\nalias s := serve\nserve port="8080":\n  echo {{port}}\n_hidden:\n  echo no\n',
   'compose.yaml': 'services:\n  db:\n    image: postgres\n  cache:\n    image: redis\n',
+  // Committed tasks: one, a file of another name claiming its id (which would win on every load, so edits and deletes
+  // would not stick), and one with an id no file could be saved as.
+  '.quiver/runner/shadowed.json': JSON.stringify({ id: 'shadowed', name: 'shadowed', command: 'echo original' }),
+  '.quiver/runner/zz.json': JSON.stringify({ id: 'shadowed', name: 'shadowed', command: 'echo hostile' }),
+  '.quiver/runner/climb.json': JSON.stringify({ id: '../climb', name: 'climb', command: 'echo climb' }),
 };
 
 const section: SmokeSection = async ({ host, check, run, ws, rpc, toolNames }) => {
@@ -86,6 +91,15 @@ const section: SmokeSection = async ({ host, check, run, ws, rpc, toolNames }) =
     check('runner: discovery leaves out script names a shell would read as commands', !found.some((d) => /say|injected|PATH/.test(d.name)), keys);
     check('runner: discovery reads nothing outside the workspace (patterns with .., a linked folder) and skips files over 2 MB', linked && !found.some((d) => /leak|outside|huge/.test(d.name) || d.cwd.startsWith('..')), { linked, keys });
 
+    // ---------- committed task files ----------
+    const committed = await run<RunnerTask[]>('runner.task.list', {}, fx.id);
+    check('runner: a task file whose id is not its file name is left out', committed.map((t) => `${t.id} ${t.command}`).join() === 'shadowed echo original', committed);
+    const climb = await run('runner.proc.start', { taskId: '../climb' }, fx.id).then(() => '', (err: Error) => err.message);
+    check('runner: start refuses a task id that is not a file name as invalid input', /Invalid input/i.test(climb), climb);
+    const shadowGone = await run<{ deleted: boolean }>('runner.task.delete', { id: 'shadowed' }, fx.id);
+    const shadowBack = await run('runner.task.get', { id: 'shadowed' }, fx.id).then(() => 'found', (err: Error) => err.message);
+    check('runner: a deleted task stays deleted when another file claims its id', shadowGone.deleted && /No saved task/.test(shadowBack), shadowBack);
+
     // ---------- save, list, get ----------
     const hello = found.find((d) => d.name === 'hello')!;
     const saved = await run<RunnerTask>('runner.task.save', { task: hello }, fx.id);
@@ -100,6 +114,18 @@ const section: SmokeSection = async ({ host, check, run, ws, rpc, toolNames }) =
     const resaved = await run<RunnerTask>('runner.task.save', { task: hello }, fx.id);
     check('runner: saving a discovered script again keeps the name the task was given', resaved.id === saved.id && resaved.name === 'Say hello', resaved);
     await run('runner.task.save', { task: { id: saved.id, name: 'hello' } }, fx.id);
+    // A saved task that adds env to the script is not what saving the plain script asks for.
+    await run('runner.task.save', { task: { id: saved.id, env: [{ id: 'o', key: 'NODE_OPTIONS', value: '--require ./x.js', enabled: true }] } }, fx.id);
+    const unmarked = (await run<Discovered[]>('runner.task.discover', {}, fx.id)).find((d) => d.name === 'hello');
+    const plain = await run<RunnerTask>('runner.task.save', { task: hello }, fx.id);
+    const withEnv = await run<RunnerTask>('runner.task.get', { id: saved.id }, fx.id);
+    check(
+      'runner: saving a discovered script does not take over a saved task with env entries; it gets a task of its own',
+      unmarked?.taskId === undefined && plain.id !== saved.id && plain.env.length === 0 && withEnv.env.length === 1,
+      { unmarked, plain, withEnv },
+    );
+    await run('runner.task.delete', { id: plain.id }, fx.id);
+    await run('runner.task.save', { task: { id: saved.id, env: [] } }, fx.id);
     const two = found.find((d) => d.name === 'two words')!;
     const [first, second] = await Promise.all([run<RunnerTask>('runner.task.save', { task: two }, fx.id), run<RunnerTask>('runner.task.save', { task: two }, fx.id)]);
     check('runner: two saves of one discovered script at once give one task', first.id === second.id && first.command === 'npm run "two words"', [first, second]);

@@ -1,4 +1,4 @@
-import { promises as fs } from 'node:fs';
+import { constants as fsConstants, promises as fs } from 'node:fs';
 import path from 'node:path';
 import {
   COMPOSE_FILES,
@@ -17,6 +17,7 @@ import {
   type RunnerDiscoveredTask,
   type WorkspaceApi,
 } from '@quiver/core';
+import { leavesFolder } from './supervisor';
 
 // Finds the scripts a project already has: package.json scripts (the root's and its workspace packages'), Makefile
 // targets, justfile recipes and compose services, in the workspace folder and in every workspace package folder.
@@ -40,25 +41,54 @@ interface Scan {
   dirsListed: number;
 }
 
+/** Whether a resolved path is inside the workspace folder. */
+function insideReal(scan: Scan, real: string): boolean {
+  return !leavesFolder(path.relative(scan.realRoot, real));
+}
+
 /** Whether a path, once its symlinks and junctions are resolved, is inside the workspace folder; false when it is missing. */
 async function inside(scan: Scan, file: string): Promise<boolean> {
   try {
-    const back = path.relative(scan.realRoot, await fs.realpath(file));
-    return back !== '..' && !back.startsWith(`..${path.sep}`) && !path.isAbsolute(back);
+    return insideReal(scan, await fs.realpath(file));
   } catch {
     return false;
   }
 }
 
-/** A file inside the workspace folder and no bigger than `MAX_FILE_BYTES`, or null. */
+/** Opened without waiting for a writer when the path is a named pipe (POSIX); the handle's stat then turns it down. */
+const READ_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0);
+
+/**
+ * A file inside the workspace folder and no bigger than `MAX_FILE_BYTES`, or null. Everything is checked on the open
+ * handle, so the file cannot be swapped between the checks and the read: it is a regular file, it is the file its
+ * resolved path inside the workspace names (same device and inode), and at most `MAX_FILE_BYTES + 1` bytes are read
+ * from it, so one that grows after the size check is still skipped.
+ */
 async function readText(scan: Scan, file: string): Promise<string | null> {
+  let handle: fs.FileHandle | undefined;
   try {
-    if (!(await inside(scan, file))) return null;
-    const stat = await fs.stat(file);
-    if (!stat.isFile() || stat.size > MAX_FILE_BYTES) return null;
-    return await fs.readFile(file, 'utf8');
+    handle = await fs.open(file, READ_FLAGS);
+    const stat = await handle.stat({ bigint: true });
+    if (!stat.isFile() || stat.size > BigInt(MAX_FILE_BYTES)) return null;
+    const real = await fs.realpath(file);
+    const named = await fs.stat(real, { bigint: true });
+    if (!insideReal(scan, real) || named.dev !== stat.dev || named.ino !== stat.ino) return null;
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for (;;) {
+      const room = MAX_FILE_BYTES + 1 - total;
+      if (room <= 0) break;
+      const chunk = Buffer.alloc(Math.min(room, Math.max(Number(stat.size) + 1 - total, 64 * 1024)));
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, total);
+      if (!bytesRead) break;
+      chunks.push(chunk.subarray(0, bytesRead));
+      total += bytesRead;
+    }
+    return total > MAX_FILE_BYTES ? null : Buffer.concat(chunks, total).toString('utf8');
   } catch {
     return null;
+  } finally {
+    await handle?.close().catch(() => undefined);
   }
 }
 
