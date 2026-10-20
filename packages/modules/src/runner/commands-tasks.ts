@@ -1,7 +1,7 @@
 import { defineCommand, type CommandContext, type CommandDefinition, type WorkspaceApi } from '@quiver/core';
 import { z } from 'zod';
 import { discoverTasks } from './discover';
-import { RunnerTaskDraftSchema, deleteTask, discoveredRows, getTask, listTasks, saveTask } from './tasks';
+import { RunnerTaskDraftSchema, TaskIdSchema, deleteTask, discoveredRows, getTask, listTasks, saveTask } from './tasks';
 
 // Lane R1: saved and discovered tasks. Saved tasks are committed under `.quiver/runner/<id>.json`.
 
@@ -22,7 +22,7 @@ const taskDiscover = defineCommand({
   id: 'runner.task.discover',
   title: 'Discover tasks',
   description:
-    'Finds the scripts the project already defines: package.json scripts (run with npm, pnpm or yarn, picked from the packageManager field or the lockfile; lifecycle scripts and pre/post hooks left out), Makefile targets, justfile recipes and docker compose services, in the workspace folder and in every workspace package (package.json `workspaces`, pnpm-workspace.yaml). Each has `source`, `name`, `command`, `cwd`, `file`, and `taskId` when it is saved already. Pass one to runner.task.save as `task` to save it.',
+    'Finds the scripts the project already defines: package.json scripts (run with npm, pnpm or yarn, picked from the packageManager field or the lockfile; lifecycle scripts and pre/post hooks left out), Makefile targets, justfile recipes and docker compose services, in the workspace folder and in every workspace package (package.json `workspaces`, pnpm-workspace.yaml). Only reads files inside the workspace folder and runs nothing; a name a shell would read as something else is left out. Each has `source`, `name`, `command`, `cwd`, `file`, and `taskId` when it is saved already. Pass one to runner.task.save as `task` to save it.',
   scope: 'workspace',
   input: z.object({}),
   handler: async (_input, ctx) => discoveredRows(ws(ctx), await discoverTasks(ws(ctx))),
@@ -33,7 +33,7 @@ const taskGet = defineCommand({
   title: 'Get saved task',
   description: 'Returns one saved task.',
   scope: 'workspace',
-  input: z.object({ id: z.string().describe('Id of a saved task (see runner.task.list)') }),
+  input: z.object({ id: TaskIdSchema.describe('Id of a saved task (see runner.task.list)') }),
   handler: async ({ id }, ctx) => getTask(ws(ctx), id),
 });
 
@@ -41,7 +41,7 @@ const taskSave = defineCommand({
   id: 'runner.task.save',
   title: 'Save task',
   description:
-    'Creates a task (omit id) or updates one (the fields given replace the saved ones; an empty readyPattern or envProfile, or a null port, clears it). A task runs `command` through the shell in `cwd` (relative to the workspace). `readyPattern` is a case-insensitive regular expression on the output that marks it ready; `port` marks it ready once it accepts connections. A discovered task (runner.task.discover) can be passed as it is; saving the same discovered script again updates its task.',
+    'Creates a task (omit id) or updates one (the fields given replace the saved ones; an empty readyPattern or envProfile, or a null port, clears it). A task runs `command` through the shell in `cwd` (relative to the workspace). `readyPattern` is a case-insensitive regular expression on the output that marks it ready; `port` marks it ready once it accepts connections. `env` entries are committed with the project in plain text, like the rest of the task: put secrets in an env file and name it with `envProfile` instead. A task without a name is named after its command. A discovered task (runner.task.discover) can be passed as it is; saving the same discovered script again updates its task and keeps its name.',
   scope: 'workspace',
   mutating: true,
   input: z.object({ task: RunnerTaskDraftSchema }),
@@ -51,10 +51,11 @@ const taskSave = defineCommand({
 const taskDelete = defineCommand({
   id: 'runner.task.delete',
   title: 'Delete task',
-  description: 'Deletes a saved task. A task that is running (or waiting to restart) is stopped first, with every process it started; `stopped` is that run.',
+  description:
+    'Deletes a saved task. A task that is running, waiting to restart or being started is stopped too, with every process it started (its file goes first, so nothing starts it again meanwhile); `stopped` is that run.',
   scope: 'workspace',
   mutating: true,
-  input: z.object({ id: z.string() }),
+  input: z.object({ id: TaskIdSchema }),
   handler: async ({ id }, ctx) => deleteTask(ctx, id),
 });
 

@@ -15,12 +15,22 @@ interface Discovered {
 
 // A project with one of everything discovery reads: a root package.json with npm workspaces and a lockfile, a
 // workspace package, a Makefile, a justfile and a compose file. In a folder of its own, so the files do not show up
-// in the other parts' workspace.
+// in the other parts' workspace. Some of it is hostile, the way a cloned project can be: workspace patterns that climb
+// out of the folder, a package that is a junction to a folder outside it, script names a shell would read as
+// commands, and a justfile too big to read.
 const FILES: Record<string, string> = {
   'package.json': JSON.stringify({
     name: 'fixture',
-    workspaces: ['packages/*', '!packages/ignored'],
-    scripts: { hello: 'echo hello-from-npm', prebuild: 'echo pre', build: 'echo build', postinstall: 'echo nope' },
+    workspaces: ['packages/*', '!packages/ignored', '../*', 'packages\\..\\..\\*', 'packages/linked'],
+    scripts: {
+      hello: 'echo hello-from-npm',
+      prebuild: 'echo pre',
+      build: 'echo build',
+      postinstall: 'echo nope',
+      'two words': 'echo two',
+      'say "hi" & echo injected': 'echo hi',
+      'x%PATH%': 'echo path',
+    },
   }),
   'package-lock.json': '{}',
   'packages/web/package.json': JSON.stringify({ name: '@fixture/web', scripts: { dev: 'echo dev' } }),
@@ -37,6 +47,16 @@ const section: SmokeSection = async ({ host, check, run, ws, rpc, toolNames }) =
     await fs.mkdir(path.dirname(path.join(folder, file)), { recursive: true });
     await fs.writeFile(path.join(folder, file), text);
   }
+  // Over the 2 MB discovery reads, with a recipe at the top that must not show up.
+  await fs.writeFile(path.join(folder, 'packages', 'web', 'justfile'), `huge:\n  echo huge\n${'#'.repeat(3 * 1024 * 1024)}\n`);
+  // A project next to the fixture, which `../*` would reach and `packages/linked` links to (a junction on Windows).
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-runner-outside-'));
+  await fs.writeFile(path.join(outside, 'package.json'), JSON.stringify({ name: 'outside', scripts: { leak: 'echo leak' } }));
+  await fs.writeFile(path.join(outside, 'Makefile'), 'leak-make:\n\techo leak\n');
+  const linked = await fs.symlink(outside, path.join(folder, 'packages', 'linked'), 'junction').then(
+    () => true,
+    () => false,
+  );
   const fx = await run<WorkspaceInfo>('workspace.open', { path: folder }, null);
   const events: HostEventMessage<'runner.changed'>['payload'][] = [];
   const emit = host.emit.bind(host);
@@ -53,6 +73,7 @@ const section: SmokeSection = async ({ host, check, run, ws, rpc, toolNames }) =
     const expected = [
       'npm hello | npm run hello |  | package.json',
       'npm build | npm run build |  | package.json',
+      'npm two words | npm run "two words" |  | package.json',
       'make test | make test |  | Makefile',
       'make lint | make lint |  | Makefile',
       'just serve | just serve |  | justfile',
@@ -62,6 +83,8 @@ const section: SmokeSection = async ({ host, check, run, ws, rpc, toolNames }) =
     ];
     check('runner: discovery finds npm scripts, Makefile targets, just recipes, compose services and workspace packages', JSON.stringify(keys) === JSON.stringify(expected), keys);
     check('runner: discovery leaves out hooks, lifecycle scripts, private recipes, excluded packages and node_modules', !found.some((d) => /prebuild|postinstall|_hidden|skip|dep|alias|%/.test(d.name)), keys);
+    check('runner: discovery leaves out script names a shell would read as commands', !found.some((d) => /say|injected|PATH/.test(d.name)), keys);
+    check('runner: discovery reads nothing outside the workspace (patterns with .., a linked folder) and skips files over 2 MB', linked && !found.some((d) => /leak|outside|huge/.test(d.name) || d.cwd.startsWith('..')), { linked, keys });
 
     // ---------- save, list, get ----------
     const hello = found.find((d) => d.name === 'hello')!;
@@ -73,6 +96,16 @@ const section: SmokeSection = async ({ host, check, run, ws, rpc, toolNames }) =
     check('runner: saving the same discovered script again keeps one task', twice.id === saved.id);
     const marked = (await run<Discovered[]>('runner.task.discover', {}, fx.id)).find((d) => d.name === 'hello');
     check('runner: discovery marks a script that is saved already', marked?.taskId === saved.id, marked);
+    await run('runner.task.save', { task: { id: saved.id, name: 'Say hello' } }, fx.id);
+    const resaved = await run<RunnerTask>('runner.task.save', { task: hello }, fx.id);
+    check('runner: saving a discovered script again keeps the name the task was given', resaved.id === saved.id && resaved.name === 'Say hello', resaved);
+    await run('runner.task.save', { task: { id: saved.id, name: 'hello' } }, fx.id);
+    const two = found.find((d) => d.name === 'two words')!;
+    const [first, second] = await Promise.all([run<RunnerTask>('runner.task.save', { task: two }, fx.id), run<RunnerTask>('runner.task.save', { task: two }, fx.id)]);
+    check('runner: two saves of one discovered script at once give one task', first.id === second.id && first.command === 'npm run "two words"', [first, second]);
+    const unnamed = await run<RunnerTask>('runner.task.save', { task: { command: 'echo unnamed' } }, fx.id);
+    check('runner: a task saved without a name is named after its command', unnamed.name === 'echo unnamed', unnamed);
+    for (const id of [first.id, unnamed.id]) await run('runner.task.delete', { id }, fx.id);
     const custom = await run<RunnerTask>('runner.task.save', { task: { name: 'Web dev', command: 'echo dev', cwd: 'packages\\web', readyPattern: 'ready', port: 4321, autoRestart: true } }, fx.id);
     check('runner: a task saves with its folder, ready pattern, port and auto restart', custom.source === 'saved' && custom.cwd === 'packages/web' && custom.port === 4321 && custom.readyPattern === 'ready' && custom.autoRestart, custom);
     const cleared = await run<RunnerTask>('runner.task.save', { task: { id: custom.id, port: null, readyPattern: '' } }, fx.id);
@@ -92,6 +125,9 @@ const section: SmokeSection = async ({ host, check, run, ws, rpc, toolNames }) =
     let missing = '';
     await run('runner.task.get', { id: 'no-such-task' }, fx.id).catch((err: Error) => (missing = err.message));
     check('runner: get of a task that is not saved fails', missing.includes('no-such-task'), missing);
+    let unsafe = '';
+    await run('runner.task.delete', { id: '../runner' }, fx.id).catch((err: Error) => (unsafe = err.message));
+    check('runner: delete refuses an id that is not a file name as invalid input', /Invalid input/i.test(unsafe), unsafe);
     check('runner: saves are announced as runner.changed tasks', events.some((e) => e.reason === 'tasks' && e.workspaceId === fx.id && e.taskId === saved.id));
 
     // ---------- a saved task starts ----------
@@ -113,7 +149,10 @@ const section: SmokeSection = async ({ host, check, run, ws, rpc, toolNames }) =
   } finally {
     host.emit = emit;
     await run('workspace.close', { id: fx.id }, null).catch(() => undefined);
+    // The junction goes first, so removing the fixture cannot reach into the folder it links to.
+    await fs.unlink(path.join(folder, 'packages', 'linked')).catch(() => undefined);
     await fs.rm(folder, { recursive: true, force: true }).catch(() => undefined);
+    await fs.rm(outside, { recursive: true, force: true }).catch(() => undefined);
   }
 
   // ---------- agents over MCP, in the shared workspace ----------

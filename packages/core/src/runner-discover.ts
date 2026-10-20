@@ -52,9 +52,21 @@ function named(place: DiscoverPlace, name: string): string {
   return place.label ? `${place.label}: ${name}` : name;
 }
 
-/** A word for the shell: kept as it is when it is plain, else in double quotes. */
-export function shellWord(word: string): string {
-  return /^[\w:.@/+=-]+$/.test(word) ? word : `"${word.replace(/(["\\$`])/g, '\\$1')}"`;
+/**
+ * What a POSIX shell or cmd.exe still acts on inside double quotes (`$`, a backquote, `%`, `!`), what neither can put
+ * inside them the same way (`"`, `\`), and control characters such as a line break.
+ */
+const UNQUOTABLE = /["\\$`%!\u0000-\u001f\u007f]/;
+
+/**
+ * A word for the shell, the same for sh and cmd.exe since a saved task is committed and may run on either: kept as it
+ * is when it is plain, in double quotes when nothing in it means anything there, else null (the name is left out
+ * rather than run as something else). One starting with `-` is null too: the program would read it as an option.
+ */
+export function shellWord(word: string): string | null {
+  if (!word || word.startsWith('-')) return null;
+  if (/^[\w:.@/+=-]+$/.test(word)) return word;
+  return UNQUOTABLE.test(word) ? null : `"${word}"`;
 }
 
 function parseJsonObject(text: string): Record<string, unknown> | null {
@@ -87,8 +99,25 @@ export function packageName(packageJson: string): string | null {
 }
 
 /**
+ * A workspace pattern with forward slashes and without empty or `.` segments, a run of `**` as one, or null when it
+ * would leave the workspace folder: a `..` segment, a leading slash or a drive letter. The `!` of an exclusion stays.
+ */
+export function normalizePattern(pattern: string): string | null {
+  let p = pattern.trim();
+  const negated = p.startsWith('!');
+  if (negated) p = p.slice(1).trim();
+  p = p.replace(/\\/g, '/');
+  if (p.startsWith('/') || /^[A-Za-z]:/.test(p)) return null;
+  const segments = p.split('/').filter((s) => s && s !== '.');
+  if (!segments.length || segments.includes('..')) return null;
+  const collapsed = segments.filter((s, i) => !(s === '**' && segments[i - 1] === '**'));
+  return (negated ? '!' : '') + collapsed.join('/');
+}
+
+/**
  * The workspace package patterns: `workspaces` in package.json (a list, or `{ packages }` as yarn 1 allows) and
- * `packages` in pnpm-workspace.yaml. Negated patterns (`!packages/old`) come back with their `!`.
+ * `packages` in pnpm-workspace.yaml, normalized (`normalizePattern`), without those that would leave the workspace.
+ * Negated patterns (`!packages/old`) come back with their `!`.
  */
 export function workspacePatterns(packageJson: string | null, pnpmWorkspaceYaml?: string | null): string[] {
   const out: string[] = [];
@@ -104,26 +133,58 @@ export function workspacePatterns(packageJson: string | null, pnpmWorkspaceYaml?
       // A broken pnpm-workspace.yaml lists no packages.
     }
   }
-  return [...new Set(out.map((p) => p.trim().replace(/^\.\//, '').replace(/\/+$/, '')).filter(Boolean))];
+  return [...new Set(out.map(normalizePattern).filter((p): p is string => p !== null))];
 }
 
-/** Whether a folder name matches one segment of a workspace pattern (`*` for any run of characters, `?` for one). */
+/**
+ * Whether a folder name matches one segment of a workspace pattern (`*` for any run of characters, `?` for one).
+ * Matched by walking both strings, going back only to the last `*`, so no pattern from a cloned project can make it
+ * backtrack for ages the way a regular expression of `.*.*.*` would.
+ */
 export function matchSegment(pattern: string, name: string): boolean {
-  const source = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
-  return new RegExp(`^${source}$`).test(name);
+  let p = 0;
+  let n = 0;
+  let star = -1;
+  let mark = 0;
+  while (n < name.length) {
+    if (p < pattern.length && (pattern[p] === '?' || pattern[p] === name[n])) {
+      p++;
+      n++;
+    } else if (p < pattern.length && pattern[p] === '*') {
+      star = p++;
+      mark = n;
+    } else if (star !== -1) {
+      p = star + 1;
+      n = ++mark;
+    } else {
+      return false;
+    }
+  }
+  while (pattern[p] === '*') p++;
+  return p === pattern.length;
 }
 
 /** The scripts of a package.json as tasks, run with the workspace's package manager in the package's folder. */
 export function discoverPackageScripts(packageJson: string, pm: PackageManager, place: DiscoverPlace): RunnerDiscoveredTask[] {
   const scripts = parseJsonObject(packageJson)?.['scripts'];
-  if (!scripts || typeof scripts !== 'object') return [];
+  if (!scripts || typeof scripts !== 'object' || Array.isArray(scripts)) return [];
   const names = Object.keys(scripts).filter((name) => typeof (scripts as Record<string, unknown>)[name] === 'string');
   const has = new Set(names);
-  return names
-    .filter((name) => !LIFECYCLE.has(name))
-    // A pre or post hook of another script runs with it, not on its own.
-    .filter((name) => !(/^(pre|post)./.test(name) && has.has(name.replace(/^(pre|post)/, ''))))
-    .map((name) => ({ source: 'npm' as const, name: named(place, name), command: `${pm} run ${shellWord(name)}`, cwd: place.cwd, file: join(place.cwd, 'package.json') }));
+  const hookOf = (name: string) => /^(?:pre|post)(.+)$/.exec(name)?.[1];
+  return (
+    names
+      .filter((name) => !LIFECYCLE.has(name))
+      // A pre or post hook of another script runs with it, not on its own: `prebuild` when there is a `build`, the way
+      // npm itself decides (so `preview` is a hook when there is a `view` script, and a script of its own otherwise).
+      .filter((name) => {
+        const base = hookOf(name);
+        return base === undefined || !has.has(base);
+      })
+      .flatMap((name) => {
+        const word = shellWord(name);
+        return word ? [{ source: 'npm' as const, name: named(place, name), command: `${pm} run ${word}`, cwd: place.cwd, file: join(place.cwd, 'package.json') }] : [];
+      })
+  );
 }
 
 /**
@@ -141,15 +202,23 @@ export function discoverMakeTargets(text: string, file: string, place: DiscoverP
     }
     // Recipe lines start with a tab; comments and directives have no rule colon.
     if (raw.startsWith('\t') || /^\s*#/.test(raw)) continue;
-    const m = /^([^\s:=#][^:=#]*?)\s*::?(?![:=])/.exec(raw);
+    // Everything up to the first `:`, `=` or `#`, which must be the rule's colon. One greedy run and no part that
+    // could take the same characters as another, so a long line cannot make it backtrack.
+    const m = /^([^\s:=#][^:=#]*)::?(?![:=])/.exec(raw);
     if (!m) continue;
     for (const target of m[1].trim().split(/\s+/)) {
       if (!target || target.startsWith('.') || /[%$()]/.test(target) || target.includes('\\')) continue;
       if (!targets.includes(target)) targets.push(target);
     }
   }
-  return targets.map((target) => ({ source: 'make' as const, name: named(place, target), command: `make ${shellWord(target)}`, cwd: place.cwd, file: join(place.cwd, file) }));
+  return targets.flatMap((target) => {
+    const word = shellWord(target);
+    return word ? [{ source: 'make' as const, name: named(place, target), command: `make ${word}`, cwd: place.cwd, file: join(place.cwd, file) }] : [];
+  });
 }
+
+/** A just attribute line that makes the next recipe private: `[private]`, or `private` in a list (`[no-cd, private]`). */
+const PRIVATE_ATTRIBUTE = /^\[(?:[^\]]*,)?\s*private\s*[,\]]/;
 
 /** The public recipes of a justfile: not those starting with `_` or marked `[private]`, nor settings, aliases or variables. */
 export function discoverJustRecipes(text: string, file: string, place: DiscoverPlace): RunnerDiscoveredTask[] {
@@ -159,10 +228,11 @@ export function discoverJustRecipes(text: string, file: string, place: DiscoverP
     // Recipe bodies are indented; blank lines and comments do not end a run of attributes.
     if (/^\s/.test(raw) || !raw.trim() || raw.startsWith('#')) continue;
     if (raw.startsWith('[')) {
-      if (/\bprivate\b/.test(raw)) hidden = true;
+      if (PRIVATE_ATTRIBUTE.test(raw)) hidden = true;
       continue;
     }
-    const m = /^@?([A-Za-z_][\w-]*)(?:\s+[^:]*)?:(?![=])/.exec(raw);
+    // The name, then parameters after one blank (the rest up to the colon), so no two parts can take the same blanks.
+    const m = /^@?([A-Za-z_][\w-]*)(?:\s[^:]*)?:(?![=])/.exec(raw);
     const wasHidden = hidden;
     hidden = false;
     if (!m || wasHidden || m[1].startsWith('_')) continue;
@@ -170,6 +240,9 @@ export function discoverJustRecipes(text: string, file: string, place: DiscoverP
   }
   return recipes.map((recipe) => ({ source: 'just' as const, name: named(place, recipe), command: `just ${recipe}`, cwd: place.cwd, file: join(place.cwd, file) }));
 }
+
+/** A service name as Docker Compose allows it; anything else is left out rather than quoted. */
+const COMPOSE_SERVICE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
 
 /** The services of a compose file, each brought up with `docker compose -f <file> up <service>`. */
 export function discoverComposeServices(text: string, file: string, place: DiscoverPlace): RunnerDiscoveredTask[] {
@@ -181,10 +254,10 @@ export function discoverComposeServices(text: string, file: string, place: Disco
   }
   const services = doc && typeof doc === 'object' ? (doc as { services?: unknown }).services : undefined;
   if (!services || typeof services !== 'object' || Array.isArray(services)) return [];
-  return Object.keys(services).map((service) => ({
+  return Object.keys(services).filter((service) => COMPOSE_SERVICE.test(service)).map((service) => ({
     source: 'compose' as const,
     name: named(place, service),
-    command: `docker compose -f ${shellWord(file)} up ${shellWord(service)}`,
+    command: `docker compose -f ${file} up ${service}`,
     cwd: place.cwd,
     file: join(place.cwd, file),
   }));

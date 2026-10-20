@@ -5,6 +5,7 @@ import {
   discoverMakeTargets,
   discoverPackageScripts,
   matchSegment,
+  normalizePattern,
   packageName,
   pickPackageManager,
   shellWord,
@@ -39,15 +40,42 @@ describe('workspacePatterns', () => {
     expect(workspacePatterns('{', 'packages: [')).toEqual([]);
     expect(workspacePatterns(null, null)).toEqual([]);
   });
+
+  it('normalizes patterns and leaves out those that would leave the workspace folder', () => {
+    const patterns = ['..\\..\\x', '../x', '/etc', 'C:/x', 'c:x', 'a/../b', '!../x', '.', 'packages//web/', 'apps\\*', '**/**/pkg', '! ./old', '..foo/*'];
+    expect(workspacePatterns(JSON.stringify({ workspaces: patterns }))).toEqual(['packages/web', 'apps/*', '**/pkg', '!old', '..foo/*']);
+  });
+});
+
+describe('normalizePattern', () => {
+  it('keeps the ! of an exclusion and refuses climbing out', () => {
+    expect(normalizePattern('!packages/./old/')).toBe('!packages/old');
+    expect(normalizePattern('!..\\x')).toBeNull();
+    expect(normalizePattern('a/**/**/**/b')).toBe('a/**/b');
+    expect(normalizePattern('  ')).toBeNull();
+  });
 });
 
 describe('matchSegment', () => {
   it('matches * and ? and nothing else as a wildcard', () => {
     expect(matchSegment('*', 'core')).toBe(true);
+    expect(matchSegment('*', '')).toBe(true);
     expect(matchSegment('app-*', 'app-web')).toBe(true);
     expect(matchSegment('app-*', 'lib-web')).toBe(false);
     expect(matchSegment('v?', 'v2')).toBe(true);
+    expect(matchSegment('v?', 'v')).toBe(false);
     expect(matchSegment('a.b', 'axb')).toBe(false);
+    expect(matchSegment('*-web-*', 'my-web-app')).toBe(true);
+    expect(matchSegment('*a*b', 'xaxbxb')).toBe(true);
+    expect(matchSegment('*a*b', 'xaxbxc')).toBe(false);
+    expect(matchSegment('(x)[y]', '(x)[y]')).toBe(true);
+  });
+
+  it('answers at once for patterns a regular expression would backtrack on', () => {
+    const started = Date.now();
+    expect(matchSegment(`${'*'.repeat(40)}z`, 'a'.repeat(255))).toBe(false);
+    expect(matchSegment(`${'*a'.repeat(30)}b`, 'a'.repeat(255))).toBe(false);
+    expect(Date.now() - started).toBeLessThan(500);
   });
 });
 
@@ -60,11 +88,16 @@ describe('packageName', () => {
 });
 
 describe('shellWord', () => {
-  it('keeps plain words and quotes the rest', () => {
+  it('keeps plain words and double-quotes those that mean nothing to sh or cmd.exe inside quotes', () => {
     expect(shellWord('build:prod')).toBe('build:prod');
     expect(shellWord('docs/serve')).toBe('docs/serve');
     expect(shellWord('my script')).toBe('"my script"');
-    expect(shellWord('a"b')).toBe('"a\\"b"');
+    expect(shellWord('lint & fix')).toBe('"lint & fix"');
+    expect(shellWord("it's (ok) | <yes>; ^")).toBe(`"it's (ok) | <yes>; ^"`);
+  });
+
+  it('gives null for what either shell would read differently, and for options', () => {
+    for (const word of ['a"b', 'a"&calc&"', '100%', 'x%OS%y', '$HOME', 'a`id`', 'a\\b', 'wow!', 'a\nb', 'a\tb', '', '-x', '--eval=1']) expect(shellWord(word)).toBeNull();
   });
 });
 
@@ -93,6 +126,17 @@ describe('discoverPackageScripts', () => {
   it('gives nothing without scripts or for broken json', () => {
     expect(discoverPackageScripts('{"name":"x"}', 'npm', root)).toEqual([]);
     expect(discoverPackageScripts('{', 'npm', root)).toEqual([]);
+    expect(discoverPackageScripts('{"scripts":["echo x"]}', 'npm', root)).toEqual([]);
+  });
+
+  it('treats only pre<script> and post<script> of a script that exists as hooks', () => {
+    const scripts = { view: 'x', preview: 'x', postcss: 'x', pre: 'x', post: 'x', prepost: 'x' };
+    expect(discoverPackageScripts(JSON.stringify({ scripts }), 'npm', root).map((t) => t.name)).toEqual(['view', 'postcss', 'pre', 'post']);
+  });
+
+  it('leaves out scripts whose names a shell would read as something else', () => {
+    const scripts = { ok: 'x', 'say "hi"': 'x', 'a"&calc&"': 'x', 'x%PATH%': 'x', 'two\nlines': 'x', '--flag': 'x', 'and & or': 'x' };
+    expect(discoverPackageScripts(JSON.stringify({ scripts }), 'npm', root).map((t) => t.command)).toEqual(['npm run ok', 'npm run "and & or"']);
   });
 });
 
@@ -126,6 +170,16 @@ describe('discoverMakeTargets', () => {
       { source: 'make', name: 'web: serve', command: 'make serve', cwd: 'web', file: 'web/makefile' },
     ]);
   });
+
+  it('leaves out targets a shell would read as something else', () => {
+    expect(discoverMakeTargets('a"&calc&": x\nok:\n-flag:\nwith%:\n', 'Makefile', root).map((t) => t.command)).toEqual(['make ok']);
+  });
+
+  it('reads a very long line without backtracking', () => {
+    const started = Date.now();
+    expect(discoverMakeTargets(`a${' '.repeat(1_000_000)}\nok:\n`, 'Makefile', root).map((t) => t.name)).toEqual(['ok']);
+    expect(Date.now() - started).toBeLessThan(500);
+  });
 });
 
 describe('discoverJustRecipes', () => {
@@ -158,6 +212,17 @@ describe('discoverJustRecipes', () => {
       ['build', 'test', 'serve-docs', 'clean'].map((name) => ({ source: 'just', name, command: `just ${name}`, cwd: '', file: 'justfile' })),
     );
   });
+
+  it('takes private only as an attribute of its own', () => {
+    const text = ['[no-cd, private]', 'a:', '[ private ]', 'b:', '[doc("not private")]', 'c:', "[group('private-tools')]", 'd:'].join('\n');
+    expect(discoverJustRecipes(text, 'justfile', root).map((t) => t.name)).toEqual(['c', 'd']);
+  });
+
+  it('reads a very long line without backtracking', () => {
+    const started = Date.now();
+    expect(discoverJustRecipes(`a${' '.repeat(1_000_000)}\nok:\n`, 'justfile', root).map((t) => t.name)).toEqual(['ok']);
+    expect(Date.now() - started).toBeLessThan(500);
+  });
 });
 
 describe('discoverComposeServices', () => {
@@ -173,5 +238,10 @@ describe('discoverComposeServices', () => {
     expect(discoverComposeServices('version: "3"\n', 'docker-compose.yml', root)).toEqual([]);
     expect(discoverComposeServices('services: [', 'docker-compose.yml', root)).toEqual([]);
     expect(discoverComposeServices('services:\n  - a\n', 'docker-compose.yml', root)).toEqual([]);
+  });
+
+  it('leaves out service names Docker Compose would refuse', () => {
+    const text = 'services:\n  web.1_a-b: {}\n  \'x" & calc & "\': {}\n  "%PATH%": {}\n  -opt: {}\n';
+    expect(discoverComposeServices(text, 'compose.yaml', root).map((t) => t.command)).toEqual(['docker compose -f compose.yaml up web.1_a-b']);
   });
 });
