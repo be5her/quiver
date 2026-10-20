@@ -33,12 +33,9 @@ async function management({ host, check, run, ws, folder, rpc }: SmokeContext): 
     const tested = await run<{ ok: boolean; message: string }>('queues.connection.test', { id: conn.id }, ws.id);
     check('rabbit: test reports the management API and the AMQP failure apart', !tested.ok && tested.message.includes('management API reachable (RabbitMQ 4.2.0-fake)') && tested.message.includes('AMQP failed'), tested);
 
-    const pasted = await run<{ ok: boolean; message: string }>(
-      'queues.connection.test',
-      { connection: { ...fields, host: `amqp://${fake.username}:${fake.password}@127.0.0.1` }, secrets: { password: fake.password } },
-      ws.id,
-    );
-    check('rabbit: a pasted amqp:// URL as host is refused rather than connected to', !pasted.ok && pasted.message.includes('plain host name'), pasted);
+    // The schema refuses it before the driver sees it; the driver refuses it too (unit tested).
+    const pasted = await code('queues.connection.test', { connection: { ...fields, host: `amqp://${fake.username}:${fake.password}@127.0.0.1` }, secrets: { password: fake.password } });
+    check('rabbit: a pasted amqp:// URL as host is refused rather than connected to', pasted === 'INVALID_INPUT', pasted);
     const connDir = path.join(folder, '.quiver', 'queues');
     const filesBefore = (await fs.readdir(connDir).catch(() => [] as string[])).length;
     const savedPasted = await code('queues.connection.save', { connection: { name: 'smoke rabbit pasted', ...fields, host: 'amqp://user:pa55-in-url@127.0.0.1' }, secrets: {} });

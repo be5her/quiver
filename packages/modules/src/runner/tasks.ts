@@ -33,7 +33,8 @@ export const RunnerTaskDraftSchema = z.object({
   autoRestart: z.boolean().optional(),
   readyPattern: z.string().optional(),
   port: z.number().int().min(1).max(65535).nullable().optional(),
-  source: RunnerTaskSchema.shape.source.optional(),
+  // Without the schema's 'saved' default: an update that leaves source out (a rename) must keep a discovered task's.
+  source: RunnerTaskSchema.shape.source.unwrap().optional(),
 });
 export type RunnerTaskDraft = z.infer<typeof RunnerTaskDraftSchema>;
 
