@@ -87,12 +87,13 @@ const show = defineCommand({
 const fetch = defineCommand({
   id: 'git.fetch',
   title: 'Git fetch',
-  description: "Downloads new commits and branches from a remote (default: the current branch's remote) and prunes deleted remote branches. Only remote-tracking refs change; local branches and files are untouched.",
+  description:
+    "Downloads new commits and branches from a remote (default: the current branch's remote) and prunes deleted remote branches. Only remote-tracking refs change; local branches and files are untouched. remote must be one of the repository's configured remotes, not a URL or a folder.",
   scope: 'workspace',
   input: GitRemoteInputSchema.pick({ remote: true }),
   handler: async ({ remote }, ctx): Promise<local.GitRemoteResult> => {
     const ws = workspace(ctx);
-    const result = await local.remoteOp(ws.path, ['fetch', '--prune', ...(remote ? [remote] : [])]);
+    const result = await local.remoteOp(ws.path, ['fetch', '--prune', ...(remote ? [remote] : [])], remote);
     changed(ctx, ws, 'branches', 'status');
     return result;
   },
@@ -190,7 +191,7 @@ const pull = defineCommand({
   handler: async ({ remote, branch }, ctx): Promise<local.GitRemoteResult> => {
     const ws = workspace(ctx);
     if (branch && !remote) throw new QuiverError('INVALID_INPUT', 'A pull of a branch needs its remote too');
-    const result = await local.remoteOp(ws.path, ['pull', '--no-edit', ...(remote ? [remote] : []), ...(branch ? [branch] : [])]);
+    const result = await local.remoteOp(ws.path, ['pull', '--no-edit', ...(remote ? [remote] : []), ...(branch ? [branch] : [])], remote);
     changed(ctx, ws, 'status', 'branches');
     return result;
   },
@@ -215,7 +216,7 @@ const push = defineCommand({
     }
     if (ref && !target) throw new QuiverError('INVALID_INPUT', 'A push of a branch needs its remote too');
     const args = ['push', ...(setUpstream ? ['--set-upstream'] : []), ...(forceWithLease ? ['--force-with-lease'] : []), ...(target ? [target] : []), ...(ref ? [ref] : [])];
-    const result = await local.remoteOp(ws.path, args);
+    const result = await local.remoteOp(ws.path, args, target);
     changed(ctx, ws, 'status', 'branches');
     return result;
   },

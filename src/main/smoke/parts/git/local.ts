@@ -119,6 +119,18 @@ const section: SmokeSection = async (t) => {
     const optionLike = await failure(() => run('git.log', { ref: '--output=pwned.txt' }, ws!.id));
     check('git: a ref that looks like an option is refused', optionLike.length > 0 && !(await fs.stat(path.join(folder, 'pwned.txt')).catch(() => null)), optionLike);
 
+    // A remote must be one the repository has: git would otherwise fetch from any URL or folder into FETCH_HEAD.
+    const bare = await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-smoke-git-remote-'));
+    await sh('clone', '-q', '--bare', folder, bare);
+    const urlRemote = await failure(() => run('git.fetch', { remote: 'https://example.com/other/repo.git' }, ws!.id));
+    const folderRemote = await failure(() => run('git.fetch', { remote: bare }, ws!.id));
+    check('git: fetch refuses a URL or a folder as the remote', urlRemote.includes('not a remote') && folderRemote.includes('not a remote') && !(await fs.stat(path.join(folder, '.git', 'FETCH_HEAD')).catch(() => null)), { urlRemote, folderRemote });
+    await sh('remote', 'add', 'origin', bare);
+    const fetched = await run<{ output: string; status: GitStatus }>('git.fetch', { remote: 'origin' }, ws.id);
+    const remoteBranches = await run<GitBranch[]>('git.branch.list', {}, ws.id);
+    check('git: fetch of a configured remote brings its branches in', fetched.status.branch === 'feat/x' && remoteBranches.some((b) => b.remote && b.name === 'origin/main'), remoteBranches.map((b) => b.name));
+    await fs.rm(bare, { recursive: true, force: true }).catch(() => {});
+
     // Agents: reads go through, anything that changes the repository is refused until mutations are allowed.
     const mcpUrl = `http://127.0.0.1:${mcpPort}/mcp?workspace=${encodeURIComponent(folder)}`;
     const rpc = async (name: string, args: unknown): Promise<RpcResult> => {

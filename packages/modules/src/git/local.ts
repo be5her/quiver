@@ -165,8 +165,21 @@ export interface GitRemoteResult {
   status: GitStatus;
 }
 
-export async function remoteOp(cwd: string, args: string[]): Promise<GitRemoteResult> {
+/**
+ * The remote as one of the repository's configured remotes, or a clear error. Git also takes a URL or a folder here
+ * (`git fetch https://…`, `git fetch ../other`), which would let a read-only fetch pull any repository the user's
+ * credentials or disk can reach into FETCH_HEAD for `git.log` and `git.show` to read.
+ */
+export async function requireRemote(cwd: string, remote: string): Promise<string> {
+  const names = (await git(cwd, ['remote'])).stdout.split(/\r?\n/).filter(Boolean);
+  if (names.includes(remote)) return remote;
+  throw new QuiverError('INVALID_INPUT', names.length ? `${remote} is not a remote of this repository (${names.join(', ')})` : `${remote} is not a remote of this repository, which has none`);
+}
+
+/** Run a fetch, pull or push; `remote`, when the caller named one, must be a configured remote (see `requireRemote`). */
+export async function remoteOp(cwd: string, args: string[], remote?: string): Promise<GitRemoteResult> {
   await repoDirs(cwd);
+  if (remote !== undefined) await requireRemote(cwd, remote);
   const result = await git(cwd, args, { timeoutMs: NETWORK_TIMEOUT_MS });
   return { output: [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join('\n'), status: await status(cwd) };
 }
