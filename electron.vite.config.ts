@@ -4,7 +4,7 @@ import { defineConfig } from 'electron-vite';
  * Runtime dependencies that stay outside the main bundle and are resolved from node_modules.
  * Keep in sync with the root package.json "dependencies" so packaging picks them up.
  */
-const externalRuntimeDeps = ['undici', 'zod', 'mysql2', /^mysql2\//, 'ioredis', 'graphql', /^graphql\//, 'yaml', 'electron-updater', /^node:/, /^@modelcontextprotocol\/sdk/];
+const externalRuntimeDeps = ['undici', 'zod', 'mysql2', /^mysql2\//, 'ioredis', 'graphql', /^graphql\//, 'yaml', 'electron-updater', /^node:/, /^@modelcontextprotocol\/sdk/, 'kafkajs', 'amqplib', /^@aws-sdk\//, /^@smithy\//];
 /** Dev-only: the smoke test's fake WebSocket server. Loaded lazily, never shipped. */
 const externalDevDeps = ['ws'];
 

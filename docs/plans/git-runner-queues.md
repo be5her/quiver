@@ -12,8 +12,10 @@ Only the scaffold (W0) touches these files. Later lanes never edit them.
 | `tsconfig.node.json` | `include` list |
 | `src/main/smoke/index.ts` | part imports |
 | `packages/core/src/types.ts` | `HostEvents` |
-| `packages/core/src/index.ts` | exports |
+| `packages/core/src/index.ts` | exports; the scaffold already exports the four empty core modules the lanes fill (`git-parse`, `gh-parse`, `runner-discover`, `ring-buffer`) |
 | `package.json`, `package-lock.json` | new deps |
+| `electron.vite.config.ts` | `externalRuntimeDeps`: the new deps stay outside the main bundle |
+| `src/main/smoke/fixtures.ts` | the shared fakes; a lane's own fake (`fake-gh.ts`, `fake-sqs.ts`) is started and stopped by its smoke section instead |
 | `README.md` | module table |
 
 ---
@@ -34,9 +36,10 @@ Branch `feat/scaffold-git-runner-queues`, label `enhancement`.
    - `'runner.changed': { workspaceId; reason: 'tasks' | 'state' | 'output'; taskId?: string }`
    - `'queues.changed': { workspaceId; reason: 'connections' | 'messages' | 'consumer'; consumerId?: string }`
 6. **Dependencies, all added now** so no lane touches the lockfile:
-   - `kafkajs` (pure JS, no native build for Electron)
+   - `kafkajs` (pure JS, no native build for Electron; see decision 4)
    - `@aws-sdk/client-sqs`
    - `amqplib` (it ships its own types)
+   All three are listed in `electron.vite.config.ts` as external, so a lane importing one does not get it bundled into the main process.
 7. **Smoke:** `parts/git.ts`, `parts/runner.ts`, `parts/queues.ts`, registered in `index.ts`. Each part runs its section files in order through `runSections`; they start empty:
    - `parts/git/{local,pr,ui}.ts`
    - `parts/runner/{tasks,proc,ui}.ts`
@@ -85,7 +88,7 @@ Each lane: its own branch and PR, owns only the files listed, adds unit tests in
   - `git.pr.comment` (mutating)
   - `git.pr.open` (browser)
 - **Polling:** every 60s while the view is open, emitting `git.changed{prs}`.
-- **Smoke:** `fake-gh.ts`, modelled on `fake-tsh.ts`.
+- **Smoke:** `fake-gh.ts`, modelled on `fake-tsh.ts`, but written to a temp dir and cleaned up by `smoke/parts/git/pr.ts` itself (its `after` hook), not by `fixtures.ts`.
 
 ### R1: Runner tasks (`feat/runner-tasks`)
 - **Owns:** `runner/tasks.ts`, `runner/discover.ts`, `runner/commands-tasks.ts`, `core/src/runner-discover.ts` (+test), `smoke/parts/runner/tasks.ts`
@@ -154,12 +157,13 @@ Each lane: its own branch and PR, owns only the files listed, adds unit tests in
   - auth through an AWS profile or an access key (`host.secrets`); the endpoint can be overridden for LocalStack
   - peek uses visibility timeout 0, so messages are not consumed
   - supports FIFO queues and DLQ redrive info
-- **Fake:** `fake-sqs.ts` is an HTTP JSON fake covering the SQS API subset used.
+- **Fake:** `fake-sqs.ts` is an HTTP JSON fake covering the SQS API subset used, started and closed by `smoke/parts/queues/sqs.ts` itself, not by `fixtures.ts`.
 
 ### Q3: RabbitMQ driver (`feat/queues-rabbit`)
 - **Owns:** `queues/drivers/rabbit.ts`, `smoke/parts/queues/rabbit.ts`
 - **Driver:**
   - AMQP through `amqplib`, plus the management HTTP API for listings and counts
+  - the connection holds `host`, `port`, `vhost`, `ssl` and `username`; the password is the secret `password`. The driver builds the URL itself: a pasted `amqp://user:pass@host` is never stored
   - peek = `get` + `nack(requeue)`, and the UI warns that this changes redelivery flags
 - **Smoke:** runs only when `QUIVER_SMOKE_RABBIT` is set; the management-API parts run against a small fake.
 
@@ -217,3 +221,4 @@ That is 12 PRs. At most 7 agents work at the same time.
 1. GitHub goes through the `gh` CLI with the user's own sign-in. Quiver stores no token.
 2. Kafka and RabbitMQ smoke checks that need a real broker are opt-in (`QUIVER_SMOKE_KAFKA`, `QUIVER_SMOKE_RABBIT`). CI does not start brokers.
 3. Agents may start, stop and restart runner processes, but those commands are gated as mutating.
+4. Kafka goes through `kafkajs` although it has had no release since 2023: it is pure JavaScript, so it needs no native rebuild against Electron, which rules out `@confluentinc/kafka-javascript` (librdkafka). The `QueueDriver` interface keeps the client behind `queues/drivers/kafka.ts`, so swapping it later touches one file and no UI.

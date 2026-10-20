@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess, type StdioOptions } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { statSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 export interface SpawnTreeOptions {
@@ -27,10 +28,10 @@ export function spawnTree(program: string, args: readonly string[], options: Spa
   });
 }
 
-/** Stop a process spawned with `spawnTree` and everything it started. */
+/** Stop a process spawned with `spawnTree` and everything it started. Nothing happens once it has exited, so a pid reused by another process is never signalled. */
 export function killTree(child: ChildProcess, signal: NodeJS.Signals = 'SIGTERM'): void {
   const pid = child.pid;
-  if (pid === undefined || child.exitCode !== null) return;
+  if (pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
   if (process.platform === 'win32') {
     const taskkill = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe');
     try {
@@ -51,41 +52,109 @@ export function killTree(child: ChildProcess, signal: NodeJS.Signals = 'SIGTERM'
   }
 }
 
-/** The full path of a program found on PATH (with PATHEXT on Windows), or null. */
+function isFile(file: string): boolean {
+  try {
+    return statSync(file).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The full path of a program found on PATH, or null. On Windows the PATHEXT extensions are tried first, then the
+ * name as given (`git.exe`). On macOS and Linux the usual install spots a GUI app launched from the Dock does not
+ * have on its PATH (`/usr/local/bin`, Homebrew, `~/.local/bin`) are searched too. Directories never match.
+ */
 export function whichSync(program: string, env: NodeJS.ProcessEnv = process.env): string | null {
+  if (path.isAbsolute(program)) return isFile(program) ? program : null;
   const dirs = (env.PATH ?? env.Path ?? '').split(path.delimiter).filter(Boolean);
-  const exts = process.platform === 'win32' ? ['', ...(env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean)] : [''];
-  if (path.isAbsolute(program)) return existsSync(program) ? program : null;
+  if (process.platform !== 'win32') {
+    for (const extra of ['/usr/local/bin', '/opt/homebrew/bin', path.join(os.homedir(), '.local', 'bin')]) if (!dirs.includes(extra)) dirs.push(extra);
+  }
+  const exts = process.platform === 'win32' ? [...(env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean), ''] : [''];
   for (const dir of dirs) {
     for (const ext of exts) {
       const candidate = path.join(dir, program + ext);
-      if (existsSync(candidate)) return candidate;
+      if (isFile(candidate)) return candidate;
     }
   }
   return null;
 }
 
-/** Run a program to completion and collect its output. Never throws for a non-zero exit; `code` is null when it could not start. */
-export function runToEnd(program: string, args: readonly string[], options: SpawnTreeOptions & { input?: string; timeoutMs?: number } = {}): Promise<{ code: number | null; stdout: string; stderr: string; error?: string }> {
+export interface RunToEndOptions extends SpawnTreeOptions {
+  /** Written to stdin, which is then closed. Without it stdin is closed from the start. */
+  input?: string;
+  /** Stop the process tree when it runs longer than this; the result then has `timedOut`. */
+  timeoutMs?: number;
+  /** Stop the process tree once stdout and stderr together exceed this many bytes; the result then has `truncated` and holds what arrived before. */
+  maxBytes?: number;
+}
+
+export interface RunToEndResult {
+  /** The exit code; null when the process was killed or could not start. */
+  code: number | null;
+  /** The signal that ended it, when one did. */
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+  /** Killed by `timeoutMs`. */
+  timedOut: boolean;
+  /** Killed by `maxBytes`; the output is what arrived before the limit. */
+  truncated: boolean;
+  /** Why it could not start, when it could not. */
+  error?: string;
+}
+
+/**
+ * Run a program to completion and collect its output. Never throws and never rejects: a non-zero exit is reported in
+ * `code`, a program that could not start in `error`. The input, when any, is written without waiting for the program
+ * to read it; a program that exits first just leaves it unread.
+ */
+export function runToEnd(program: string, args: readonly string[], options: RunToEndOptions = {}): Promise<RunToEndResult> {
   return new Promise((resolve) => {
+    const { input, timeoutMs, maxBytes, ...spawnOptions } = options;
     let child: ChildProcess;
     try {
-      child = spawnTree(program, args, { ...options, stdio: [options.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
+      child = spawnTree(program, args, { ...spawnOptions, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
     } catch (err) {
-      resolve({ code: null, stdout: '', stderr: '', error: (err as Error).message });
+      resolve({ code: null, signal: null, stdout: '', stderr: '', timedOut: false, truncated: false, error: (err as Error).message });
       return;
     }
     const out: Buffer[] = [];
     const err: Buffer[] = [];
-    child.stdout?.on('data', (c: Buffer) => out.push(c));
-    child.stderr?.on('data', (c: Buffer) => err.push(c));
-    const timer = options.timeoutMs ? setTimeout(() => killTree(child), options.timeoutMs) : undefined;
+    let bytes = 0;
+    let timedOut = false;
+    let truncated = false;
     let failed: string | undefined;
+    const collect = (into: Buffer[]) => (chunk: Buffer) => {
+      if (truncated) return;
+      bytes += chunk.length;
+      if (maxBytes !== undefined && bytes > maxBytes) {
+        truncated = true;
+        into.push(chunk.subarray(0, Math.max(0, chunk.length - (bytes - maxBytes))));
+        killTree(child);
+        return;
+      }
+      into.push(chunk);
+    };
+    child.stdout?.on('data', collect(out));
+    child.stderr?.on('data', collect(err));
+    const timer = timeoutMs
+      ? setTimeout(() => {
+          timedOut = true;
+          killTree(child);
+        }, timeoutMs)
+      : undefined;
     child.on('error', (e) => (failed = e.message));
-    child.on('close', (code) => {
+    child.on('close', (code, signal) => {
       if (timer) clearTimeout(timer);
-      resolve({ code: failed ? null : code, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8'), error: failed });
+      resolve({ code: failed ? null : code, signal, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8'), timedOut, truncated, error: failed });
     });
-    if (options.input !== undefined) child.stdin?.end(options.input);
+    if (input !== undefined && child.stdin) {
+      // A program that exits before reading its input makes the write fail (EPIPE, or EOF on Windows). That is not an
+      // error of ours: the exit code says what happened, and an unhandled stream error would take the whole process down.
+      child.stdin.on('error', () => {});
+      child.stdin.end(input);
+    }
   });
 }

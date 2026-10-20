@@ -2,7 +2,8 @@ import { z } from 'zod';
 
 // Queues contract: connections committed under `.quiver/queues/<id>.json`, passwords and keys in
 // `host.secrets`. Every broker is reached through a `QueueDriver`; `memory` is an in-process broker
-// for trying the module out and for the smoke.
+// for trying the module out and for the smoke. The connection never holds a credential: no field
+// takes a URL with `user:password@` in it, so a pasted connection string cannot end up committed.
 
 export const QueueKindSchema = z.enum(['memory', 'kafka', 'sqs', 'rabbit']);
 export type QueueKind = z.infer<typeof QueueKindSchema>;
@@ -18,14 +19,17 @@ export const QueueConnectionSchema = z.object({
   ssl: z.boolean().default(false),
   /** Kafka SASL; the password is a secret. */
   sasl: z.enum(['none', 'plain', 'scram-sha-256', 'scram-sha-512']).default('none'),
+  /** Kafka SASL user and RabbitMQ user; the password for either is the secret `password`. */
   username: z.string().default(''),
-  /** SQS: region, an AWS profile or an access key id (its secret is a secret), and an endpoint for LocalStack. */
+  /** SQS: region, an AWS profile or an access key id (its `secretAccessKey` is a secret), and an endpoint for LocalStack. */
   region: z.string().default(''),
   profile: z.string().default(''),
   accessKeyId: z.string().default(''),
   endpoint: z.string().default(''),
-  /** RabbitMQ: `amqp://host:5672/vhost` and the management API, `http://host:15672`. */
-  url: z.string().default(''),
+  /** RabbitMQ: the AMQP host, port and virtual host (`ssl` picks amqps), and the management API, `http://host:15672`, reached with the same user. */
+  host: z.string().default(''),
+  port: z.number().int().min(1).max(65535).optional(),
+  vhost: z.string().default('/'),
   managementUrl: z.string().default(''),
 });
 export type QueueConnection = z.infer<typeof QueueConnectionSchema>;
