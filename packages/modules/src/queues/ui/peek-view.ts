@@ -96,10 +96,11 @@ export class QueuesPeekView {
       return 'SQS has no read-only peek: messages are received with a zero visibility timeout, and every receive adds to their receive count, which a redrive policy counts towards moving them to the dead-letter queue. Peek reads on a click only.';
     return null;
   });
-  /** Newest first when reading the newest, oldest first otherwise. */
+  /** Newest first when reading the newest, oldest first otherwise: as the shown messages were read, not as the select now says. */
   protected readonly messages = computed(() => {
     const list = this.peek.value() ?? [];
-    return this.from() === 'latest' ? [...list].reverse() : list;
+    const from = this.free() ? this.from() : this.asked()?.from;
+    return from === 'latest' ? [...list].reverse() : list;
   });
   protected readonly summary = computed(() => {
     const list = this.peek.value();

@@ -107,6 +107,9 @@ export interface ProducerPreset {
               <option value="json">JSON</option>
               <option value="text">Text</option>
             </select>
+            @if (cutBody() !== null && cutBody() === c.body) {
+              <span class="text-[11px] text-warning truncate" data-testid="queues-produce-cut">Only the first 64 KB of this message was kept when it was sent; edit it before sending it again.</span>
+            }
             @if (c.format === 'json') {
               <button qButton size="sm" variant="ghost" [icon]="icons.Braces" [disabled]="!c.body.trim()" (click)="pretty()">Format</button>
               @if (jsonError(); as e) {
@@ -146,6 +149,8 @@ export class QueuesProducer {
   protected readonly composerForm = form(this.composer);
   protected readonly sending = signal(false);
   protected readonly lastId = signal<string | null>(null);
+  /** The body loaded from "Sent before" when the history only kept its first 64 KB: sent unedited, it would go out cut. */
+  protected readonly cutBody = signal<string | null>(null);
   protected readonly topic = computed(() => this.kind() === 'kafka' || this.kind() === 'memory');
   /** RabbitMQ `exchange:<name>`: published there with the routing key typed; a queue is reached by its name instead. */
   protected readonly exchangeDestination = computed(() => isRabbitExchange(this.kind(), this.destination()));
@@ -182,6 +187,7 @@ export class QueuesProducer {
     // from (with the queue's name as routing key), since a key of its own would be refused there.
     const rabbitQueue = this.kind() === 'rabbit' && !this.exchangeDestination();
     const from = m.attributes?.['exchange'];
+    this.cutBody.set(null);
     this.composer.set({
       ...EMPTY,
       key: rabbitQueue ? '' : (m.key ?? ''),
@@ -198,6 +204,7 @@ export class QueuesProducer {
     select.value = '';
     if (!entry?.message) return;
     this.load(entry.message);
+    if (entry.message.truncated) this.cutBody.set(entry.message.body);
     this.composer.update((c) => ({ ...c, partition: entry.message?.partition === undefined ? '' : String(entry.message.partition), groupId: entry.message?.groupId ?? '', exchange: entry.message?.exchange ?? '' }));
   }
 
@@ -211,6 +218,7 @@ export class QueuesProducer {
 
   protected reset(): void {
     this.composer.set({ ...EMPTY });
+    this.cutBody.set(null);
     this.lastId.set(null);
   }
 
@@ -222,6 +230,10 @@ export class QueuesProducer {
     for (const h of c.headers) if (h.enabled && h.key.trim()) headers[h.key.trim()] = h.value;
     const partition = Number.parseInt(c.partition, 10);
     const delay = Number.parseInt(c.delaySeconds, 10);
+    if (this.cutBody() === c.body) {
+      this.toasts.notify('This message was cut at 64 KB when it was saved; edit it before sending it again', 'error');
+      return;
+    }
     if (kind === 'sqs' && this.fifo() && !c.groupId.trim()) {
       this.toasts.notify('A FIFO queue needs a message group id', 'error');
       return;

@@ -244,13 +244,13 @@ type View = 'settings' | 'groups';
                       class="font-mono"
                       autocomplete="off"
                       [placeholder]="secretPlaceholder()"
-                      [disabled]="secret().clear"
+                      [disabled]="clearing()"
                       [value]="secret().value"
                       (input)="typeSecret($event)"
                       data-testid="queues-secret"
                     />
                     <div class="flex items-center gap-2 mt-1 min-h-7">
-                      <span class="text-[11px]" [class]="hasSecret() && !secret().clear ? 'text-success' : 'text-muted'" data-testid="queues-secret-state">{{ secretState() }}</span>
+                      <span class="text-[11px]" [class]="hasSecret() && !clearing() ? 'text-success' : 'text-muted'" data-testid="queues-secret-state">{{ secretState() }}</span>
                       @if (hasSecret()) {
                         <label class="flex items-center gap-1 text-[11px] text-muted"><input type="checkbox" qCheckbox [checked]="secret().clear" (change)="clearSecret($event)" data-testid="queues-secret-clear" /> Remove on save</label>
                       }
@@ -342,7 +342,7 @@ export class QueuesConnectionTab implements TabComponent {
     return this.secretName() !== null && (d.kind !== 'kafka' || d.sasl !== 'none');
   });
   /** What was typed or ticked in the box, counted only while the box shows, so a hidden box sends nothing. */
-  private readonly typedSecret = computed(() => (this.secretVisible() ? this.secret() : { value: '', clear: false }));
+  private readonly typedSecret = computed(() => (this.secretVisible() ? { value: this.secret().value, clear: this.clearing() } : { value: '', clear: false }));
   /** Secrets stored for this connection that these settings do not use (another broker's, or Kafka without SASL). */
   protected readonly unused = computed(() => {
     const used = this.secretVisible() ? this.secretName() : null;
@@ -352,9 +352,14 @@ export class QueuesConnectionTab implements TabComponent {
     const name = this.secretName();
     return Boolean(name && this.summary.value()?.secrets.includes(name));
   });
-  protected readonly secretPlaceholder = computed(() => (this.hasSecret() && !this.secret().clear ? '•••••••• (stored, leave blank to keep)' : 'not set'));
+  /**
+   * "Remove on save" counts only while there is a stored secret of this name to remove: after a switch to a broker whose
+   * secret has another name the box would otherwise stay disabled, and the save would remove a secret that is not there.
+   */
+  protected readonly clearing = computed(() => this.secret().clear && this.hasSecret());
+  protected readonly secretPlaceholder = computed(() => (this.hasSecret() && !this.clearing() ? '•••••••• (stored, leave blank to keep)' : 'not set'));
   protected readonly secretState = computed(() => {
-    if (this.secret().clear) return 'Removed when you save';
+    if (this.clearing()) return 'Removed when you save';
     if (this.secret().value) return 'Stored encrypted on this machine when you save';
     return this.hasSecret() ? 'Stored on this machine' : 'Nothing stored on this machine';
   });

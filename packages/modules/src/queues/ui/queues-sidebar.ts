@@ -1,4 +1,4 @@
-import { Component, computed, inject, input } from '@angular/core';
+import { Component, DestroyRef, computed, inject, input } from '@angular/core';
 import type { QueueDestination } from '@quiver/core';
 import { Button, ContextMenu, Icon, IconButton, SectionHeader, Spinner, TreeState, invokeResource } from '@quiver/ui';
 import { ChevronDown, ChevronRight, Ellipsis, Inbox, Plus, RefreshCw } from 'lucide';
@@ -6,6 +6,9 @@ import { DbRow } from '../../db/ui/db-row';
 import { QueuesActions } from './queues-actions';
 import { injectQueuesChanged } from './queues-events';
 import { KIND_BADGE, countOf, describeQueueConnection, destinationWord, kindClass, type QueueConnectionSummary } from './queues-format';
+
+/** How long counts may lag behind a run of produces or purges. */
+const RELOAD_EVERY_MS = 1000;
 
 /** A connection: its kind and name, expanding to its topics or queues with their counts. */
 @Component({
@@ -74,11 +77,25 @@ export class QueuesConnectionNode {
   });
   protected readonly count = countOf;
 
+  /** A listing waiting to be reloaded: at most one a second, since one can cost a call per queue (SQS) or an admin call. */
+  private reloadTimer: ReturnType<typeof setTimeout> | null = null;
+
   constructor() {
     // Counts follow produces, purges, creates and deletes made here; what other clients do shows on Refresh. A tail's
-    // events (four a second while it receives) are left out, so a busy Kafka topic does not cost an admin call each.
+    // events (four a second while it receives) are left out, so a busy Kafka topic does not cost an admin call each, and
+    // a run of produces (an agent sending a hundred) reloads once a second rather than once each.
     injectQueuesChanged((p) => {
-      if (this.open() && p.reason !== 'consumer' && (!p.connectionId || p.connectionId === this.conn().id)) this.destinations.reload();
+      if (!this.open() || p.reason === 'consumer' || (p.connectionId && p.connectionId !== this.conn().id) || this.reloadTimer) return;
+      this.reloadTimer = setTimeout(
+        () => {
+          this.reloadTimer = null;
+          if (this.open()) this.destinations.reload();
+        },
+        p.reason === 'messages' ? RELOAD_EVERY_MS : 0,
+      );
+    });
+    inject(DestroyRef).onDestroy(() => {
+      if (this.reloadTimer) clearTimeout(this.reloadTimer);
     });
   }
 

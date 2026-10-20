@@ -10,10 +10,12 @@ import {
   QueueProduceInputSchema,
   QueueWaitInputSchema,
   QuiverError,
+  SQS_SECRET_BINDING,
   compact,
   defineCommand,
   newId,
   nowIso,
+  sqsSecretBinding,
   type CommandContext,
   type CommandDefinition,
   type HostApi,
@@ -36,6 +38,8 @@ export const QUEUES_COLLECTION = 'queues';
 export const QUEUES_HISTORY_LOG = 'queues-history';
 /** Per machine: `{ [connectionId]: { [secretName]: cipher } }`, encrypted with `host.secrets`. */
 const SECRETS_DOC = 'queues-secrets';
+/** Per machine: `{ [connectionId]: binding }`, what an SQS access key was stored for (`sqsSecretBinding`). */
+const BINDINGS_DOC = 'queues-secret-bindings';
 /** Bytes of a produced body kept in the history. */
 const HISTORY_BODY_LIMIT = 64 * 1024;
 
@@ -94,6 +98,31 @@ async function secretNames(w: WorkspaceApi): Promise<SecretsDoc> {
   return w.store.readLocal<SecretsDoc>(SECRETS_DOC, {});
 }
 
+/** Record (a string) or forget (null) the endpoint and region an SQS connection's access key was stored for. */
+async function writeBinding(w: WorkspaceApi, connectionId: string, binding: string | null): Promise<void> {
+  const doc = await w.store.readLocal<Record<string, string>>(BINDINGS_DOC, {});
+  if (doc[connectionId] === (binding ?? undefined)) return;
+  if (binding) doc[connectionId] = binding;
+  else delete doc[connectionId];
+  await w.store.writeLocal(BINDINGS_DOC, doc);
+}
+
+/**
+ * The secrets an SQS driver call gets, with what its access key was stored for: the driver refuses to sign for another
+ * endpoint or region, so a pulled commit that points the connection elsewhere does not take the key along. A key
+ * stored before bindings existed is bound to where the connection points the first time it is used.
+ */
+async function withBinding(w: WorkspaceApi, c: QueueConnection, secrets: QueueSecrets): Promise<QueueSecrets> {
+  if (c.kind !== 'sqs' || !secrets.secretAccessKey) return secrets;
+  const doc = await w.store.readLocal<Record<string, string>>(BINDINGS_DOC, {});
+  let binding = doc[c.id];
+  if (!binding) {
+    binding = sqsSecretBinding(c);
+    await writeBinding(w, c.id, binding);
+  }
+  return { ...secrets, [SQS_SECRET_BINDING]: binding };
+}
+
 // ---------- connections ----------
 
 async function listConnections(w: WorkspaceApi): Promise<QueueConnectionSummary[]> {
@@ -130,7 +159,8 @@ function driverId(w: WorkspaceApi, connectionId: string): string {
 /** The connection, its driver and its secrets, ready for a driver call; `target` is the connection as the driver gets it (scoped id). */
 async function open(ctx: CommandContext, connectionId: string): Promise<{ connection: QueueConnection; target: QueueConnection; driver: QueueDriver; secrets: QueueSecrets }> {
   const connection = await getConnection(ws(ctx), connectionId);
-  return { connection, target: { ...connection, id: driverId(ws(ctx), connectionId) }, driver: driverFor(connection), secrets: await readSecrets(ws(ctx), ctx.host, connectionId) };
+  const secrets = await withBinding(ws(ctx), connection, await readSecrets(ws(ctx), ctx.host, connectionId));
+  return { connection, target: { ...connection, id: driverId(ws(ctx), connectionId) }, driver: driverFor(connection), secrets };
 }
 
 function unsupported(c: QueueConnection, what: string): never {
@@ -195,6 +225,20 @@ function merge(existing: QueueConnection | undefined, draft: QueueConnectionDraf
   return merged;
 }
 
+/** A connection's settings apart from its name, in a stable order, to tell whether a save changed where or how it connects. */
+function settingsKey(c: QueueConnection): string {
+  const sorted = (v: unknown): unknown =>
+    v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b)).map(([k, x]) => [k, sorted(x)])) : v;
+  const { name: _name, ...rest } = c;
+  return JSON.stringify(sorted(rest));
+}
+
+/** Stop the running consumers of a connection, or of one of its destinations; their buffers stay readable. */
+async function stopConsumers(workspaceId: string, connectionId: string, destination?: string): Promise<void> {
+  const running = consumers.list(workspaceId, connectionId).filter((s) => s.status === 'running' && (destination === undefined || s.destination === destination));
+  await Promise.all(running.map((s) => consumers.get(workspaceId, s.id)).map((l) => (l ? consumers.stop(l) : undefined)));
+}
+
 const ConnectionIdInput = z.object({ id: z.string().describe('Id of a queue connection (see queues.connection.list)') });
 const ConnectionInput = z.object({ connectionId: z.string().describe('Id of a queue connection (see queues.connection.list)') });
 
@@ -220,7 +264,7 @@ const connectionSave = defineCommand({
   id: 'queues.connection.save',
   title: 'Save queue connection',
   description:
-    'Creates or updates a queue connection; omit id to create. Only the fields given change. Kafka uses `brokers` (host:port), `clientId`, `ssl`, `sasl` and `username`; SQS `region`, `profile` or `accessKeyId`, and `endpoint` for LocalStack; RabbitMQ `host`, `port`, `vhost`, `ssl`, `username` and `managementUrl`. Passwords and keys go in `secrets`, never in the connection: URLs with a user or password are refused.',
+    'Creates or updates a queue connection; omit id to create. Only the fields given change. Kafka uses `brokers` (host:port), `clientId`, `ssl`, `sasl` and `username`; SQS `region`, `profile` or `accessKeyId`, and `endpoint` for LocalStack; RabbitMQ `host`, `port`, `vhost`, `ssl`, `username` and `managementUrl`. Passwords and keys go in `secrets`, never in the connection: URLs with a user or password are refused. A change other than the name stops the connection\'s running tails.',
   scope: 'workspace',
   mutating: true,
   input: z.object({ connection: QueueConnectionDraftSchema, secrets: SecretsInput.optional() }),
@@ -229,11 +273,20 @@ const connectionSave = defineCommand({
     const id = connection.id ?? newId();
     const existing = connection.id ? await w.store.get<QueueConnection>(QUEUES_COLLECTION, connection.id) : undefined;
     const merged = merge(existing, connection, id);
-    if (secrets && Object.keys(secrets).length) {
+    const newSecrets = Boolean(secrets && Object.keys(secrets).length);
+    if (newSecrets) {
       if (!ctx.host.secrets.available) throw new QuiverError('NOT_SUPPORTED', 'Secret storage is not available on this machine');
-      await writeSecrets(w, ctx.host, id, secrets);
+      await writeSecrets(w, ctx.host, id, secrets ?? {});
     }
     await w.store.put(QUEUES_COLLECTION, merged);
+    // An access key typed here, or an endpoint or region changed here, is bound to where the connection now points.
+    // A save that leaves them as they are (a rename, say) keeps the binding: an endpoint changed by a pulled commit stays refused.
+    if (merged.kind === 'sqs' && (secrets?.['secretAccessKey'] || !existing || existing.endpoint !== merged.endpoint || existing.region !== merged.region)) {
+      await writeBinding(w, id, sqsSecretBinding(merged));
+    }
+    // A running tail keeps the client it started with, so after a change of host, keys or settings it would go on
+    // reading from where the connection used to point; it is stopped instead (its buffer stays readable). A rename is not a change.
+    if (existing && (newSecrets || settingsKey(existing) !== settingsKey(merged))) await stopConsumers(w.id, id);
     // The store announces the file; the secrets live outside it.
     if (secrets) changed(ctx, 'connections', id);
     return getConnection(w, id);
@@ -254,6 +307,7 @@ const connectionDelete = defineCommand({
     const kind = QueueKindSchema.safeParse(item?.kind);
     await DRIVERS[kind.success ? kind.data : 'memory'].close?.(driverId(w, id));
     await writeSecrets(w, ctx.host, id, Object.fromEntries(Object.keys((await secretNames(w))[id] ?? {}).map((n) => [n, null])));
+    await writeBinding(w, id, null);
     const deleted = await w.store.remove(QUEUES_COLLECTION, id);
     changed(ctx, 'connections', id);
     return { deleted };
@@ -276,7 +330,8 @@ const connectionTest = defineCommand({
     if (!base && !connection) throw new QuiverError('INVALID_INPUT', 'Give id or connection');
     // An unsaved connection gets an id of its own so it never shares a pooled client.
     const target = merge(base, connection ?? {}, base?.id ?? `test-${newId()}`);
-    const stored = base ? await readSecrets(w, ctx.host, base.id) : {};
+    // A saved connection tested as it is goes by its binding like any other call; a draft on top is mutating already.
+    const stored = base ? (connection ? await readSecrets(w, ctx.host, base.id) : await withBinding(w, base, await readSecrets(w, ctx.host, base.id))) : {};
     const merged: QueueSecrets = { ...stored };
     for (const [name, value] of Object.entries(secrets ?? {})) {
       if (value) merged[name] = value;
@@ -354,7 +409,7 @@ const destinationCreate = defineCommand({
 const destinationDelete = defineCommand({
   id: 'queues.destination.delete',
   title: 'Delete topic or queue',
-  description: 'Deletes a topic or queue together with its messages.',
+  description: 'Deletes a topic or queue together with its messages, and stops its live tails.',
   scope: 'workspace',
   mutating: true,
   input: QueueDestinationInputSchema,
@@ -362,6 +417,8 @@ const destinationDelete = defineCommand({
     const { connection, target, driver, secrets } = await open(ctx, connectionId);
     if (!driver.remove) unsupported(connection, 'delete destinations');
     await driver.remove(target, secrets, destination);
+    // A RabbitMQ tail reads through bindings copied from the queue and would outlive it; every tail of it stops here.
+    await stopConsumers(ws(ctx).id, connectionId, destination);
     await record(ctx, connection, { action: 'delete', destination });
     changed(ctx, 'connections', connectionId, destination);
     return { deleted: true };

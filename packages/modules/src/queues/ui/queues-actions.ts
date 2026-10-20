@@ -19,21 +19,29 @@ export class QueuesActions {
     return untracked(this.app.scope);
   }
 
+  /**
+   * The workspace on screen, taken before a command is awaited: the user may switch to another checkout of the project
+   * meanwhile, which shares connection ids, and the tabs to close or open belong to the one the command ran in.
+   */
+  private here(): { scope: string; workspaceId: string | null } {
+    return { scope: this.scope(), workspaceId: untracked(this.app.activeWorkspaceId) };
+  }
+
   /** Open (or focus) a connection's settings. */
   openConnectionTab(conn: Pick<ConnRef, 'id' | 'name'>): void {
     this.tabs.openTab(this.scope(), { type: 'queues.connection', title: conn.name, data: { id: conn.id } }, { singletonKey: `queues.connection:${conn.id}` });
   }
 
   /** Open (or focus) a topic or queue on a view: its messages, the producer, the live tail or the group lag. */
-  openDestination(conn: Pick<ConnRef, 'id'>, destination: string, view?: string): void {
+  openDestination(conn: Pick<ConnRef, 'id'>, destination: string, view?: string, scope = this.scope()): void {
     const id = `${conn.id}:${destination}`;
     const tab = this.tabs.openTab(
-      this.scope(),
+      scope,
       { type: 'queues.destination', title: destination, data: { id, connectionId: conn.id, destination, view, nonce: Date.now() } },
       { singletonKey: `queues.destination:${id}` },
     );
     // A tab that was already open keeps its data unless asked for another view.
-    if (view) this.tabs.updateTab(this.scope(), tab.id, { data: { ...tab.data, view, nonce: Date.now() } });
+    if (view) this.tabs.updateTab(scope, tab.id, { data: { ...tab.data, view, nonce: Date.now() } });
   }
 
   async createConnection(kind?: QueueKind): Promise<void> {
@@ -79,9 +87,10 @@ export class QueuesActions {
       }))
     )
       return false;
+    const { scope, workspaceId } = this.here();
     try {
-      await this.host.invoke('queues.connection.delete', { id: conn.id });
-      this.tabs.closeWhere(this.scope(), (t) => (t.type === 'queues.connection' && t.data?.['id'] === conn.id) || (t.type === 'queues.destination' && t.data?.['connectionId'] === conn.id));
+      await this.host.invoke('queues.connection.delete', { id: conn.id }, workspaceId);
+      this.tabs.closeWhere(scope, (t) => (t.type === 'queues.connection' && t.data?.['id'] === conn.id) || (t.type === 'queues.destination' && t.data?.['connectionId'] === conn.id));
       return true;
     } catch (err) {
       this.toasts.error(err);
@@ -128,10 +137,11 @@ export class QueuesActions {
       name = await this.dialogs.prompt({ title, label: 'Name', placeholder, confirmLabel: 'Create' });
     }
     if (!name?.trim()) return;
+    const { scope, workspaceId } = this.here();
     try {
-      const created = await this.host.invoke<QueueDestination>('queues.destination.create', { connectionId: conn.id, destination: name.trim(), ...options });
+      const created = await this.host.invoke<QueueDestination>('queues.destination.create', { connectionId: conn.id, destination: name.trim(), ...options }, workspaceId);
       this.tree.expand(`queues/${conn.id}`);
-      this.openDestination(conn, created.name);
+      this.openDestination(conn, created.name, undefined, scope);
     } catch (err) {
       this.toasts.error(err);
     }
@@ -170,10 +180,11 @@ export class QueuesActions {
       }))
     )
       return false;
+    const { scope, workspaceId } = this.here();
     try {
-      await this.host.invoke('queues.destination.delete', { connectionId: conn.id, destination });
+      await this.host.invoke('queues.destination.delete', { connectionId: conn.id, destination }, workspaceId);
       const id = `${conn.id}:${destination}`;
-      this.tabs.closeWhere(this.scope(), (t) => t.type === 'queues.destination' && t.data?.['id'] === id);
+      this.tabs.closeWhere(scope, (t) => t.type === 'queues.destination' && t.data?.['id'] === id);
       return true;
     } catch (err) {
       this.toasts.error(err);

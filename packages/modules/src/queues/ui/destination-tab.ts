@@ -1,6 +1,6 @@
-import { Component, computed, inject, input, linkedSignal, signal, untracked } from '@angular/core';
+import { Component, DestroyRef, computed, inject, input, linkedSignal, signal, untracked } from '@angular/core';
 import type { QueueDestination, QueueMessage } from '@quiver/core';
-import { Button, Icon, Segment, Segmented, Spinner, invokeResource, type Tab, type TabComponent } from '@quiver/ui';
+import { Button, HostBridge, Icon, Segment, Segmented, Spinner, TabsState, invokeResource, type Tab, type TabComponent } from '@quiver/ui';
 import { Eraser, Inbox, RefreshCw, Trash2 } from 'lucide';
 import { QueuesGroupLag } from './group-lag';
 import { QueuesLiveTail } from './live-tail';
@@ -81,6 +81,8 @@ const VIEWS: View[] = ['messages', 'produce', 'tail', 'groups'];
 export class QueuesDestinationTab implements TabComponent {
   protected readonly actions = inject(QueuesActions);
   private readonly tails = inject(QueuesTails);
+  private readonly tabsState = inject(TabsState);
+  private readonly host = inject(HostBridge);
 
   readonly tab = input.required<Tab>();
   readonly scope = input.required<string>();
@@ -139,6 +141,15 @@ export class QueuesDestinationTab implements TabComponent {
   constructor() {
     injectQueuesChanged((p) => {
       if (p.reason !== 'consumer' && concernsDestination(p, this.connectionId(), this.destination())) this.info.reload();
+    });
+    // A tail held for this tab while its component was gone (the tab showed an error instead, or its workspace was off
+    // screen) has nobody to stop it once the tab closes; the live tail stops its own when it is still there.
+    inject(DestroyRef).onDestroy(() => {
+      const scope = untracked(this.scope);
+      const tabId = untracked(this.tab).id;
+      if (this.tabsState.scope(scope).tabs.some((t) => t.id === tabId)) return;
+      const held = this.tails.take(`${scope}/${tabId}`);
+      if (held) void this.host.invoke('queues.consumer.stop', { consumerId: held, forget: true }).catch(() => {});
     });
   }
 
