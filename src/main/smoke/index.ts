@@ -9,18 +9,21 @@ import { freePort, type PartHooks, type RpcResult, type SmokeContext, type Smoke
 import api from './parts/api';
 import db from './parts/db';
 import env from './parts/env';
+import git from './parts/git';
 import logs from './parts/logs';
 import mcp from './parts/mcp';
 import metabase from './parts/metabase';
 import mock from './parts/mock';
+import queues from './parts/queues';
 import realtime from './parts/realtime';
+import runner from './parts/runner';
 import shell from './parts/shell';
 import teleport from './parts/teleport';
 import todo from './parts/todo';
 import tools from './parts/tools';
 
 /** Every part, in the order they run. A full run is all of them; `npm run smoke -- db mock` picks some. */
-export const PARTS: SmokePart[] = [api, tools, db, teleport, mock, realtime, mcp, env, todo, logs, metabase, shell];
+export const PARTS: SmokePart[] = [api, tools, db, teleport, mock, realtime, mcp, env, todo, logs, metabase, git, runner, queues, shell];
 
 type Phase = 'host' | 'renderer' | 'ui' | 'after';
 

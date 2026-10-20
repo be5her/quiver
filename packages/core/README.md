@@ -2,7 +2,7 @@
 
 The engine, with no Electron or UI framework in it: the command registry (`defineCommand`, `defineModule`, the mutating gate), the models every module shares, variable resolution, the file store behind `.quiver/`, the colour palettes, and small pure helpers (arrays, activity bar layout, JSON formatting that keeps numbers as written, relative times). Everything here is unit-tested with vitest (`npm test`); if a piece of logic can be written without I/O, it belongs here with a test beside it.
 
-`src/index.ts` is the pure entry point, safe to import from the renderer. `src/node/` holds the Node-only parts: the workspace manager, the file store, the global config store and the JWT validation behind `tools.jwt.verify`.
+`src/index.ts` is the pure entry point, safe to import from the renderer. `src/node/` holds the Node-only parts: the workspace manager, the file store, the global config store, the JWT validation behind `tools.jwt.verify`, and the child process helpers (`spawnTree`, `killTree`, `whichSync`, `runToEnd`) the git, gh, runner and teleport code starts programs with: a run can be stopped as a whole tree, times out and caps its output on request, never rejects, and survives a program that exits before reading its input.
 
 ## Storage
 

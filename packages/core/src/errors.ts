@@ -20,6 +20,8 @@ export type QuiverErrorCode =
   | 'QUERY_CANCELLED'
   /** A row edit matched a number of rows other than one; the transaction was rolled back. */
   | 'CONFLICT'
+  /** The target cannot do this, e.g. a queue broker with no purge, or a driver not built yet. */
+  | 'NOT_SUPPORTED'
   | 'INTERNAL';
 
 export interface ErrorPayload {
