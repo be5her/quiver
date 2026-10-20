@@ -54,3 +54,4 @@ export * from './history-response';
 export * from './network';
 export * from './queues-kafka';
 export * from './queues-messages';
+export * from './queues-sqs';
