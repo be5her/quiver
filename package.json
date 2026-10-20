@@ -32,10 +32,13 @@
     "release:plan": "node scripts/release/plan.mjs stable"
   },
   "dependencies": {
+    "@aws-sdk/client-sqs": "^3.1153.0",
     "@modelcontextprotocol/sdk": "^1.30.1",
+    "amqplib": "^2.2.0",
     "electron-updater": "^6.8.9",
     "graphql": "^17.0.2",
     "ioredis": "^6.0.0",
+    "kafkajs": "^2.2.4",
     "mysql2": "^3.24.4",
     "pg": "^8.23.1",
     "undici": "^7.29.1",

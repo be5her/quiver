@@ -302,6 +302,12 @@ export interface HostEvents {
   'metabase.changed': { reason: 'session' | 'secret' | 'history'; url?: string; connectionId?: string; workspaceId?: string };
   /** The workspace's todo list changed. */
   'todo.changed': { workspaceId: string };
+  /** Git: the working tree, index or HEAD changed (`status`), branches or refs moved (`branches`), or the pull request list was refreshed (`prs`). */
+  'git.changed': { workspaceId: string; reason: 'status' | 'branches' | 'prs' };
+  /** Process runner: saved tasks changed (`tasks`), a process changed state (`state`), or a run printed output (`output`, throttled). */
+  'runner.changed': { workspaceId: string; reason: 'tasks' | 'state' | 'output'; taskId?: string; runId?: string };
+  /** Queues: connections changed (`connections`), messages were produced or purged (`messages`), or a live consumer got messages or ended (`consumer`). */
+  'queues.changed': { workspaceId: string; reason: 'connections' | 'messages' | 'consumer'; connectionId?: string; consumerId?: string };
   /** The in-app updater moved: checking, a version found, download progress, downloaded, or an error. */
   'app.update': UpdateState;
 }

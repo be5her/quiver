@@ -68,6 +68,26 @@ export function definePart(part: SmokePart): SmokePart {
   return part;
 }
 
+/** One file of a part split across files, so parallel work on a module touches different files. */
+export type SmokeSection = (t: SmokeContext) => Promise<PartHooks | void>;
+
+/** Run a part's sections in order and chain their hooks, each phase in the same order. */
+export async function runSections(t: SmokeContext, sections: SmokeSection[]): Promise<PartHooks> {
+  const all: PartHooks[] = [];
+  for (const section of sections) {
+    const hooks = await section(t);
+    if (hooks) all.push(hooks);
+  }
+  const chain = <K extends keyof PartHooks>(key: K): PartHooks[K] | undefined => {
+    const fns = all.map((h) => h[key]).filter((f): f is NonNullable<PartHooks[K]> => Boolean(f));
+    if (!fns.length) return undefined;
+    return (async (arg: never) => {
+      for (const fn of fns) await (fn as (a: never) => Promise<void>)(arg);
+    }) as PartHooks[K];
+  };
+  return { renderer: chain('renderer'), ui: chain('ui'), after: chain('after') };
+}
+
 export function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const server = createTcpServer();
