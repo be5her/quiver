@@ -2,6 +2,7 @@ import { spawn, type ChildProcess, type StdioOptions } from 'node:child_process'
 import { statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 
 export interface SpawnTreeOptions {
   cwd?: string;
@@ -145,10 +146,16 @@ export function runToEnd(program: string, args: readonly string[], options: RunT
           killTree(child);
         }, timeoutMs)
       : undefined;
-    child.on('error', (e) => (failed = e.message));
+    // A child that could not start has no pid. An `error` after it started (a `kill` that failed, say) is not a start
+    // failure: the exit code and `timedOut` tell what happened.
+    child.on('error', (e) => {
+      if (child.pid === undefined) failed = e.message;
+    });
+    // The byte cap can fall inside a multi-byte character; the decoder holds such a tail back instead of printing U+FFFD.
+    const text = (chunks: Buffer[]) => (truncated ? new StringDecoder('utf8').write(Buffer.concat(chunks)) : Buffer.concat(chunks).toString('utf8'));
     child.on('close', (code, signal) => {
       if (timer) clearTimeout(timer);
-      resolve({ code: failed ? null : code, signal, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8'), timedOut, truncated, error: failed });
+      resolve({ code: failed ? null : code, signal, stdout: text(out), stderr: text(err), timedOut, truncated, error: failed });
     });
     if (input !== undefined && child.stdin) {
       // A program that exits before reading its input makes the write fail (EPIPE, or EOF on Windows). That is not an

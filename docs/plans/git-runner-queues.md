@@ -30,7 +30,7 @@ Branch `feat/scaffold-git-runner-queues`, label `enhancement`.
    - `runner/main.ts` → `commands: [...taskCommands, ...procCommands]` from `runner/commands-tasks.ts`, `runner/commands-proc.ts`
    - `queues/main.ts` → `commands` from `queues/commands.ts`. The drivers live in `queues/drivers/{index,memory,kafka,sqs,rabbit}.ts`. `index.ts` maps `kind → driver`, and each non-memory file starts as a stub that throws `not implemented`.
 3. **Contracts in core** (types only, no logic): `packages/core/src/models/{git,runner,queues}.ts`. They hold every command's zod input schema and output type, listed below. Lanes implement against them. Changing a contract needs a note in the PR and a ping to the UI lane.
-4. **Shared process helper:** `packages/core/src/node/process.ts` (`@quiver/core/node`) with `spawnTree`, `killTree` (taskkill `/T /F` on Windows, process group elsewhere), `whichSync` and `runToEnd`, plus unit tests. It is extracted as a copy of `teleport/tsh.ts`; teleport stays as it is.
+4. **Shared process helper:** `packages/core/src/node/process.ts` (`@quiver/core/node`) with `spawnTree`, `killTree` (taskkill `/T /F` on Windows, process group elsewhere), `whichSync` and `runToEnd`, plus unit tests. It grew out of `teleport/tsh.ts`, which now imports `killTree` and `whichSync` from it instead of keeping its own copies.
 5. **Events in `HostEvents`:**
    - `'git.changed': { workspaceId; reason: 'status' | 'branches' | 'prs' }`
    - `'runner.changed': { workspaceId; reason: 'tasks' | 'state' | 'output'; taskId?: string }`

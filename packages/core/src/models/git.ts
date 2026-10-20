@@ -155,8 +155,8 @@ export const GitPrChecksInputSchema = GitPrRefInputSchema.extend({
 export const GitPrCreateInputSchema = z.object({
   title: z.string().trim().min(1),
   body: z.string().default(''),
-  base: z.string().optional(),
+  base: GitArgSchema.optional(),
   draft: z.boolean().default(false),
-  labels: z.array(z.string()).default([]),
+  labels: z.array(GitArgSchema).default([]),
 });
 export const GitPrCommentInputSchema = GitPrRefInputSchema.extend({ body: z.string().trim().min(1) });

@@ -8,6 +8,19 @@ import { z } from 'zod';
 export const QueueKindSchema = z.enum(['memory', 'kafka', 'sqs', 'rabbit']);
 export type QueueKind = z.infer<typeof QueueKindSchema>;
 
+/** True when a URL carries `user:password@` before its host, in any scheme; a string that is not a URL carries none. */
+export function urlHasCredentials(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.username !== '' || parsed.password !== '';
+  } catch {
+    return /^[^/?#]*\/\/[^/?#]*@/.test(url);
+  }
+}
+
+/** A URL that gets committed with the connection, so it must not carry a user or password: those go in `host.secrets`. */
+export const CommittedUrlSchema = z.string().refine((s) => !urlHasCredentials(s), { message: 'must not contain a user or password; the password goes in the connection secret' });
+
 export const QueueConnectionSchema = z.object({
   id: z.string(),
   name: z.string().default('Connection'),
@@ -25,12 +38,12 @@ export const QueueConnectionSchema = z.object({
   region: z.string().default(''),
   profile: z.string().default(''),
   accessKeyId: z.string().default(''),
-  endpoint: z.string().default(''),
+  endpoint: CommittedUrlSchema.default(''),
   /** RabbitMQ: the AMQP host, port and virtual host (`ssl` picks amqps), and the management API, `http://host:15672`, reached with the same user. */
   host: z.string().default(''),
   port: z.number().int().min(1).max(65535).optional(),
   vhost: z.string().default('/'),
-  managementUrl: z.string().default(''),
+  managementUrl: CommittedUrlSchema.default(''),
 });
 export type QueueConnection = z.infer<typeof QueueConnectionSchema>;
 

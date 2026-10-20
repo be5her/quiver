@@ -49,7 +49,8 @@ describe('process helpers', () => {
   });
 
   it('stops a program that runs too long and says so', async () => {
-    const out = await runToEnd(node, ['-e', 'process.stdout.write("started"); setInterval(() => {}, 1000)'], { timeoutMs: 300 });
+    // The budget leaves node room to start and print on a loaded machine; the test still ends well within its own timeout.
+    const out = await runToEnd(node, ['-e', 'process.stdout.write("started"); setInterval(() => {}, 1000)'], { timeoutMs: 1500 });
     expect(out.timedOut).toBe(true);
     expect(out.stdout).toBe('started');
     // Killed, so no ordinary exit code: a signal on macOS and Linux, taskkill's exit code on Windows.
@@ -61,6 +62,14 @@ describe('process helpers', () => {
     expect(out.truncated).toBe(true);
     expect(out.timedOut).toBe(false);
     expect(out.stdout.length).toBe(10_000);
+  });
+
+  it('does not leave half a character behind when the limit cuts a multi-byte sequence', async () => {
+    // "é" is two bytes; an odd limit lands between them, and the tail is dropped rather than decoded as U+FFFD.
+    const out = await runToEnd(node, ['-e', 'const line = "\\u00e9".repeat(512); setInterval(() => process.stdout.write(line), 1)'], { maxBytes: 2049, timeoutMs: 10_000 });
+    expect(out.truncated).toBe(true);
+    expect(out.stdout).not.toContain('�');
+    expect(out.stdout).toBe('é'.repeat(1024));
   });
 
   it('kills a process tree, grandchildren included', async () => {

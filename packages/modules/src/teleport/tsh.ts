@@ -3,6 +3,10 @@ import { statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { QuiverError, tokenizeShell, tshSettingToArgv } from '@quiver/core';
+import { killTree, whichSync } from '@quiver/core/node';
+
+/** Stopping a `tree: true` run and everything it started is the shared helper; re-exported for the callers here. */
+export { killTree };
 
 export interface TshCommand {
   /** Program plus fixed leading arguments, e.g. `['C:\\...\\tsh.exe']` or `['node', 'fake-tsh.cjs']`. */
@@ -51,30 +55,14 @@ export function teleportConnectCandidates(): string[] {
   }
 }
 
-/** Search PATH (plus the usual spots a GUI app launched from the dock does not see). */
-export function findOnPath(name: string): string | null {
-  const dirs = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
-  if (process.platform !== 'win32') {
-    for (const extra of ['/usr/local/bin', '/opt/homebrew/bin', path.join(os.homedir(), '.local', 'bin')]) if (!dirs.includes(extra)) dirs.push(extra);
-  }
-  const exts = process.platform === 'win32' ? ['.exe', ...(process.env.PATHEXT ?? '').split(';').map((e) => e.toLowerCase()).filter((e) => e && e !== '.exe')] : [''];
-  for (const dir of dirs) {
-    for (const ext of exts) {
-      const candidate = path.join(dir, name + ext);
-      if (isFile(candidate)) return candidate;
-    }
-  }
-  return null;
-}
-
 /**
- * Resolve tsh: an explicit setting wins (a path, or a wrapper command line), then PATH,
- * then the copy bundled with Teleport Connect.
+ * Resolve tsh: an explicit setting wins (a path, or a wrapper command line), then PATH (plus the usual spots a
+ * GUI app launched from the dock does not see, which `whichSync` searches), then the copy bundled with Teleport Connect.
  */
 export function resolveTsh(setting: string): TshCommand | null {
   const fromSetting = tshSettingToArgv(setting, isFile, tokenizeShell);
   if (fromSetting) return { argv: fromSetting, source: 'settings' };
-  const onPath = findOnPath('tsh');
+  const onPath = whichSync('tsh');
   if (onPath) return { argv: [onPath], source: 'path' };
   const bundled = teleportConnectCandidates().find(isFile);
   if (bundled) return { argv: [bundled], source: 'connect' };
@@ -103,34 +91,6 @@ export function spawnTsh(tsh: TshCommand, args: string[], options: SpawnOptions 
   });
 }
 
-/**
- * Stop a process spawned with `tree: true` and everything it started. `tsh kubectl` runs kubectl
- * in a second tsh process that shares the first one's stdout, so killing only the first leaves
- * the second running and the pipe open. Windows: taskkill walks the tree by parent process id.
- * Elsewhere: signal the process group.
- */
-export function killTree(child: ChildProcess, signal: NodeJS.Signals = 'SIGTERM'): void {
-  const pid = child.pid;
-  if (pid === undefined) return;
-  if (process.platform === 'win32') {
-    const taskkill = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe');
-    try {
-      const killer = spawn(taskkill, ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
-      killer.on('error', () => child.kill());
-      killer.on('exit', (code) => {
-        if (code !== 0) child.kill();
-      });
-    } catch {
-      child.kill();
-    }
-    return;
-  }
-  try {
-    process.kill(-pid, signal);
-  } catch {
-    child.kill(signal);
-  }
-}
 
 /** Pipe a stream's chunks into whole lines. */
 export function lineSplitter(onLine: (line: string) => void): (chunk: Buffer | string) => void {
