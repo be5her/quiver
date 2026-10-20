@@ -10,6 +10,7 @@ import {
   parseRemoteRepo,
   pickRemote,
   repoArg,
+  repoName,
   rollupChecks,
 } from './gh-parse';
 
@@ -76,9 +77,14 @@ describe('remotes', () => {
     expect(pickRemote([remotes[3]], ['github.com', 'gitlab.com'])?.remote).toBe('lab');
   });
 
-  it('names a github.com repository without its host for --repo', () => {
-    expect(repoArg({ host: 'github.com', owner: 'o', name: 'r' })).toBe('o/r');
+  it('names the host in --repo also for github.com, so GH_HOST cannot send the call to Enterprise', () => {
+    expect(repoArg({ host: 'github.com', owner: 'o', name: 'r' })).toBe('github.com/o/r');
     expect(repoArg({ host: 'ghe.example.com', owner: 'o', name: 'r' })).toBe('ghe.example.com/o/r');
+  });
+
+  it('shows a github.com repository without its host', () => {
+    expect(repoName({ host: 'github.com', owner: 'o', name: 'r' })).toBe('o/r');
+    expect(repoName({ host: 'ghe.example.com', owner: 'o', name: 'r' })).toBe('ghe.example.com/o/r');
   });
 });
 
@@ -240,6 +246,40 @@ describe('parsePatchFiles', () => {
       { path: 'img.png', status: 'modified', additions: 0, deletions: 0, binary: true, hasPatch: false },
     ]);
     expect(files[0].patch).toMatch(/^diff --git a\/src\/a b\.ts[\s\S]*\+-dash\n$/);
+  });
+
+  it('decodes quoted paths: octal escapes are UTF-8 bytes, C escapes and quotes kept, the tab after a spaced name dropped', () => {
+    const quoted = [
+      'diff --git "a/\\303\\251.txt" "b/\\303\\251.txt"',
+      'new file mode 100644',
+      '--- /dev/null',
+      '+++ "b/\\303\\251.txt"',
+      '@@ -0,0 +1 @@',
+      '+x',
+      'diff --git "a/say \\"hi\\"\\t.txt" "b/say \\"hi\\"\\t.txt"',
+      'deleted file mode 100644',
+      '--- "a/say \\"hi\\"\\t.txt"',
+      '+++ /dev/null',
+      '@@ -1 +0,0 @@',
+      '-x',
+      'diff --git "a/\\346\\227\\247 name" "b/\\346\\226\\260 name"',
+      'similarity index 100%',
+      'rename from "\\346\\227\\247 name"',
+      'rename to "\\346\\226\\260 name"',
+      'diff --git a/x y.txt b/x y.txt',
+      '--- a/x y.txt\t',
+      '+++ b/x y.txt\t',
+      '@@ -1 +1 @@',
+      '-a',
+      '+b',
+      '',
+    ].join('\n');
+    expect(parsePatchFiles(quoted, 512 * 1024).map((f) => [f.path, f.origPath ?? null, f.status])).toEqual([
+      ['é.txt', null, 'added'],
+      ['say "hi"\t.txt', null, 'deleted'],
+      ['新 name', '旧 name', 'renamed'],
+      ['x y.txt', null, 'modified'],
+    ]);
   });
 
   it('marks a patch over the limit, and the last file of a cut-short diff, as truncated', () => {

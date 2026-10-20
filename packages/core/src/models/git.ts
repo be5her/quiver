@@ -99,7 +99,7 @@ export interface GhStatus {
   installed: boolean;
   authenticated: boolean;
   user?: string;
-  /** `owner/name` of the workspace's GitHub repository. */
+  /** `owner/name` of the workspace's GitHub repository (`host/owner/name` on GitHub Enterprise). */
   repo?: string;
   /** What to do next when something is missing. */
   message?: string;
@@ -151,6 +151,14 @@ export const GitPrRefInputSchema = z.object({ number: z.number().int().positive(
 export const GitPrChecksInputSchema = GitPrRefInputSchema.extend({
   /** Include the last lines of each failed job's log. */
   failedLogs: z.boolean().default(false),
+});
+export const GitPrCheckoutInputSchema = GitPrRefInputSchema.extend({
+  allowFork: z
+    .boolean()
+    .default(false)
+    .describe(
+      "Check out a pull request from another repository (a fork). Off by default: the fork's branch brings its own committed .quiver/ folder, whose MCP servers, mock servers and realtime connections marked to start with the workspace run their commands on the next open.",
+    ),
 });
 export const GitPrCreateInputSchema = z.object({
   title: z.string().trim().min(1),

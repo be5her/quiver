@@ -24,13 +24,21 @@ export interface FakeGhPr {
   reviews: { author: { login: string }; state: string; submittedAt: string; body: string }[];
   comments: { author: { login: string }; createdAt: string; body: string }[];
   reviewRequested: string[];
+  /** Whether the head branch is on another repository (a fork), and whose. */
+  isCrossRepository: boolean;
+  headRepositoryOwner: { login: string };
 }
 
 export interface FakeGhState {
   /** The signed-in account, or null when signed out. */
   login: string | null;
-  /** `owner/name`: the only repository the fake answers for, so a call without the right --repo fails. */
+  /**
+   * `owner/name` on github.com: the only repository the fake answers for. --repo (the argument of `repo view`) must
+   * be `github.com/owner/name`, host included, so a call without it, or without the host, fails.
+   */
   repo: string;
+  /** What `gh repo view --json defaultBranchRef` gives. */
+  defaultBranch: string;
   prs: FakeGhPr[];
   /** `gh pr checks --json` rows per pull request number. */
   checks: Record<string, Record<string, unknown>[]>;
@@ -61,7 +69,7 @@ export interface FakeGh {
 /**
  * A stand-in for the GitHub CLI, written as a Node script so the smoke can exercise pull requests without GitHub or
  * the user's own sign-in. It answers the subcommands Quiver runs (`auth status`, `pr list|view|checks|diff|checkout|
- * create|comment`, `run view --log-failed`) from a JSON state file, exits like gh (4 when signed out, 1 or 8 from
+ * create|comment`, `run view --log-failed`, `repo view`) from a JSON state file, exits like gh (4 when signed out, 1 or 8 from
  * `pr checks` for failed or pending checks), refuses any repository but its own, and logs every argv with its stdin.
  */
 export async function writeFakeGh(dir: string, state: FakeGhState): Promise<FakeGh> {
@@ -146,7 +154,13 @@ if (cmd === 'auth' && sub === 'status') {
   process.exit(accounts.length ? 0 : 1);
 }
 if (!state.login) fail('To get started with GitHub CLI, please run:  gh auth login\nAlternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.', 4);
-if (flag('repo') !== state.repo) fail('GraphQL: Could not resolve to a Repository with the name \'' + flag('repo') + '\'. (repository)');
+const repoGiven = cmd === 'repo' ? argv[2] : flag('repo');
+if (repoGiven !== 'github.com/' + state.repo) fail('GraphQL: Could not resolve to a Repository with the name \'' + repoGiven + '\'. (repository)');
+
+if (cmd === 'repo' && sub === 'view') {
+  process.stdout.write(JSON.stringify(pick({ defaultBranchRef: { name: state.defaultBranch } }, flag('json'))) + '\n');
+  process.exit(0);
+}
 
 if (cmd === 'pr' && sub === 'list') {
   const wanted = { open: ['OPEN'], closed: ['CLOSED', 'MERGED'], merged: ['MERGED'], all: ['OPEN', 'CLOSED', 'MERGED'] }[flag('state') || 'open'];
@@ -205,6 +219,7 @@ if (cmd === 'pr' && sub === 'create') {
     url: 'https://github.com/' + state.repo + '/pull/' + number, createdAt: now, updatedAt: now, reviewDecision: '',
     labels: all('label').map((name) => ({ name })), statusCheckRollup: [], body: stdin || '', additions: 0, deletions: 0,
     files: [], reviews: [], comments: [], reviewRequested: [],
+    isCrossRepository: head.includes(':'), headRepositoryOwner: { login: head.includes(':') ? head.split(':')[0] : state.repo.split('/')[0] },
   };
   state.prs.push(pr);
   save();

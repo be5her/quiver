@@ -1,4 +1,5 @@
 import {
+  GitPrCheckoutInputSchema,
   GitPrChecksInputSchema,
   GitPrCommentInputSchema,
   GitPrCreateInputSchema,
@@ -103,13 +104,14 @@ const open = defineCommand({
 const checkout = defineCommand({
   id: 'git.pr.checkout',
   title: 'Check out pull request',
-  description: "Fetches a pull request's branch (from a fork too) and switches to it, creating or updating a local branch. Fails rather than overwrite uncommitted changes. Gives back the new git.status.",
+  description:
+    "Fetches a pull request's branch and switches to it, creating or updating a local branch. Fails rather than overwrite uncommitted changes. A pull request from a fork is refused unless allowFork is true, since its .quiver/ folder can start commands when the workspace next opens. Gives back the new git.status.",
   scope: 'workspace',
   mutating: true,
-  input: GitPrRefInputSchema,
-  handler: async ({ number }, ctx): Promise<GitStatus> => {
+  input: GitPrCheckoutInputSchema,
+  handler: async ({ number, allowFork }, ctx): Promise<GitStatus> => {
     const ws = workspace(ctx);
-    const root = await pr.checkout(ws.path, number, ctx.caller !== 'mcp');
+    const root = await pr.checkout(ws.path, number, { interactive: ctx.caller !== 'mcp', allowFork });
     for (const reason of ['status', 'branches'] as const) ctx.host.emit('git.changed', { workspaceId: ws.id, reason });
     return local.status(root);
   },

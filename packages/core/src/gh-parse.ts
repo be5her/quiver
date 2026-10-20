@@ -115,9 +115,17 @@ export function pickRemote(remotes: { name: string; url: string; resolved?: bool
   return best ? { remote: best.name, repo: best.repo } : null;
 }
 
-/** The `--repo` value gh takes: `owner/name` on github.com, `host/owner/name` elsewhere. */
+/**
+ * The `--repo` value gh takes, always `host/owner/name`: without a host gh fills in GH_HOST, or the only host it is
+ * signed in to, so a github.com repository could be read (and written) as a same-named one on GitHub Enterprise.
+ */
 export function repoArg(repo: GitHubRepoRef): string {
-  return repo.host === 'github.com' ? `${repo.owner}/${repo.name}` : `${repo.host}/${repo.owner}/${repo.name}`;
+  return `${repo.host}/${repo.owner}/${repo.name}`;
+}
+
+/** How a repository is shown: `owner/name` on github.com, `host/owner/name` elsewhere. */
+export function repoName(repo: GitHubRepoRef): string {
+  return repo.host === 'github.com' ? `${repo.owner}/${repo.name}` : repoArg(repo);
 }
 
 // ---------- pull requests ----------
@@ -272,20 +280,43 @@ export function failedLogExcerpt(log: string, maxLines = 60, maxChars = 400): st
 
 // ---------- diffs ----------
 
+const C_ESCAPES: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, '\\': 92 };
+
+/**
+ * A path as git prints it in a diff: as is, or in double quotes with C escapes when it holds quotes, control or
+ * non-ASCII characters. Octal escapes are the bytes of the UTF-8 name (`"\303\251.txt"` is `é.txt`), so every escape
+ * becomes a byte and the bytes are decoded together.
+ */
 function unquotePath(p: string): string {
-  if (!p.startsWith('"')) return p;
-  try {
-    return JSON.parse(p.replace(/\\([0-7]{3})/g, (_m, o: string) => `\\u00${parseInt(o, 8).toString(16).padStart(2, '0')}`)) as string;
-  } catch {
-    return p.slice(1, -1);
+  if (p.length < 2 || !p.startsWith('"') || !p.endsWith('"')) return p;
+  const body = p.slice(1, -1);
+  const encoder = new TextEncoder();
+  const bytes: number[] = [];
+  let i = 0;
+  while (i < body.length) {
+    const at = body.indexOf('\\', i);
+    bytes.push(...encoder.encode(at < 0 ? body.slice(i) : body.slice(i, at)));
+    if (at < 0) break;
+    const octal = /^[0-7]{3}/.exec(body.slice(at + 1, at + 4))?.[0];
+    const next = body[at + 1] ?? '';
+    if (octal) bytes.push(parseInt(octal, 8) & 0xff);
+    else bytes.push(...(next in C_ESCAPES ? [C_ESCAPES[next]] : encoder.encode(next)));
+    i = at + (octal ? 4 : 2);
   }
+  return new TextDecoder().decode(new Uint8Array(bytes));
+}
+
+/** A diff header path (`a/x`, `"b/\303\251"`) without its quotes and its `a/` or `b/`. */
+function headerPath(token: string): string {
+  return unquotePath(token).replace(/^[ab]\//, '');
 }
 
 /** One file's chunk of a unified diff: its paths, status and line counts read from the headers and hunks. */
 function patchFile(chunk: string): GitDiffFile {
   const lines = chunk.split(/\r?\n/);
-  const head = /^diff --git (?:"?a\/(.+?)"?) (?:"?b\/(.+?)"?)$/.exec(lines[0]) ?? [];
-  let path = unquotePath(head[2] ?? '');
+  // Each side is a/<path>, or "a/<escaped path>" when git had to quote it; the quoted token is decoded whole.
+  const head = /^diff --git ("a\/(?:[^"\\]|\\.)*"|a\/.+?) ("b\/(?:[^"\\]|\\.)*"|b\/.+)$/.exec(lines[0]) ?? [];
+  let path = head[2] ? headerPath(head[2]) : '';
   let origPath: string | undefined;
   let status: GitDiffFile['status'] = 'modified';
   let additions = 0;
@@ -310,7 +341,8 @@ function patchFile(chunk: string): GitDiffFile {
       origPath = unquotePath(line.slice('copy from '.length));
     } else if (line.startsWith('copy to ')) path = unquotePath(line.slice('copy to '.length));
     else if (line.startsWith('Binary files') || line === 'GIT binary patch') binary = true;
-    else if (line.startsWith('+++ ') && !line.startsWith('+++ /dev/null')) path = unquotePath(line.slice(4).replace(/^"?b\//, '').replace(/"$/, '')) || path;
+    // git ends the line with a tab when the name holds a space.
+    else if (line.startsWith('+++ ') && !line.startsWith('+++ /dev/null')) path = headerPath(line.slice(4).replace(/\t$/, '')) || path;
   }
   return { path, ...(origPath ? { origPath } : {}), status, additions, deletions, binary };
 }

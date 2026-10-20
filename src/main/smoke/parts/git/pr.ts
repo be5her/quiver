@@ -10,6 +10,8 @@ import type { RpcResult, SmokeSection } from '../../part';
 // own whose origin is on github.com. The fake and the variable are cleaned up in this section's `after` hook.
 
 const REPO = 'smoke/quiver';
+/** What every call must pass as --repo: with the host, so GH_HOST cannot send it to a GitHub Enterprise namesake. */
+const REPO_ARG = `github.com/${REPO}`;
 
 function pr(number: number, over: Partial<FakeGhPr>): FakeGhPr {
   return {
@@ -33,6 +35,8 @@ function pr(number: number, over: Partial<FakeGhPr>): FakeGhPr {
     reviews: [],
     comments: [],
     reviewRequested: [],
+    isCrossRepository: false,
+    headRepositoryOwner: { login: 'smoke' },
     ...over,
   };
 }
@@ -51,6 +55,7 @@ function initialState(): FakeGhState {
   return {
     login: null,
     repo: REPO,
+    defaultBranch: 'main',
     prs: [
       pr(1, {
         title: 'Mine, failing',
@@ -125,6 +130,20 @@ const section: SmokeSection = async (t) => {
     check('git pr: status says when gh is not installed', !missing.installed && !missing.authenticated && /not found.*cli\.github\.com/s.test(missing.message ?? ''), missing);
     const missingList = await failure(() => run('git.pr.list', {}, id));
     check('git pr: commands fail clearly without gh', missingList.includes('NOT_FOUND') && missingList.includes('GitHub CLI (gh) was not found'), missingList);
+    // A gh that is there but will not start: the status still answers, with why.
+    const notAProgram = path.join(ghDir, 'not-a-program.txt');
+    await fs.writeFile(notAProgram, 'not gh\n');
+    process.env.QUIVER_GH_PATH = notAProgram;
+    const broken = await run<GhStatus>('git.pr.status', {}, id);
+    check('git pr: status answers when gh cannot be started', broken.installed && !broken.authenticated && (broken.message ?? '').includes('could not be started'), broken);
+    if (process.platform === 'win32') {
+      // A gh.cmd shim would need a shell to run; it is named, with what to set instead.
+      const shim = path.join(ghDir, 'gh.cmd');
+      await fs.writeFile(shim, '@echo off\r\n');
+      process.env.QUIVER_GH_PATH = shim;
+      const batch = await run<GhStatus>('git.pr.status', {}, id);
+      check('git pr: a batch-file gh is reported as such, pointing at QUIVER_GH_PATH and gh.exe', !batch.installed && (batch.message ?? '').includes('batch file') && (batch.message ?? '').includes('gh.exe'), batch);
+    }
     process.env.QUIVER_GH_PATH = fake.command;
 
     // Signed out, and a repository that is not on GitHub.
@@ -233,6 +252,26 @@ const section: SmokeSection = async (t) => {
     await sh('config', 'branch.feat/new.merge', 'refs/heads/main');
     const tracksBase = await failure(() => run('git.pr.create', { title: 'New', base: 'main' }, id));
     check('git pr: a branch whose upstream is the base itself counts as not pushed', tracksBase.includes('has not been pushed'), tracksBase);
+    // git checkout -b feat/new origin/release, nothing pushed: release is not feat/new's own branch.
+    await sh('config', 'branch.feat/new.merge', 'refs/heads/release');
+    const tracksOther = await failure(() => run('git.pr.create', { title: 'New', base: 'main' }, id));
+    check('git pr: a branch tracking another branch of another name counts as not pushed', tracksOther.includes('has not been pushed'), tracksOther);
+    // With push.default=upstream the push would go to the upstream's name; to main, with no base given and origin/HEAD
+    // unset, that is the default branch gh names.
+    await sh('config', 'push.default', 'upstream');
+    await sh('config', 'branch.feat/new.merge', 'refs/heads/main');
+    const callsBefore = (await fake.calls()).length;
+    const pushesToBase = await failure(() => run('git.pr.create', { title: 'New' }, id));
+    const repoView = (await fake.calls()).slice(callsBefore).find((c) => c.argv[0] === 'repo' && c.argv[1] === 'view');
+    check('git pr: without origin/HEAD the default branch comes from gh, and pushing to it counts as not pushed', pushesToBase.includes('has not been pushed') && repoView?.argv[2] === REPO_ARG, { pushesToBase, repoView });
+    await sh('config', '--unset', 'push.default');
+    // Upstream on GitLab, while the pull request belongs to the github.com origin.
+    await sh('remote', 'add', 'lab', 'https://gitlab.com/smoke/quiver.git');
+    await sh('config', 'branch.feat/new.remote', 'lab');
+    await sh('config', 'branch.feat/new.merge', 'refs/heads/feat/new');
+    const onGitlab = await failure(() => run('git.pr.create', { title: 'New' }, id));
+    check('git pr: create refuses a branch whose upstream is not on GitHub', onGitlab.includes('INVALID_INPUT') && onGitlab.includes('upstream is not on GitHub') && onGitlab.includes('gitlab.com'), onGitlab);
+    check('git pr: the refused creates never reached gh pr create', !(await fake.calls()).some((c) => c.argv[0] === 'pr' && c.argv[1] === 'create'));
     await sh('remote', 'add', 'fork', 'git@github.com:forker/quiver.git');
     await sh('config', 'branch.feat/new.remote', 'fork');
     await sh('config', 'branch.feat/new.merge', 'refs/heads/feat/new');
@@ -250,20 +289,50 @@ const section: SmokeSection = async (t) => {
         events.some((e) => e.reason === 'prs'),
       { created, createCall },
     );
+    // Triangular: tracking origin/release, pushed to the fork under its own name; the push remote names the head.
+    await sh('config', 'branch.feat/new.remote', 'origin');
+    await sh('config', 'branch.feat/new.merge', 'refs/heads/release');
+    await sh('config', 'branch.feat/new.pushRemote', 'fork');
+    const viaPushRemote = await run<GitPullRequest>('git.pr.create', { title: 'Via the push remote' }, id);
+    const pushRemoteCall = (await fake.calls()).filter((c) => c.argv[0] === 'pr' && c.argv[1] === 'create').pop();
+    check('git pr: a branch with a push remote goes from there, under its own name', viaPushRemote.number === 5 && Boolean(pushRemoteCall?.argv.includes('--head=forker:feat/new')), { viaPushRemote, pushRemoteCall });
     const commented = await run<{ url: string }>('git.pr.comment', { number: 1, body: 'Looks good' }, id);
     const afterComment = (await fake.getState()).prs[0].comments;
     check('git pr: comment adds the body and gives back its address', commented.url.endsWith('#issuecomment-2') && afterComment[1]?.body === 'Looks good', { commented, afterComment });
+
+    // A fork's branch brings its own .quiver/: refused until allowFork says so.
+    await fake.update((s) => {
+      s.prs[0].isCrossRepository = true;
+      s.prs[0].headRepositoryOwner = { login: 'forker' };
+    });
+    const forkRefused = await failure(() => run('git.pr.checkout', { number: 1 }, id));
+    const forkCheckouts = (await fake.calls()).filter((c) => c.argv[0] === 'pr' && c.argv[1] === 'checkout');
+    check(
+      "git pr: checkout of a fork's pull request is refused with the reason, before gh checks anything out",
+      forkRefused.includes('INVALID_INPUT') && forkRefused.includes('forker') && forkRefused.includes('.quiver/') && forkRefused.includes('allowFork') && forkCheckouts.length === 0,
+      { forkRefused, forkCheckouts },
+    );
+    const forkAllowed = await run<GitStatus>('git.pr.checkout', { number: 1, allowFork: true }, id);
+    check("git pr: allowFork checks out a fork's pull request", forkAllowed.branch === 'feat/1', forkAllowed);
 
     events.length = 0;
     const checkedOut = await run<GitStatus>('git.pr.checkout', { number: 2 }, id);
     check('git pr: checkout switches to the pull request branch and announces it', checkedOut.branch === 'feat/2' && events.some((e) => e.reason === 'status') && events.some((e) => e.reason === 'branches'), { checkedOut, events });
 
     const calls = await fake.calls();
-    const repoCalls = calls.filter((c) => c.argv[0] === 'pr' || c.argv[0] === 'run');
+    const repoCalls = calls.filter((c) => c.argv[0] === 'pr' || c.argv[0] === 'run' || c.argv[0] === 'repo');
+    // gh repo view takes the repository as its argument rather than --repo.
+    const repoOf = (c: (typeof calls)[number]) => (c.argv[0] === 'repo' ? c.argv[2] : c.argv[c.argv.indexOf('--repo') + 1]);
+    // The temp folder can be an 8.3 short path (C:\Users\RUNNER~1 on CI) while git gives the long one, so both sides
+    // go through realpath before they are compared.
+    const real = (p: string) => fs.realpath(p).then((r) => r.toLowerCase(), () => path.resolve(p).toLowerCase());
+    const root = await real(folder);
+    const wrongCwd = (await Promise.all(repoCalls.map(async (c) => ((await real(c.cwd)) === root ? null : c.cwd)))).filter((c) => c !== null);
+    const wrongRepo = repoCalls.filter((c) => repoOf(c) !== REPO_ARG);
     check(
-      'git pr: every gh call names the repository with --repo and runs in the repository root',
-      repoCalls.length > 10 && repoCalls.every((c) => c.argv[c.argv.indexOf('--repo') + 1] === REPO) && repoCalls.every((c) => path.resolve(c.cwd).toLowerCase() === path.resolve(folder).toLowerCase()),
-      repoCalls.filter((c) => c.argv[c.argv.indexOf('--repo') + 1] !== REPO).slice(0, 3),
+      'git pr: every gh call names the repository with --repo (host included) and runs in the repository root',
+      repoCalls.length > 10 && wrongRepo.length === 0 && wrongCwd.length === 0,
+      { calls: repoCalls.length, wrongRepo: wrongRepo.slice(0, 3), wrongCwd: wrongCwd.slice(0, 3), root },
     );
 
     // Agents: reads go through, writes are gated.
