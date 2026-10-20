@@ -5,7 +5,22 @@ The project's long-running commands in one place: tasks discovered from `package
 <!-- lane:R1 -->
 ## Tasks
 
-To be written by lane R1.
+A task is a command line saved with the project, one committed file per task in `.quiver/runner/<id>.json` (store collection `runner`, `RunnerTaskSchema` in `@quiver/core`): `name`, `command`, `cwd` (relative to the workspace, kept with forward slashes; one outside the workspace is refused), `env` entries, an `envProfile`, `autoRestart`, a `readyPattern`, a `port`, and `source` (`saved`, or where a discovered script came from). The supervisor reads the same file each time the task starts.
+
+- **Discovery.** `runner.task.discover` reads the project's own files (`discover.ts`, with the parsing in `runner-discover.ts` in `@quiver/core`) in the workspace folder and in every workspace package: the folders named by `workspaces` in the root package.json (a list or `{ packages }`) and by pnpm-workspace.yaml, with `*`, `?` and `**` (five levels deep, never into `node_modules`, `.git`, `.quiver` or build output) and `!` exclusions.
+  - **package.json scripts**, run with the root's package manager: its `packageManager` field, else its lockfile (`pnpm-lock.yaml`, `yarn.lock`, `package-lock.json`), else npm, as `<pm> run <script>` in the package's folder. Lifecycle scripts (`postinstall`, `prepare` ...) and the `pre`/`post` hooks of another script are left out. A workspace package's scripts are named after the package (`@scope/web: dev`).
+  - **Makefile targets** (`GNUmakefile`, `makefile`, `Makefile`, the first there is) as `make <target>`: explicit targets only, not special ones (`.PHONY`), pattern rules, targets built from variables, assignments or anything in a `define` block.
+  - **justfile recipes** (`justfile`, `Justfile`, `.justfile`) as `just <recipe>`, without private ones (`_name` or `[private]`), settings, aliases and variables.
+  - **compose services** (`compose.yaml`, `compose.yml`, `docker-compose.yml`, `docker-compose.yaml`) as `docker compose -f <file> up <service>`.
+
+  Each found script has `source`, `name`, `command`, `cwd` and `file`, and `taskId` once it is saved.
+- **Saving.** `runner.task.save` creates a task (no `id`) or updates one: the fields given replace the saved ones, and an empty `readyPattern` or `envProfile`, or a null `port`, clears it. A discovered script is saved by passing it as it is; saving the same script (same source, command and folder) again updates its task rather than adding a second one. A save is refused without a command, with a folder outside the workspace, or with a ready pattern the supervisor would refuse (one that could backtrack forever).
+- **Deleting.** `runner.task.delete` stops a task that is running or waiting to restart first (`runner.proc.stop`, the whole tree), then removes its file, and answers `{ deleted, stopped }` with the stopped run. Stopping rather than refusing, so deleting from the panel or an agent with mutations on never leaves a process without a task.
+- **Events.** Saves and deletes emit `runner.changed` with reason `tasks` and the `taskId`, besides the store's own `store.changed`.
+
+Commands: `runner.task.list`, `runner.task.discover` and `runner.task.get` read; `runner.task.save` and `runner.task.delete` are mutating.
+
+The smoke section [`tasks.ts`](../../../../src/main/smoke/parts/runner/tasks.ts) opens a fixture project of its own (a package.json with npm workspaces, a lockfile, an included and an excluded workspace package, a package in `node_modules`, a Makefile, a justfile and a compose file) and checks: what discovery finds and what it leaves out, saving a discovered script into `.quiver/runner/<id>.json`, saving it again keeping one task and discovery marking it, a task with folder, pattern, port and auto restart, an update clearing port and pattern, list, get, a missing task, refused saves (no command, outside folder, unsafe pattern), the `runner.changed` event, the saved npm script running through `runner.proc.start`, deleting a running task stopping it first, delete removing the file, and agents listing and discovering over MCP while save and delete are blocked.
 <!-- /lane:R1 -->
 
 <!-- lane:R2 -->
