@@ -63,9 +63,16 @@ export interface GitDiffFile {
   truncated?: boolean;
 }
 
+/**
+ * A ref, branch, remote or path handed to git on its command line. Git reads a value starting with `-` as an
+ * option, and some of those write files or run programs (`--output=<file>`, `--upload-pack=<cmd>`), which would
+ * turn a read-only command into a write for an agent. Commands still put `--` before paths.
+ */
+export const GitArgSchema = z.string().min(1).refine((s) => !s.startsWith('-'), { message: 'must not start with "-"' });
+
 export const GitLogInputSchema = z.object({
-  ref: z.string().optional(),
-  path: z.string().optional(),
+  ref: GitArgSchema.optional(),
+  path: GitArgSchema.optional(),
   limit: z.number().int().min(1).max(500).default(50),
   skip: z.number().int().min(0).default(0),
 });
@@ -73,18 +80,18 @@ export const GitLogInputSchema = z.object({
 /** Working tree against the index (default), the index against HEAD (`staged`), or two refs. */
 export const GitDiffInputSchema = z.object({
   staged: z.boolean().default(false),
-  from: z.string().optional(),
-  to: z.string().optional(),
-  path: z.string().optional(),
+  from: GitArgSchema.optional(),
+  to: GitArgSchema.optional(),
+  path: GitArgSchema.optional(),
   /** Leave patches out and give only the per-file counts. */
   statOnly: z.boolean().default(false),
 });
 
-export const GitPathsInputSchema = z.object({ paths: z.array(z.string()).min(1) });
+export const GitPathsInputSchema = z.object({ paths: z.array(GitArgSchema).min(1) });
 export const GitCommitInputSchema = z.object({ message: z.string().trim().min(1), amend: z.boolean().default(false) });
-export const GitCheckoutInputSchema = z.object({ ref: z.string().min(1) });
-export const GitBranchCreateInputSchema = z.object({ name: z.string().min(1), from: z.string().optional(), checkout: z.boolean().default(true) });
-export const GitRemoteInputSchema = z.object({ remote: z.string().optional(), branch: z.string().optional() });
+export const GitCheckoutInputSchema = z.object({ ref: GitArgSchema });
+export const GitBranchCreateInputSchema = z.object({ name: GitArgSchema, from: GitArgSchema.optional(), checkout: z.boolean().default(true) });
+export const GitRemoteInputSchema = z.object({ remote: GitArgSchema.optional(), branch: GitArgSchema.optional() });
 export const GitPushInputSchema = GitRemoteInputSchema.extend({ setUpstream: z.boolean().default(false), forceWithLease: z.boolean().default(false) });
 
 /** Whether `gh` can be used here: installed, signed in, and the workspace is a GitHub repository. */
