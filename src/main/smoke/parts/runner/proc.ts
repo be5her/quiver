@@ -217,6 +217,10 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc, toolNa
     try {
       const nearest = await profileRun('smoke-prof-web', 'prof', 'rp-apps/web');
       check("runner: a task's env profile is read from its own folder first, as <name>.env too", nearest.state === 'exited' && nearest.value === 'web', nearest);
+      if (process.platform === 'win32' || process.platform === 'darwin') {
+        const folded = await profileRun('smoke-prof-case', 'PROF', 'RP-Apps/Web');
+        check('runner: on a case-insensitive file system a profile and task folder in other case find the same file', folded.value === 'web', folded);
+      }
       const rootProf = await profileRun('smoke-prof-root', 'prof');
       check('runner: from the workspace folder the same profile is its .env.<name>', rootProf.value === 'root', rootProf);
       const only = await profileRun('smoke-prof-only', 'only');

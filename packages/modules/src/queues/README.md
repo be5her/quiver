@@ -88,7 +88,7 @@ The smoke's `ui` section (with `--shots`) drives the panel on a memory connectio
 
 ## Agents
 
-Allowed: `queues.connection.list`, `queues.connection.get`, `queues.connection.test` (of a saved connection as it is, or of a draft with secrets of its own), `queues.destination.list`, `queues.destination.describe`, `queues.consumer.stop`, `queues.consumer.read`, `queues.consumer.list`, `queues.group.list` and `queues.history.list`; and, on Kafka and memory connections, `queues.message.peek`, `queues.message.wait` and `queues.consumer.start`.
+Allowed: `queues.connection.list`, `queues.connection.get`, `queues.connection.test` (of a saved connection as it is, or of a draft with secrets of its own), `queues.destination.list`, `queues.destination.describe`, `queues.consumer.stop`, `queues.consumer.read`, `queues.consumer.list`, `queues.group.list` and `queues.history.list`; and, on Kafka and memory connections, `queues.message.peek`, `queues.message.wait` and `queues.consumer.start`, and on RabbitMQ `queues.message.wait` and `queues.consumer.start` from `latest`.
 
 Gated as mutating, refused until the user enables mutations: `queues.connection.save`, `queues.connection.delete`, `queues.connection.test` with both `id` and `connection` (a draft on top of a saved connection, which would send its secrets to the draft's broker), `queues.destination.purge`, `queues.destination.create`, `queues.destination.delete`, `queues.message.produce` and `queues.history.clear`; and, decided per call from the connection's kind, `queues.message.peek`, `queues.message.wait` and `queues.consumer.start` on SQS, and `queues.message.peek` and `queues.consumer.start` from `earliest` on RabbitMQ.
 

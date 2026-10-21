@@ -289,7 +289,8 @@ export class GitActions {
     const workspaceId = untracked(this.app.activeWorkspaceId);
     try {
       const todos = await this.host.invoke<TodoItem[]>('todo.list', {}, workspaceId);
-      if (todos.some((t) => !t.done && t.notes.includes(pr.url))) {
+      // The address as a whole word: `…/pull/1` is not `…/pull/12`.
+      if (todos.some((t) => !t.done && t.notes.split(/\s+/).includes(pr.url))) {
         this.toasts.notify(`#${pr.number} is already on the todo list`);
         return false;
       }

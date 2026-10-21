@@ -23,7 +23,7 @@ describe('isSafeExternalUrl', () => {
   });
 
   it('refuses what is not an absolute URL', () => {
-    for (const url of ['', 'github.com', '/relative/path', 'C:\Windows\notepad.exe', '\\host\share']) {
+    for (const url of ['', 'github.com', '/relative/path', String.raw`C:\Windows\notepad.exe`, String.raw`\\host\share\run.exe`]) {
       expect(isSafeExternalUrl(url)).toBe(false);
     }
   });

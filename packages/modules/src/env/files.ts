@@ -86,12 +86,15 @@ export async function findProfileFile(w: WorkspaceApi, profile: string, fromDir 
   const name = profile.trim();
   if (!name) throw new QuiverError('INVALID_INPUT', 'A profile name is required');
   if (/[\\/]/.test(name) || isEnvFileName(name)) return resolveEnvPath(w, name);
-  const names = [`.env.${name}`, `${name}.env`];
-  const matches = (await scanEnvFiles(w.path)).filter((rel) => names.includes(envPathName(rel)));
-  for (let dir = normalizeEnvPath(fromDir); ; dir = envPathDir(dir)) {
+  // Names compare the way the file system does: a profile `Staging`, or a task folder typed `Apps/web`, finds
+  // `apps/web/.env.staging` on Windows and macOS, as reading the file directly would.
+  const fold = process.platform === 'win32' || process.platform === 'darwin' ? (s: string) => s.toLowerCase() : (s: string) => s;
+  const names = [`.env.${name}`, `${name}.env`].map(fold);
+  const matches = (await scanEnvFiles(w.path)).filter((rel) => names.includes(fold(envPathName(rel))));
+  for (let dir = fold(normalizeEnvPath(fromDir)); ; dir = envPathDir(dir)) {
     for (const file of names) {
-      const rel = dir ? `${dir}/${file}` : file;
-      if (matches.includes(rel)) return { abs: path.join(w.path, rel), rel };
+      const rel = matches.find((m) => fold(m) === (dir ? `${dir}/${file}` : file));
+      if (rel) return { abs: path.join(w.path, rel), rel };
     }
     if (!dir) break;
   }

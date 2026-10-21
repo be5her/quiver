@@ -293,8 +293,11 @@ const section: SmokeSection = async ({ check, run, ws: mainWs }) => ({
       const conversation = await js(`[...(${visible('[data-testid=git-pr-tab]')}?.querySelectorAll('[data-testid=git-pr-comment]') ?? [])].map((c) => c.getAttribute('data-kind'))`);
       check('git ui: a pull request opens with its description, review and comment', detail && JSON.stringify(conversation) === JSON.stringify(['review', 'comment']), conversation);
       await shot('32h-git-pr-conversation-light');
-      // Add todo: one todo per open pull request, titled with its number and title, its address in the notes.
-      const todosOf = async () => (await run<TodoItem[]>('todo.list', {}, id)).filter((t) => t.notes.includes(`${REPO}/pull/1`));
+      // Add todo: one todo per open pull request, titled with its number and title, its address in the notes. An open
+      // todo for #12 does not count as one for #1, though its address starts with #1's.
+      const prUrl = `https://github.com/${REPO}/pull/1`;
+      const todosOf = async () => (await run<TodoItem[]>('todo.list', {}, id)).filter((t) => t.notes === prUrl);
+      await run('todo.add', { title: '#12 Another pull request', notes: `${prUrl}2` }, id);
       await js(`${visible('[data-testid=git-pr-todo]')}?.click()`);
       const added = await until(async () => (await todosOf()).length === 1, 4000);
       const todo = (await todosOf())[0];
@@ -302,8 +305,8 @@ const section: SmokeSection = async ({ check, run, ws: mainWs }) => ({
       await wait(400);
       const once = (await todosOf()).length;
       check(
-        'git ui: Add todo makes a todo from the pull request (title, address in the notes), once while it is open',
-        added && todo?.title === '#1 Add the parser' && todo.notes === `https://github.com/${REPO}/pull/1` && !todo.done && once === 1,
+        'git ui: Add todo makes a todo from the pull request (title, address in the notes), once while it is open, beside one for #12',
+        added && todo?.title === '#1 Add the parser' && !todo.done && once === 1,
         { todo, once },
       );
       await js(`document.documentElement.classList.add('dark')`);

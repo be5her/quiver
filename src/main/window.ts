@@ -34,6 +34,12 @@ export function createMainWindow(options: { show?: boolean } = {}): BrowserWindo
     void openExternal(url).catch((err) => console.warn('[quiver] could not open link', err));
     return { action: 'deny' };
   });
+  // A plain anchor navigates the window itself; the page has the host bridge, so it never leaves the app's own page.
+  win.webContents.on('will-navigate', (event, url) => {
+    if (withoutHash(url) === withoutHash(win.webContents.getURL())) return;
+    event.preventDefault();
+    void openExternal(url).catch((err) => console.warn('[quiver] could not open link', err));
+  });
 
   const forwardConsole = process.env.QUIVER_SMOKE || process.env.ELECTRON_RENDERER_URL;
   if (forwardConsole) {
@@ -48,4 +54,9 @@ export function createMainWindow(options: { show?: boolean } = {}): BrowserWindo
     void win.loadFile(join(__dirname, '../renderer/index.html'));
   }
   return win;
+}
+
+function withoutHash(url: string): string {
+  const i = url.indexOf('#');
+  return i < 0 ? url : url.slice(0, i);
 }
