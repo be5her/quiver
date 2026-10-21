@@ -2,7 +2,7 @@ import { Component, computed, effect, inject, input, signal, untracked } from '@
 import { FormField, form } from '@angular/forms/signals';
 import type { GitDiffFile, GitPrCheckWithLog, GitPullRequestDetail } from '@quiver/core';
 import { Badge, Button, Icon, Segment, Segmented, Spinner, TextArea, invokeResource, type Tab, type TabComponent } from '@quiver/ui';
-import { CircleCheck, CircleDashed, CircleDot, CircleSlash, CircleX, ExternalLink, GitBranch, GitPullRequest, MessageSquare, RefreshCw } from 'lucide';
+import { CircleCheck, CircleDashed, CircleDot, CircleSlash, CircleX, ExternalLink, GitBranch, GitPullRequest, ListPlus, MessageSquare, RefreshCw } from 'lucide';
 import { GitDiffView } from './diff-view';
 import { GitActions } from './git-actions';
 import { injectGitChanged, injectPrPolling, injectReloadWhenShown, tabVisible } from './git-events';
@@ -34,6 +34,7 @@ const REVIEW_STATE: Record<string, string> = {
           <span qBadge class="shrink-0" [class]="stateClass(p)" data-testid="git-pr-state">{{ stateLabel(p) }}</span>
           <span class="flex-1"></span>
           <button qButton size="sm" variant="ghost" [icon]="icons.RefreshCw" [loading]="pr.isLoading()" (click)="reload()">Refresh</button>
+          <button qButton size="sm" variant="ghost" [icon]="icons.ListPlus" [loading]="addingTodo()" title="Create a todo from this pull request" data-testid="git-pr-todo" (click)="addTodo(p)">Add todo</button>
           <button qButton size="sm" variant="ghost" [icon]="icons.ExternalLink" data-testid="git-pr-open" (click)="actions.prOpen(p.number)">Open in browser</button>
           @if (p.state === 'open') {
             <button qButton size="sm" variant="secondary" [icon]="icons.GitBranch" [loading]="checkingOut()" data-testid="git-pr-checkout" (click)="checkout()">Check out</button>
@@ -158,7 +159,7 @@ export class GitPrTab implements TabComponent {
   readonly tab = input.required<Tab>();
   readonly scope = input.required<string>();
 
-  protected readonly icons = { ExternalLink, GitBranch, GitPullRequest, MessageSquare, RefreshCw };
+  protected readonly icons = { ExternalLink, GitBranch, GitPullRequest, ListPlus, MessageSquare, RefreshCw };
   protected readonly checkIcon = CHECK_ICON;
   private readonly number = computed(() => Number(this.tab().data?.['id'] ?? 0));
   protected readonly view = signal<View>('conversation');
@@ -170,6 +171,7 @@ export class GitPrTab implements TabComponent {
   protected readonly checks = invokeResource<GitPrCheckWithLog[]>('git.pr.checks', () => ({ number: this.number(), failedLogs: this.withLogs() }), { enabled: () => this.opened().has('checks') });
   protected readonly diff = invokeResource<GitDiffFile[]>('git.pr.diff', () => ({ number: this.number() }), { enabled: () => this.opened().has('files') });
   protected readonly checkingOut = signal(false);
+  protected readonly addingTodo = signal(false);
   protected readonly commentDraft = signal({ body: '' });
   protected readonly commentForm = form(this.commentDraft);
   protected readonly commenting = signal(false);
@@ -244,6 +246,13 @@ export class GitPrTab implements TabComponent {
     this.checkingOut.set(true);
     await this.actions.prCheckout(this.number());
     this.checkingOut.set(false);
+  }
+
+  protected async addTodo(pr: GitPullRequestDetail): Promise<void> {
+    if (this.addingTodo()) return;
+    this.addingTodo.set(true);
+    await this.actions.prTodo(pr);
+    this.addingTodo.set(false);
   }
 
   protected async comment(): Promise<void> {

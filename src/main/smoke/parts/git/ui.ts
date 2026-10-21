@@ -1,17 +1,17 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { GitCommit, GitDiffFile, GitStatus, WorkspaceInfo } from '@quiver/core';
+import type { GitCommit, GitDiffFile, GitStatus, TodoItem, WorkspaceInfo } from '@quiver/core';
 import { runToEnd } from '@quiver/core/node';
 import { writeFakeGh, type FakeGhPr, type FakeGhState } from '../../fake-gh';
 import { until, type SmokeSection } from '../../part';
 
 // The Git panel, on a repository of its own in a temporary folder opened as a second workspace: a file changed on disk
 // shows in the sidebar, its diff opens side by side and inline, it is staged and committed from the commit box, the
-// commit shows in the history, a branch is made from a dialog and another switched to from the list, a merge conflict
-// gets a note rather than a diff; then the pull
-// requests against the fake gh of parts/git/pr.ts, with their check badges, a detail tab with the failed log on demand,
-// and the empty state when gh is missing.
+// commit shows in the history, a branch is made from a dialog and another switched to from the list, the status bar
+// follows the branch with its ahead count, a merge conflict gets a note rather than a diff; then the pull requests
+// against the fake gh of parts/git/pr.ts, with their check badges, a detail tab with the failed log on demand and a
+// todo made from it, and the empty state when gh is missing.
 
 const REPO = 'smoke/quiver';
 
@@ -124,6 +124,12 @@ const section: SmokeSection = async ({ check, run, ws: mainWs }) => ({
       await click('[data-testid=activity-item][data-drag-id=git]');
       const branchShown = await waitFor(`document.querySelector('[data-testid=git-current-branch]')?.textContent.trim() === 'main'`);
       check('git ui: the sidebar shows the current branch with a clean tree', branchShown && (await js(`Boolean(document.querySelector('[data-testid=git-clean]'))`)) === true);
+      const statusItem = () => js(`(() => { const el = document.querySelector('[data-testid=git-status-item]'); return el ? { branch: el.getAttribute('data-branch'), ahead: el.getAttribute('data-ahead'), behind: el.getAttribute('data-behind'), text: el.textContent.replace(/\\s+/g, ' ').trim() } : null; })()`);
+      const itemOn = (branch: string, ahead = '0') => until(async () => {
+        const item = (await statusItem()) as { branch: string; ahead: string } | null;
+        return item?.branch === branch && item.ahead === ahead;
+      }, 5000);
+      check('git ui: the status bar shows the branch, without arrows while nothing is ahead or behind', (await itemOn('main')) && JSON.stringify(await statusItem()) === JSON.stringify({ branch: 'main', ahead: '0', behind: '0', text: 'main' }), await statusItem());
 
       // A file changed on disk shows under Changes (the status is read again on refresh, focus and every few seconds).
       await fs.writeFile(path.join(folder, 'app.txt'), 'one\nTWO\nthree\nfour\nfive\n');
@@ -168,6 +174,8 @@ const section: SmokeSection = async ({ check, run, ws: mainWs }) => ({
       const emptied = await waitFor(`Boolean(${visible('[data-testid=git-diff-tab]')}?.querySelector('[data-testid=git-diff-empty]'))`);
       check('git ui: the working diff empties once the file is staged', emptied);
 
+      // main tracks feature for a moment, so the commit below puts it one ahead in the status bar.
+      await sh('branch', '--set-upstream-to=feature', 'main');
       // Commit from the box: the button waits for a message, then commits what is staged.
       const disabledBefore = await js(`document.querySelector('[data-testid=git-commit]')?.disabled ?? null`);
       await js(`(() => { const set = ${setInput}; set(document.querySelector('[data-testid=git-commit-message]'), 'Change app\\n\\nFrom the panel.'); })()`);
@@ -183,6 +191,9 @@ const section: SmokeSection = async ({ check, run, ws: mainWs }) => ({
         { disabledBefore, enabled, head, cleared },
       );
       await shot('32d-git-sidebar-committed-light');
+      const ahead = await itemOn('main', '1');
+      check('git ui: after the commit the status bar shows the branch one ahead of its upstream', ahead && ((await statusItem()) as { text: string } | null)?.text === 'main1', await statusItem());
+      await sh('branch', '--unset-upstream', 'main');
 
       // The history lists it first, with its files and diff.
       await click('[data-testid=git-open-history]');
@@ -209,6 +220,16 @@ const section: SmokeSection = async ({ check, run, ws: mainWs }) => ({
       await click('[data-testid=git-branch][data-name=feature]');
       const switched = await waitFor(`document.querySelector('[data-testid=git-current-branch]')?.textContent.trim() === 'feature'`);
       check('git ui: clicking a branch switches to it', switched && (await run<GitStatus>('git.status', {}, id)).branch === 'feature');
+      // The status bar follows the checkout, and a click there opens Git from another module.
+      const followed = await itemOn('feature');
+      await click('[data-testid=activity-item][data-drag-id=todo]');
+      await wait(200);
+      const away = await js(`!document.querySelector('[data-testid=git-sidebar]')`);
+      await click('[data-testid=git-status-item]');
+      const opened = await waitFor(`Boolean(document.querySelector('[data-testid=git-sidebar]'))`, 2000);
+      // The sidebar is made anew; the steps below need its branch read and its buttons in place.
+      await waitFor(`document.querySelector('[data-testid=git-current-branch]')?.textContent.trim() === 'feature' && Boolean(document.querySelector('[data-testid=git-new-branch]'))`);
+      check('git ui: the status bar follows a branch switch, and a click on it opens Git', followed && away === true && opened, { item: await statusItem(), away, opened });
       await click('[data-testid=git-new-branch]');
       await wait(250);
       const dialogTitle = await js(`document.querySelector('.fixed.inset-0 h2')?.textContent.trim() ?? null`);
@@ -272,6 +293,23 @@ const section: SmokeSection = async ({ check, run, ws: mainWs }) => ({
       const conversation = await js(`[...(${visible('[data-testid=git-pr-tab]')}?.querySelectorAll('[data-testid=git-pr-comment]') ?? [])].map((c) => c.getAttribute('data-kind'))`);
       check('git ui: a pull request opens with its description, review and comment', detail && JSON.stringify(conversation) === JSON.stringify(['review', 'comment']), conversation);
       await shot('32h-git-pr-conversation-light');
+      // Add todo: one todo per open pull request, titled with its number and title, its address in the notes.
+      const todosOf = async () => (await run<TodoItem[]>('todo.list', {}, id)).filter((t) => t.notes.includes(`${REPO}/pull/1`));
+      await js(`${visible('[data-testid=git-pr-todo]')}?.click()`);
+      const added = await until(async () => (await todosOf()).length === 1, 4000);
+      const todo = (await todosOf())[0];
+      await js(`${visible('[data-testid=git-pr-todo]')}?.click()`);
+      await wait(400);
+      const once = (await todosOf()).length;
+      check(
+        'git ui: Add todo makes a todo from the pull request (title, address in the notes), once while it is open',
+        added && todo?.title === '#1 Add the parser' && todo.notes === `https://github.com/${REPO}/pull/1` && !todo.done && once === 1,
+        { todo, once },
+      );
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(150);
+      await shot('32l-git-pr-todo-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
       await js(`${visible('[data-testid=git-pr-view-checks]')}?.click()`);
       const checksShown = await waitFor(`(${visible('[data-testid=git-pr-tab]')}?.querySelectorAll('[data-testid=git-pr-check]').length ?? 0) === 2`, 6000);
       const logBefore = await js(`Boolean(${visible('[data-testid=git-pr-tab]')}?.querySelector('[data-testid=git-pr-check-log]'))`);
@@ -314,6 +352,9 @@ const section: SmokeSection = async ({ check, run, ws: mainWs }) => ({
       await click(`[data-testid=workspace-tab][data-drag-id="${mainWs.id}"]`);
       const leaked = await js(`Boolean(document.querySelector('[data-testid=git-file][data-path="notes.txt"]'))`);
       check('git ui: switching workspace drops the other repository\'s status at once', shownHere && leaked === false, { shownHere, leaked });
+      const mainBranch = await run<GitStatus>('git.status', {}, mainWs.id).then((st) => st.branch, () => undefined);
+      const itemThere = await until(async () => ((await statusItem()) as { branch: string } | null)?.branch === mainBranch || (mainBranch === undefined && (await statusItem()) === null), 4000);
+      check('git ui: the status bar shows the branch of the workspace on screen, and nothing outside a repository', itemThere, { mainBranch, item: await statusItem() });
     } finally {
       // A dialog a failed step left open would block every later part.
       await js(`[...document.querySelectorAll('.fixed.inset-0 button')].find((b) => b.textContent.trim() === 'Cancel')?.click()`).catch(() => {});

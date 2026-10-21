@@ -23,8 +23,8 @@ process.stdin.on('data', (d) => {
 `;
 
 // The Runner panel: a fixture task started from the sidebar turning ready with its coloured output, the port link,
-// stdin, search, stop, the settings form saved to the task's file, a discovered Makefile target saved as a task, and
-// the confirmation before deleting it.
+// the status bar's count of running tasks, stdin, search, stop, the settings form saved to the task's file, a
+// discovered Makefile target saved as a task, and the confirmation before deleting it.
 const section: SmokeSection = async ({ check, run, ws, folder }) => {
   const port = await freePort();
   await fs.writeFile(path.join(folder, 'runner-ui-fixture.cjs'), FIXTURE);
@@ -45,11 +45,29 @@ const section: SmokeSection = async ({ check, run, ws, folder }) => {
       await until(async () => (await rowState()) !== null, 5000);
       check('runner ui: the activity bar opens the Runner sidebar with the saved task, stopped', (await js(`Boolean(document.querySelector('[data-testid=runner-sidebar]'))`)) === true && (await rowState()) === 'stopped', await rowState());
 
+      const statusItem = () => js(`document.querySelector('[data-testid=runner-status-item]')?.getAttribute('data-count') ?? null`);
+      check('runner ui: the status bar shows no runner item while no task runs', (await statusItem()) === null, await statusItem());
+
       // Start from the sidebar: the dot goes through starting to ready once the fixture prints its line.
       await js(`${row}?.querySelector('[data-testid=runner-task-start]')?.click()`);
       const ready = await until(async () => (await rowState()) === 'ready', 15_000);
       const hint = await js(`${row}?.textContent.trim() ?? ''`);
       check('runner ui: Start in the sidebar runs the task and its dot turns ready, with the port as its hint', ready && typeof hint === 'string' && hint.includes(`:${port}`), { state: await rowState(), hint });
+
+      // The status bar counts it; a click there opens the Runner from another module.
+      const counted = await until(async () => (await statusItem()) === '1', 5000);
+      await js(`document.querySelector('[data-testid=activity-item][data-drag-id=todo]')?.click()`);
+      await wait(200);
+      const awayFromRunner = await js(`!document.querySelector('[data-testid=runner-sidebar]')`);
+      await js(`document.querySelector('[data-testid=runner-status-item]')?.click()`);
+      await wait(200);
+      const backInRunner = await js(`Boolean(document.querySelector('[data-testid=runner-sidebar]'))`);
+      const itemTitle = await js(`document.querySelector('[data-testid=runner-status-item]')?.getAttribute('title') ?? ''`);
+      check(
+        'runner ui: the status bar says 1 running, names the task in its tooltip, and a click opens the Runner',
+        counted && awayFromRunner === true && backInRunner === true && String(itemTitle).includes('ui server: ready'),
+        { counted: await statusItem(), awayFromRunner, backInRunner, itemTitle },
+      );
 
       // Its tab: the output with the colour codes drawn, the header facts and the port as a link.
       await js(`${row}?.click()`);
@@ -112,6 +130,8 @@ const section: SmokeSection = async ({ check, run, ws, folder }) => {
       const stdinOff = await js(`${tab}?.querySelector('[data-testid=runner-stdin]')?.disabled ?? null`);
       const stopLine = await js(`${tab}?.querySelector('[data-testid=runner-output]')?.textContent ?? ''`);
       check('runner ui: Stop in the tab stops the task, the dot and header say stopped and stdin turns off', stopped && stdinOff === true, { state: await rowState(), stdinOff, stopLine: String(stopLine).slice(-200) });
+      const quiet = await until(async () => (await statusItem()) === null, 3000);
+      check('runner ui: the status bar item goes once the task stops', quiet, await statusItem());
       await shot('34c-runner-stopped-dark');
       await js(`document.documentElement.classList.remove('dark')`);
 

@@ -1,27 +1,8 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { HostEventMessage, RunnerOutputChunk, RunnerOutputLine, RunnerTask, WorkspaceInfo } from '@quiver/core';
+import type { HostEventMessage, RunnerOutputChunk, RunnerProcInfo, RunnerTask, RunnerWaitResult, WorkspaceInfo } from '@quiver/core';
 import { freePort, processAlive, until, type SmokeSection } from '../../part';
-
-interface Proc {
-  taskId: string;
-  runId: string;
-  state: string;
-  pid?: number;
-  exitCode?: number | null;
-  restarts: number;
-  port?: number;
-  uptimeMs?: number;
-  restartAt?: string;
-}
-
-interface Waited {
-  matched: boolean;
-  timedOut: boolean;
-  line?: RunnerOutputLine;
-  proc: Proc | null;
-}
 
 // A dev server stand-in: starts a grandchild (to check the whole tree is stopped), prints "ready on <port>" once it
 // listens, leaves a prompt without a line break, and answers stdin: `crash` exits with 3, `burst` prints 6000 lines,
@@ -71,7 +52,7 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc, toolNa
   // Count what the supervisor announces, and look at the task the moment its state changes: a state that lasts a
   // second (crashed, before the restart) is easily missed by polling on a busy machine.
   const events: HostEventMessage<'runner.changed'>['payload'][] = [];
-  const seen: Proc[] = [];
+  const seen: RunnerProcInfo[] = [];
   const emit = host.emit.bind(host);
   host.emit = ((event, payload) => {
     if (event === 'runner.changed') {
@@ -79,7 +60,7 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc, toolNa
       events.push(e);
       if (e.reason === 'state' && e.workspaceId === ws.id && e.taskId) {
         void host.invoke('runner.proc.list', {}, { caller: 'ui', workspaceId: ws.id }).then((out) => {
-          const proc = out.ok ? (out.result as Proc[]).find((p) => p.taskId === e.taskId) : undefined;
+          const proc = out.ok ? (out.result as RunnerProcInfo[]).find((p) => p.taskId === e.taskId) : undefined;
           if (proc) seen.push(proc);
         });
       }
@@ -89,17 +70,17 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc, toolNa
 
   try {
     const output = (taskId: string, after = 0, limit = 5000) => run<RunnerOutputChunk>('runner.proc.output', { taskId, after, limit }, ws.id);
-    const wait = (taskId: string, pattern?: string, timeoutMs = 15_000) => run<Waited>('runner.proc.wait', { taskId, pattern, timeoutMs }, ws.id);
+    const wait = (taskId: string, pattern?: string, timeoutMs = 15_000) => run<RunnerWaitResult>('runner.proc.wait', { taskId, pattern, timeoutMs }, ws.id);
     const grandchild = async (taskId: string) => Number(/grandchild (\d+)/.exec((await output(taskId)).lines.map((l) => l.text).join('\n'))?.[1]);
 
     // ---------- start, ready by pattern, output, cursor, stdin ----------
-    const started = await run<Proc>('runner.proc.start', { taskId: 'smoke-srv' }, ws.id);
+    const started = await run<RunnerProcInfo>('runner.proc.start', { taskId: 'smoke-srv' }, ws.id);
     check('runner: start answers the new run, starting, with its pid and port', started.state === 'starting' && Boolean(started.pid) && started.port === port && started.restarts === 0, started);
-    const again = await run<Proc>('runner.proc.start', { taskId: 'smoke-srv' }, ws.id);
+    const again = await run<RunnerProcInfo>('runner.proc.start', { taskId: 'smoke-srv' }, ws.id);
     check('runner: starting a running task leaves it alone', again.runId === started.runId && again.pid === started.pid);
     const ready = await wait('smoke-srv');
     check('runner: a task is ready once its ready pattern prints, colour codes aside', ready.matched && ready.proc?.state === 'ready' && ready.proc.runId === started.runId, ready);
-    const listed = (await run<Proc[]>('runner.proc.list', {}, ws.id)).find((p) => p.taskId === 'smoke-srv');
+    const listed = (await run<RunnerProcInfo[]>('runner.proc.list', {}, ws.id)).find((p) => p.taskId === 'smoke-srv');
     check('runner: list carries state, pid, port and uptime', listed?.state === 'ready' && listed.pid === started.pid && listed.port === port && typeof listed.uptimeMs === 'number', listed);
     const prompt = await wait('smoke-srv', '^prompt> $', 3000);
     check('runner: text without a line break (a prompt) shows up after a pause', prompt.matched, prompt);
@@ -131,8 +112,8 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc, toolNa
     check('runner: ordinary groups and quantifiers are still accepted', fine.matched, fine);
 
     // ---------- a port held by something else does not mean ready ----------
-    const held = await run<Proc>('runner.proc.start', { taskId: 'smoke-held' }, ws.id);
-    const heldRunning = await until(async () => (await run<Proc[]>('runner.proc.list', {}, ws.id)).some((p) => p.taskId === 'smoke-held' && p.state === 'running'), 5000);
+    const held = await run<RunnerProcInfo>('runner.proc.start', { taskId: 'smoke-held' }, ws.id);
+    const heldRunning = await until(async () => (await run<RunnerProcInfo[]>('runner.proc.list', {}, ws.id)).some((p) => p.taskId === 'smoke-held' && p.state === 'running'), 5000);
     const heldNote = (await output('smoke-held')).lines.some((l) => l.stream === 'system' && l.text.includes('already in use'));
     check('runner: a port another process already holds does not mark the task ready, and the output says so', held.state !== 'ready' && heldRunning && heldNote, held);
     await run('runner.proc.stop', { taskId: 'smoke-held' }, ws.id);
@@ -156,8 +137,8 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc, toolNa
     await run('runner.proc.input', { taskId: 'smoke-srv', text: 'crash\n' }, ws.id);
     const crashed = await until(() => seen.some((p) => p.taskId === 'smoke-srv' && p.state === 'crashed' && p.exitCode === 3 && Boolean(p.restartAt)), 5000);
     check('runner: a crash is reported with a restart pending', crashed);
-    const back = await until(async () => (await run<Proc[]>('runner.proc.list', {}, ws.id)).some((p) => p.taskId === 'smoke-srv' && p.state === 'ready' && p.restarts === 1), 15_000);
-    const restarted = (await run<Proc[]>('runner.proc.list', {}, ws.id)).find((p) => p.taskId === 'smoke-srv');
+    const back = await until(async () => (await run<RunnerProcInfo[]>('runner.proc.list', {}, ws.id)).some((p) => p.taskId === 'smoke-srv' && p.state === 'ready' && p.restarts === 1), 15_000);
+    const restarted = (await run<RunnerProcInfo[]>('runner.proc.list', {}, ws.id)).find((p) => p.taskId === 'smoke-srv');
     check('runner: auto restart starts the crashed task again after a backoff, in the same run', back && restarted?.runId === started.runId && restarted.pid !== started.pid && Date.now() - crashAt >= 900, restarted);
     const crashLog = (await output('smoke-srv')).lines.map((l) => l.text);
     check('runner: the output notes the exit and the restart', crashLog.some((t) => t.includes('exited with code 3')) && crashLog.some((t) => /Restarting in 1 s/.test(t)));
@@ -170,7 +151,7 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc, toolNa
     const mcpOut = await rpc('tools/call', { name: 'runner_proc_output', arguments: { taskId: 'smoke-srv', after: 0, limit: 5 } });
     check('mcp reads task output', mcpOut.result?.isError !== true && (JSON.parse(mcpOut.result?.content?.[0]?.text ?? '{}') as RunnerOutputChunk).lines?.length === 5);
     const mcpWait = await rpc('tools/call', { name: 'runner_proc_wait', arguments: { taskId: 'smoke-srv', timeoutMs: 2000 } });
-    check('mcp can wait for a task', (JSON.parse(mcpWait.result?.content?.[0]?.text ?? '{}') as Waited).matched === true);
+    check('mcp can wait for a task', (JSON.parse(mcpWait.result?.content?.[0]?.text ?? '{}') as RunnerWaitResult).matched === true);
     for (const [tool, args] of [
       ['runner_proc_start', { taskId: 'smoke-port' }],
       ['runner_proc_stop', { taskId: 'smoke-srv' }],
@@ -184,16 +165,16 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc, toolNa
     // ---------- stop kills the whole tree; restart is a new run ----------
     const pidBeforeRestart = restarted?.pid;
     const grandAfterRestart = await grandchild('smoke-srv');
-    const viaRestart = await run<Proc>('runner.proc.restart', { taskId: 'smoke-srv' }, ws.id);
+    const viaRestart = await run<RunnerProcInfo>('runner.proc.restart', { taskId: 'smoke-srv' }, ws.id);
     check('runner: restart starts a new run', viaRestart.runId !== started.runId && viaRestart.restarts === 0 && viaRestart.pid !== pidBeforeRestart);
     check('runner: restart stopped the old tree first', !processAlive(pidBeforeRestart) && (await until(() => !processAlive(grandAfterRestart), 3000)), { pidBeforeRestart, grandAfterRestart });
     await wait('smoke-srv');
     const grandNow = await grandchild('smoke-srv');
-    const stopped = await run<Proc>('runner.proc.stop', { taskId: 'smoke-srv' }, ws.id);
+    const stopped = await run<RunnerProcInfo>('runner.proc.stop', { taskId: 'smoke-srv' }, ws.id);
     check('runner: stop waits for the exit and is not a crash', stopped.state === 'exited' && !processAlive(viaRestart.pid), stopped);
     check('runner: stop kills the process tree, grandchildren too', await until(() => !processAlive(grandNow) && !processAlive(grand), 3000), { grandNow, grand });
     await new Promise((r) => setTimeout(r, 1500));
-    const stays = (await run<Proc[]>('runner.proc.list', {}, ws.id)).find((p) => p.taskId === 'smoke-srv');
+    const stays = (await run<RunnerProcInfo[]>('runner.proc.list', {}, ws.id)).find((p) => p.taskId === 'smoke-srv');
     check('runner: a stopped task with auto restart stays stopped', stays?.state === 'exited' && stays.runId === viaRestart.runId);
     const oldRun = await run<RunnerOutputChunk>('runner.proc.output', { taskId: 'smoke-srv', runId: started.runId, after: 0, limit: 1 }, ws.id);
     check('runner: the output of an earlier run stays readable by its id', oldRun.runId === started.runId && oldRun.lines.length === 1);
@@ -204,12 +185,57 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc, toolNa
     check('runner: a task with a port is ready once the port accepts connections', byPort.matched && byPort.proc?.state === 'ready', byPort);
     const portTree = [byPort.proc?.pid, await grandchild('smoke-port')];
     await run('runner.proc.start', { taskId: 'smoke-echo' }, ws.id);
-    const echoDone = await until(async () => (await run<Proc[]>('runner.proc.list', {}, ws.id)).some((p) => p.taskId === 'smoke-echo' && p.state === 'exited' && p.exitCode === 0), 5000);
+    const echoDone = await until(async () => (await run<RunnerProcInfo[]>('runner.proc.list', {}, ws.id)).some((p) => p.taskId === 'smoke-echo' && p.state === 'exited' && p.exitCode === 0), 5000);
     const echoText = (await output('smoke-echo')).lines.map((l) => l.text).join('\n');
     check('runner: a command runs through the shell with the task env and exits cleanly', echoDone && echoText.includes('quiver'), echoText);
     await run('runner.proc.start', { taskId: 'smoke-bad' }, ws.id);
     const bad = await wait('smoke-bad', 'never printed', 5000);
     check('runner: a failing command is crashed with its exit code, and a wait on it ends early', !bad.matched && !bad.timedOut && bad.proc?.state === 'crashed' && bad.proc.exitCode === 7, bad);
+    // ---------- env profiles, found the way the env module finds env files ----------
+    const envFiles: Record<string, string> = {
+      '.env.prof': 'RUNNER_PROF=root\n',
+      'rp-apps/web/prof.env': 'RUNNER_PROF=web\n',
+      'rp-apps/web/.env.only': 'RUNNER_PROF=only\n',
+      'rp-apps/web/.env.twice': 'RUNNER_PROF=twice-web\n',
+      'rp-lib/.env.twice': 'RUNNER_PROF=twice-lib\n',
+      'node_modules/rp-pkg/.env.hidden': 'RUNNER_PROF=hidden\n',
+      'rp-a/b/c/d/e/.env.deep': 'RUNNER_PROF=deep\n',
+    };
+    for (const [rel, text] of Object.entries(envFiles)) {
+      await fs.mkdir(path.dirname(path.join(folder, rel)), { recursive: true });
+      await fs.writeFile(path.join(folder, rel), text);
+    }
+    const profileRun = async (id: string, envProfile: string, cwd = '') => {
+      await store.put('runner', task({ id, command: 'echo prof=%RUNNER_PROF%$RUNNER_PROF', cwd, envProfile }));
+      await run('runner.proc.start', { taskId: id }, ws.id);
+      await until(async () => (await run<RunnerProcInfo[]>('runner.proc.list', {}, ws.id)).some((p) => p.taskId === id && (p.state === 'exited' || p.state === 'crashed')), 5000);
+      const proc = (await run<RunnerProcInfo[]>('runner.proc.list', {}, ws.id)).find((p) => p.taskId === id);
+      const text = (await output(id)).lines.map((l) => l.text).join('\n');
+      await store.remove('runner', id);
+      return { state: proc?.state, text, value: /prof=\S*?(root|web|only|twice-\w+|hidden|deep)/.exec(text)?.[1] };
+    };
+    try {
+      const nearest = await profileRun('smoke-prof-web', 'prof', 'rp-apps/web');
+      check("runner: a task's env profile is read from its own folder first, as <name>.env too", nearest.state === 'exited' && nearest.value === 'web', nearest);
+      const rootProf = await profileRun('smoke-prof-root', 'prof');
+      check('runner: from the workspace folder the same profile is its .env.<name>', rootProf.value === 'root', rootProf);
+      const only = await profileRun('smoke-prof-only', 'only');
+      check('runner: a profile only one folder has is found there', only.value === 'only', only);
+      const byPath = await profileRun('smoke-prof-path', 'rp-apps/web/prof.env');
+      check('runner: a profile with a slash is a path in the workspace', byPath.value === 'web', byPath);
+      const twice = await profileRun('smoke-prof-twice', 'twice');
+      check('runner: a profile several other folders have is refused, naming them', twice.state === 'crashed' && twice.text.includes('rp-apps/web/.env.twice') && twice.text.includes('rp-lib/.env.twice'), twice);
+      const hidden = await profileRun('smoke-prof-hidden', 'hidden');
+      const deep = await profileRun('smoke-prof-deep', 'deep');
+      check('runner: env files the env module skips (node_modules, five folders deep) are not profiles', [hidden, deep].every((r) => r.state === 'crashed' && r.text.includes('No env file for the profile')), { hidden, deep });
+      const outside = await profileRun('smoke-prof-outside', '../.env.prof');
+      check('runner: a profile path outside the workspace is refused', outside.state === 'crashed' && outside.text.includes('inside the project folder'), outside);
+    } finally {
+      // Only this section's own files: the workspace folder is shared with the other parts (env has an apps/ of its own).
+      for (const top of ['.env.prof', 'rp-apps', 'rp-lib', 'node_modules/rp-pkg', 'rp-a']) await fs.rm(path.join(folder, top), { recursive: true, force: true }).catch(() => undefined);
+      await fs.rmdir(path.join(folder, 'node_modules')).catch(() => undefined);
+    }
+
     let missing = '';
     await run('runner.proc.start', { taskId: 'no-such-task' }, ws.id).catch((err: Error) => (missing = err.message));
     check('runner: starting a task that is not saved fails', missing.includes('no-such-task'), missing);
@@ -222,7 +248,7 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc, toolNa
     const other = await run<WorkspaceInfo>('workspace.open', { path: otherFolder }, null);
     const otherPort = await freePort();
     await host.workspaces.get(other.id)!.store.put('runner', task({ id: 'smoke-close', command: `${node} runner-fixture.cjs ${otherPort}`, env: asNode, readyPattern: 'ready on' }));
-    const closing = await run<Proc>('runner.proc.start', { taskId: 'smoke-close' }, other.id);
+    const closing = await run<RunnerProcInfo>('runner.proc.start', { taskId: 'smoke-close' }, other.id);
     await run('runner.proc.wait', { taskId: 'smoke-close', timeoutMs: 15_000 }, other.id);
     const closeGrand = Number(/grandchild (\d+)/.exec((await run<RunnerOutputChunk>('runner.proc.output', { taskId: 'smoke-close', after: 0, limit: 50 }, other.id)).lines.map((l) => l.text).join('\n'))?.[1]);
     await run('workspace.close', { id: other.id }, null);

@@ -4,6 +4,8 @@ The renderer is the frame around the modules: title bar, activity bar, sidebar, 
 
 The status bar shows the workspace folder, the active environment, the updater, and the MCP server with its port. While the MCP inspector's call recorder is recording, `REC` and the number of calls so far sit next to it and open the recorder.
 
+Modules add their own items after the environment through `statusItems` on their `ModuleUI`: Git shows the current branch with ahead and behind, the Runner how many tasks are running, and either opens its sidebar on a click. See [Status bar items](#status-bar-items).
+
 ## Workspaces and tabs
 
 Open several folders at once and switch instantly. Each workspace has its own tabs, and the open or collapsed state of sidebar folders and sections, restored on return and after a restart (kept under `.quiver/local`). Global-scope tabs (Settings, Tools) are not persisted.
@@ -35,11 +37,30 @@ Two things to know when styling: `cn` joins class names without Tailwind merging
 
 - The host contract: `HostBridge` (commands and host events over the preload), `invokeResource` (a command as a `resource()` that runs again on store, state or host events and keeps its last value while reloading) and `injectHostEvent`.
 - State services: `AppState`, `TabsState`, `TreeState`, `UiActions` (the palette's entries), `Toasts`, `Dialogs` (prompt, prompt with a choice, confirm, and a notice with only OK), the context menu and the variable hover.
-- `defineModuleUI`, the renderer half of a module: id, title, icon, sidebar component, tab components by type, and palette actions created in an injection context.
+- `defineModuleUI`, the renderer half of a module: id, title, icon, sidebar component, tab components by type, and palette actions created in an injection context, and status bar items.
 - Dragging: `dragReorder` and `DropMarker` for strips, `dragInto` for dropping items on targets.
 - Controls as directives on native elements (`button[qButton]`, `button[qIconButton]`, `input[qInput]`, `select[qSelect]`, `input[qCheckbox]`, `span[qBadge]`, `svg[qSpinner]`, `[qAutofocus]`), and components: the segmented tabs, section header, empty state, the key/value editor, the CodeMirror editor, the variable input with its hover card, and the toast, dialog and context menu hosts.
 - `VariableSource`, the injection token the variable input and hover read `{{variables}}` from; `[qVariables]` provides one, and the API module's `ApiVariables` directive provides the active environment's.
 
+## Status bar items
+
+A module contributes to the status bar by listing components in `statusItems` on its `ModuleUI` (`packages/ui/src/module-ui.ts`):
+
+```ts
+export const runnerModuleUI = defineModuleUI({
+  id: 'runner',
+  // ...
+  statusItems: [RunnerStatusItem],
+});
+```
+
+The status bar (`app/status-bar/status-bar.ts`) draws them with `NgComponentOutlet` after the environment picker, in the activity bar's order, for every module that is shown there (one the user hid contributes nothing) and available (a `workspace` module only while a workspace is open). They take no inputs, so an item reads its own data, usually with `invokeResource` on the active workspace and a reload on its module's host event, and lives as long as its module is shown. An item:
+
+- renders nothing when it has nothing to say (outside a repository, no task running), so a quiet module leaves no gap; give the component `host: { class: 'contents' }` so the bar's gap applies to what it renders;
+- keeps a result with the workspace it was read for (`linkedSignal` over the resource's value, as `git-status-item.ts` does), since `invokeResource` keeps the last value while the next workspace's loads;
+- is a `<button>` at the bar's size (`text-[11px]`, icons `size-3`, `hover:text-fg`) with a tooltip that says what a click does, which is usually `AppState.setActiveModule(<module id>)` to open the module's sidebar;
+- carries a `data-testid` for the smoke.
+
 ## Verified by
 
-The smoke's `shell` part ([`src/main/smoke/parts/shell.ts`](../main/smoke/parts/shell.ts)) checks the updater state of a dev build, that the default palette applies and a saved one recolours the window in both modes, and in the UI the tab strip (scrolling, dragging, Escape during a drag, middle click, the right-click menus), dragging workspaces, hiding and reordering modules in the activity bar, and the About and palette sections of the settings. Settings also has a Network section (the proxy for the API client, realtime and GraphQL introspection), checked by the `api` part. `npm run smoke -- shell --shots` runs it alone with its UI checks.
+The smoke's `shell` part ([`src/main/smoke/parts/shell.ts`](../main/smoke/parts/shell.ts)) checks the updater state of a dev build, that the default palette applies and a saved one recolours the window in both modes, and in the UI the tab strip (scrolling, dragging, Escape during a drag, middle click, the right-click menus), dragging workspaces, hiding and reordering modules in the activity bar, and the About and palette sections of the settings. Settings also has a Network section (the proxy for the API client, realtime and GraphQL introspection), checked by the `api` part. `npm run smoke -- shell --shots` runs it alone with its UI checks. The module status bar items are checked by the parts of their modules (`git` and `runner`, with `--shots`).

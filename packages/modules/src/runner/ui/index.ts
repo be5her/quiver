@@ -3,6 +3,7 @@ import { AppState, defineModuleUI } from '@quiver/ui';
 import { SquareTerminal } from 'lucide';
 import { RunnerActions } from './runner-actions';
 import { RunnerSidebar } from './runner-sidebar';
+import { RunnerStatusItem } from './runner-status-item';
 import { RunnerTaskTab } from './task-tab';
 
 export const runnerModuleUI = defineModuleUI({
@@ -12,6 +13,7 @@ export const runnerModuleUI = defineModuleUI({
   order: 45,
   availability: 'workspace',
   sidebar: RunnerSidebar,
+  statusItems: [RunnerStatusItem],
   tabs: {
     'runner.task': RunnerTaskTab,
   },

@@ -1,11 +1,11 @@
 import { Component, computed, effect, inject, input, linkedSignal, signal, untracked } from '@angular/core';
-import type { RunnerTask } from '@quiver/core';
+import type { RunnerProcInfo, RunnerTask } from '@quiver/core';
 import { Button, Icon, Segment, Segmented, TabsState, invokeResource, type Tab, type TabComponent } from '@quiver/ui';
 import { ExternalLink, Play, RotateCw, Square } from 'lucide';
 import { RunnerOutput } from './output-pane';
 import { RunnerActions, type TaskView } from './runner-actions';
 import { injectRunnerChanged } from './runner-events';
-import { STATE_LABEL, formatUptime, isLive, portUrl, stateDot, taskState, type RunnerProcInfo } from './runner-format';
+import { STATE_LABEL, formatUptime, isLive, portUrl, stateDot, taskState } from './runner-format';
 import { RunnerTaskEditor } from './task-editor';
 
 /**

@@ -1,5 +1,5 @@
 import { Service, inject, signal, untracked } from '@angular/core';
-import { toErrorPayload, type GitBranch, type GitCommit, type GitStatus, type GitPullRequest } from '@quiver/core';
+import { toErrorPayload, type GitBranch, type GitCommit, type GitStatus, type GitPullRequest, type TodoItem } from '@quiver/core';
 import { AppState, Dialogs, HostBridge, TabsState, Toasts, type ContextMenuItem } from '@quiver/ui';
 import { errorReason, groupChanges, splitPath, type DiffSource, type GitLogPage, type GitRemoteResult, type PrFilter } from './git-format';
 
@@ -274,6 +274,27 @@ export class GitActions {
   async prComment(number: number, body: string): Promise<boolean> {
     try {
       await this.host.invoke('git.pr.comment', { number, body });
+      return true;
+    } catch (err) {
+      this.toasts.error(err);
+      return false;
+    }
+  }
+
+  /**
+   * A todo for a pull request (`todo.add`): its number and title as the title, its address in the notes. One still open
+   * for the same address is not added twice.
+   */
+  async prTodo(pr: Pick<GitPullRequest, 'number' | 'title' | 'url'>): Promise<boolean> {
+    const workspaceId = untracked(this.app.activeWorkspaceId);
+    try {
+      const todos = await this.host.invoke<TodoItem[]>('todo.list', {}, workspaceId);
+      if (todos.some((t) => !t.done && t.notes.includes(pr.url))) {
+        this.toasts.notify(`#${pr.number} is already on the todo list`);
+        return false;
+      }
+      await this.host.invoke('todo.add', { title: `#${pr.number} ${pr.title}`, notes: pr.url }, workspaceId);
+      this.toasts.notify(`Added #${pr.number} to the todo list`, 'success');
       return true;
     } catch (err) {
       this.toasts.error(err);

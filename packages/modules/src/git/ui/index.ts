@@ -4,6 +4,7 @@ import { GitBranch } from 'lucide';
 import { GitDiffTab } from './diff-tab';
 import { GitActions } from './git-actions';
 import { GitSidebar } from './git-sidebar';
+import { GitStatusItem } from './git-status-item';
 import { GitHistoryTab } from './history-tab';
 import { GitPrTab } from './pr-tab';
 import { GitPrsTab } from './prs-tab';
@@ -15,6 +16,7 @@ export const gitModuleUI = defineModuleUI({
   order: 35,
   availability: 'workspace',
   sidebar: GitSidebar,
+  statusItems: [GitStatusItem],
   tabs: {
     'git.diff': GitDiffTab,
     'git.history': GitHistoryTab,

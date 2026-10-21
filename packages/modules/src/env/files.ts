@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { promises as fs, watch, type FSWatcher } from 'node:fs';
 import path from 'node:path';
-import { QuiverError, isEnvFileName, newId, normalizeEnvPath, nowIso, type EnvBackup, type EnvGitStatus, type HostApi, type WorkspaceApi } from '@quiver/core';
+import { QuiverError, envPathDir, envPathName, isEnvFileName, newId, normalizeEnvPath, nowIso, type EnvBackup, type EnvGitStatus, type HostApi, type WorkspaceApi } from '@quiver/core';
 
 /** Folders never entered while looking for env files. */
 const SKIP_DIRS = new Set([
@@ -72,6 +72,31 @@ export function resolveEnvPath(w: WorkspaceApi, rel: string): { abs: string; rel
   if (!back || back.startsWith('..') || path.isAbsolute(back)) throw new QuiverError('INVALID_INPUT', 'The file must be inside the project folder');
   if (!isEnvFileName(path.basename(abs))) throw new QuiverError('INVALID_INPUT', `"${normalized}" is not an env file name (.env, .env.<name> or <name>.env)`);
   return { abs, rel: normalizeEnvPath(back) };
+}
+
+/**
+ * The env file a profile names, for whoever loads a profile by name (the runner's `envProfile`). A name with a slash,
+ * or one that is itself an env file name (`.env.staging`, `staging.env`), is a project-relative path and goes through
+ * `resolveEnvPath`. A bare name is looked up among the files `scanEnvFiles` finds, as `.env.<name>` or `<name>.env`:
+ * in `fromDir` (project-relative, `''` for the folder itself) first, then each folder above it up to the project
+ * folder, `.env.<name>` before `<name>.env` in each; failing that, the only such file elsewhere in the project.
+ * `abs` is null when there is none, or when several elsewhere leave it ambiguous (`candidates` lists them).
+ */
+export async function findProfileFile(w: WorkspaceApi, profile: string, fromDir = ''): Promise<{ abs: string; rel: string } | { abs: null; candidates: string[] }> {
+  const name = profile.trim();
+  if (!name) throw new QuiverError('INVALID_INPUT', 'A profile name is required');
+  if (/[\\/]/.test(name) || isEnvFileName(name)) return resolveEnvPath(w, name);
+  const names = [`.env.${name}`, `${name}.env`];
+  const matches = (await scanEnvFiles(w.path)).filter((rel) => names.includes(envPathName(rel)));
+  for (let dir = normalizeEnvPath(fromDir); ; dir = envPathDir(dir)) {
+    for (const file of names) {
+      const rel = dir ? `${dir}/${file}` : file;
+      if (matches.includes(rel)) return { abs: path.join(w.path, rel), rel };
+    }
+    if (!dir) break;
+  }
+  if (matches.length === 1) return { abs: path.join(w.path, matches[0]), rel: matches[0] };
+  return { abs: null, candidates: matches };
 }
 
 // ---------- git ----------

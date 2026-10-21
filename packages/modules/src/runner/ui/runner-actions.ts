@@ -1,7 +1,7 @@
 import { Service, inject, untracked } from '@angular/core';
-import type { RunnerTask } from '@quiver/core';
+import type { RunnerDiscoveredRow, RunnerProcInfo, RunnerTask } from '@quiver/core';
 import { AppState, Dialogs, HostBridge, TabsState, Toasts, type ContextMenuItem } from '@quiver/ui';
-import { isLive, taskState, type RunnerDiscoveredRow, type RunnerProcInfo } from './runner-format';
+import { isLive, taskState } from './runner-format';
 
 type TaskRef = Pick<RunnerTask, 'id' | 'name'>;
 export type TaskView = 'output' | 'settings';
