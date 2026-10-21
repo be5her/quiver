@@ -1,6 +1,6 @@
 # Process runner
 
-The project's long-running commands in one place: tasks discovered from `package.json`, Makefiles, justfiles and compose files or saved with the project, started and stopped as whole process trees, with their output, a ready state and their port. Under construction: the module is registered and empty; the plan is in [docs/plans/git-runner-queues.md](../../../../docs/plans/git-runner-queues.md).
+The project's long-running commands in one place: tasks discovered from `package.json`, Makefiles, justfiles and compose files or saved with the project, started and stopped as whole process trees, with their output, a ready state and their port. The plan it was built from is in [docs/plans/git-runner-queues.md](../../../../docs/plans/git-runner-queues.md).
 
 <!-- lane:R1 -->
 ## Tasks
@@ -51,7 +51,19 @@ The smoke section [`proc.ts`](../../../../src/main/smoke/parts/runner/proc.ts) r
 <!-- lane:RU -->
 ## The panel
 
-To be written by lane RU.
+The Runner sidebar lists the saved tasks, each with a dot for its state: stopped (grey), starting or waiting to restart (amber, pulsing), ready or running (green), crashed (red). Hovering a task shows Start or Stop, Restart and a menu (Output, Edit task, Delete task); a ready task's port is its hint. The header has New task (asks for the command, then opens its settings) and, while anything runs, Stop all. Below, **Discovered** lists the scripts `runner.task.discover` finds (npm, make, just, compose, with the file and command on the badge's tooltip): Save as task saves one (`runner.task.save` with the script as it is) and opens its settings, and Run once runs it. The runner starts only saved tasks, so Run once saves the script first; running the same script again starts that task rather than adding another. A script already saved shows a tick, and clicking it opens its task. The list is read again when tasks change, and on "Look again" after editing the project's files.
+
+A task opens in its own tab:
+
+- **Header.** The state, the command, the port as a link (`http://localhost:<port>`, opened in the system browser through the window's link handler), the pid and uptime while it runs, the automatic restarts, and the exit code once it ended (red only for a crash; stopping a tree on Windows ends it with 1). Start or Stop and Restart.
+- **Output.** Read with the cursor from `runner.proc.output` whenever `runner.changed` names the task (output events come at most four times a second), in pages of 1000. Colour codes are drawn (`ansi.ts`: the 16 colours through the theme's tokens so they read on both canvases, 256 colours and true colour, bold, dim, italic, underline, inverse, carried from line to line; colon sub-parameters such as `38:2::r:g:b` and `4:0` read as one parameter; cursor moves, titles, `ESC ( B` and other escapes are dropped; a carriage return inside a line starts it over, so a progress bar shows its last state); stderr is red and the runner's own lines are muted. The search keeps the lines that contain the text, ignoring case, and counts them; Follow keeps the newest line in view, catches up when the output is shown again after Settings or another tab, and turns itself off when scrolled up; Clear empties the view (the process's buffer is untouched). A restart is read from the new run's first line below a divider. Lines that left the host's 5000-line buffer before they were read are counted in a notice. The stdin line sends what is typed plus a line break (`runner.proc.input`) while there is a process (not while a crashed task waits to restart). The header's port is the running process's, and the saved one once it stops.
+- **Settings.** A Signal Forms form over the task (name, command, folder, ready pattern, port, auto restart, env profile with the workspace's env profiles as suggestions, env entries in the key/value editor), saved with Save or Ctrl+S through `runner.task.save`: an empty pattern or profile clears it, an empty port is `null`. A port outside 1 to 65535 or an empty command is refused before sending. Unsaved edits mark the tab; a change made elsewhere replaces the fields while they hold none. Delete task asks first, and says when the task is running and will be stopped.
+
+The palette has Run task and Open task (pick from the list or type part of a name or command), Stop all tasks and New task.
+
+Not here yet: the running-task count in the status bar. The shell has no extension point for module status items, so it comes with the integration wave.
+
+The smoke section [`ui.ts`](../../../../src/main/smoke/parts/runner/ui.ts) saves a fixture task (a Node script that prints a coloured line, `ready on <port>` in green once it listens, and echoes stdin) and a Makefile, then with `--shots`: starts the task from the sidebar and waits for its dot to turn ready with the port as hint, opens its tab and checks the output (colour drawn, no escape codes left, the runner's own line), the header (state, pid, uptime, the port link with `target=_blank`), stdin echoed back, search, Follow and Clear, Stop from the tab (dot, header and stdin follow), the settings form saving name, port, auto restart and a cleared pattern into `.quiver/runner/<id>.json` without switching the view, a port out of range refused by the form with its message and nothing saved, the Makefile target listed under Discovered and saved as a task with source `make`, and Delete task asking first and closing the tab. Screenshots `34a`–`34e`, light and dark.
 <!-- /lane:RU -->
 
 <!-- lane:agents -->

@@ -139,11 +139,14 @@ export function parseDiffSummary(out: string): GitDiffFile[] {
   return files.map((f, i) => ({ ...f, ...(counts[i] ?? {}) }));
 }
 
-/** A whole `git diff` patch split into one chunk per file, each starting at its `diff --git` line, in git's order. */
+/**
+ * A whole `git diff` patch split into one chunk per file, each starting at its `diff --git` line (or `diff --cc` for
+ * a file with merge conflicts, in its combined format), in git's order.
+ */
 export function splitPatch(patch: string): string[] {
   const chunks: string[] = [];
   let start = -1;
-  const re = /^diff --git /gm;
+  const re = /^diff --(?:git|cc|combined) /gm;
   for (let m = re.exec(patch); m; m = re.exec(patch)) {
     if (start >= 0) chunks.push(patch.slice(start, m.index));
     start = m.index;

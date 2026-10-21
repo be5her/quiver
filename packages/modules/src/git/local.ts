@@ -155,7 +155,9 @@ function diffRange(input: { staged: boolean; from?: string; to?: string }): stri
 
 async function diffFiles(cwd: string, range: string[], filePath: string | undefined, statOnly: boolean): Promise<GitDiffFile[]> {
   const tail = filePath ? ['--', filePath] : ['--'];
-  const common = ['--no-ext-diff', '--no-textconv', '-M'];
+  // `u` leaves out the unmerged records: a conflicted file would otherwise be listed twice (unmerged, then its working
+  // change) against one combined patch, and the summary and the patch would no longer pair up.
+  const common = ['--no-ext-diff', '--no-textconv', '-M', '--diff-filter=u'];
   const summary = parseDiffSummary((await git(cwd, ['diff', ...common, '--raw', '--numstat', '-z', ...range, ...tail])).stdout);
   if (statOnly || !summary.length) return summary;
   const patch = await git(cwd, ['diff', ...common, '--patch', ...range, ...tail]);
