@@ -24,6 +24,14 @@ export interface InvokeResource<T> {
   readonly value: Signal<T | undefined>;
   /** The error of the last load, cleared by the next successful one. */
   readonly error: Signal<ErrorPayload | null>;
+  /**
+   * `value`, only while it was read for the workspace the resource reads now: undefined while it is another
+   * workspace's (the active one changed and its result has not come yet). A view that serves every workspace shows
+   * this, so one repository's or project's data never shows in another for a moment.
+   */
+  readonly current: Signal<T | undefined>;
+  /** `error`, only while it is the workspace's the resource reads now; null otherwise. */
+  readonly currentError: Signal<ErrorPayload | null>;
   readonly isLoading: Signal<boolean>;
   /** Run the command again with the same input. */
   reload(): void;
@@ -51,15 +59,27 @@ export function invokeResource<T>(id: string, input: () => unknown = () => ({}),
     loader: ({ params: p }) => host.invoke<T>(id, p.input, p.workspaceId),
   });
 
-  const value = linkedSignal<ResourceSnapshot<T | undefined>, T | undefined>({
+  // Each result and error is kept with the workspace it was read for. A resolved or failed snapshot always belongs to
+  // the current params (the resource drops a load whose params changed), so they say which workspace that is.
+  const loadedFor = () => untracked(params)?.workspaceId;
+  const latest = linkedSignal<ResourceSnapshot<T | undefined>, { value: T | undefined; workspaceId: string | null | undefined }>({
     source: ref.snapshot,
     computation: (snapshot, previous) =>
-      snapshot.status === 'resolved' || snapshot.status === 'reloading' || snapshot.status === 'local' ? snapshot.value : previous?.value,
+      snapshot.status === 'resolved' || snapshot.status === 'reloading' || snapshot.status === 'local'
+        ? { value: snapshot.value, workspaceId: loadedFor() }
+        : (previous?.value ?? { value: undefined, workspaceId: undefined }),
   });
-  const error = linkedSignal<ResourceSnapshot<T | undefined>, ErrorPayload | null>({
+  const failed = linkedSignal<ResourceSnapshot<T | undefined>, { error: ErrorPayload | null; workspaceId: string | null | undefined }>({
     source: ref.snapshot,
-    computation: (snapshot, previous) => (snapshot.status === 'error' ? toErrorPayload(snapshot.error) : snapshot.status === 'resolved' ? null : (previous?.value ?? null)),
+    computation: (snapshot, previous) =>
+      snapshot.status === 'error'
+        ? { error: toErrorPayload(snapshot.error), workspaceId: loadedFor() }
+        : snapshot.status === 'resolved'
+          ? { error: null, workspaceId: loadedFor() }
+          : (previous?.value ?? { error: null, workspaceId: undefined }),
   });
+  const value = computed(() => latest().value);
+  const error = computed(() => failed().error);
 
   const offs: (() => void)[] = [];
   const refreshOn = options.refreshOn ?? [];
@@ -75,8 +95,10 @@ export function invokeResource<T>(id: string, input: () => unknown = () => ({}),
   inject(DestroyRef).onDestroy(() => offs.forEach((off) => off()));
 
   return {
-    value: value.asReadonly(),
-    error: error.asReadonly(),
+    value,
+    error,
+    current: computed(() => (latest().workspaceId === workspaceId() ? latest().value : undefined)),
+    currentError: computed(() => (failed().workspaceId === workspaceId() ? failed().error : null)),
     isLoading: ref.isLoading,
     reload: () => void ref.reload(),
   };

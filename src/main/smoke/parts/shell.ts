@@ -1,9 +1,11 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { DEFAULT_PALETTE, resolvePalette } from '@quiver/core';
 import type { UpdateState, WorkspaceInfo } from '@quiver/core';
-import { definePart } from '../part';
+import { externalUrlRefused, openExternal } from '../../external';
+import { definePart, until } from '../part';
 
 export default definePart({
   name: 'shell',
@@ -42,12 +44,26 @@ export default definePart({
     const revealByAgent = await host.invoke('workspace.reveal', { id: ws.id }, { caller: 'mcp', workspaceId: null });
     check('workspace.reveal: answers the folder for the UI and refuses agents', revealedFolder.path === folder && !revealByAgent.ok, { revealedFolder, agent: revealByAgent.ok });
 
+    // Links: only http, https and mailto go to the system; a file: link (which could start a program) is refused.
+    const fileLink = pathToFileURL(path.join(os.tmpdir(), 'quiver-smoke-refused-link.txt')).href;
+    check('links: a file: URL is not opened', (await openExternal(fileLink)) === false && externalUrlRefused(fileLink), fileLink);
+    const pageFileLink = pathToFileURL(path.join(os.tmpdir(), 'quiver-smoke-refused-window-open.txt')).href;
+    const navFileLink = pathToFileURL(path.join(os.tmpdir(), 'quiver-smoke-refused-navigation.txt')).href;
+
     // A second workspace for the title bar checks, opened before the window so that the first one stays on screen.
     const otherFolder = await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-smoke-other-'));
     const otherWs = await run<WorkspaceInfo>('workspace.open', { path: otherFolder }, null);
 
     return {
       renderer: async (win) => {
+        // A file: link the page asks to open (window.open, as a link in a preview would) is refused by the window's handler.
+        await win.webContents.executeJavaScript(`void window.open(${JSON.stringify(pageFileLink)}, '_blank', 'noopener')`);
+        check('links: a file: URL opened from the page is refused', await until(() => externalUrlRefused(pageFileLink), 3000), pageFileLink);
+        // A plain anchor navigates the window itself: the window stays on the app and the link is refused the same way.
+        const appUrl = win.webContents.getURL();
+        await win.webContents.executeJavaScript(`location.href = ${JSON.stringify(navFileLink)}`);
+        check('links: navigating the window to a file: URL is refused and it stays on the app', (await until(() => externalUrlRefused(navFileLink), 3000)) && win.webContents.getURL() === appUrl, { url: win.webContents.getURL(), appUrl });
+
         // Theme: the brand palette is the default, and a palette saved in config recolours the running UI in both modes.
         {
           const cssVar = (name: string) => win.webContents.executeJavaScript(`getComputedStyle(document.documentElement).getPropertyValue('${name}').trim()`) as Promise<string>;

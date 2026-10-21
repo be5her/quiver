@@ -4,6 +4,9 @@
 } @else {
   <span>No workspace</span>
 }
+@for (item of moduleItems(); track item) {
+  <ng-container *ngComponentOutlet="item" />
+}
 <div class="flex-1"></div>
 <q-update-item />
 <q-recording-item />

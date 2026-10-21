@@ -16,11 +16,14 @@ import {
   type RunnerOutputChunk,
   type RunnerOutputLine,
   type RunnerProc,
+  type RunnerProcInfo,
   type RunnerProcState,
   type RunnerTask,
+  type RunnerWaitResult,
   type WorkspaceApi,
 } from '@quiver/core';
 import { killTree, spawnTree } from '@quiver/core/node';
+import { findProfileFile } from '../env/files';
 
 // The process supervisor: runs saved tasks as whole process trees, keeps their output, tells when they are ready,
 // restarts crashed ones when asked to and stops everything when the workspace closes or the app quits.
@@ -44,24 +47,6 @@ const STOP_TIMEOUT_MS = 5000;
 const BACKOFF_MAX_MS = 30_000;
 const BACKOFF_MIN_MS = 1000;
 const HEALTHY_MS = 10_000;
-
-/** A row of `runner.proc.list`: the run with how long its process has been up. */
-export interface RunnerProcInfo extends RunnerProc {
-  name: string;
-  /** Milliseconds since the current process started, while it runs. */
-  uptimeMs?: number;
-  /** When a crashed run starts again by itself, while it waits for that. */
-  restartAt?: string;
-}
-
-export interface RunnerWaitResult {
-  /** True when the task became ready or the pattern matched. */
-  matched: boolean;
-  timedOut: boolean;
-  /** The line that matched the pattern (or the ready pattern). */
-  line?: RunnerOutputLine;
-  proc: RunnerProcInfo | null;
-}
 
 interface Waiter {
   /** Settles the wait when the run did what it waits for, or ended; true when it was resolved. */
@@ -152,19 +137,23 @@ function insideWorkspace(ws: WorkspaceApi, rel: string): string {
 }
 
 /**
- * The env file a profile names: a path relative to the workspace when it has a slash or starts with `.env`, else the
- * `.env.<profile>` file in the task's folder, then in the workspace folder.
+ * The values of the env file a profile names (`findProfileFile`): `.env.<profile>` or `<profile>.env` in the task's
+ * folder or the nearest folder above it, or a project-relative path when the profile has a slash or is an env file name
+ * itself. One in another folder is only named in the error, never read: it may be another app's.
  */
 async function profileEnv(ws: WorkspaceApi, cwd: string, profile: string): Promise<Record<string, string>> {
-  const candidates = /[\\/]/.test(profile) || profile.startsWith('.env') ? [insideWorkspace(ws, profile)] : [path.join(cwd, `.env.${profile}`), path.join(ws.path, `.env.${profile}`)];
-  for (const file of candidates) {
-    try {
-      return dotenvToMap(parseDotenv(await fs.readFile(file, 'utf8')));
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-    }
+  const name = profile.trim();
+  const found = await findProfileFile(ws, name, path.relative(path.resolve(ws.path), cwd));
+  if (found.abs === null) {
+    const elsewhere = found.candidates.length ? `; other folders have ${found.candidates.join(', ')}, so give the one to use as the profile` : '';
+    throw new QuiverError('NOT_FOUND', `No env file for the profile ${name} (.env.${name} or ${name}.env) in the task's folder or above it${elsewhere}`);
   }
-  throw new QuiverError('NOT_FOUND', `No env file for the profile ${profile}`);
+  try {
+    return dotenvToMap(parseDotenv(await fs.readFile(found.abs, 'utf8')));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw new QuiverError('NOT_FOUND', `No env file for the profile ${name}: ${found.rel} does not exist`);
+    throw err;
+  }
 }
 
 /** A pattern longer than this is refused before it is even looked at. */

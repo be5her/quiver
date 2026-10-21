@@ -6,12 +6,14 @@ import {
   RunnerTaskSchema,
   newId,
   type CommandContext,
+  type RunnerDiscoveredRow,
   type RunnerDiscoveredTask,
+  type RunnerProcInfo,
   type RunnerTask,
   type WorkspaceApi,
 } from '@quiver/core';
 import { z } from 'zod';
-import { compilePattern, getProc, leavesFolder, stopTask, type RunnerProcInfo } from './supervisor';
+import { compilePattern, getProc, leavesFolder, stopTask } from './supervisor';
 
 // Saved tasks: one committed file per task in `.quiver/runner/<id>.json`, read by the supervisor with the same schema.
 
@@ -38,11 +40,6 @@ export const RunnerTaskDraftSchema = z.object({
   source: RunnerTaskSchema.shape.source.unwrap().optional(),
 });
 export type RunnerTaskDraft = z.infer<typeof RunnerTaskDraftSchema>;
-
-/** A discovered task, with the saved task it was saved as, if any. */
-export interface RunnerDiscoveredRow extends RunnerDiscoveredTask {
-  taskId?: string;
-}
 
 /** The saved tasks by name, without those whose id get, save, delete and start would refuse. */
 export async function listTasks(ws: WorkspaceApi): Promise<RunnerTask[]> {

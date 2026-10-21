@@ -49,6 +49,21 @@ export interface RunnerProc {
   port?: number;
 }
 
+/** A row of `runner.proc.list`: the run with how long its process has been up. */
+export interface RunnerProcInfo extends RunnerProc {
+  /** The task's name when the run started. */
+  name: string;
+  /** Milliseconds since the current process started, while it runs. */
+  uptimeMs?: number;
+  /** When a crashed run starts again by itself, while it waits for that. */
+  restartAt?: string;
+}
+
+/** A row of `runner.task.discover`: a discovered task, with the saved task it was saved as, if any. */
+export interface RunnerDiscoveredRow extends RunnerDiscoveredTask {
+  taskId?: string;
+}
+
 export interface RunnerOutputLine {
   /** Increasing per run; the cursor for the next read. */
   seq: number;
@@ -64,6 +79,16 @@ export interface RunnerOutputChunk {
   next: number;
   /** Lines that fell out of the buffer before they were read. */
   dropped: number;
+}
+
+/** What `runner.proc.wait` returns. */
+export interface RunnerWaitResult {
+  /** True when the task became ready or the pattern matched. */
+  matched: boolean;
+  timedOut: boolean;
+  /** The line that matched the pattern (or the ready pattern). */
+  line?: RunnerOutputLine;
+  proc: RunnerProcInfo | null;
 }
 
 /** A saved task's id, which names its file (`.quiver/runner/<id>.json`); anything else is invalid input. */

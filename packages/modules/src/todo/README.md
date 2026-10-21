@@ -1,6 +1,6 @@
 # Todo
 
-A plain list for the day, per workspace and per machine. Type a line and press Enter to add it, tick it off, open it to read it in full, edit the title or write notes, remove it, or clear every completed one. The header counts progress. "Add a todo" is also in the command palette. It is deliberately nothing more than that: no due dates, priorities or projects.
+A plain list for the day, per workspace and per machine. Type a line and press Enter to add it, tick it off, open it to read it in full, edit the title or write notes, remove it, or clear every completed one. The header counts progress. "Add a todo" is also in the command palette, and a Git pull request's tab has Add todo, which adds the pull request with its address in the notes. It is deliberately nothing more than that: no due dates, priorities or projects.
 
 ## How it works
 

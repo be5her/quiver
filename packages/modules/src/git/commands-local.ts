@@ -46,10 +46,10 @@ const status = defineCommand({
   id: 'git.status',
   title: 'Git status',
   description:
-    'The workspace repository: current branch (null when detached), HEAD, upstream with ahead/behind counts, the operation in progress (merge, rebase, cherry-pick, revert) and every changed file with its index and worktree codes (M modified, A added, D deleted, R renamed, U unmerged, ? untracked, . unchanged). Paths are relative to the repository root (an untracked folder is one entry, "new/"), and every other git command takes them that way.',
+    'The workspace repository: current branch (null when detached), HEAD, upstream with ahead/behind counts, the operation in progress (merge, rebase, cherry-pick, revert) and every changed file with its index and worktree codes (M modified, A added, D deleted, R renamed, U unmerged, ? untracked, . unchanged). Paths are relative to the repository root (an untracked folder is one entry, "new/"), and every other git command takes them that way. files: false leaves the files out (an empty list) and is faster in a big repository, for when only the branch is wanted.',
   scope: 'workspace',
-  input: z.object({}),
-  handler: async (_i, ctx): Promise<GitStatus> => local.status(workspace(ctx).path),
+  input: z.object({ files: z.boolean().optional() }),
+  handler: async (i, ctx): Promise<GitStatus> => local.status(workspace(ctx).path, { files: i.files }),
 });
 
 const branchList = defineCommand({

@@ -1,11 +1,11 @@
 import { Component, computed, inject } from '@angular/core';
-import type { RunnerTask } from '@quiver/core';
+import type { RunnerDiscoveredRow, RunnerProcInfo, RunnerTask } from '@quiver/core';
 import { Button, ContextMenu, Icon, IconButton, SectionHeader, Spinner, TreeState, invokeResource } from '@quiver/ui';
 import { BookmarkPlus, Check, ChevronDown, ChevronRight, Ellipsis, Play, Plus, RefreshCw, RotateCw, Square, SquareX } from 'lucide';
 import { DbRow } from '../../db/ui/db-row';
 import { RunnerActions } from './runner-actions';
 import { injectRunnerChanged } from './runner-events';
-import { SOURCE_BADGE, STATE_LABEL, isLive, stateDot, taskState, type RunnerDiscoveredRow, type RunnerProcInfo, type TaskState } from './runner-format';
+import { SOURCE_BADGE, STATE_LABEL, isLive, stateDot, taskState, type TaskState } from './runner-format';
 
 const DISCOVERED_KEY = 'runner/discovered';
 

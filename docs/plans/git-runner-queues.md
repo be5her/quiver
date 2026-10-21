@@ -1,5 +1,7 @@
 # Plan: Git/PR, Process runner, Queues
 
+**Status: complete.** All four waves are merged (pull requests #29 to #42 and the wave 3 integration); what is left is listed under [Done / follow-ups](#done--follow-ups) at the end.
+
 Three new modules built by parallel agents. The approach: **one scaffold PR first** takes every shared file (registries, events, deps, lockfile, smoke index, README table). After it merges, each lane owns its own folder and files, so lanes never edit the same file.
 
 ## Conflict hotspots (scaffold only)
@@ -45,7 +47,7 @@ Branch `feat/scaffold-git-runner-queues`, label `enhancement`.
    - `parts/runner/{tasks,proc,ui}.ts`
    - `parts/queues/{memory,kafka,sqs,rabbit,ui}.ts`
 8. **Error code:** `NOT_SUPPORTED`, for what a broker or driver cannot do.
-9. **Docs:** add a README table row per module. Each module README gets headings with `<!-- lane:X -->` markers; a lane edits only its own section.
+9. **Docs:** add a README table row per module. Each module README gets one section per lane, marked with an HTML comment naming the lane (wave 3 removed the markers); a lane edits only its own section.
 
 Done when typecheck, tests and the full smoke pass, and the three empty modules appear in the activity bar.
 
@@ -193,7 +195,7 @@ Angular standalone components with signals, following `src/renderer/README.md`. 
 
 ## Wave 3: integration and docs (1 agent, after all of the above)
 
-- **Runner and Env:** a task's `envProfile` loads that env profile's values. Lane R2 already reads `.env.<profile>` from the task's folder, then the workspace folder (or a path when the profile has a slash or starts with `.env`); this step aligns that with the env module's own discovery (`<name>.env` too, four folders deep) instead of adding a second lookup.
+- **Runner and Env:** a task's `envProfile` loads that env profile's values. Lane R2 already reads `.env.<profile>` from the task's folder, then the workspace folder (or a path when the profile has a slash or starts with `.env`); this step takes `<name>.env` too and the folders between the task's and the workspace's, read directly (`findProfileFile`), and names a file only another folder has rather than reading it.
 - **Git and Todo:** create a todo from a PR, and show the branch in the status bar.
 - **Runner in the status bar:** the count of running tasks.
 - **Docs:** finish each module README (what it does, storage, Agents section with the allowed and gated tools, smoke coverage), remove the lane markers, and update the README table one-liners.
@@ -222,3 +224,21 @@ That is 12 PRs. At most 7 agents work at the same time.
 2. Kafka and RabbitMQ smoke checks that need a real broker are opt-in (`QUIVER_SMOKE_KAFKA`, `QUIVER_SMOKE_RABBIT`). CI does not start brokers.
 3. Agents may start, stop and restart runner processes, but those commands are gated as mutating.
 4. Kafka goes through `kafkajs` although it has had no release since 2023: it is pure JavaScript, so it needs no native rebuild against Electron, which rules out `@confluentinc/kafka-javascript` (librdkafka). The `QueueDriver` interface keeps the client behind `queues/drivers/kafka.ts`, so swapping it later touches one file and no UI.
+
+## Done / follow-ups
+
+Done: the scaffold (wave 0), the seven host lanes (wave 1), the three panels (wave 2), and the integration (wave 3):
+
+- a status bar extension point for modules (`statusItems` on `ModuleUI`, described in `src/renderer/README.md`), used by Git for the branch with ahead and behind and by the Runner for the count of running tasks, each opening its sidebar on a click;
+- a task's `envProfile` found the way the env module finds env files (`findProfileFile` in `env/files.ts`: `.env.<name>` or `<name>.env`, four folders deep, the same folders skipped);
+- Add todo in a pull request's tab (`todo.add`, its address in the notes);
+- the runner's result types (`RunnerProcInfo`, `RunnerDiscoveredRow`, `RunnerWaitResult`) in `packages/core/src/models/runner.ts`, used by the host, the panel and the smoke;
+- the three module READMEs finished, with the allowed and gated tools of each, and the README table.
+
+Follow-ups, none of them blocking:
+
+- **Git host commands** the panel lacks: init, discard working changes, branch delete and rename, stash, and reading a file at a ref (which would let the diff use the shared CodeMirror merge view with full context).
+- **Amend's "already pushed" check** looks only at `ahead === 0`: it misses a new branch whose HEAD is already on another remote branch, and warns wrongly when the upstream is gone. The force-push-with-lease offer covers what happens after.
+- **ANSI escapes split by a partial flush**: an escape cut by the host's 150 ms flush of text without a line break still shows as text.
+- **History paging by `skip`** can skip or repeat a commit when HEAD moves while older pages load.
+- **Side-by-side `\ No newline at end of file`**: a deleted and an added line with that marker between them are not paired.

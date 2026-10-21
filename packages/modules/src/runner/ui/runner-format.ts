@@ -1,18 +1,4 @@
-import type { RunnerDiscoveredTask, RunnerProc } from '@quiver/core';
-
-/** A row of `runner.proc.list` (the host's `RunnerProcInfo`). */
-export interface RunnerProcInfo extends RunnerProc {
-  name: string;
-  /** Milliseconds since the current process started, while it runs. */
-  uptimeMs?: number;
-  /** When a crashed run starts again by itself, while it waits for that. */
-  restartAt?: string;
-}
-
-/** A row of `runner.task.discover`, with the saved task it was saved as. */
-export interface RunnerDiscoveredRow extends RunnerDiscoveredTask {
-  taskId?: string;
-}
+import type { RunnerDiscoveredTask, RunnerProcInfo } from '@quiver/core';
 
 /** What the panel shows for a task: its run's state, or stopped when it has not run or has exited. */
 export type TaskState = 'stopped' | 'starting' | 'ready' | 'running' | 'stopping' | 'crashed' | 'restarting';
