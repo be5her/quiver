@@ -4,6 +4,8 @@ The renderer is the frame around the modules: title bar, activity bar, sidebar, 
 
 The status bar shows the workspace folder, the active environment, the updater, and the MCP server with its port. While the MCP inspector's call recorder is recording, `REC` and the number of calls so far sit next to it and open the recorder.
 
+Links never open inside the app: a link the page opens (`window.open`, a `target=_blank` anchor) goes to the system's handler through `openExternal` in `src/main/external.ts`, and only for `http:`, `https:` and `mailto:` (`isSafeExternalUrl` in `@quiver/core`). Any other scheme (`file:`, `ms-settings:`, `smb:`, a custom protocol) could start a local program from page content such as a response preview, a PR body or a log line, so it is refused and logged once.
+
 ## Workspaces and tabs
 
 Open several folders at once and switch instantly. Each workspace has its own tabs, and the open or collapsed state of sidebar folders and sections, restored on return and after a restart (kept under `.quiver/local`). Global-scope tabs (Settings, Tools) are not persisted.
@@ -42,4 +44,4 @@ Two things to know when styling: `cn` joins class names without Tailwind merging
 
 ## Verified by
 
-The smoke's `shell` part ([`src/main/smoke/parts/shell.ts`](../main/smoke/parts/shell.ts)) checks the updater state of a dev build, that the default palette applies and a saved one recolours the window in both modes, and in the UI the tab strip (scrolling, dragging, Escape during a drag, middle click, the right-click menus), dragging workspaces, hiding and reordering modules in the activity bar, and the About and palette sections of the settings. Settings also has a Network section (the proxy for the API client, realtime and GraphQL introspection), checked by the `api` part. `npm run smoke -- shell --shots` runs it alone with its UI checks.
+The smoke's `shell` part ([`src/main/smoke/parts/shell.ts`](../main/smoke/parts/shell.ts)) checks the updater state of a dev build, that a `file:` link is refused both directly and when the page opens it, that the default palette applies and a saved one recolours the window in both modes, and in the UI the tab strip (scrolling, dragging, Escape during a drag, middle click, the right-click menus), dragging workspaces, hiding and reordering modules in the activity bar, and the About and palette sections of the settings. Settings also has a Network section (the proxy for the API client, realtime and GraphQL introspection), checked by the `api` part. `npm run smoke -- shell --shots` runs it alone with its UI checks.

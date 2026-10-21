@@ -1,5 +1,6 @@
 import { join } from 'node:path';
-import { BrowserWindow, app, shell } from 'electron';
+import { BrowserWindow, app } from 'electron';
+import { openExternal } from './external';
 
 /** Windows and macOS take the window icon from the executable and the bundle; Linux and dev runs need it here. */
 export const iconPath = app.isPackaged ? join(process.resourcesPath, 'icon.png') : join(app.getAppPath(), 'resources', 'icon.png');
@@ -28,9 +29,9 @@ export function createMainWindow(options: { show?: boolean } = {}): BrowserWindo
     if (options.show !== false) win.show();
   });
 
-  // Links open in the system browser, never inside the app.
+  // Links open in the system browser, never inside the app; only http, https and mailto (see openExternal).
   win.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url);
+    void openExternal(url).catch((err) => console.warn('[quiver] could not open link', err));
     return { action: 'deny' };
   });
 
