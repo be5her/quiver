@@ -191,7 +191,7 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc, toolNa
     await run('runner.proc.start', { taskId: 'smoke-bad' }, ws.id);
     const bad = await wait('smoke-bad', 'never printed', 5000);
     check('runner: a failing command is crashed with its exit code, and a wait on it ends early', !bad.matched && !bad.timedOut && bad.proc?.state === 'crashed' && bad.proc.exitCode === 7, bad);
-    // ---------- env profiles, found the way the env module finds env files ----------
+    // ---------- env profiles: the task's folder or a folder above it, read directly ----------
     const envFiles: Record<string, string> = {
       '.env.prof': 'RUNNER_PROF=root\n',
       'rp-apps/web/prof.env': 'RUNNER_PROF=web\n',
@@ -200,7 +200,9 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc, toolNa
       'rp-lib/.env.twice': 'RUNNER_PROF=twice-lib\n',
       'node_modules/rp-pkg/.env.hidden': 'RUNNER_PROF=hidden\n',
       'rp-a/b/c/d/e/.env.deep': 'RUNNER_PROF=deep\n',
+      'rp-tools/build/.env.built': 'RUNNER_PROF=built\n',
     };
+    await fs.mkdir(path.join(folder, 'rp-apps/web/src'), { recursive: true });
     for (const [rel, text] of Object.entries(envFiles)) {
       await fs.mkdir(path.dirname(path.join(folder, rel)), { recursive: true });
       await fs.writeFile(path.join(folder, rel), text);
@@ -212,7 +214,7 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc, toolNa
       const proc = (await run<RunnerProcInfo[]>('runner.proc.list', {}, ws.id)).find((p) => p.taskId === id);
       const text = (await output(id)).lines.map((l) => l.text).join('\n');
       await store.remove('runner', id);
-      return { state: proc?.state, text, value: /prof=\S*?(root|web|only|twice-\w+|hidden|deep)/.exec(text)?.[1] };
+      return { state: proc?.state, text, value: /prof=\S*?(root|web|only|twice-\w+|hidden|deep|built)/.exec(text)?.[1] };
     };
     try {
       const nearest = await profileRun('smoke-prof-web', 'prof', 'rp-apps/web');
@@ -221,22 +223,28 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc, toolNa
         const folded = await profileRun('smoke-prof-case', 'PROF', 'RP-Apps/Web');
         check('runner: on a case-insensitive file system a profile and task folder in other case find the same file', folded.value === 'web', folded);
       }
+      const above = await profileRun('smoke-prof-above', 'prof', 'rp-apps/web/src');
+      check('runner: a task folder without the profile takes it from the nearest folder above', above.value === 'web', above);
       const rootProf = await profileRun('smoke-prof-root', 'prof');
       check('runner: from the workspace folder the same profile is its .env.<name>', rootProf.value === 'root', rootProf);
       const only = await profileRun('smoke-prof-only', 'only');
-      check('runner: a profile only one folder has is found there', only.value === 'only', only);
+      check("runner: a profile only another folder has is not read (it may be another app's), and the error names it", only.state === 'crashed' && only.value === undefined && only.text.includes('rp-apps/web/.env.only'), only);
       const byPath = await profileRun('smoke-prof-path', 'rp-apps/web/prof.env');
       check('runner: a profile with a slash is a path in the workspace', byPath.value === 'web', byPath);
       const twice = await profileRun('smoke-prof-twice', 'twice');
-      check('runner: a profile several other folders have is refused, naming them', twice.state === 'crashed' && twice.text.includes('rp-apps/web/.env.twice') && twice.text.includes('rp-lib/.env.twice'), twice);
+      check('runner: a profile several other folders have is refused, naming them all', twice.state === 'crashed' && twice.text.includes('rp-apps/web/.env.twice') && twice.text.includes('rp-lib/.env.twice'), twice);
       const hidden = await profileRun('smoke-prof-hidden', 'hidden');
       const deep = await profileRun('smoke-prof-deep', 'deep');
-      check('runner: env files the env module skips (node_modules, five folders deep) are not profiles', [hidden, deep].every((r) => r.state === 'crashed' && r.text.includes('No env file for the profile')), { hidden, deep });
+      check('runner: env files outside the task folder and above it are not profiles, nor named when the scan skips them', [hidden, deep].every((r) => r.state === 'crashed' && r.text.includes('No env file for the profile') && !r.text.includes('other folders have')), { hidden, deep });
+      // The task's own folder is read directly: five folders deep, or in a folder the env scan skips, still counts.
+      const deepOwn = await profileRun('smoke-prof-deep-own', 'deep', 'rp-a/b/c/d/e');
+      const built = await profileRun('smoke-prof-built', 'built', 'rp-tools/build');
+      check("runner: a profile in the task's own folder is found however deep, also in a folder the env scan skips (build)", deepOwn.value === 'deep' && built.value === 'built', { deepOwn, built });
       const outside = await profileRun('smoke-prof-outside', '../.env.prof');
       check('runner: a profile path outside the workspace is refused', outside.state === 'crashed' && outside.text.includes('inside the project folder'), outside);
     } finally {
       // Only this section's own files: the workspace folder is shared with the other parts (env has an apps/ of its own).
-      for (const top of ['.env.prof', 'rp-apps', 'rp-lib', 'node_modules/rp-pkg', 'rp-a']) await fs.rm(path.join(folder, top), { recursive: true, force: true }).catch(() => undefined);
+      for (const top of ['.env.prof', 'rp-apps', 'rp-lib', 'node_modules/rp-pkg', 'rp-a', 'rp-tools']) await fs.rm(path.join(folder, top), { recursive: true, force: true }).catch(() => undefined);
       await fs.rmdir(path.join(folder, 'node_modules')).catch(() => undefined);
     }
 

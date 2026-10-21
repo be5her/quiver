@@ -29,13 +29,14 @@ export class StatusBar {
   protected readonly workspace = this.app.activeWorkspace;
   protected readonly mcp = this.app.mcpStatus;
   protected readonly theme = this.app.resolvedTheme;
-  /** The items of the modules shown in the activity bar and available now, in its order. */
+  /** The items of the modules available now and shown in the activity bar (or drawn when hidden too), in its order. */
   protected readonly moduleItems = computed(() => {
     const layout = this.app.config()?.activityBar ?? defaultActivityBarLayout();
-    return arrangeActivityBar(moduleIds, layout).visible.flatMap((id) => {
+    const { all, visible } = arrangeActivityBar(moduleIds, layout);
+    return all.flatMap((id) => {
       const mod = modules.find((m) => m.id === id);
       if (!mod?.statusItems || (mod.availability === 'workspace' && !this.app.hasWorkspace())) return [];
-      return mod.statusItems;
+      return visible.includes(id) || mod.statusItemsWhenHidden ? mod.statusItems : [];
     });
   });
 }

@@ -1,4 +1,4 @@
-import { Component, DestroyRef, computed, effect, inject, input, linkedSignal, output, signal, untracked } from '@angular/core';
+import { Component, DestroyRef, computed, effect, inject, input, output, signal, untracked } from '@angular/core';
 import { FormField, form } from '@angular/forms/signals';
 import type { GitBranch, GitFileChange, GitStatus } from '@quiver/core';
 import { AppState, Button, Checkbox, ContextMenu, EmptyState, HostBridge, Icon, IconButton, SectionHeader, Spinner, TextArea, TreeState, invokeResource } from '@quiver/ui';
@@ -285,13 +285,10 @@ export class GitSidebar {
 
   protected readonly icons = { ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, CloudUpload, Download, GitBranchIcon, GitPullRequest, History, RefreshCw, Plus };
   protected readonly status = invokeResource<GitStatus>('git.status');
-  // The same sidebar serves every workspace with Git on screen, and the resource keeps a result while the next one
-  // loads; each result is kept with the workspace it was read for, so another repository's files never show here.
-  private readonly statusOf = linkedSignal({ source: this.status.value, computation: (value) => ({ value, ws: untracked(this.app.activeWorkspaceId) }) });
-  private readonly errorOf = linkedSignal({ source: this.status.error, computation: (error) => ({ error, ws: untracked(this.app.activeWorkspaceId) }) });
+  // The same sidebar serves every workspace with Git on screen, so another repository's files never show here.
   /** The status of the workspace on screen, once read. */
-  protected readonly current = computed(() => (this.statusOf().ws === this.app.activeWorkspaceId() ? this.statusOf().value : undefined));
-  protected readonly statusError = computed(() => (this.errorOf().ws === this.app.activeWorkspaceId() ? this.errorOf().error : null));
+  protected readonly current = this.status.current;
+  protected readonly statusError = this.status.currentError;
   protected readonly branchesOpen = computed(() => this.tree.isExpanded('git/branches', true));
   protected readonly branches = invokeResource<GitBranch[]>('git.branch.list', () => ({}), { enabled: () => this.branchesOpen() && Boolean(this.current()) });
   protected readonly busy = this.actions.busy;

@@ -23,9 +23,9 @@ process.stdin.on('data', (d) => {
 `;
 
 // The Runner panel: a fixture task started from the sidebar turning ready with its coloured output, the port link,
-// the status bar's count of running tasks, stdin, search, stop, the settings form saved to the task's file, a
+// the status bar's count of running tasks (kept while the Runner is hidden from the activity bar), stdin, search, stop, the settings form saved to the task's file, a
 // discovered Makefile target saved as a task, and the confirmation before deleting it.
-const section: SmokeSection = async ({ check, run, ws, folder }) => {
+const section: SmokeSection = async ({ host, check, run, ws, folder }) => {
   const port = await freePort();
   await fs.writeFile(path.join(folder, 'runner-ui-fixture.cjs'), FIXTURE);
   await fs.writeFile(path.join(folder, 'Makefile'), 'ui-hello:\n\techo hello from make\n');
@@ -68,6 +68,14 @@ const section: SmokeSection = async ({ check, run, ws, folder }) => {
         counted && awayFromRunner === true && backInRunner === true && String(itemTitle).includes('ui server: ready'),
         { counted: await statusItem(), awayFromRunner, backInRunner, itemTitle },
       );
+      // Hidden from the activity bar, the Runner still shows its running tasks in the status bar: an agent may start them.
+      const barBefore = host.config.get().activityBar;
+      await run('config.update', { patch: { activityBar: { ...barBefore, hidden: [...barBefore.hidden, 'runner'] } } }, null);
+      const runnerHidden = await until(async () => (await js(`!document.querySelector('[data-testid=activity-item][data-drag-id=runner]')`)) === true, 3000);
+      const countWhileHidden = await statusItem();
+      await run('config.update', { patch: { activityBar: barBefore } }, null);
+      await until(async () => (await js(`Boolean(document.querySelector('[data-testid=activity-item][data-drag-id=runner]'))`)) === true, 3000);
+      check('runner ui: with the Runner hidden from the activity bar, the status bar still counts its running task', runnerHidden && countWhileHidden === '1', { runnerHidden, countWhileHidden });
 
       // Its tab: the output with the colour codes drawn, the header facts and the port as a link.
       await js(`${row}?.click()`);

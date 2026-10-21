@@ -41,10 +41,20 @@ const ENV: Record<string, string> = { GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOC
 const NON_INTERACTIVE_ENV: Record<string, string> = { GCM_INTERACTIVE: 'never' };
 
 let gitPath: string | null = null;
+/** When git was last looked for and not found. */
+let gitMissedAt = 0;
+/** How long a miss is remembered: the lookup walks PATH synchronously, and the status bar asks on every workspace switch. */
+const GIT_MISS_MS = 10_000;
 
-/** The git program, or a clear error when it is not installed. Looked up again after a miss, so installing git needs no restart. */
+/**
+ * The git program, or a clear error when it is not installed. Looked up again a few seconds after a miss, so
+ * installing git needs no restart.
+ */
 function gitProgram(): string {
-  gitPath ??= whichSync('git');
+  if (!gitPath && Date.now() - gitMissedAt >= GIT_MISS_MS) {
+    gitPath = whichSync('git');
+    if (!gitPath) gitMissedAt = Date.now();
+  }
   if (!gitPath) throw new QuiverError('NOT_FOUND', 'git was not found on PATH. Install git (https://git-scm.com) and try again.', { reason: 'no-git' });
   return gitPath;
 }
@@ -106,12 +116,18 @@ export async function repoRoot(cwd: string): Promise<string> {
   return (await repoDirs(cwd)).root;
 }
 
-export async function status(cwd: string): Promise<GitStatus> {
+/**
+ * The repository's status. With `files: false` only the branch, HEAD, upstream and operation are wanted (the status
+ * bar): `files` comes back empty, and git neither looks for untracked files nor goes into submodules, which is most
+ * of what a status costs in a big repository.
+ */
+export async function status(cwd: string, options: { files?: boolean } = {}): Promise<GitStatus> {
   const dirs = await repoDirs(cwd);
   // Untracked folders are listed as one entry (`new/`), as git itself does: `all` would list every file of an
   // unignored node_modules on each status.
-  const { stdout } = await git(dirs.root, ['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=normal']);
-  const parsed = parseStatusV2(stdout);
+  const which = options.files === false ? ['--untracked-files=no', '--ignore-submodules=all'] : ['--untracked-files=normal'];
+  const { stdout } = await git(dirs.root, ['status', '--porcelain=v2', '--branch', '-z', ...which]);
+  const parsed = options.files === false ? { ...parseStatusV2(stdout), files: [] } : parseStatusV2(stdout);
   const operation = detectOperation((name) => existsSync(path.join(dirs.gitDir, name)));
   return operation ? { ...parsed, operation } : parsed;
 }

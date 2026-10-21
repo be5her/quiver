@@ -77,29 +77,37 @@ export function resolveEnvPath(w: WorkspaceApi, rel: string): { abs: string; rel
 /**
  * The env file a profile names, for whoever loads a profile by name (the runner's `envProfile`). A name with a slash,
  * or one that is itself an env file name (`.env.staging`, `staging.env`), is a project-relative path and goes through
- * `resolveEnvPath`. A bare name is looked up among the files `scanEnvFiles` finds, as `.env.<name>` or `<name>.env`:
- * in `fromDir` (project-relative, `''` for the folder itself) first, then each folder above it up to the project
- * folder, `.env.<name>` before `<name>.env` in each; failing that, the only such file elsewhere in the project.
- * `abs` is null when there is none, or when several elsewhere leave it ambiguous (`candidates` lists them).
+ * `resolveEnvPath`. A bare name is `.env.<name>` or `<name>.env` in `fromDir` (project-relative, `''` for the folder
+ * itself), else in the nearest folder above it up to the project folder, `.env.<name>` before `<name>.env` in each.
+ * Those folders are read directly, so the scan's depth, skipped folders and file limit do not apply to them. A file in
+ * any other folder is never used: it may belong to another app of the project. `abs` is null when there is none, and
+ * `candidates` lists the files of that name `scanEnvFiles` finds elsewhere, for the message.
  */
 export async function findProfileFile(w: WorkspaceApi, profile: string, fromDir = ''): Promise<{ abs: string; rel: string } | { abs: null; candidates: string[] }> {
   const name = profile.trim();
   if (!name) throw new QuiverError('INVALID_INPUT', 'A profile name is required');
   if (/[\\/]/.test(name) || isEnvFileName(name)) return resolveEnvPath(w, name);
-  // Names compare the way the file system does: a profile `Staging`, or a task folder typed `Apps/web`, finds
-  // `apps/web/.env.staging` on Windows and macOS, as reading the file directly would.
+  // Names compare the way the file system does: a profile `Staging` finds `.env.staging` on Windows and macOS, as
+  // reading the file directly would, and the file's own name is the one given back.
   const fold = process.platform === 'win32' || process.platform === 'darwin' ? (s: string) => s.toLowerCase() : (s: string) => s;
   const names = [`.env.${name}`, `${name}.env`].map(fold);
-  const matches = (await scanEnvFiles(w.path)).filter((rel) => names.includes(fold(envPathName(rel))));
-  for (let dir = fold(normalizeEnvPath(fromDir)); ; dir = envPathDir(dir)) {
+  for (let dir = normalizeEnvPath(fromDir); ; dir = envPathDir(dir)) {
+    let entries: import('node:fs').Dirent[] = [];
+    try {
+      entries = await fs.readdir(path.join(w.path, dir), { withFileTypes: true });
+    } catch {
+      // A folder that is not there has no profile; the folders above it still may.
+    }
     for (const file of names) {
-      const rel = matches.find((m) => fold(m) === (dir ? `${dir}/${file}` : file));
-      if (rel) return { abs: path.join(w.path, rel), rel };
+      const entry = entries.find((e) => (e.isFile() || e.isSymbolicLink()) && fold(e.name) === file);
+      if (entry) {
+        const rel = dir ? `${dir}/${entry.name}` : entry.name;
+        return { abs: path.join(w.path, rel), rel };
+      }
     }
     if (!dir) break;
   }
-  if (matches.length === 1) return { abs: path.join(w.path, matches[0]), rel: matches[0] };
-  return { abs: null, candidates: matches };
+  return { abs: null, candidates: (await scanEnvFiles(w.path)).filter((rel) => names.includes(fold(envPathName(rel)))) };
 }
 
 // ---------- git ----------

@@ -1,4 +1,4 @@
-import { Component, computed, inject, linkedSignal, untracked } from '@angular/core';
+import { Component, computed, inject } from '@angular/core';
 import type { RunnerProcInfo } from '@quiver/core';
 import { AppState, invokeResource } from '@quiver/ui';
 import { injectRunnerChanged } from './runner-events';
@@ -18,12 +18,8 @@ import { STATE_LABEL, isLive, taskState } from './runner-format';
 export class RunnerStatusItem {
   private readonly app = inject(AppState);
   private readonly procs = invokeResource<RunnerProcInfo[]>('runner.proc.list');
-  // Kept with the workspace they were read for, so another workspace's tasks are not counted while this one's load.
-  private readonly procsOf = linkedSignal({ source: this.procs.value, computation: (value) => ({ value, ws: untracked(this.app.activeWorkspaceId) }) });
-  protected readonly live = computed(() => {
-    const { value, ws } = this.procsOf();
-    return ws === this.app.activeWorkspaceId() ? (value ?? []).filter((p) => isLive(taskState(p))) : [];
-  });
+  /** The live runs of the workspace on screen: another workspace's are not counted while this one's load. */
+  protected readonly live = computed(() => (this.procs.current() ?? []).filter((p) => isLive(taskState(p))));
   /** Some are starting, stopping or waiting to restart. */
   protected readonly settling = computed(() => this.live().some((p) => !['ready', 'running'].includes(taskState(p))));
   protected readonly title = computed(() => [...this.live().map((p) => `${p.name}: ${STATE_LABEL[taskState(p)].toLowerCase()}`), 'Click to open the Runner'].join('\n'));

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isSafeExternalUrl } from './external-url';
+import { isSafeExternalUrl, safeExternalUrl, urlScheme } from './external-url';
 
 describe('isSafeExternalUrl', () => {
   it('allows web pages and mail', () => {
@@ -26,5 +26,20 @@ describe('isSafeExternalUrl', () => {
     for (const url of ['', 'github.com', '/relative/path', String.raw`C:\Windows\notepad.exe`, String.raw`\\host\share\run.exe`]) {
       expect(isSafeExternalUrl(url)).toBe(false);
     }
+  });
+
+  it('gives back the link as the parser read it, which is what the system gets', () => {
+    // Spaces and control characters around the link and tabs or line breaks inside it pass the check; the system's
+    // handler must not see the raw text.
+    expect(safeExternalUrl(' \thttps://example.com/a b')).toBe('https://example.com/a%20b');
+    expect(safeExternalUrl('ht\ntps://example.com')).toBe('https://example.com/');
+    expect(safeExternalUrl('mailto:someone@example.com')).toBe('mailto:someone@example.com');
+    expect(safeExternalUrl('fi\tle:///C:/x.exe')).toBeNull();
+  });
+
+  it('names the scheme of a refused link without the rest of it', () => {
+    expect(urlScheme('VSCODE://file/x?token=secret')).toBe('vscode:');
+    expect(urlScheme('  ms-settings:privacy')).toBe('ms-settings:');
+    expect(urlScheme('/relative/path')).toBeNull();
   });
 });

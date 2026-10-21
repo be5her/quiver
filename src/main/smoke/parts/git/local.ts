@@ -133,6 +133,14 @@ const section: SmokeSection = async (t) => {
     await fs.writeFile(path.join(folder, 'newdir', 'b.txt'), 'b\n');
     const untracked = (await run<GitStatus>('git.status', {}, ws.id)).files.filter((f) => f.index === '?').map((f) => f.path);
     check('git: an untracked folder is listed once, not file by file', untracked.includes('newdir/') && !untracked.some((p) => p.startsWith('newdir/a')), untracked);
+    // The status bar asks for the branch alone: the same header, no files.
+    const full = await run<GitStatus>('git.status', {}, ws.id);
+    const headOnly = await run<GitStatus>('git.status', { files: false }, ws.id);
+    check(
+      'git: status with files: false gives the branch, HEAD and upstream without the files',
+      headOnly.files.length === 0 && full.files.length > 0 && headOnly.branch === full.branch && headOnly.head === full.head && headOnly.upstream === full.upstream,
+      { headOnly, full: { ...full, files: full.files.length } },
+    );
     await fs.rm(path.join(folder, 'newdir'), { recursive: true, force: true });
 
     // A workspace that is a subfolder of the repository: paths mean the same thing in status, diff, stage and log.

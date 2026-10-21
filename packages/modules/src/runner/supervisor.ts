@@ -137,20 +137,21 @@ function insideWorkspace(ws: WorkspaceApi, rel: string): string {
 }
 
 /**
- * The values of the env file a profile names, found the way the env module finds env files (`findProfileFile`):
- * `.env.<profile>` or `<profile>.env` in the task's folder or a folder above it, else the only one in the project; or
- * a project-relative path when the profile has a slash or is an env file name itself.
+ * The values of the env file a profile names (`findProfileFile`): `.env.<profile>` or `<profile>.env` in the task's
+ * folder or the nearest folder above it, or a project-relative path when the profile has a slash or is an env file name
+ * itself. One in another folder is only named in the error, never read: it may be another app's.
  */
 async function profileEnv(ws: WorkspaceApi, cwd: string, profile: string): Promise<Record<string, string>> {
-  const found = await findProfileFile(ws, profile, path.relative(path.resolve(ws.path), cwd));
+  const name = profile.trim();
+  const found = await findProfileFile(ws, name, path.relative(path.resolve(ws.path), cwd));
   if (found.abs === null) {
-    const which = found.candidates.length ? `; several folders have one (${found.candidates.join(', ')}), so name its path` : '';
-    throw new QuiverError('NOT_FOUND', `No env file for the profile ${profile} (.env.${profile} or ${profile}.env)${which}`);
+    const elsewhere = found.candidates.length ? `; other folders have ${found.candidates.join(', ')}, so give the one to use as the profile` : '';
+    throw new QuiverError('NOT_FOUND', `No env file for the profile ${name} (.env.${name} or ${name}.env) in the task's folder or above it${elsewhere}`);
   }
   try {
     return dotenvToMap(parseDotenv(await fs.readFile(found.abs, 'utf8')));
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw new QuiverError('NOT_FOUND', `No env file for the profile ${profile}: ${found.rel} does not exist`);
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw new QuiverError('NOT_FOUND', `No env file for the profile ${name}: ${found.rel} does not exist`);
     throw err;
   }
 }

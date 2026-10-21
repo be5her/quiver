@@ -14,6 +14,8 @@ export const runnerModuleUI = defineModuleUI({
   availability: 'workspace',
   sidebar: RunnerSidebar,
   statusItems: [RunnerStatusItem],
+  // Running processes stay in sight while the Runner is hidden: an agent may have started them.
+  statusItemsWhenHidden: true,
   tabs: {
     'runner.task': RunnerTaskTab,
   },

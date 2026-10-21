@@ -289,8 +289,9 @@ export class GitActions {
     const workspaceId = untracked(this.app.activeWorkspaceId);
     try {
       const todos = await this.host.invoke<TodoItem[]>('todo.list', {}, workspaceId);
-      // The address as a whole word: `…/pull/1` is not `…/pull/12`.
-      if (todos.some((t) => !t.done && t.notes.split(/\s+/).includes(pr.url))) {
+      // The address as a whole: `…/pull/1` is not `…/pull/12`, but it may sit in a markdown link or end a sentence.
+      const listed = new RegExp(`${pr.url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w-])`);
+      if (todos.some((t) => !t.done && listed.test(t.notes))) {
         this.toasts.notify(`#${pr.number} is already on the todo list`);
         return false;
       }

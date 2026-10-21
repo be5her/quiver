@@ -37,7 +37,7 @@ Two things to know when styling: `cn` joins class names without Tailwind merging
 
 `packages/ui` holds what the shell and the modules share:
 
-- The host contract: `HostBridge` (commands and host events over the preload), `invokeResource` (a command as a `resource()` that runs again on store, state or host events and keeps its last value while reloading) and `injectHostEvent`.
+- The host contract: `HostBridge` (commands and host events over the preload), `invokeResource` (a command as a `resource()` that runs again on store, state or host events and keeps its last value while reloading; `current` is that value only while it is the active workspace's) and `injectHostEvent`.
 - State services: `AppState`, `TabsState`, `TreeState`, `UiActions` (the palette's entries), `Toasts`, `Dialogs` (prompt, prompt with a choice, confirm, and a notice with only OK), the context menu and the variable hover.
 - `defineModuleUI`, the renderer half of a module: id, title, icon, sidebar component, tab components by type, and palette actions created in an injection context, and status bar items.
 - Dragging: `dragReorder` and `DropMarker` for strips, `dragInto` for dropping items on targets.
@@ -56,10 +56,10 @@ export const runnerModuleUI = defineModuleUI({
 });
 ```
 
-The status bar (`app/status-bar/status-bar.ts`) draws them with `NgComponentOutlet` after the environment picker, in the activity bar's order, for every module that is shown there (one the user hid contributes nothing) and available (a `workspace` module only while a workspace is open). They take no inputs, so an item reads its own data, usually with `invokeResource` on the active workspace and a reload on its module's host event, and lives as long as its module is shown. An item:
+The status bar (`app/status-bar/status-bar.ts`) draws them with `NgComponentOutlet` after the environment picker, in the activity bar's order, for every module that is shown there (one the user hid contributes nothing, unless its `ModuleUI` sets `statusItemsWhenHidden`, as the Runner does so running processes never go unseen) and available (a `workspace` module only while a workspace is open). They take no inputs, so an item reads its own data, usually with `invokeResource` on the active workspace and a reload on its module's host event, and lives as long as its module is shown. An item:
 
 - renders nothing when it has nothing to say (outside a repository, no task running), so a quiet module leaves no gap; give the component `host: { class: 'contents' }` so the bar's gap applies to what it renders;
-- keeps a result with the workspace it was read for (`linkedSignal` over the resource's value, as `git-status-item.ts` does), since `invokeResource` keeps the last value while the next workspace's loads;
+- shows the resource's `current` (and `currentError`) rather than `value`: `invokeResource` keeps the last value while the next workspace's loads, and `current` is that value only while it was read for the workspace the resource reads now;
 - is a `<button>` at the bar's size (`text-[11px]`, icons `size-3`, `hover:text-fg`) with a tooltip that says what a click does, which is usually `AppState.setActiveModule(<module id>)` to open the module's sidebar;
 - carries a `data-testid` for the smoke.
 

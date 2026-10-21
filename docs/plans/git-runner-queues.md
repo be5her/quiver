@@ -195,7 +195,7 @@ Angular standalone components with signals, following `src/renderer/README.md`. 
 
 ## Wave 3: integration and docs (1 agent, after all of the above)
 
-- **Runner and Env:** a task's `envProfile` loads that env profile's values. Lane R2 already reads `.env.<profile>` from the task's folder, then the workspace folder (or a path when the profile has a slash or starts with `.env`); this step aligns that with the env module's own discovery (`<name>.env` too, four folders deep) instead of adding a second lookup.
+- **Runner and Env:** a task's `envProfile` loads that env profile's values. Lane R2 already reads `.env.<profile>` from the task's folder, then the workspace folder (or a path when the profile has a slash or starts with `.env`); this step takes `<name>.env` too and the folders between the task's and the workspace's, read directly (`findProfileFile`), and names a file only another folder has rather than reading it.
 - **Git and Todo:** create a todo from a PR, and show the branch in the status bar.
 - **Runner in the status bar:** the count of running tasks.
 - **Docs:** finish each module README (what it does, storage, Agents section with the allowed and gated tools, smoke coverage), remove the lane markers, and update the README table one-liners.

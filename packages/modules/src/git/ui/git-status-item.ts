@@ -1,4 +1,4 @@
-import { Component, computed, inject, linkedSignal, untracked } from '@angular/core';
+import { Component, computed, inject } from '@angular/core';
 import type { GitStatus } from '@quiver/core';
 import { AppState, Icon, invokeResource } from '@quiver/ui';
 import { ArrowDown, ArrowUp, GitBranch } from 'lucide';
@@ -30,11 +30,10 @@ import { injectGitChanged } from './git-events';
 export class GitStatusItem {
   private readonly app = inject(AppState);
   protected readonly icons = { ArrowDown, ArrowUp, GitBranch };
-  private readonly status = invokeResource<GitStatus>('git.status');
-  // The resource keeps the last result while the next workspace's loads (or fails, outside a repository), so each
-  // result is kept with the workspace it was read for and only shown there.
-  private readonly statusOf = linkedSignal({ source: this.status.value, computation: (value) => ({ value, ws: untracked(this.app.activeWorkspaceId) }) });
-  protected readonly current = computed(() => (this.statusOf().ws === this.app.activeWorkspaceId() && !this.status.error() ? this.statusOf().value : undefined));
+  // Only the branch: git leaves out the untracked files and submodules, the bulk of a status in a big repository.
+  private readonly status = invokeResource<GitStatus>('git.status', () => ({ files: false }));
+  /** The status of the workspace on screen; nothing while another's is the latest, or outside a repository. */
+  protected readonly current = computed(() => (this.status.currentError() ? undefined : this.status.current()));
   protected readonly title = computed(() => {
     const s = this.current();
     if (!s) return '';

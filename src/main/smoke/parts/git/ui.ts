@@ -313,6 +313,14 @@ const section: SmokeSection = async ({ check, run, ws: mainWs }) => ({
       await wait(150);
       await shot('32l-git-pr-todo-dark');
       await js(`document.documentElement.classList.remove('dark')`);
+      // An open todo with the address inside other text (a markdown link, the end of a sentence) counts as well.
+      if (todo) await run('todo.remove', { id: todo.id }, id);
+      const linked = await run<TodoItem>('todo.add', { title: 'Review it', notes: `See [the parser](${prUrl}).` }, id);
+      await js(`${visible('[data-testid=git-pr-todo]')}?.click()`);
+      await wait(400);
+      const afterLinked = (await todosOf()).length;
+      await run('todo.remove', { id: linked.id }, id);
+      check('git ui: Add todo finds the pull request already in an open todo as a markdown link', afterLinked === 0, { afterLinked });
       await js(`${visible('[data-testid=git-pr-view-checks]')}?.click()`);
       const checksShown = await waitFor(`(${visible('[data-testid=git-pr-tab]')}?.querySelectorAll('[data-testid=git-pr-check]').length ?? 0) === 2`, 6000);
       const logBefore = await js(`Boolean(${visible('[data-testid=git-pr-tab]')}?.querySelector('[data-testid=git-pr-check-log]'))`);
