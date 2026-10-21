@@ -1,7 +1,7 @@
-import { Component, DestroyRef, computed, effect, inject, input, output, signal, untracked } from '@angular/core';
+import { Component, DestroyRef, computed, effect, inject, input, linkedSignal, output, signal, untracked } from '@angular/core';
 import { FormField, form } from '@angular/forms/signals';
 import type { GitBranch, GitFileChange, GitStatus } from '@quiver/core';
-import { Button, Checkbox, ContextMenu, EmptyState, HostBridge, Icon, IconButton, SectionHeader, Spinner, TextArea, TreeState, invokeResource } from '@quiver/ui';
+import { AppState, Button, Checkbox, ContextMenu, EmptyState, HostBridge, Icon, IconButton, SectionHeader, Spinner, TextArea, TreeState, invokeResource } from '@quiver/ui';
 import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Check, CloudUpload, Download, GitBranch as GitBranchIcon, GitPullRequest, History, Minus, Plus, RefreshCw } from 'lucide';
 import { GitActions } from './git-actions';
 import { injectGitChanged } from './git-events';
@@ -107,14 +107,18 @@ export class GitChangeGroup {
 
   protected one(event: Event, f: GitFileChange): void {
     event.stopPropagation();
-    void (this.group() === 'staged' ? this.actions.unstage([f.path]) : this.actions.stage([f.path]));
+    void (this.group() === 'staged' ? this.actions.unstage(withOrigin([f])) : this.actions.stage([f.path]));
   }
 
   protected all(event: Event): void {
     event.stopPropagation();
-    const paths = this.files().map((f) => f.path);
-    void (this.group() === 'staged' ? this.actions.unstage(paths) : this.actions.stage(paths));
+    void (this.group() === 'staged' ? this.actions.unstage(withOrigin(this.files())) : this.actions.stage(this.files().map((f) => f.path)));
   }
+}
+
+/** The paths to unstage: a staged rename's old path too, or its deletion would stay staged. */
+function withOrigin(files: GitFileChange[]): string[] {
+  return files.flatMap((f) => (f.origPath ? [f.path, f.origPath] : [f.path]));
 }
 
 /** The workspace repository: branch and remote, the changed files, the commit box and the branches. */
@@ -122,17 +126,17 @@ export class GitChangeGroup {
   selector: 'q-git-sidebar',
   imports: [Button, Checkbox, EmptyState, FormField, GitChangeGroup, Icon, IconButton, SectionHeader, Spinner, TextArea],
   template: `
-    @if (status.error(); as error) {
-      @if (!status.value()) {
+    @if (statusError(); as error) {
+      @if (!current()) {
         <q-empty-state [title]="errorTitle()" [hint]="error.message" data-testid="git-not-repo">
           <button qButton size="sm" variant="secondary" [icon]="icons.RefreshCw" (click)="reloadAll()">Try again</button>
         </q-empty-state>
       }
     }
-    @if (status.isLoading() && !status.value() && !status.error()) {
+    @if (!current() && !statusError()) {
       <div class="px-3 py-2"><svg qSpinner></svg></div>
     }
-    @if (status.value(); as s) {
+    @if (current(); as s) {
       <!-- Branch and remote -->
       <div class="flex items-center gap-1.5 px-3 h-9 border-b border-edge shrink-0" data-testid="git-branch-bar">
         <svg [qIcon]="icons.GitBranchIcon" class="size-4 text-accent shrink-0"></svg>
@@ -276,24 +280,32 @@ export class GitSidebar {
   protected readonly actions = inject(GitActions);
   protected readonly tree = inject(TreeState);
   private readonly contextMenu = inject(ContextMenu);
+  private readonly app = inject(AppState);
   protected readonly modKey = inject(HostBridge).modKey;
 
   protected readonly icons = { ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, CloudUpload, Download, GitBranchIcon, GitPullRequest, History, RefreshCw, Plus };
   protected readonly status = invokeResource<GitStatus>('git.status');
+  // The same sidebar serves every workspace with Git on screen, and the resource keeps a result while the next one
+  // loads; each result is kept with the workspace it was read for, so another repository's files never show here.
+  private readonly statusOf = linkedSignal({ source: this.status.value, computation: (value) => ({ value, ws: untracked(this.app.activeWorkspaceId) }) });
+  private readonly errorOf = linkedSignal({ source: this.status.error, computation: (error) => ({ error, ws: untracked(this.app.activeWorkspaceId) }) });
+  /** The status of the workspace on screen, once read. */
+  protected readonly current = computed(() => (this.statusOf().ws === this.app.activeWorkspaceId() ? this.statusOf().value : undefined));
+  protected readonly statusError = computed(() => (this.errorOf().ws === this.app.activeWorkspaceId() ? this.errorOf().error : null));
   protected readonly branchesOpen = computed(() => this.tree.isExpanded('git/branches', true));
-  protected readonly branches = invokeResource<GitBranch[]>('git.branch.list', () => ({}), { enabled: () => this.branchesOpen() && Boolean(this.status.value()) });
+  protected readonly branches = invokeResource<GitBranch[]>('git.branch.list', () => ({}), { enabled: () => this.branchesOpen() && Boolean(this.current()) });
   protected readonly busy = this.actions.busy;
 
-  protected readonly groups = computed(() => groupChanges(this.status.value()?.files ?? []));
+  protected readonly groups = computed(() => groupChanges(this.current()?.files ?? []));
   protected readonly localBranches = computed(() => (this.branches.value() ?? []).filter((b) => !b.remote));
   protected readonly remoteCount = computed(() => (this.branches.value() ?? []).filter((b) => b.remote && !b.name.endsWith('/HEAD')).length);
   protected readonly branchTitle = computed(() => {
-    const s = this.status.value();
+    const s = this.current();
     if (!s) return '';
     return [s.branch ? `On ${s.branch}` : `Detached at ${s.head}`, s.upstream ? `tracking ${s.upstream}: ${s.ahead} ahead, ${s.behind} behind` : 'no upstream', 'Click to switch branch'].join('\n');
   });
   protected readonly errorTitle = computed(() => {
-    const reason = errorReason(this.status.error());
+    const reason = errorReason(this.statusError());
     return reason === 'no-git' ? 'Git was not found' : reason === 'not-a-repo' ? 'Not a git repository' : 'Git could not read this folder';
   });
 
@@ -322,15 +334,22 @@ export class GitSidebar {
         this.branches.reload();
       }
     });
-    // Amend starts from the last commit's message, as an editor would show it.
+    // Amend starts from the last commit's message, as an editor would show it: once, when it is ticked.
+    const amend = computed(() => this.draft().amend);
     effect(() => {
-      if (!this.draft().amend || untracked(this.draft).message.trim()) return;
+      if (!amend() || untracked(this.draft).message.trim()) return;
       void this.actions.lastMessage().then((message) => {
         if (untracked(this.draft).amend && !untracked(this.draft).message.trim()) this.draft.update((d) => ({ ...d, message }));
       });
     });
+    // A message written for one repository is not carried to another.
+    effect(() => {
+      this.app.activeWorkspaceId();
+      untracked(() => this.draft.set({ message: '', amend: false }));
+    });
+    // Polled only in a repository: a folder without one is read again on focus, events and Try again.
     const timer = setInterval(() => {
-      if (document.visibilityState === 'visible' && !this.status.isLoading()) this.status.reload();
+      if (document.visibilityState === 'visible' && !this.status.isLoading() && untracked(this.current)) this.status.reload();
     }, STATUS_EVERY_MS);
     inject(DestroyRef).onDestroy(() => clearInterval(timer));
   }
@@ -349,7 +368,7 @@ export class GitSidebar {
     if (!this.canCommit()) return;
     this.committing.set(true);
     const { message, amend } = this.draft();
-    const done = await this.actions.commit(message, amend, this.status.value());
+    const done = await this.actions.commit(message, amend, this.current());
     this.committing.set(false);
     if (done) this.draft.set({ message: '', amend: false });
   }

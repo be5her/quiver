@@ -36,6 +36,25 @@ describe('parseAnsi', () => {
     expect(parseAnsi('a\tb').spans[0].text).toBe('a\tb');
   });
 
+  it('drops escapes with intermediates and the one-character ones (tput sgr0, save and restore cursor)', () => {
+    expect(plainText('\x1b[31mred\x1b(B\x1b[m plain')).toBe('red plain');
+    expect(plainText('\x1b7saved\x1b8\x1b=\x1b>')).toBe('saved');
+  });
+
+  it('reads colon sub-parameters as one parameter', () => {
+    expect(applySgr({}, '38:2::255:0:0')).toEqual({ fg: 'rgb(255,0,0)' });
+    expect(applySgr({}, '38:2:1:2:3')).toEqual({ fg: 'rgb(1,2,3)' });
+    expect(applySgr({}, '48:5:196')).toEqual({ bg: 'rgb(255,0,0)' });
+    expect(applySgr({ fg: 'red', underline: true }, '4:0')).toEqual({ fg: 'red' });
+    expect(applySgr({}, '4:3')).toEqual({ underline: true });
+  });
+
+  it('starts the line over at a carriage return, keeping the colour set before it', () => {
+    expect(plainText('dl 10%\rdl 50%\rdl 100%')).toBe('dl 100%');
+    expect(parseAnsi('\x1b[32m10%\r100%').spans).toEqual([{ text: '100%', css: 'color:var(--success)' }]);
+    expect(plainText('done\r')).toBe('done');
+  });
+
   it('swaps colours for inverse and turns bold and dim off with 22', () => {
     expect(applySgr({}, '7;31')).toEqual({ inverse: true, fg: 'var(--danger)' });
     expect(parseAnsi('\x1b[7;31mx').spans[0].css).toBe('color:var(--canvas);background-color:var(--danger)');

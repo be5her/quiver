@@ -59,7 +59,7 @@ import { RunnerTaskEditor } from './task-editor';
           <button qSegment="settings" data-testid="runner-view-settings">Settings{{ tab().dirty ? '*' : '' }}</button>
         </q-segmented>
         <!-- Both stay alive, so switching keeps the output read and the unsaved settings. -->
-        <q-runner-output class="flex-1 min-h-0" [class.hidden]="view() !== 'output'" [taskId]="t.id" [live]="live()" />
+        <q-runner-output class="flex-1 min-h-0" [class.hidden]="view() !== 'output'" [taskId]="t.id" [live]="hasProcess()" />
         <q-runner-task-editor class="flex-1 min-h-0" [class.hidden]="view() !== 'settings'" [task]="t" (dirtyChange)="markDirty($event)" (remove)="remove(t)" />
       </div>
     }
@@ -84,7 +84,10 @@ export class RunnerTaskTab implements TabComponent {
   protected readonly proc = computed(() => (this.procs.value() ?? []).find((p) => p.taskId === this.taskId()));
   protected readonly state = computed(() => taskState(this.proc()));
   protected readonly live = computed(() => isLive(this.state()));
-  protected readonly port = computed(() => this.proc()?.port ?? this.task.value()?.port);
+  /** Whether there is a process to write to: not while a crashed one waits to restart, nor while it stops. */
+  protected readonly hasProcess = computed(() => ['starting', 'ready', 'running'].includes(this.state()));
+  /** The running process's port; once stopped, the saved one, so an edit in Settings shows at once. */
+  protected readonly port = computed(() => (this.live() ? this.proc()?.port : undefined) ?? this.task.value()?.port);
   /** The view the tab was opened on, until the user picks another or the tab is asked for one again. */
   protected readonly view = linkedSignal<string, TaskView>({
     // Keyed on the asked view and when it was asked, so other tab updates (title, dirty) leave the view alone.

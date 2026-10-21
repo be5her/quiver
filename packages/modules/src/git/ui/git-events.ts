@@ -38,6 +38,24 @@ export function injectPrPolling(visible: () => boolean): void {
   });
 }
 
+/**
+ * A reload that waits for the tab to be on screen: the shell keeps every open tab alive, so a hidden diff or pull
+ * request would otherwise run git or gh on every event. Asked while hidden, it runs once when the tab is shown.
+ */
+export function injectReloadWhenShown(visible: () => boolean, reload: () => void): () => void {
+  let stale = false;
+  effect(() => {
+    if (visible() && stale) {
+      stale = false;
+      untracked(reload);
+    }
+  });
+  return () => {
+    if (untracked(visible)) reload();
+    else stale = true;
+  };
+}
+
 /** Whether a tab is the one on screen: active in its scope, and its scope is the workspace shown. */
 export function tabVisible(tab: () => Tab, scope: () => string): () => boolean {
   const app = inject(AppState);

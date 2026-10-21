@@ -4,7 +4,7 @@ import { Button, Icon, Spinner, invokeResource, type Tab, type TabComponent } fr
 import { FileDiff, Plus, RefreshCw } from 'lucide';
 import { GitDiffView } from './diff-view';
 import { GitActions } from './git-actions';
-import { injectGitChanged } from './git-events';
+import { injectGitChanged, injectReloadWhenShown, tabVisible } from './git-events';
 import type { DiffSource, GitShowResult } from './git-format';
 
 /** A diff: working or staged changes (one file or all of them), or a commit. */
@@ -37,7 +37,7 @@ import type { DiffSource, GitShowResult } from './git-format';
     </div>
   `,
   // Edits to working files are not watched; coming back to the window picks them up.
-  host: { class: 'contents', '(window:focus)': 'local() && reload()' },
+  host: { class: 'contents', '(window:focus)': 'local() && reloadShown()' },
 })
 export class GitDiffTab implements TabComponent {
   private readonly actions = inject(GitActions);
@@ -100,9 +100,12 @@ export class GitDiffTab implements TabComponent {
     return kind === 'working' ? 'Nothing here differs from the index. Staged changes have their own diff.' : kind === 'staged' ? 'Nothing staged here.' : null;
   });
 
+  /** Reloads now when the tab is on screen, else once it is shown. */
+  protected readonly reloadShown = injectReloadWhenShown(tabVisible(this.tab, this.scope), () => this.reload());
+
   constructor() {
     injectGitChanged((p) => {
-      if (p.reason === 'status' && this.local()) this.reload();
+      if (p.reason === 'status' && this.local()) this.reloadShown();
     });
   }
 

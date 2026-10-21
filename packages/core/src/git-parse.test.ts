@@ -131,6 +131,14 @@ describe('patches', () => {
     expect(splitPatch('')).toEqual([]);
   });
 
+  it('splits a conflicted file\'s combined diff as a chunk of its own', () => {
+    const merged = 'diff --cc f.txt\nindex 28ce6a8,2c7dc80..0000000\n--- a/f.txt\n+++ b/f.txt\n@@@ -1,1 -1,1 +1,5 @@@\n++<<<<<<< HEAD\n +m\n++=======\n+ x\n++>>>>>>> x\ndiff --git a/g.txt b/g.txt\n--- a/g.txt\n+++ b/g.txt\n@@ -1 +1 @@\n-g\n+g2\n';
+    const chunks = splitPatch(merged);
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0].startsWith('diff --cc f.txt\n')).toBe(true);
+    expect(chunks[1].startsWith('diff --git a/g.txt')).toBe(true);
+  });
+
   it('attaches each patch to its file, leaving binaries and oversized patches out', () => {
     const chunks = splitPatch(patch);
     const out = attachPatches(files, chunks, 1000);

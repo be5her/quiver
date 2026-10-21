@@ -26,12 +26,14 @@ const ROW_CLASS: Record<string, string> = {
   selector: 'q-git-patch',
   template: `
     @let f = file();
-    @if (f.binary) {
+    @if (conflicted()) {
+      <p class="p-4 text-xs text-muted" data-testid="git-patch-note" data-conflict="true">This file has merge conflicts. Resolve the conflict markers in your editor, then mark it resolved (Stage) in the sidebar.</p>
+    } @else if (f.binary) {
       <p class="p-4 text-xs text-muted" data-testid="git-patch-note">Binary file; no text diff.</p>
     } @else if (f.patch === undefined) {
       <p class="p-4 text-xs text-muted" data-testid="git-patch-note">{{ f.truncated ? 'The diff of this file is too large to show.' : 'No changes to show.' }}</p>
     } @else if (!rows().length) {
-      <p class="p-4 text-xs text-muted" data-testid="git-patch-note">{{ f.status === 'renamed' ? 'Renamed without changes.' : 'Only the file mode changed.' }}</p>
+      <p class="p-4 text-xs text-muted" data-testid="git-patch-note">{{ unchangedNote(f) }}</p>
     } @else {
       <table class="w-full border-collapse font-mono text-[12px] leading-[18px]" data-testid="git-patch" [attr.data-mode]="mode()">
         @if (mode() === 'split') {
@@ -93,6 +95,8 @@ export class GitPatch {
   readonly mode = input<DiffMode>('split');
 
   protected readonly showAll = linkedSignal({ source: this.file, computation: () => false });
+  /** A file with merge conflicts comes as a combined diff (`diff --cc`, `@@@` hunks), which this view does not draw. */
+  protected readonly conflicted = computed(() => this.file().patch?.startsWith('diff --cc ') ?? false);
   protected readonly rows = computed(() => parsePatch(this.file().patch ?? ''));
   private readonly split = computed(() => (this.mode() === 'split' ? splitRows(this.rows()) : []));
   protected readonly visibleRows = computed(() => (this.showAll() ? this.rows() : this.rows().slice(0, FIRST_ROWS)));
@@ -101,6 +105,15 @@ export class GitPatch {
     if (this.showAll()) return 0;
     return Math.max(0, (this.mode() === 'split' ? this.split().length : this.rows().length) - FIRST_ROWS);
   });
+
+  /** Why a file with a patch has no lines to show. */
+  protected unchangedNote(f: GitDiffFile): string {
+    if (f.status === 'renamed') return 'Renamed without changes.';
+    if (f.status === 'copied') return 'Copied without changes.';
+    if (f.status === 'added') return 'Empty file added.';
+    if (f.status === 'deleted') return 'Empty file deleted.';
+    return 'Only the file mode changed.';
+  }
 
   protected cellClass(cell: SplitCell): string {
     return ROW_CLASS[cell.kind];

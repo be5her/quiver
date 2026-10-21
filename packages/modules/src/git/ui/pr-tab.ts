@@ -1,11 +1,11 @@
-import { Component, computed, inject, input, signal } from '@angular/core';
+import { Component, computed, effect, inject, input, signal, untracked } from '@angular/core';
 import { FormField, form } from '@angular/forms/signals';
 import type { GitDiffFile, GitPrCheckWithLog, GitPullRequestDetail } from '@quiver/core';
 import { Badge, Button, Icon, Segment, Segmented, Spinner, TextArea, invokeResource, type Tab, type TabComponent } from '@quiver/ui';
 import { CircleCheck, CircleDashed, CircleDot, CircleSlash, CircleX, ExternalLink, GitBranch, GitPullRequest, MessageSquare, RefreshCw } from 'lucide';
 import { GitDiffView } from './diff-view';
 import { GitActions } from './git-actions';
-import { injectGitChanged, injectPrPolling, tabVisible } from './git-events';
+import { injectGitChanged, injectPrPolling, injectReloadWhenShown, tabVisible } from './git-events';
 import { REVIEW_LABEL, ago, checkClass, checksSummary, prStateClass, prStateLabel, reviewClass } from './git-format';
 
 type View = 'conversation' | 'checks' | 'files';
@@ -165,8 +165,10 @@ export class GitPrTab implements TabComponent {
   protected readonly pr = invokeResource<GitPullRequestDetail>('git.pr.get', () => ({ number: this.number() }));
   /** Failed logs cost a gh call per failed job, so they are read only when asked for. */
   protected readonly withLogs = signal(false);
-  protected readonly checks = invokeResource<GitPrCheckWithLog[]>('git.pr.checks', () => ({ number: this.number(), failedLogs: this.withLogs() }), { enabled: () => this.view() === 'checks' });
-  protected readonly diff = invokeResource<GitDiffFile[]>('git.pr.diff', () => ({ number: this.number() }), { enabled: () => this.view() === 'files' });
+  /** The views opened so far: checks and files are read when first shown and then kept, not read again on every switch. */
+  private readonly opened = signal<ReadonlySet<View>>(new Set(['conversation']));
+  protected readonly checks = invokeResource<GitPrCheckWithLog[]>('git.pr.checks', () => ({ number: this.number(), failedLogs: this.withLogs() }), { enabled: () => this.opened().has('checks') });
+  protected readonly diff = invokeResource<GitDiffFile[]>('git.pr.diff', () => ({ number: this.number() }), { enabled: () => this.opened().has('files') });
   protected readonly checkingOut = signal(false);
   protected readonly commentDraft = signal({ body: '' });
   protected readonly commentForm = form(this.commentDraft);
@@ -202,16 +204,22 @@ export class GitPrTab implements TabComponent {
   });
 
   constructor() {
-    injectPrPolling(tabVisible(this.tab, this.scope));
+    const visible = tabVisible(this.tab, this.scope);
+    injectPrPolling(visible);
+    const reloadShown = injectReloadWhenShown(visible, () => this.reload());
     injectGitChanged((p) => {
-      if (p.reason === 'prs') this.reload();
+      if (p.reason === 'prs') reloadShown();
+    });
+    effect(() => {
+      const v = this.view();
+      if (!untracked(this.opened).has(v)) this.opened.update((s) => new Set(s).add(v));
     });
   }
 
   protected reload(): void {
     this.pr.reload();
-    if (this.view() === 'checks') this.checks.reload();
-    if (this.view() === 'files') this.diff.reload();
+    if (this.opened().has('checks')) this.checks.reload();
+    if (this.opened().has('files')) this.diff.reload();
   }
 
   protected reviewStateClass(state: string): string {

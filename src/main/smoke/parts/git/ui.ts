@@ -1,14 +1,15 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { GitCommit, GitStatus, WorkspaceInfo } from '@quiver/core';
+import type { GitCommit, GitDiffFile, GitStatus, WorkspaceInfo } from '@quiver/core';
 import { runToEnd } from '@quiver/core/node';
 import { writeFakeGh, type FakeGhPr, type FakeGhState } from '../../fake-gh';
 import { until, type SmokeSection } from '../../part';
 
 // The Git panel, on a repository of its own in a temporary folder opened as a second workspace: a file changed on disk
 // shows in the sidebar, its diff opens side by side and inline, it is staged and committed from the commit box, the
-// commit shows in the history, a branch is made from a dialog and another switched to from the list; then the pull
+// commit shows in the history, a branch is made from a dialog and another switched to from the list, a merge conflict
+// gets a note rather than a diff; then the pull
 // requests against the fake gh of parts/git/pr.ts, with their check badges, a detail tab with the failed log on demand,
 // and the empty state when gh is missing.
 
@@ -217,6 +218,30 @@ const section: SmokeSection = async ({ check, run, ws: mainWs }) => ({
       const created = await waitFor(`document.querySelector('[data-testid=git-current-branch]')?.textContent.trim() === 'ui/new-branch'`);
       check('git ui: New branch asks for a name, creates the branch and switches to it', dialogTitle === 'New branch' && created, dialogTitle);
 
+      // A merge conflict: the file is listed once, under Merge conflicts, and its tab says to resolve it rather than
+      // drawing the combined diff. The host pairs it with its own patch, so another changed file still has its diff.
+      await sh('checkout', '-q', '-b', 'ui/conflict');
+      await fs.writeFile(path.join(folder, 'app.txt'), 'one\nother\n');
+      await sh('commit', '-q', '-am', 'Other app');
+      await sh('merge', '-q', 'main');
+      await fs.writeFile(path.join(folder, 'readme.md'), '# Smoke, edited\n');
+      await click('[data-testid=git-refresh]');
+      const conflictRow = await waitFor(`document.querySelectorAll('[data-testid=git-file][data-path="app.txt"]').length === 1 && Boolean(document.querySelector('[data-testid=git-file][data-group=conflicts][data-path="app.txt"]'))`);
+      await click('[data-testid=git-file][data-group=conflicts][data-path="app.txt"]');
+      const conflictNote = await waitFor(`${visible('[data-testid=git-diff-tab][data-path="app.txt"]')}?.querySelector('[data-testid=git-patch-note]')?.getAttribute('data-conflict') === 'true'`);
+      const working = await run<GitDiffFile[]>('git.diff', { staged: false }, id);
+      const pairs = working.map((d) => ({ path: d.path, patch: d.patch?.slice(0, 10) ?? null, truncated: Boolean(d.truncated) }));
+      check(
+        'git ui: a conflicted file is listed once and its tab says to resolve it; the other files keep their diffs',
+        conflictRow && conflictNote && JSON.stringify(pairs) === JSON.stringify([{ path: 'app.txt', patch: 'diff --cc ', truncated: false }, { path: 'readme.md', patch: 'diff --git', truncated: false }]),
+        { conflictRow, conflictNote, pairs },
+      );
+      await sh('merge', '--abort');
+      await sh('checkout', '-q', '--', 'readme.md');
+      await sh('checkout', '-q', 'ui/new-branch');
+      await click('[data-testid=git-refresh]');
+      await waitFor(`document.querySelector('[data-testid=git-current-branch]')?.textContent.trim() === 'ui/new-branch' && !document.querySelector('[data-testid=git-group][data-group=conflicts]')`);
+
       // Pull requests: the list with check badges and review decisions.
       await click('[data-testid=git-open-prs]');
       const listed = await waitFor(`(${visible('[data-testid=git-prs-tab]')}?.querySelectorAll('[data-testid=git-pr-row]').length ?? 0) === 3`, 8000);
@@ -283,7 +308,15 @@ const section: SmokeSection = async ({ check, run, ws: mainWs }) => ({
       const missing = await waitFor(`${visible('[data-testid=git-gh-missing]')}?.getAttribute('data-reason') === 'no-gh'`, 6000);
       check('git ui: without gh the pull requests view says so instead of listing', missing);
       await shot('32k-git-prs-no-gh-light');
+
+      // Back on the first workspace, the sidebar never shows this repository's files while it reads that one's.
+      const shownHere = await waitFor(`Boolean(document.querySelector('[data-testid=git-file][data-path="notes.txt"]'))`);
+      await click(`[data-testid=workspace-tab][data-drag-id="${mainWs.id}"]`);
+      const leaked = await js(`Boolean(document.querySelector('[data-testid=git-file][data-path="notes.txt"]'))`);
+      check('git ui: switching workspace drops the other repository\'s status at once', shownHere && leaked === false, { shownHere, leaked });
     } finally {
+      // A dialog a failed step left open would block every later part.
+      await js(`[...document.querySelectorAll('.fixed.inset-0 button')].find((b) => b.textContent.trim() === 'Cancel')?.click()`).catch(() => {});
       if (previousGh === undefined) delete process.env.QUIVER_GH_PATH;
       else process.env.QUIVER_GH_PATH = previousGh;
       await click(`[data-testid=workspace-tab][data-drag-id="${mainWs.id}"]`);

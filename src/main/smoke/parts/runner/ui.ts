@@ -42,7 +42,7 @@ const section: SmokeSection = async ({ check, run, ws, folder }) => {
       const dialogButton = (label: string) => js(`(() => { const b = [...document.querySelectorAll('.fixed.inset-0 button')].find((b) => b.textContent.trim() === ${JSON.stringify(label)}); b?.click(); return Boolean(b); })()`);
 
       await js(`document.querySelector('[data-testid=activity-item][data-drag-id=runner]').click()`);
-      await wait(500);
+      await until(async () => (await rowState()) !== null, 5000);
       check('runner ui: the activity bar opens the Runner sidebar with the saved task, stopped', (await js(`Boolean(document.querySelector('[data-testid=runner-sidebar]'))`)) === true && (await rowState()) === 'stopped', await rowState());
 
       // Start from the sidebar: the dot goes through starting to ready once the fixture prints its line.
@@ -129,7 +129,8 @@ const section: SmokeSection = async ({ check, run, ws, folder }) => {
       const dirtyLabel = await js(`${tab}?.querySelector('[data-testid=runner-save]')?.textContent.trim() ?? ''`);
       await shot('34d-runner-settings-light');
       await js(`${tab}?.querySelector('[data-testid=runner-save]')?.click()`);
-      await wait(700);
+      const readTask = async () => JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'runner', `${task.id}.json`), 'utf8').catch(() => '{}')) as Partial<RunnerTask>;
+      await until(async () => (await readTask()).name === 'ui server edited' && (await js(`${tab}?.querySelector('[data-testid=runner-save]')?.textContent.trim() ?? ''`)) === 'Save', 5000);
       const file = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'runner', `${task.id}.json`), 'utf8').catch(() => '{}')) as Partial<RunnerTask>;
       const savedLabel = await js(`${tab}?.querySelector('[data-testid=runner-save]')?.textContent.trim() ?? ''`);
       const renamed = await js(`${row}?.textContent.includes('ui server edited') ?? false`);
@@ -138,14 +139,15 @@ const section: SmokeSection = async ({ check, run, ws, folder }) => {
         editorShown === true && stillShown === true && dirtyLabel === 'Save*' && savedLabel === 'Save' && file.name === 'ui server edited' && file.port === port2 && file.autoRestart === true && file.readyPattern === undefined && file.command === task.command && renamed === true,
         { editorShown, stillShown, dirtyLabel, savedLabel, file, renamed },
       );
-      // A port that is no port is refused before it is sent.
-      await js(`(() => { const set = ${setInput}; set(${tab}.querySelector('[data-testid=runner-edit-port]'), '99999'); })()`);
+      // A port that is no port is refused before it is sent: the form says why, and the name typed with it stays unsaved.
+      await js(`(() => { const set = ${setInput}; const t = ${tab}; set(t.querySelector('[data-testid=runner-edit-port]'), '99999'); set(t.querySelector('[data-testid=runner-edit-name]'), 'ui server refused'); })()`);
       await wait(150);
+      const problem = await js(`${tab}?.querySelector('[data-testid=runner-edit-problem]')?.textContent.trim() ?? null`);
       await js(`${tab}?.querySelector('[data-testid=runner-save]')?.click()`);
       await wait(400);
-      const kept = (JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'runner', `${task.id}.json`), 'utf8')) as RunnerTask).port;
+      const kept = await readTask();
       await js(`${tab}?.querySelector('[data-testid=runner-revert]')?.click()`);
-      check('runner ui: a port out of range is not saved', kept === port2, kept);
+      check('runner ui: a port out of range is refused by the form and nothing is saved', kept.port === port2 && kept.name === 'ui server edited' && String(problem ?? '').includes('1 to 65535'), { problem, port: kept.port, name: kept.name });
 
       // Discovered: the Makefile target is listed, and Save as task saves it and marks it.
       const discovered = `document.querySelector('[data-testid=runner-discovered-row][data-source=make][data-name=ui-hello]')`;
@@ -158,8 +160,10 @@ const section: SmokeSection = async ({ check, run, ws, folder }) => {
       await shot('34e-runner-sidebar-light');
 
       // Deleting asks first: cancel keeps the task, Delete removes its file and closes its tab.
-      if (made) {
-        await until(async () => Boolean(await js(`${tab}?.getAttribute('data-id') === ${JSON.stringify(made.id)}`)), 3000);
+      // Only on the saved target's own tab, so a wrong tab never deletes another task.
+      const onMadeTab = made ? await until(async () => Boolean(await js(`${tab}?.getAttribute('data-id') === ${JSON.stringify(made.id)}`)), 3000) : false;
+      if (!onMadeTab) check('runner ui: Save as task opens the saved target\'s tab', false, { made, shown: await js(`${tab}?.getAttribute('data-id') ?? null`) });
+      else if (made) {
         await js(`${tab}?.querySelector('[data-testid=runner-delete]')?.click()`);
         await wait(300);
         const title = await dialogTitle();
@@ -177,6 +181,8 @@ const section: SmokeSection = async ({ check, run, ws, folder }) => {
     },
     after: async () => {
       await run('runner.task.delete', { id: task.id }, ws.id).catch(() => undefined);
+      const left = (await run<RunnerTask[]>('runner.task.list', {}, ws.id).catch(() => [] as RunnerTask[])).filter((t) => t.command === 'make ui-hello');
+      for (const t of left) await run('runner.task.delete', { id: t.id }, ws.id).catch(() => undefined);
       await fs.rm(path.join(folder, 'Makefile'), { force: true });
       await fs.rm(path.join(folder, 'runner-ui-fixture.cjs'), { force: true });
     },

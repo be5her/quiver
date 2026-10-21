@@ -54,24 +54,44 @@ export function color256(n: number): string | undefined {
 }
 
 /** Reads an extended colour (`38;5;n` or `38;2;r;g;b`) from `codes` at `i`, the 38 or 48; gives the colour and how many codes it took. */
-function extended(codes: number[], i: number): { color?: string; used: number } {
-  const mode = codes[i + 1];
-  if (mode === 5) return { color: color256(codes[i + 2]), used: 3 };
+function extended(codes: (number | number[])[], i: number): { color?: string; used: number } {
+  const at = (k: number) => (typeof codes[k] === 'number' ? codes[k] : NaN);
+  const mode = at(i + 1);
+  if (mode === 5) return { color: color256(at(i + 2)), used: 3 };
   if (mode === 2) {
-    const [r, g, b] = [codes[i + 2], codes[i + 3], codes[i + 4]];
+    const [r, g, b] = [at(i + 2), at(i + 3), at(i + 4)];
     const ok = [r, g, b].every((c) => Number.isInteger(c) && c >= 0 && c <= 255);
     return { color: ok ? `rgb(${r},${g},${b})` : undefined, used: 5 };
   }
   return { used: 1 };
 }
 
+/** A colon group (`38:2::r:g:b`, `38:5:n`, `4:3`): one parameter with its sub-parameters, applied to `s`. */
+function applySub(s: AnsiStyle, subs: number[]): void {
+  const [c, mode] = subs;
+  if (c === 4) s.underline = mode === 0 ? undefined : true;
+  else if (c === 38 || c === 48) {
+    let color: string | undefined;
+    if (mode === 5) color = color256(subs[2]);
+    else if (mode === 2) {
+      // `38:2:cs:r:g:b` carries a colour space id before the channels; `38:2:r:g:b` leaves it out.
+      const [r, g, b] = subs.length >= 6 ? subs.slice(3, 6) : subs.slice(2, 5);
+      if ([r, g, b].every((v) => Number.isInteger(v) && v >= 0 && v <= 255)) color = `rgb(${r},${g},${b})`;
+    }
+    if (color) s[c === 38 ? 'fg' : 'bg'] = color;
+  }
+}
+
 /** The style after one SGR sequence's codes. */
 export function applySgr(style: AnsiStyle, params: string): AnsiStyle {
-  const codes = params === '' ? [0] : params.split(/[;:]/).map((p) => (p === '' ? 0 : Number(p)));
+  const groups = params === '' ? ['0'] : params.split(';');
+  const num = (p: string) => (p === '' ? 0 : Number(p));
   let s: AnsiStyle = { ...style };
+  const codes = groups.map((g) => (g.includes(':') ? g.split(':').map(num) : num(g)));
   for (let i = 0; i < codes.length; i++) {
     const c = codes[i];
-    if (c === 0) s = {};
+    if (Array.isArray(c)) applySub(s, c);
+    else if (c === 0) s = {};
     else if (c === 1) s.bold = true;
     else if (c === 2) s.dim = true;
     else if (c === 3) s.italic = true;
@@ -112,12 +132,17 @@ export function styleCss(s: AnsiStyle): string {
 
 /**
  * Escape sequences: SGR (kept as style), any other CSI (cursor moves, erase line), OSC (titles, hyperlinks, ended by
- * BEL or ST) and two-character escapes, all dropped. Linear: every alternative is a run of one character class.
+ * BEL or ST) and the other escapes (`ESC ( B`, `ESC 7`, `ESC =`: intermediates, then a final byte), all dropped.
+ * Linear: every alternative is a run of one character class.
  */
 // eslint-disable-next-line no-control-regex
-const ESCAPES = /\x1b\[([0-9;:]*)m|\x1b\[[0-9;:?<=>]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[@-Z\\-_]|[\x00-\x08\x0b-\x1f\x7f]/g;
+const ESCAPES = /\x1b\[([0-9;:]*)m|\x1b\[[0-9;:?<=>]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[ -/]*[0-~]|[\x00-\x08\x0b-\x1f\x7f]/g;
 
-/** One line of output as styled spans, starting from `style` (the previous line's end); also gives the style it ends with. */
+/**
+ * One line of output as styled spans, starting from `style` (the previous line's end); also gives the style it ends
+ * with. A carriage return inside the line (progress bars) starts it over, as a terminal would: only the text after the
+ * last one is kept, while the colours set before it still apply.
+ */
 export function parseAnsi(text: string, style: AnsiStyle = {}): { spans: AnsiSpan[]; style: AnsiStyle } {
   const spans: AnsiSpan[] = [];
   let current = style;
@@ -133,12 +158,15 @@ export function parseAnsi(text: string, style: AnsiStyle = {}): { spans: AnsiSpa
     push(text.slice(last, m.index));
     last = m.index + m[0].length;
     if (m[1] !== undefined) current = applySgr(current, m[1]);
+    else if (m[0] === '\r' && /[^\r]/.test(text.slice(last))) spans.length = 0;
   }
   push(text.slice(last));
   return { spans, style: current };
 }
 
-/** The text without escape sequences, for searching. */
+/** The text as shown, without escape sequences, for searching. */
 export function plainText(text: string): string {
-  return text.replace(ESCAPES, '');
+  return parseAnsi(text)
+    .spans.map((s) => s.text)
+    .join('');
 }

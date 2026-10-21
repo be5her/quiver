@@ -1,7 +1,7 @@
 import { Component, computed, effect, inject, input, linkedSignal, output, signal, untracked } from '@angular/core';
 import { FormField, form } from '@angular/forms/signals';
 import type { GhStatus, GitPullRequest, GitStatus } from '@quiver/core';
-import { Badge, Button, Checkbox, EmptyState, HostBridge, Icon, Input, Label, Segment, Segmented, Select, Spinner, TextArea, Toasts, invokeResource, type Tab, type TabComponent } from '@quiver/ui';
+import { Badge, Button, Checkbox, EmptyState, HostBridge, Icon, Input, Label, Segment, Segmented, Select, Spinner, TabsState, TextArea, Toasts, invokeResource, type Tab, type TabComponent } from '@quiver/ui';
 import { CloudUpload, GitPullRequest as GitPullRequestIcon, GitPullRequestCreate, MessageSquare, Plus, RefreshCw } from 'lucide';
 import { GitActions } from './git-actions';
 import { injectGitChanged, injectPrPolling, tabVisible } from './git-events';
@@ -98,7 +98,7 @@ export class GitGhMissing {
                 </div>
                 <label class="flex items-center gap-1.5 text-sm h-8"><input type="checkbox" qCheckbox [formField]="createForm.draft" data-testid="git-pr-draft" /> Draft</label>
                 <span class="flex-1"></span>
-                <button qButton size="sm" variant="ghost" (click)="view.set('list')">Cancel</button>
+                <button qButton size="sm" variant="ghost" (click)="showList()">Cancel</button>
                 <button qButton size="sm" variant="primary" [icon]="icons.GitPullRequestCreate" [loading]="creating()" [disabled]="!draft().title.trim()" data-testid="git-pr-create-submit" (click)="create()">
                   {{ draft().draft ? 'Create draft' : 'Create pull request' }}
                 </button>
@@ -184,6 +184,7 @@ export class GitPrsTab implements TabComponent {
   protected readonly actions = inject(GitActions);
   private readonly host = inject(HostBridge);
   private readonly toasts = inject(Toasts);
+  private readonly tabs = inject(TabsState);
 
   readonly tab = input.required<Tab>();
   readonly scope = input.required<string>();
@@ -197,7 +198,10 @@ export class GitPrsTab implements TabComponent {
   /** The list or the form; the sidebar and the palette ask for one through the tab's data. */
   protected readonly view = linkedSignal<unknown, 'list' | 'new'>({
     source: () => this.tab().data?.['nonce'],
-    computation: (_nonce, previous) => (untracked(() => this.tab().data?.['view']) === 'new' ? 'new' : (previous?.value ?? 'list')),
+    computation: (_nonce, previous) => {
+      const asked = untracked(() => this.tab().data?.['view']);
+      return asked === 'new' || asked === 'list' ? asked : (previous?.value ?? 'list');
+    },
   });
   protected readonly filter = linkedSignal<unknown, PrFilter>({
     source: () => this.tab().data?.['nonce'],
@@ -268,6 +272,13 @@ export class GitPrsTab implements TabComponent {
     void this.host.invoke('git.pr.refresh', { force: true }).catch(() => {});
   }
 
+  /** Back to the list, also in the tab's saved data, so the tab does not reopen on the form. */
+  protected showList(): void {
+    this.view.set('list');
+    const tab = untracked(this.tab);
+    if (tab.data?.['view'] === 'new') this.tabs.updateTab(untracked(this.scope), tab.id, { data: { ...tab.data, view: 'list' } });
+  }
+
   protected async create(): Promise<void> {
     const d = this.draft();
     if (!d.title.trim() || this.creating()) return;
@@ -276,7 +287,7 @@ export class GitPrsTab implements TabComponent {
       const pr = await this.host.invoke<GitPullRequest>('git.pr.create', { title: d.title.trim(), body: d.body, draft: d.draft, ...(d.base.trim() ? { base: d.base.trim() } : {}) });
       this.toasts.notify(`Opened #${pr.number}`, 'success');
       this.draft.set({ title: '', body: '', base: '', draft: false });
-      this.view.set('list');
+      this.showList();
       this.actions.openPullRequest(pr);
     } catch (err) {
       this.toasts.error(err);

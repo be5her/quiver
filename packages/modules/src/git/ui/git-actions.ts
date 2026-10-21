@@ -1,7 +1,7 @@
 import { Service, inject, signal, untracked } from '@angular/core';
-import type { GitBranch, GitCommit, GitStatus, GitPullRequest } from '@quiver/core';
+import { toErrorPayload, type GitBranch, type GitCommit, type GitStatus, type GitPullRequest } from '@quiver/core';
 import { AppState, Dialogs, HostBridge, TabsState, Toasts, type ContextMenuItem } from '@quiver/ui';
-import { errorReason, splitPath, type DiffSource, type GitLogPage, type GitRemoteResult, type PrFilter } from './git-format';
+import { errorReason, groupChanges, splitPath, type DiffSource, type GitLogPage, type GitRemoteResult, type PrFilter } from './git-format';
 
 type RemoteOp = 'fetch' | 'pull' | 'push';
 
@@ -39,7 +39,9 @@ export class GitActions {
   openPullRequests(options: { filter?: PrFilter; view?: 'list' | 'new' } = {}): void {
     const scope = this.scope();
     const tab = this.tabs.openTab(scope, { type: 'git.prs', title: 'Pull requests', data: { id: 'prs', ...options, nonce: Date.now() } }, { singletonKey: 'git.prs:prs' });
-    if (options.filter || options.view) this.tabs.updateTab(scope, tab.id, { data: { ...tab.data, ...options, nonce: Date.now() } });
+    // A filter asks for the list, also when the tab is on the form.
+    const asked = { ...options, ...(options.filter && !options.view ? { view: 'list' as const } : {}) };
+    if (asked.filter || asked.view) this.tabs.updateTab(scope, tab.id, { data: { ...tab.data, ...asked, nonce: Date.now() } });
   }
 
   openPullRequest(pr: Pick<GitPullRequest, 'number' | 'title'>): void {
@@ -102,7 +104,12 @@ export class GitActions {
   async commitFromPalette(): Promise<void> {
     try {
       const status = await this.host.invoke<GitStatus>('git.status', {});
-      if (!status.files.some((f) => f.index !== '.' && f.index !== '?')) {
+      const groups = groupChanges(status.files);
+      if (groups.conflicts.length) {
+        await this.dialogs.notice({ title: 'Merge conflicts', message: 'Resolve the conflicts and mark them resolved in the Git sidebar before committing.' });
+        return;
+      }
+      if (!groups.staged.length) {
         await this.dialogs.notice({ title: 'Nothing staged', message: 'Stage changes in the Git sidebar first; the commit takes what is staged.' });
         return;
       }
@@ -166,7 +173,8 @@ export class GitActions {
     if (!answer) return;
     const typed = answer.value.trim();
     const found = typed ? matches(typed) : [];
-    const picked = typed ? (found.find((n) => n === typed) ?? (found.length === 1 ? found[0] : typed)) : answer.choice;
+    // Typed text filters: an exact name or a single match wins, then the branch picked below when it is among the matches.
+    const picked = typed ? (found.find((n) => n === typed) ?? (found.length === 1 ? found[0] : found.includes(answer.choice) ? answer.choice : typed)) : answer.choice;
     if (!picked || picked === current?.name) return;
     const branch = branches.find((b) => b.name === picked);
     // A remote branch is checked out by its name without the remote, which makes a local branch tracking it.
@@ -176,14 +184,18 @@ export class GitActions {
 
   // ---- Remotes ----
 
-  private async remote(op: RemoteOp, input: Record<string, unknown>, done: string): Promise<void> {
-    if (untracked(this.busy).has(op)) return;
+  /** Runs a remote command with its button spinning; gives true when it failed with an error `handled` takes over. */
+  private async remote(op: RemoteOp, input: Record<string, unknown>, done: string, handled?: (err: unknown) => boolean): Promise<boolean> {
+    if (untracked(this.busy).has(op)) return false;
     this.busy.update((s) => new Set(s).add(op));
     try {
       await this.host.invoke<GitRemoteResult>(`git.${op}`, input);
       this.toasts.notify(done, 'success');
+      return false;
     } catch (err) {
+      if (handled?.(err)) return true;
       this.toasts.error(err);
+      return false;
     } finally {
       this.busy.update((s) => {
         const next = new Set(s);
@@ -193,18 +205,30 @@ export class GitActions {
     }
   }
 
-  fetch(): Promise<void> {
-    return this.remote('fetch', {}, 'Fetched');
+  async fetch(): Promise<void> {
+    await this.remote('fetch', {}, 'Fetched');
   }
 
-  pull(): Promise<void> {
-    return this.remote('pull', {}, 'Pulled');
+  async pull(): Promise<void> {
+    await this.remote('pull', {}, 'Pulled');
   }
 
-  /** Push; a branch with no upstream yet is published to origin under its own name. */
-  push(status: GitStatus | undefined): Promise<void> {
+  /**
+   * Push; a branch with no upstream yet is published to origin under its own name. When the remote branch has moved
+   * on (after an amend or a rebase), it offers a force push with lease, which overwrites it only if nobody pushed
+   * since the last fetch.
+   */
+  async push(status: GitStatus | undefined): Promise<void> {
     const publish = Boolean(status?.branch && !status.upstream);
-    return this.remote('push', publish ? { setUpstream: true } : {}, publish ? `Published ${status?.branch}` : 'Pushed');
+    const rejected = await this.remote('push', publish ? { setUpstream: true } : {}, publish ? `Published ${status?.branch}` : 'Pushed', (err) => !publish && /non-fast-forward|fetch first|[rejected]/i.test(toErrorPayload(err).message));
+    if (!rejected) return;
+    const ok = await this.dialogs.confirm({
+      title: 'Force push?',
+      message: `${status?.upstream ?? 'The remote branch'} has commits this branch does not, for example after an amend or a rebase. A force push with lease replaces them, and only if nobody pushed there since your last fetch. Pull instead to keep them.`,
+      confirmLabel: 'Force push',
+      danger: true,
+    });
+    if (ok) await this.remote('push', { forceWithLease: true }, 'Force pushed');
   }
 
   // ---- Pull requests ----

@@ -97,7 +97,7 @@ function portProblem(d: TaskDraft): string | null {
           <button qButton size="sm" variant="ghost" [icon]="icons.Trash2" class="text-danger" data-testid="runner-delete" (click)="remove.emit()">Delete task</button>
         </div>
         @if (problem(); as p) {
-          <p class="text-xs text-danger -mt-2">{{ p }}</p>
+          <p class="text-xs text-danger -mt-2" data-testid="runner-edit-problem">{{ p }}</p>
         }
         <p class="text-[11px] text-muted -mt-2">Saved as <span class="font-mono">.quiver/runner/{{ task().id }}.json</span>; a running task picks up the change on its next start.</p>
       </div>

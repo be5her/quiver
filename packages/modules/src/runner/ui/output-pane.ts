@@ -1,4 +1,4 @@
-import { Component, ElementRef, afterRenderEffect, computed, effect, inject, input, signal, untracked, viewChild } from '@angular/core';
+import { Component, DestroyRef, ElementRef, afterNextRender, afterRenderEffect, computed, effect, inject, input, signal, untracked, viewChild } from '@angular/core';
 import { toErrorPayload, type RunnerOutputChunk, type RunnerOutputLine } from '@quiver/core';
 import { Button, HostBridge, Icon, Input, Toasts } from '@quiver/ui';
 import { ArrowDownToLine, CornerDownLeft, Eraser, Search, TriangleAlert } from 'lucide';
@@ -108,8 +108,8 @@ export class RunnerOutput {
   private style: AnsiStyle = {};
   private reading = false;
   private again = false;
-  /** Set while the view scrolls itself, so that scroll does not count as the user's. */
-  private autoScrolling = false;
+  /** Where the view last scrolled itself to, so the scroll event that follows does not count as the user's. */
+  private autoTop: number | null = null;
 
   constructor() {
     // Another task in the same tab component (the shell reuses it) starts from nothing.
@@ -130,13 +130,24 @@ export class RunnerOutput {
     });
     afterRenderEffect(() => {
       this.shown();
-      if (!this.follow()) return;
-      const el = this.list().nativeElement;
-      if (el.scrollTop + el.clientHeight < el.scrollHeight - 1) {
-        this.autoScrolling = true;
-        el.scrollTop = el.scrollHeight;
-      }
+      if (this.follow()) this.toBottom();
     });
+    // A hidden pane (the Settings view, another tab) cannot scroll; once it is shown again, follow catches up.
+    const destroyRef = inject(DestroyRef);
+    afterNextRender(() => {
+      const observer = new ResizeObserver(() => {
+        if (untracked(this.follow)) this.toBottom();
+      });
+      observer.observe(this.list().nativeElement);
+      destroyRef.onDestroy(() => observer.disconnect());
+    });
+  }
+
+  private toBottom(): void {
+    const el = this.list().nativeElement;
+    if (!el.clientHeight || el.scrollTop + el.clientHeight >= el.scrollHeight - 1) return;
+    el.scrollTop = el.scrollHeight;
+    this.autoTop = el.scrollTop;
   }
 
   private toShown(runId: string, l: RunnerOutputLine): ShownLine {
@@ -194,11 +205,9 @@ export class RunnerOutput {
   }
 
   protected scrolled(): void {
-    if (this.autoScrolling) {
-      this.autoScrolling = false;
-      return;
-    }
     const el = this.list().nativeElement;
+    if (this.autoTop !== null && el.scrollTop === this.autoTop) return;
+    this.autoTop = null;
     const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
     if (atBottom !== this.follow()) this.follow.set(atBottom);
   }
