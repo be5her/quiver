@@ -66,18 +66,21 @@ export interface RunnerOutputChunk {
   dropped: number;
 }
 
-export const RunnerTaskRefInputSchema = z.object({ taskId: z.string() });
+/** A saved task's id, which names its file (`.quiver/runner/<id>.json`); anything else is invalid input. */
+export const RunnerTaskIdSchema = z.string().regex(/^[A-Za-z0-9._-]+$/, 'A task id has only letters, digits, dots, dashes and underscores');
+
+export const RunnerTaskRefInputSchema = z.object({ taskId: RunnerTaskIdSchema });
 export const RunnerOutputInputSchema = z.object({
-  taskId: z.string(),
+  taskId: RunnerTaskIdSchema,
   /** A past run; default the latest. */
   runId: z.string().optional(),
   after: z.number().int().min(0).default(0),
   limit: z.number().int().min(1).max(5000).default(500),
 });
 export const RunnerWaitInputSchema = z.object({
-  taskId: z.string(),
+  taskId: RunnerTaskIdSchema,
   /** Wait for this regular expression on the output; default until the task is ready. */
   pattern: z.string().optional(),
   timeoutMs: z.number().int().min(100).max(600_000).default(30_000),
 });
-export const RunnerInputInputSchema = z.object({ taskId: z.string(), text: z.string() });
+export const RunnerInputInputSchema = z.object({ taskId: RunnerTaskIdSchema, text: z.string() });

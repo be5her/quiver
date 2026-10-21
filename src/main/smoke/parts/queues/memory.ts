@@ -175,8 +175,20 @@ const section: SmokeSection = async ({ host, check, run, ws, folder, rpc, toolNa
     const agentConn = await rpc('tools/call', { name: 'queues_connection_get', arguments: { id: kafka.id } });
     check('queues: agents see secret names, never values', !(agentConn.result?.content?.[0]?.text ?? '').includes('k4fka-pass') && (agentConn.result?.content?.[0]?.text ?? '').includes('password'));
 
+    // ---------- a running tail and an edit of its connection ----------
+    const editTail = await run<Consumer>('queues.consumer.start', { connectionId: mem.id, destination: 'agents' }, ws.id);
+    await run('queues.connection.save', { connection: { id: mem.id, name: 'smoke memory renamed' } }, ws.id);
+    const afterRename = await run<Read>('queues.consumer.read', { consumerId: editTail.id }, ws.id);
+    await run('queues.connection.save', { connection: { id: mem.id, clientId: 'smoke-changed' } }, ws.id);
+    const afterEdit = await run<Read>('queues.consumer.read', { consumerId: editTail.id }, ws.id);
+    check(
+      'queues: a rename keeps the tails of a connection running, and a change of its settings stops them',
+      afterRename.consumer.status === 'running' && afterEdit.consumer.status === 'stopped',
+      { afterRename: afterRename.consumer.status, afterEdit: afterEdit.consumer.status },
+    );
+
     // ---------- deleting a connection; closing the workspace ----------
-    const lastTail = await run<Consumer>('queues.consumer.start', { connectionId: mem.id, destination: 'agents' }, ws.id);
+    const lastTail =await run<Consumer>('queues.consumer.start', { connectionId: mem.id, destination: 'agents' }, ws.id);
     await run('queues.connection.delete', { id: kafka.id }, ws.id);
     await run('queues.connection.delete', { id: mem.id }, ws.id);
     const secretsDoc = await fs.readFile(path.join(localDir, 'queues-secrets.json'), 'utf8').catch(() => '{}');

@@ -99,7 +99,7 @@ export interface GhStatus {
   installed: boolean;
   authenticated: boolean;
   user?: string;
-  /** `owner/name` of the workspace's GitHub repository. */
+  /** `owner/name` of the workspace's GitHub repository (`host/owner/name` on GitHub Enterprise). */
   repo?: string;
   /** What to do next when something is missing. */
   message?: string;
@@ -152,11 +152,20 @@ export const GitPrChecksInputSchema = GitPrRefInputSchema.extend({
   /** Include the last lines of each failed job's log. */
   failedLogs: z.boolean().default(false),
 });
+export const GitPrCheckoutInputSchema = GitPrRefInputSchema.extend({
+  allowFork: z
+    .boolean()
+    .default(false)
+    .describe(
+      "Check out a pull request from another repository (a fork). Off by default: the fork's branch brings its own committed .quiver/ folder, whose MCP servers, mock servers and realtime connections marked to start with the workspace run their commands on the next open.",
+    ),
+});
 export const GitPrCreateInputSchema = z.object({
   title: z.string().trim().min(1),
   body: z.string().default(''),
   base: GitArgSchema.optional(),
   draft: z.boolean().default(false),
-  labels: z.array(GitArgSchema).default([]),
+  // gh splits --label on commas and reads quotes as CSV, so such a label would become other labels or an error.
+  labels: z.array(GitArgSchema.refine((s) => !/[,"]/.test(s), { message: 'must not contain a comma or a double quote' })).default([]),
 });
 export const GitPrCommentInputSchema = GitPrRefInputSchema.extend({ body: z.string().trim().min(1) });

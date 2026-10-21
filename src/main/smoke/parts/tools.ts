@@ -120,7 +120,7 @@ export default definePart({
           check(
             'ui: the JWT tab validates an auth-server token against its base64-wrapped key, pinned issuer and audience',
             typeof authValid === 'string' &&
-              /^Valid: signature verified \(RS256, base64 PEM\), expires \d+ minutes from now$/.test(authValid) &&
+              /^Valid: signature verified \(RS256, base64 PEM\), expires \d+ minutes? from now$/.test(authValid) &&
               authWrongIssuer === 'Invalid (RS256, base64 PEM): issuer is "authservice", expected "someone-else"' &&
               authNoAudience === 'Invalid (RS256, base64 PEM): no audience, expected "checkout"',
             { authValid, authWrongIssuer, authNoAudience },
