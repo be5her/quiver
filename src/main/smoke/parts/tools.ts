@@ -37,16 +37,18 @@ export default definePart({
       );
     }
     // An auth server's token as an API behind it receives it: RS256, "Authorization: jwt <token>", checked against
-    // JWT_RSA_PUBLIC_KEY (the public key PEM base64-encoded once more), issuer pinned, 30 s clock skew.
-    const authServer = (() => {
+    // JWT_RSA_PUBLIC_KEY (the public key PEM base64-encoded once more), issuer pinned, 30 s clock skew. It expires five
+    // minutes after it is minted, so the UI phase mints its own: on a full run it starts minutes after this one.
+    const mintAuthServerToken = () => {
       const pair = generateKeyPairSync('rsa', { modulusLength: 2048 });
       const now = Math.floor(Date.now() / 1000);
       const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
       const data = `${part({ alg: 'RS256', typ: 'JWT' })}.${part({ sub: 'auth', iss: 'authservice', iat: now, nbf: now - 60, exp: now + 300, data: { user: { id: 27768, name: 'Alice' } } })}`;
       const pem = pair.publicKey.export({ type: 'spki', format: 'pem' }).toString();
       return { token: `${data}.${sign('sha256', Buffer.from(data), pair.privateKey).toString('base64url')}`, key: Buffer.from(pem).toString('base64') };
-    })();
+    };
     {
+      const authServer = mintAuthServerToken();
       type Validated = { valid: boolean; problems: string[]; keyFormat: string; signatureValid: boolean };
       const accepted = await run<Validated>('tools.jwt.verify', { token: `jwt ${authServer.token}`, key: authServer.key, issuer: 'authservice', clockSkewSeconds: 30 }, null);
       const otherIssuer = await run<Validated>('tools.jwt.verify', { token: authServer.token, key: authServer.key, issuer: 'someone-else' }, null);
@@ -102,6 +104,7 @@ export default definePart({
             { decoded, verified, mismatched },
           );
           // The auth-server case: "jwt <token>" pasted with the base64-wrapped public key and the issuer pinned.
+          const authServer = mintAuthServerToken();
           await typeInto(':scope', `jwt ${authServer.token}`, true);
           await typeInto('[data-testid=tool-second-input]', authServer.key, true);
           const setOption = (key: string, value: string) =>
@@ -119,8 +122,9 @@ export default definePart({
           const authNoAudience = await summary();
           check(
             'ui: the JWT tab validates an auth-server token against its base64-wrapped key, pinned issuer and audience',
+            // Freshly minted with five minutes left, read a second or two later: it rounds to 5 (4 if the UI stalled).
             typeof authValid === 'string' &&
-              /^Valid: signature verified \(RS256, base64 PEM\), expires \d+ minutes? from now$/.test(authValid) &&
+              /^Valid: signature verified \(RS256, base64 PEM\), expires [45] minutes from now$/.test(authValid) &&
               authWrongIssuer === 'Invalid (RS256, base64 PEM): issuer is "authservice", expected "someone-else"' &&
               authNoAudience === 'Invalid (RS256, base64 PEM): no audience, expected "checkout"',
             { authValid, authWrongIssuer, authNoAudience },
