@@ -42,6 +42,7 @@ export { defaultGlobalConfig, DEFAULT_MCP_PORT } from './defaults';
 export * from './json-path';
 export * from './cookies';
 export * from './redirect';
+export * from './external-url';
 export * from './response-file';
 export * from './capture';
 export * from './oauth';
