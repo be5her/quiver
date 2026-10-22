@@ -402,7 +402,8 @@ const section: SmokeSection = async (t) => {
         // A branch another worktree has: the sidebar's click offers to open that worktree instead of failing.
         await waitFor(`Boolean(document.querySelector('[data-testid=git-branch][data-name="ui/side"]'))`);
         await click('[data-testid=git-branch][data-name="ui/side"]');
-        await wait(300);
+        // The offer comes once git has refused the checkout, which can take longer than a moment on a busy machine.
+        await waitFor(`Boolean(document.querySelector('.fixed.inset-0 h2'))`);
         const offerTitle = await js(`document.querySelector('.fixed.inset-0 h2')?.textContent.trim() ?? null`);
         await dialogButton('Cancel');
         check('git worktrees ui: switching to a branch checked out in another worktree offers to open that worktree', offerTitle === 'ui/side is checked out in another worktree', offerTitle);
