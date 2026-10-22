@@ -1,4 +1,4 @@
-import { DYNAMIC_VARIABLE_HELP, QuiverError, buildVariableMap, defineVariableIn, newId, setVariableValue, type Environment, type HostApi, type Variable, type WorkspaceApi } from '@quiver/core';
+import { DYNAMIC_VARIABLE_HELP, QuiverError, buildVariableMap, defineVariableIn, newId, secretEnvName, setVariableValue, type Environment, type HostApi, type Variable, type WorkspaceApi } from '@quiver/core';
 
 export const COLLECTIONS = {
   requests: 'requests',
@@ -27,7 +27,8 @@ export async function saveEnvironment(ws: WorkspaceApi, host: HostApi, env: Envi
     variables: env.variables.map((v) => {
       const key = secretKey(env.id, v.id);
       if (v.secret) {
-        if (v.value !== MASK) secrets[key] = host.secrets.encrypt(v.value);
+        // A value the host handed in (the headless CLI's QUIVER_SECRET_<NAME>) is never written down.
+        if (v.value !== MASK && v.value !== host.secrets.lookup?.(v.key.trim())) secrets[key] = host.secrets.encrypt(v.value);
         return { ...v, value: '' };
       }
       delete secrets[key];
@@ -49,17 +50,23 @@ function hydrateEnvironment(env: Environment, secrets: SecretsDoc, host: HostApi
     ...env,
     variables: env.variables.map((v) => {
       if (!v.secret) return v;
+      const supplied = host.secrets.lookup?.(v.key.trim());
+      if (supplied !== undefined) return { ...v, value: mask ? MASK : supplied };
       const cipher = secrets[secretKey(env.id, v.id)];
       if (cipher === undefined) return v;
-      return { ...v, value: mask ? MASK : safeDecrypt(host, cipher) };
+      return { ...v, value: mask ? MASK : safeDecrypt(host, cipher, env, v) };
     }),
   };
 }
 
-function safeDecrypt(host: HostApi, cipher: string): string {
+function safeDecrypt(host: HostApi, cipher: string, env: Environment, v: Variable): string {
   try {
     return host.secrets.decrypt(cipher);
-  } catch {
+  } catch (err) {
+    // A host that cannot read this machine's secrets says so, rather than sending an empty value.
+    if (err instanceof QuiverError && err.code === 'SECRET_UNAVAILABLE') {
+      throw new QuiverError('SECRET_UNAVAILABLE', `The secret variable "${v.key}" of environment "${env.name}" is encrypted for the Quiver app on this machine. ${err.message} Pass it as ${secretEnvName(v.key)}.`);
+    }
     return '';
   }
 }

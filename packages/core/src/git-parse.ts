@@ -1,4 +1,4 @@
-import type { GitBranch, GitCommit, GitDiffFile, GitFileChange, GitStatus } from './models/git';
+import type { GitBranch, GitCommit, GitDiffFile, GitFileChange, GitStash, GitStatus, GitTag } from './models/git';
 
 // Parsers for the git CLI's output, pure functions with unit tests. The commands in the git module ask git for
 // NUL-separated output (`-z`, `%x00`), so paths with spaces, quotes or newlines come through unquoted and intact.
@@ -80,8 +80,19 @@ export function parseDecorations(d: string): string[] {
 /** The `--format` that `parseBranches` reads, for `git for-each-ref refs/heads refs/remotes`. */
 export const GIT_BRANCH_FORMAT = '%(refname)%00%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track)%00%(objectname)%00%(contents:subject)%00%(committerdate:iso-strict)';
 
-/** `git for-each-ref --format=<GIT_BRANCH_FORMAT>`. Symbolic remote heads (`origin/HEAD`) are left out. */
-export function parseBranches(out: string): GitBranch[] {
+export interface BranchMergeInfo {
+  /** Full ref names (`refs/heads/x`) from `git for-each-ref --merged=<base>`. */
+  merged: ReadonlySet<string>;
+  /** The default branch's name without a remote (`main`), when there is one; it and its remote copies are never "merged". */
+  defaultBranch?: string;
+}
+
+/**
+ * `git for-each-ref --format=<GIT_BRANCH_FORMAT>`. Symbolic remote heads (`origin/HEAD`) are left out. `gone` comes
+ * from the tracking info; `merged` from `info`, leaving out the branch merged into and the current one, which would
+ * otherwise be offered for clean-up.
+ */
+export function parseBranches(out: string, info: BranchMergeInfo = { merged: new Set() }): GitBranch[] {
   const branches: GitBranch[] = [];
   for (const line of out.split('\n')) {
     if (!line.trim()) continue;
@@ -91,6 +102,7 @@ export function parseBranches(out: string): GitBranch[] {
     if (!remote && !refname.startsWith('refs/heads/')) continue;
     const ahead = /ahead (\d+)/.exec(track ?? '');
     const behind = /behind (\d+)/.exec(track ?? '');
+    const isDefault = info.defaultBranch !== undefined && (remote ? name.slice(name.indexOf('/') + 1) === info.defaultBranch : name === info.defaultBranch);
     branches.push({
       name,
       current: head === '*',
@@ -101,9 +113,46 @@ export function parseBranches(out: string): GitBranch[] {
       head: objectname,
       subject: subject ?? '',
       date: date ?? '',
+      merged: info.merged.has(refname) && head !== '*' && !isDefault,
+      gone: track === '[gone]',
     });
   }
   return branches;
+}
+
+/** The `--format` that `parseTags` reads, for `git for-each-ref refs/tags`. `*objectname` is the commit an annotated tag points at. */
+export const GIT_TAG_FORMAT = '%(refname:strip=2)%00%(objecttype)%00%(objectname)%00%(*objectname)%00%(contents:subject)%00%(creatordate:iso-strict)';
+
+/** `git for-each-ref --format=<GIT_TAG_FORMAT> refs/tags`. */
+export function parseTags(out: string): GitTag[] {
+  const tags: GitTag[] = [];
+  for (const line of out.split('\n')) {
+    if (!line.trim()) continue;
+    const [name, type, objectname, peeled, subject, date] = line.replace(/\r$/, '').split('\0');
+    if (!name) continue;
+    const annotated = type === 'tag';
+    tags.push({ name, commit: annotated && peeled ? peeled : objectname, annotated, subject: subject ?? '', date: date ?? '' });
+  }
+  return tags;
+}
+
+/** The `--format` that `parseStashes` reads, for `git stash list`: one record per stash, each starting with a record separator. */
+export const GIT_STASH_FORMAT = '%x1e%gd%x00%H%x00%gs%x00%cI';
+
+/** `git stash list --format=<GIT_STASH_FORMAT>`. The reflog subject is "On <branch>: <message>", or "WIP on <branch>: <commit>" when no message was given. */
+export function parseStashes(out: string): GitStash[] {
+  const stashes: GitStash[] = [];
+  for (const record of out.split('\x1e')) {
+    if (!record.trim()) continue;
+    const [selector, hash, subject = '', date = ''] = record.replace(/\r?\n$/, '').split('\0');
+    const index = /@\{(\d+)\}$/.exec(selector ?? '');
+    if (!index || !hash) continue;
+    const m = /^(WIP on|On) (.+?): (.*)$/s.exec(subject);
+    const branch = m && m[2] !== '(no branch)' ? m[2] : undefined;
+    const message = m ? (m[1] === 'WIP on' ? `WIP ${m[3]}` : m[3]) : subject;
+    stashes.push({ index: Number(index[1]), hash, message, ...(branch ? { branch } : {}), date: date.trim() });
+  }
+  return stashes;
 }
 
 const DIFF_STATUS: Record<string, GitDiffFile['status']> = { A: 'added', M: 'modified', D: 'deleted', R: 'renamed', C: 'copied', T: 'type-changed' };
@@ -170,11 +219,60 @@ export function attachPatches(files: GitDiffFile[], chunks: string[], maxPatchBy
   });
 }
 
-/** The operation in progress, from the marker files git leaves in its directory. */
-export function detectOperation(present: (name: string) => boolean): GitStatus['operation'] {
+/** Unmerged entries: git's XY pairs for a conflict (UU, AA, DD, AU, UA, DU, UD). */
+export function isUnmerged(f: Pick<GitFileChange, 'index' | 'worktree'>): boolean {
+  return f.index === 'U' || f.worktree === 'U' || (f.index === 'A' && f.worktree === 'A') || (f.index === 'D' && f.worktree === 'D');
+}
+
+/** The paths of a status left with conflicts. */
+export function conflictedPaths(files: GitFileChange[]): string[] {
+  return files.filter(isUnmerged).map((f) => f.path);
+}
+
+export type GitOperation = NonNullable<GitStatus['operation']>;
+export type GitOperationAction = 'continue' | 'abort' | 'skip';
+
+/** The git command line that continues, aborts or skips the operation in progress; null for a merge's skip, which git has not got. */
+export function operationArgs(operation: GitOperation, action: GitOperationAction): string[] | null {
+  if (operation === 'merge' && action === 'skip') return null;
+  return [operation, `--${action}`];
+}
+
+/**
+ * Which of the paths to discard go to `git restore` and which to `git clean`: only a path the status lists as
+ * untracked is deleted (with `-d` for a folder entry, `new/`); every other path is restored, which never deletes a
+ * file git does not track. With `staged` (back to HEAD), a staged rename's old path is restored too: the new path
+ * alone would go, and the old one stay deleted.
+ */
+export function planDiscard(files: GitFileChange[], paths: string[], staged = false): { restore: string[]; clean: string[]; cleanDirs: boolean } {
+  const untracked = new Set(files.filter((f) => f.index === '?').map((f) => f.path));
+  const clean = paths.filter((p) => untracked.has(p));
+  const restore = paths.filter((p) => !untracked.has(p));
+  if (staged) {
+    for (const f of files) if (f.origPath && restore.includes(f.path) && !restore.includes(f.origPath)) restore.push(f.origPath);
+  }
+  return { restore, clean, cleanDirs: clean.some((p) => p.endsWith('/')) };
+}
+
+/**
+ * The operation in progress, from the marker files git leaves in its directory. A cherry-pick or revert of several
+ * commits keeps `sequencer/` until the last one, also after the one it stopped on was committed by hand, which
+ * removes CHERRY_PICK_HEAD; its todo list (`read`) says which of the two it is.
+ */
+export function detectOperation(present: (name: string) => boolean, read?: (name: string) => string): GitStatus['operation'] {
   if (present('rebase-merge') || present('rebase-apply')) return 'rebase';
   if (present('MERGE_HEAD')) return 'merge';
   if (present('CHERRY_PICK_HEAD')) return 'cherry-pick';
   if (present('REVERT_HEAD')) return 'revert';
+  if (present('sequencer')) {
+    let todo = '';
+    try {
+      todo = read?.('sequencer/todo') ?? '';
+    } catch {
+      // Gone between the two looks: the operation just finished.
+      return undefined;
+    }
+    return /^\s*(revert|r)\s/m.test(todo) && !/^\s*(pick|p)\s/m.test(todo) ? 'revert' : 'cherry-pick';
+  }
   return undefined;
 }

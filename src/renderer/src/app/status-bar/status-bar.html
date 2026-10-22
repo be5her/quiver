@@ -10,6 +10,7 @@
 <div class="flex-1"></div>
 <q-update-item />
 <q-recording-item />
+<q-agents-item />
 <button type="button" class="flex items-center gap-1 hover:text-fg" [title]="mcp()?.error ?? 'MCP server'" (click)="shell.openSettings()">
   <svg [qIcon]="icons.Plug" class="size-3"></svg>
   <span class="size-1.5 rounded-full" [class]="mcp()?.running ? 'bg-success' : 'bg-danger'"></span>

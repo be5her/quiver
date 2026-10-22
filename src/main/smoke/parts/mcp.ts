@@ -2,11 +2,13 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { capabilityLabels, contentText, expandUriTemplate, skeletonFromSchema } from '@quiver/core';
 import type { McpConfigFile, McpLogEntry, McpPrompt, McpPromptResult, McpReadResourceResult, McpRecordedCall, McpRecordedCallSummary, McpRecordingFile, McpRecordingStatus, McpResource, McpResourceTemplate, McpServerSummary, McpTool, McpToolCallOutcome } from '@quiver/core';
-import { definePart, until } from '../part';
+import { definePart, runSections, until } from '../part';
+import agents from './mcp/agents';
 
-export default definePart({
+/** The inspector and the call recorder; agent permissions are their own section, `mcp/agents.ts`. */
+const inspector = definePart({
   name: 'mcp',
-  summary: 'MCP inspector and call recorder: stdio, HTTP and SSE servers, Quiver itself, the inspector and recorder UI',
+  summary: 'MCP inspector and call recorder',
   async run(t) {
     const { host, check, run, ws, folder, env, mcpPort, rpc, agentRpc, toolNames: names } = t;
     const { mcpDir, fakeStdio, fakeMcp } = t.fixtures;
@@ -491,4 +493,10 @@ export default definePart({
       },
     };
   },
+});
+
+export default definePart({
+  name: 'mcp',
+  summary: 'MCP inspector and call recorder: stdio, HTTP and SSE servers, Quiver itself, the inspector and recorder UI; agent permissions, approvals, pause and activity',
+  run: (t) => runSections(t, [inspector.run, agents]),
 });

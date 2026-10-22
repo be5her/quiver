@@ -1,11 +1,13 @@
 import type { Type } from '@angular/core';
 import { uiModules } from '@quiver/modules/ui';
 import type { ModuleUI, TabComponent } from '@quiver/ui';
+import { AgentActivityTab } from './agents/agent-activity-tab';
 import { SettingsTab } from './settings/settings-tab';
 
 /** Tabs the shell itself owns, outside any module. */
 export const shellTabs: Record<string, Type<TabComponent>> = {
   'shell.settings': SettingsTab,
+  'shell.agents': AgentActivityTab,
 };
 
 export const modules: ModuleUI[] = uiModules;

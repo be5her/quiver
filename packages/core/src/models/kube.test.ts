@@ -17,7 +17,9 @@ import {
   parseKubectlNames,
   parsePodContainers,
   sanitizeKubeHistory,
+  type KubeActionHistoryEntry,
   type KubeHistoryEntry,
+  type KubeQueryHistoryEntry,
 } from './kube';
 
 const build = (operation: string, params: Record<string, unknown> = {}) => buildKubectlArgs(operation, params);
@@ -283,8 +285,9 @@ describe('form helpers', () => {
 });
 
 describe('history', () => {
-  const entry = (id: string, extra: Partial<KubeHistoryEntry> = {}): KubeHistoryEntry => ({
+  const entry = (id: string, extra: Partial<KubeQueryHistoryEntry> = {}): KubeQueryHistoryEntry => ({
     id,
+    kind: 'query',
     proxy: 'a:443',
     cluster: 'dev-eks',
     query: { operation: 'list', params: { resource: 'pods', namespace: 'payments' } },
@@ -312,6 +315,31 @@ describe('history', () => {
     expect(sanitizeKubeHistory(null)).toEqual({ entries: [], dropped: 0 });
   });
 
+  it('reads entries from before actions existed as queries', () => {
+    const { kind: _kind, ...old } = entry('old');
+    const { entries } = sanitizeKubeHistory([old]);
+    expect(entries[0]?.kind).toBe('query');
+  });
+
+  it('keeps actions apart from queries and validates them like live ones', () => {
+    const { query: _query, ...base } = entry('base');
+    const action = (id: string, value: unknown) => ({ ...base, id, kind: 'action', action: value });
+    const raw = [
+      action('scale', { action: 'scale', params: { kind: 'deployments', name: 'api', namespace: 'payments', replicas: 2 } }),
+      action('selector', { action: 'delete', params: { kind: 'pods', name: 'x', namespace: 'payments', selector: 'app=api' } }),
+      action('secret', { action: 'delete', params: { kind: 'secrets', name: 'x', namespace: 'payments' } }),
+      action('exec', { action: 'exec', params: { pod: 'x', command: ['sh'] } }),
+      // An action dressed up as a query, and a query marked as an action, fit neither shape.
+      { ...base, id: 'as-query', query: { operation: 'scale', params: { kind: 'deployments', name: 'api', namespace: 'payments', replicas: 0 } } },
+      { ...entry('as-action'), kind: 'action' },
+    ];
+    const { entries, dropped } = sanitizeKubeHistory(raw);
+    expect(entries.map((e) => [e.id, e.kind])).toEqual([['scale', 'action']]);
+    expect(dropped).toBe(5);
+    const scale = entries[0] as KubeActionHistoryEntry;
+    expect(scale.action).toEqual({ action: 'scale', params: { kind: 'deployments', name: 'api', namespace: 'payments', replicas: 2 } });
+  });
+
   it('caps unpinned entries and keeps pinned ones', () => {
     let list: KubeHistoryEntry[] = [entry('fav', { pinned: true })];
     for (let i = 0; i < KUBE_HISTORY_MAX + 20; i++) list = addKubeHistory(list, entry(`e${i}`));
@@ -325,5 +353,8 @@ describe('history', () => {
     expect(lastKubeNamespace(list, 'a:443', 'dev-eks')).toBe('payments');
     expect(lastKubeNamespace(list, 'a:443', 'prod-eks')).toBe('other');
     expect(lastKubeNamespace(list, 'b:443', 'dev-eks')).toBeNull();
+    const { query: _query, ...base } = entry('4');
+    const restarted: KubeHistoryEntry = { ...base, kind: 'action', action: { action: 'rollout-restart', params: { kind: 'deployments', name: 'api', namespace: 'orders' } } };
+    expect(lastKubeNamespace([restarted, ...list], 'a:443', 'dev-eks')).toBe('orders');
   });
 });

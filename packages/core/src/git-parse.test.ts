@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { attachPatches, detectOperation, parseBranches, parseDecorations, parseDiffSummary, parseLog, parseStatusV2, splitPatch } from './git-parse';
+import { attachPatches, conflictedPaths, detectOperation, operationArgs, parseBranches, parseDecorations, parseDiffSummary, parseLog, parseStashes, parseStatusV2, parseTags, planDiscard, splitPatch } from './git-parse';
 
 // The fixtures are what git 2.43 printed for a small repository, with the hashes shortened.
 
@@ -70,10 +70,77 @@ describe('parseBranches', () => {
       '',
     ].join('\n');
     expect(parseBranches(out)).toEqual([
-      { name: 'main', current: true, remote: false, upstream: 'origin/main', ahead: 1, behind: 2, head: 'h1', subject: 'first', date: '2026-10-20T20:50:50+03:00' },
-      { name: 'feat/x', current: false, remote: false, upstream: 'origin/feat/x', ahead: 0, behind: 0, head: 'h2', subject: 'wip', date: '2026-10-20T20:51:00+03:00' },
-      { name: 'origin/main', current: false, remote: true, ahead: 0, behind: 0, head: 'h3', subject: 'older', date: '2026-10-19T20:50:50+03:00' },
+      { name: 'main', current: true, remote: false, upstream: 'origin/main', ahead: 1, behind: 2, head: 'h1', subject: 'first', date: '2026-10-20T20:50:50+03:00', merged: false, gone: false },
+      { name: 'feat/x', current: false, remote: false, upstream: 'origin/feat/x', ahead: 0, behind: 0, head: 'h2', subject: 'wip', date: '2026-10-20T20:51:00+03:00', merged: false, gone: true },
+      { name: 'origin/main', current: false, remote: true, ahead: 0, behind: 0, head: 'h3', subject: 'older', date: '2026-10-19T20:50:50+03:00', merged: false, gone: false },
     ]);
+  });
+
+  it('marks merged branches, never the default branch, its remote copies or the current one', () => {
+    const line = (f: string[]) => f.join('\0');
+    const out = [
+      line(['refs/heads/feat/a', 'feat/a', '*', '', '', 'h1', 'a', '']),
+      line(['refs/heads/main', 'main', ' ', 'origin/main', '', 'h2', 'm', '']),
+      line(['refs/heads/done', 'done', ' ', '', '', 'h3', 'd', '']),
+      line(['refs/heads/open', 'open', ' ', '', '', 'h4', 'o', '']),
+      line(['refs/remotes/origin/main', 'origin/main', ' ', '', '', 'h2', 'm', '']),
+      line(['refs/remotes/upstream/main', 'upstream/main', ' ', '', '', 'h2', 'm', '']),
+      line(['refs/remotes/origin/done', 'origin/done', ' ', '', '', 'h3', 'd', '']),
+    ].join('\n');
+    const merged = new Set(['refs/heads/feat/a', 'refs/heads/main', 'refs/heads/done', 'refs/remotes/origin/main', 'refs/remotes/upstream/main', 'refs/remotes/origin/done']);
+    expect(parseBranches(out, { merged, defaultBranch: 'main' }).filter((b) => b.merged).map((b) => b.name)).toEqual(['done', 'origin/done']);
+    // With no default branch, merged means merged into the current one, which is still left out.
+    expect(parseBranches(out, { merged }).filter((b) => b.merged).map((b) => b.name)).toEqual(['main', 'done', 'origin/main', 'upstream/main', 'origin/done']);
+  });
+});
+
+describe('parseTags', () => {
+  it('reads lightweight and annotated tags, an annotated one pointing at its commit', () => {
+    const out = ['v1.0.0\0commit\0c1\0\0First commit\x002026-10-20T10:00:00+03:00', 'v1.1.0\0tag\0t2\0c2\0Release 1.1\x002026-10-21T10:00:00+03:00', ''].join('\n');
+    expect(parseTags(out)).toEqual([
+      { name: 'v1.0.0', commit: 'c1', annotated: false, subject: 'First commit', date: '2026-10-20T10:00:00+03:00' },
+      { name: 'v1.1.0', commit: 'c2', annotated: true, subject: 'Release 1.1', date: '2026-10-21T10:00:00+03:00' },
+    ]);
+    expect(parseTags('')).toEqual([]);
+  });
+});
+
+describe('parseStashes', () => {
+  it('reads the index, the branch and the message, or git\'s WIP line', () => {
+    const rec = (fields: string[]) => '\x1e' + fields.join('\0') + '\n';
+    const out =
+      rec(['stash@{0}', 'aaaa', 'On feat/x: half done: the parser', '2026-10-21T10:00:00+03:00']) +
+      rec(['stash@{1}', 'bbbb', 'WIP on main: 9ea6ea2 First commit', '2026-10-20T10:00:00+03:00']) +
+      rec(['stash@{2}', 'cccc', 'WIP on (no branch): 9ea6ea2 First commit', '2026-10-19T10:00:00+03:00']);
+    expect(parseStashes(out)).toEqual([
+      { index: 0, hash: 'aaaa', message: 'half done: the parser', branch: 'feat/x', date: '2026-10-21T10:00:00+03:00' },
+      { index: 1, hash: 'bbbb', message: 'WIP 9ea6ea2 First commit', branch: 'main', date: '2026-10-20T10:00:00+03:00' },
+      { index: 2, hash: 'cccc', message: 'WIP 9ea6ea2 First commit', date: '2026-10-19T10:00:00+03:00' },
+    ]);
+    expect(parseStashes('')).toEqual([]);
+  });
+});
+
+describe('planDiscard', () => {
+  const files = [
+    { path: 'changed.txt', index: '.', worktree: 'M' },
+    { path: 'new.txt', index: '?', worktree: '?' },
+    { path: 'newdir/', index: '?', worktree: '?' },
+  ];
+
+  it('deletes only what the status lists as untracked, and restores everything else', () => {
+    expect(planDiscard(files, ['changed.txt', 'new.txt'])).toEqual({ restore: ['changed.txt'], clean: ['new.txt'], cleanDirs: false });
+    expect(planDiscard(files, ['newdir/'])).toEqual({ restore: [], clean: ['newdir/'], cleanDirs: true });
+    // A file inside an untracked folder, or one the status does not list, is never handed to git clean.
+    expect(planDiscard(files, ['newdir/a.txt', 'src'])).toEqual({ restore: ['newdir/a.txt', 'src'], clean: [], cleanDirs: false });
+  });
+
+  it('restores the old path of a staged rename when going back to HEAD', () => {
+    const renamed = [...files, { path: 'new name.txt', origPath: 'old.txt', index: 'R', worktree: '.' }];
+    expect(planDiscard(renamed, ['new name.txt'], true)).toEqual({ restore: ['new name.txt', 'old.txt'], clean: [], cleanDirs: false });
+    expect(planDiscard(renamed, ['new name.txt', 'old.txt'], true).restore).toEqual(['new name.txt', 'old.txt']);
+    // Back to the index, the rename stays staged and only the working file is touched.
+    expect(planDiscard(renamed, ['new name.txt']).restore).toEqual(['new name.txt']);
   });
 });
 
@@ -163,5 +230,43 @@ describe('detectOperation', () => {
     expect(detectOperation((n) => n === 'rebase-merge' || n === 'MERGE_HEAD')).toBe('rebase');
     expect(detectOperation((n) => n === 'CHERRY_PICK_HEAD')).toBe('cherry-pick');
     expect(detectOperation((n) => n === 'REVERT_HEAD')).toBe('revert');
+  });
+
+  it('keeps a cherry-pick or revert of several commits in progress while sequencer/ is there', () => {
+    const sequencer = (todo: string) => detectOperation((n) => n === 'sequencer', () => todo);
+    expect(sequencer('pick 1a2b3c4 Add a\npick 5d6e7f8 Add b\n')).toBe('cherry-pick');
+    expect(sequencer('revert 1a2b3c4 Add a\n')).toBe('revert');
+    expect(detectOperation((n) => n === 'sequencer')).toBe('cherry-pick');
+    // Removed between the two looks: nothing is in progress.
+    expect(
+      detectOperation(
+        (n) => n === 'sequencer',
+        () => {
+          throw new Error('ENOENT');
+        },
+      ),
+    ).toBeUndefined();
+    // CHERRY_PICK_HEAD still decides when it is there.
+    expect(detectOperation((n) => n === 'sequencer' || n === 'REVERT_HEAD', () => 'pick 1a2b3c4 x\n')).toBe('revert');
+  });
+
+  it('lists the conflicted paths of a status', () => {
+    const files = [
+      { path: 'both.txt', index: 'U', worktree: 'U' },
+      { path: 'added-both.txt', index: 'A', worktree: 'A' },
+      { path: 'deleted-them.txt', index: 'U', worktree: 'D' },
+      { path: 'staged.txt', index: 'A', worktree: '.' },
+      { path: 'new.txt', index: '?', worktree: '?' },
+    ];
+    expect(conflictedPaths(files)).toEqual(['both.txt', 'added-both.txt', 'deleted-them.txt']);
+  });
+
+  it('continues, aborts and skips each operation, with no skip for a merge', () => {
+    expect(operationArgs('merge', 'continue')).toEqual(['merge', '--continue']);
+    expect(operationArgs('merge', 'abort')).toEqual(['merge', '--abort']);
+    expect(operationArgs('merge', 'skip')).toBeNull();
+    expect(operationArgs('rebase', 'skip')).toEqual(['rebase', '--skip']);
+    expect(operationArgs('cherry-pick', 'continue')).toEqual(['cherry-pick', '--continue']);
+    expect(operationArgs('revert', 'abort')).toEqual(['revert', '--abort']);
   });
 });

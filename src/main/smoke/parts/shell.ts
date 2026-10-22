@@ -370,6 +370,74 @@ export default definePart({
         await js(`document.documentElement.classList.remove('dark')`);
         await js(`document.querySelector('[data-testid=palette-option][data-palette=${DEFAULT_PALETTE}]').click()`);
         await wait(300);
+
+        // Settings: agent permissions. The mode replaces the old mutations switch, and rules are added, changed and removed in a table, globally and for the workspace.
+        {
+          const mcpBefore = structuredClone(host.config.get().mcp);
+          const setField = (selector: string, value: string) =>
+            js(`(() => {
+              const el = document.querySelector(${JSON.stringify(selector)});
+              if (!el) return false;
+              const proto = el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+              Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, ${JSON.stringify(value)});
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              if (el instanceof HTMLSelectElement) el.dispatchEvent(new Event('change', { bubbles: true }));
+              return true;
+            })()`);
+          const rows = (table: string) => js(`[...document.querySelectorAll('[data-testid=${table}] [data-testid=agent-rule]')].map((r) => r.getAttribute('data-match') + ':' + r.getAttribute('data-action'))`) as Promise<string[]>;
+          const shown = await js(
+            `(() => { const s = document.querySelector('[data-testid=settings-mcp]'); if (!s) return null; s.scrollIntoView(); return { mode: s.querySelector('[data-testid=mcp-mode]')?.value, oldToggle: s.textContent.includes('Allow mutating commands'), workspaceTable: Boolean(s.querySelector('[data-testid=mcp-rules-workspace]')) }; })()`,
+          );
+          check('ui: settings show the permission mode in place of the mutations switch, and a workspace rules table', JSON.stringify(shown) === JSON.stringify({ mode: 'read-only', oldToggle: false, workspaceTable: true }), shown);
+          await setField('[data-testid=mcp-rules-global] [data-testid=agent-rule-match]', 'git.*');
+          await setField('[data-testid=mcp-rules-global] [data-testid=agent-rule-action]', 'deny');
+          await wait(150);
+          const hint = await js(`document.querySelector('[data-testid=mcp-rules-global]')?.textContent.includes('Matches')`);
+          await js(`document.querySelector('[data-testid=mcp-rules-global] [data-testid=agent-rule-add]')?.click()`);
+          await until(() => host.config.get().mcp.permissions.rules.some((r) => r.match === 'git.*'), 2000);
+          await setField('[data-testid=mcp-rules-global] [data-testid=agent-rule-match]', 'git.status');
+          await setField('[data-testid=mcp-rules-global] [data-testid=agent-rule-action]', 'allow');
+          await wait(150);
+          await js(`document.querySelector('[data-testid=mcp-rules-global] [data-testid=agent-rule-add]')?.click()`);
+          await until(() => host.config.get().mcp.permissions.rules.length === 2, 2000);
+          await setField('[data-testid=mcp-mode]', 'ask');
+          await until(() => host.config.get().mcp.permissions.mode === 'ask', 2000);
+          await wait(300);
+          const globalRows = await rows('mcp-rules-global');
+          check(
+            'ui: rules added in settings are saved in the global config with the mode',
+            hint === true && JSON.stringify(globalRows) === JSON.stringify(['git.*:deny', 'git.status:allow']) && host.config.get().mcp.permissions.mode === 'ask' && host.config.get().mcp.allowMutating === false,
+            { globalRows, saved: host.config.get().mcp.permissions },
+          );
+          await setField('[data-testid=mcp-rules-workspace] [data-testid=agent-rule-match]', 'todo.remove');
+          await setField('[data-testid=mcp-rules-workspace] [data-testid=agent-rule-action]', 'allow');
+          await wait(150);
+          await js(`document.querySelector('[data-testid=mcp-rules-workspace] [data-testid=agent-rule-add]')?.click()`);
+          await until(async () => (await run<{ rules: unknown[] }>('mcp.permissions.workspace', {}, ws.id)).rules.length === 1, 2000);
+          await wait(300);
+          const wsRows = await rows('mcp-rules-workspace');
+          const shownActions = await js(`[...document.querySelectorAll('[data-testid=mcp-rules-global] [data-testid=agent-rule-row-action]')].map((el) => el.value)`);
+          check('ui: each rule row shows its own action', JSON.stringify(shownActions) === JSON.stringify(['deny', 'allow']), shownActions);
+          check('ui: a workspace rule is saved for the workspace only', JSON.stringify(wsRows) === JSON.stringify(['todo.remove:allow']) && !host.config.get().mcp.permissions.rules.some((r) => r.match === 'todo.remove'), wsRows);
+          await setField('[data-testid=mcp-rules-global] [data-testid=agent-rule-match]', 'not valid');
+          await wait(150);
+          const addDisabled = await js(`document.querySelector('[data-testid=mcp-rules-global] [data-testid=agent-rule-add]')?.disabled`);
+          check('ui: an invalid match cannot be added', addDisabled === true);
+          await js(`document.querySelector('[data-testid=settings-mcp]')?.scrollIntoView()`);
+          // Saving the config re-applies the theme setting, which follows the system: the light shot wants light.
+          await js(`document.documentElement.classList.remove('dark')`);
+          await wait(200);
+          await shot('27b-settings-agent-permissions-light');
+          await js(`document.documentElement.classList.add('dark')`);
+          await wait(200);
+          await shot('27c-settings-agent-permissions-dark');
+          await js(`document.documentElement.classList.remove('dark')`);
+          await js(`document.querySelector('[data-testid=mcp-rules-global] [data-testid=agent-rule][data-match="git.status"] button')?.click()`);
+          await until(() => host.config.get().mcp.permissions.rules.length === 1, 2000);
+          check('ui: the remove button deletes a rule', JSON.stringify(host.config.get().mcp.permissions.rules) === JSON.stringify([{ match: 'git.*', action: 'deny' }]), host.config.get().mcp.permissions.rules);
+          await run('mcp.permissions.setWorkspace', { rules: [] }, ws.id);
+          await run('config.update', { patch: { mcp: { ...host.config.get().mcp, permissions: mcpBefore.permissions, allowMutating: mcpBefore.allowMutating } } }, null);
+        }
       },
       after: async () => {
         await run('workspace.close', { id: otherWs.id }, null);

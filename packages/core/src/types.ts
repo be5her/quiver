@@ -1,6 +1,8 @@
 import type { NetworkConfig } from './network';
 import type { ActivityBarLayout } from './activity-bar';
-import type { McpRecordingStatus } from './models/mcp-recording';
+import type { McpAgent, McpRecordingStatus } from './models/mcp-recording';
+import type { AgentCallDecision, ApprovalOutcome, ApprovalRequest, PendingApproval } from './approvals';
+import type { AgentPermissionRule, AgentPermissions } from './permissions';
 import type { LogsSession } from './models/logs';
 import type { z } from 'zod';
 
@@ -32,8 +34,14 @@ export interface Variable {
 export interface McpConfig {
   enabled: boolean;
   port: number;
-  /** When false, commands flagged `mutating` are refused for MCP callers. */
+  /** Mirrors `permissions.mode === 'allow'` for older builds. Setting it alone switches the mode between `read-only` and `allow`. */
   allowMutating: boolean;
+  /** What agents may call: the mode for mutating calls no rule matches, and the rules for every workspace. */
+  permissions: AgentPermissions;
+  /** Each workspace's own rules, by workspace id, which come before `permissions.rules`. Per machine, never in the project. */
+  workspaceRules: Record<string, AgentPermissionRule[]>;
+  /** Every MCP call is refused while true; the tool list stays as it is. */
+  paused: boolean;
 }
 
 /** A favourite Teleport resource, shown at the top of the Teleport sidebar. */
@@ -53,6 +61,17 @@ export interface TeleportConfig {
   tshPath: string;
   /** Start `tsh login` on launch for every cluster whose certificate has expired. */
   loginOnLaunch: boolean;
+  /** Kubernetes clusters marked protected: actions need the cluster name typed, and agents are refused. */
+  protectedKubes: TeleportKubeRef[];
+  /** Let agents run Kubernetes actions and port forwards on protected clusters too. Off by default. */
+  agentActionsOnProtected: boolean;
+}
+
+/** A Kubernetes cluster of a Teleport cluster. */
+export interface TeleportKubeRef {
+  /** Proxy address of the Teleport cluster. */
+  proxy: string;
+  name: string;
 }
 
 /** A port Quiver handed to a mock server on this machine. New servers in any project avoid every recorded port. */
@@ -148,6 +167,11 @@ export interface SecretsApi {
   readonly available: boolean;
   encrypt(plain: string): string;
   decrypt(cipher: string): string;
+  /**
+   * A secret the host hands in by name, which wins over what this machine stores: the headless CLI reads
+   * `QUIVER_SECRET_<NAME>` variables and its `--secrets` file. Absent in the app. Such a value is never written down.
+   */
+  lookup?(name: string): string | undefined;
 }
 
 /** What the host (Electron main process, or a CLI) gives to commands. */
@@ -174,6 +198,11 @@ export interface HostApi {
   secrets: SecretsApi;
   /** Browser sessions for services that sign in through a web page. Present when the host has windows. */
   web?: WebSessionsApi;
+  /** Asks the user about an agent's call the permissions say to ask about. Absent in hosts without a UI, where such calls are refused. */
+  approvals?: {
+    /** `signal` aborts when the agent goes away, which refuses the call instead of leaving it waiting. */
+    request(request: ApprovalRequest, signal?: AbortSignal): Promise<ApprovalOutcome>;
+  };
   /** Broadcast an event to every UI surface. */
   emit<E extends HostEventName>(event: E, payload: HostEvents[E]): void;
 }
@@ -182,6 +211,10 @@ export interface CommandContext {
   caller: Caller;
   workspace?: WorkspaceApi;
   host: HostApi;
+  /** The agent behind an `mcp` call, as the MCP layer identified it. */
+  agent?: McpAgent;
+  /** Aborts when the caller goes away: an MCP client's connection closed or it cancelled the call. */
+  signal?: AbortSignal;
 }
 
 export type AnyZodObject = z.ZodObject<z.ZodRawShape>;
@@ -198,6 +231,12 @@ export interface CommandDefinition<S extends AnyZodObject = AnyZodObject, O = un
    * A function decides per call (after input validation), e.g. a query runner that lets reads through.
    */
   mutating?: boolean | ((input: z.infer<S>, ctx: CommandContext) => boolean | Promise<boolean>);
+  /**
+   * For an agent's call the permissions say to ask about: the refusals the handler would make whatever the user
+   * answers (a protected cluster), checked first, so the user is never asked about a call that is refused anyway.
+   * Throws to refuse the call without asking.
+   */
+  beforeApproval?(input: z.infer<S>, ctx: CommandContext): Promise<void>;
   /** Hidden commands are plumbing: not listed in the palette or exposed over MCP. */
   hidden?: boolean;
   input: S;
@@ -274,13 +313,17 @@ export interface HostEvents {
   'store.changed': { workspaceId: string; collection: string };
   'state.changed': { workspaceId: string; key: string };
   'mcp.status': { running: boolean; port: number; error?: string };
-  'mcp.call': { tool: string; workspaceId?: string; ok: boolean; durationMs: number; at: string };
+  'mcp.call': { tool: string; workspaceId?: string; ok: boolean; durationMs: number; at: string; agent?: string; decision?: AgentCallDecision | null };
+  /** An agent's call waits for the user to allow or deny it. */
+  'mcp.approval.requested': PendingApproval;
+  /** The agent activity feed got a call (`call`), or approvals were asked, answered or timed out (`approvals`). */
+  'mcp.activity': { reason: 'call' | 'approvals'; pending: number };
   /** The recording of agent calls started, paused, ended or was dropped, or a call was recorded. Bursts of calls arrive as one event. */
   'mcp.recording': McpRecordingStatus;
   /** Teleport session status, login progress, pins or tunnel list changed. Fetch teleport.status for details. */
-  'teleport.changed': { reason: 'status' | 'tunnels' | 'login' | 'pins' };
-  /** Kubernetes queries: the local history changed, or a followed log stream has new lines or ended. */
-  'teleport.kube.changed': { reason: 'history' | 'stream'; runId?: string };
+  'teleport.changed': { reason: 'status' | 'tunnels' | 'login' | 'pins' | 'protected' };
+  /** Kubernetes: the local history changed, a followed log stream has new lines or ended, or a port forward started, stopped or exited. */
+  'teleport.kube.changed': { reason: 'history' | 'stream' | 'forwards'; runId?: string };
   /**
    * API client: a collection run started, moved on or finished (`runId`; fetch api.run.get), a streamed response got items or
    * ended (`streamId`; read api.request.stream.read), or a download of a send given a `sendId` got further (`received` bytes).
@@ -302,8 +345,8 @@ export interface HostEvents {
   'metabase.changed': { reason: 'session' | 'secret' | 'history'; url?: string; connectionId?: string; workspaceId?: string };
   /** The workspace's todo list changed. */
   'todo.changed': { workspaceId: string };
-  /** Git: the working tree, index or HEAD changed (`status`), branches or refs moved (`branches`), or the pull request list was refreshed (`prs`). */
-  'git.changed': { workspaceId: string; reason: 'status' | 'branches' | 'prs' };
+  /** Git: the working tree, index or HEAD changed (`status`), branches or refs moved (`branches`), the stashes changed (`stashes`), or the pull request list was refreshed (`prs`). */
+  'git.changed': { workspaceId: string; reason: 'status' | 'branches' | 'stashes' | 'prs' };
   /** Process runner: saved tasks changed (`tasks`), a process changed state (`state`), or a run printed output (`output`, throttled). */
   'runner.changed': { workspaceId: string; reason: 'tasks' | 'state' | 'output'; taskId?: string; runId?: string };
   /** Queues: connections changed (`connections`), messages were produced or purged (`messages`), or a live consumer got messages or ended (`consumer`); `destination` when one topic or queue was touched. */

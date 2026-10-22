@@ -25,7 +25,7 @@ import * as local from './local';
 // Lane G1: the local repository through the git CLI. Reads are open to agents; anything that moves HEAD, the index,
 // a branch or a remote is mutating.
 
-function workspace(ctx: CommandContext): WorkspaceApi {
+export function workspace(ctx: CommandContext): WorkspaceApi {
   if (!ctx.workspace) throw new QuiverError('NO_WORKSPACE', 'Open a workspace first');
   // The first git command in a folder that has become a repository starts its watcher.
   void local.ensureWatcher(ctx.workspace, ctx.host);
@@ -33,12 +33,12 @@ function workspace(ctx: CommandContext): WorkspaceApi {
 }
 
 /** A call from the UI may open a credential window; one from an agent must not hang behind a dialog nobody sees coming. */
-function interactive(ctx: CommandContext): boolean {
+export function interactive(ctx: CommandContext): boolean {
   return ctx.caller !== 'mcp';
 }
 
 /** Announce a change at once; the watcher's debounced event follows, but the view should not wait for it. */
-function changed(ctx: CommandContext, ws: WorkspaceApi, ...reasons: ('status' | 'branches')[]): void {
+export function changed(ctx: CommandContext, ws: WorkspaceApi, ...reasons: ('status' | 'branches' | 'stashes')[]): void {
   for (const reason of reasons) ctx.host.emit('git.changed', { workspaceId: ws.id, reason });
 }
 
@@ -55,7 +55,8 @@ const status = defineCommand({
 const branchList = defineCommand({
   id: 'git.branch.list',
   title: 'Git branches',
-  description: 'Local and remote-tracking branches, newest commit first, with the current one, upstream, ahead/behind, head commit, subject and date.',
+  description:
+    'Local and remote-tracking branches, newest commit first, with the current one, upstream, ahead/behind, head commit, subject and date. merged: all its commits are in the default branch (origin/HEAD, else a local main or master), or in the current branch when there is none; never set on that branch or the current one. gone: its upstream was deleted on the remote.',
   scope: 'workspace',
   input: z.object({}),
   handler: async (_i, ctx): Promise<GitBranch[]> => local.branches(workspace(ctx).path),

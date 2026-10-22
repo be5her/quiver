@@ -285,7 +285,7 @@ const toolCall = defineCommand({
   id: 'mcp.tool.call',
   title: 'Call MCP tool',
   description:
-    'Calls a tool of a connected server with JSON arguments and returns `{ result, durationMs }`; `result.isError` is set when the tool reported a failure. For agents, tools annotated `readOnlyHint` always work; other tools need "allow mutations" in Quiver settings.',
+    'Calls a tool of a connected server with JSON arguments and returns `{ result, durationMs }`; `result.isError` is set when the tool reported a failure. For agents, tools annotated `readOnlyHint` always work; other tools are gated like any mutating command by the agent permissions in Quiver settings.',
   scope: 'workspace',
   mutating: ({ id, name }, ctx) => runtime.cachedTool(ws(ctx), id, name)?.annotations?.readOnlyHint !== true,
   input: ServerIdInput.extend({

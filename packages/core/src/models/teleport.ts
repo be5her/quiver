@@ -1,4 +1,4 @@
-import type { TeleportConfig, TeleportPin } from '../types';
+import type { TeleportConfig, TeleportKubeRef, TeleportPin } from '../types';
 
 /**
  * Teleport (goteleport.com) models and the pure parsers for `tsh --format=json` output.
@@ -78,6 +78,8 @@ export interface TeleportKubeCluster {
   /** True for the cluster `tsh kube login` last selected in this profile. */
   selected: boolean;
   pinned: boolean;
+  /** Marked protected in Settings: actions need the cluster name typed, agents are refused. */
+  protected: boolean;
 }
 
 export interface TeleportTunnel {
@@ -269,7 +271,7 @@ interface TshKubeJson {
   selected?: boolean;
 }
 
-export type ParsedKubeCluster = Omit<TeleportKubeCluster, 'proxy' | 'pinned'>;
+export type ParsedKubeCluster = Omit<TeleportKubeCluster, 'proxy' | 'pinned' | 'protected'>;
 
 export function parseTshKubeClusters(stdout: string): ParsedKubeCluster[] {
   return parseJsonArray<TshKubeJson>(stdout)
@@ -348,7 +350,21 @@ export function migrateTeleportConfig(raw: Partial<TeleportConfig> & { proxy?: s
     pins: Array.isArray(raw.pins) ? raw.pins.filter((p) => p && typeof p.proxy === 'string' && typeof p.name === 'string' && (p.kind === 'db' || p.kind === 'kube')) : [],
     tshPath: typeof raw.tshPath === 'string' ? raw.tshPath : '',
     loginOnLaunch: Boolean(raw.loginOnLaunch),
+    protectedKubes: Array.isArray(raw.protectedKubes) ? raw.protectedKubes.filter((k) => k && typeof k.proxy === 'string' && typeof k.name === 'string' && k.name !== '') : [],
+    agentActionsOnProtected: raw.agentActionsOnProtected === true,
   };
+}
+
+// ---------- protected Kubernetes clusters ----------
+
+export function isKubeProtected(protectedKubes: TeleportKubeRef[], proxy: string, name: string): boolean {
+  return protectedKubes.some((k) => k.name === name && sameProxy(k.proxy, proxy));
+}
+
+/** Mark or unmark a Kubernetes cluster as protected, keeping the list free of duplicates. */
+export function setKubeProtected(protectedKubes: TeleportKubeRef[], ref: TeleportKubeRef, on: boolean): TeleportKubeRef[] {
+  const without = protectedKubes.filter((k) => !(k.name === ref.name && sameProxy(k.proxy, ref.proxy)));
+  return on ? [...without, { proxy: proxyAddress(ref.proxy) ?? ref.proxy, name: ref.name }] : without;
 }
 
 /** Human-readable time left, e.g. "11h 42m", "9m", "expired". */

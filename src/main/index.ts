@@ -1,8 +1,8 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { BrowserWindow, app, dialog, safeStorage, shell } from 'electron';
-import type { SecretsApi } from '@quiver/core';
+import { BrowserWindow, Notification, app, dialog, safeStorage, shell } from 'electron';
+import type { PendingApproval, SecretsApi } from '@quiver/core';
 import { Host } from './host';
 import { registerIpc } from './ipc';
 import { runSmokeTest } from './smoke';
@@ -69,6 +69,21 @@ async function revealFolder(folder: string): Promise<void> {
   if (error) throw new Error(error);
 }
 
+/** An agent's call waits for an answer while Quiver is behind other windows: a click on the notification brings it up. */
+function notifyApproval(pending: PendingApproval): void {
+  if (BrowserWindow.getFocusedWindow() || !Notification.isSupported()) return;
+  const where = pending.workspace ? ` in ${pending.workspace.name}` : '';
+  const notification = new Notification({ title: `${pending.agent.name} asks to run ${pending.title}`, body: `${pending.commandId}${where}. Open Quiver to allow or deny it.` });
+  notification.on('click', () => {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (!win) return;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+  });
+  notification.show();
+}
+
 let host: Host | null = null;
 
 async function main(): Promise<void> {
@@ -99,6 +114,9 @@ async function main(): Promise<void> {
     updates,
     // The smoke signs in against a local fake that needs no hands, so its window stays hidden.
     web: new ElectronWebSessions({ show: !process.env.QUIVER_SMOKE }),
+    notifyApproval: process.env.QUIVER_SMOKE ? undefined : notifyApproval,
+    // The `quiver` shims electron-builder puts beside app.asar (resources/cli in this repository).
+    cliShims: app.isPackaged ? path.join(process.resourcesPath, 'cli') : undefined,
   });
   registerIpc(host);
   await host.start();
@@ -140,8 +158,22 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin' && !process.env.QUIVER_SMOKE) app.quit();
 });
 
-app.on('before-quit', () => {
-  void host?.stop();
+// Quitting waits for the host to stop (port forwards, tunnels and the processes behind them, the MCP server), at
+// most QUIT_STOP_MS, then quits for real: a stop left running would end with the process, and forwards and tunnels
+// on macOS and Linux lead their own process groups, so they would outlive Quiver. The smoke exits with app.exit,
+// which skips this.
+const QUIT_STOP_MS = 8000;
+let quitStage: 'running' | 'stopping' | 'stopped' = 'running';
+app.on('before-quit', (event) => {
+  if (!host || quitStage === 'stopped') return;
+  event.preventDefault();
+  if (quitStage === 'stopping') return;
+  quitStage = 'stopping';
+  const stopping = host.stop().catch((err) => console.warn(`[quiver] stopping before quit failed: ${(err as Error).message}`));
+  void Promise.race([stopping, new Promise((r) => setTimeout(r, QUIT_STOP_MS))]).finally(() => {
+    quitStage = 'stopped';
+    app.quit();
+  });
 });
 
 void main().catch((err) => {

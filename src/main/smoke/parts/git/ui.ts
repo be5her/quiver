@@ -9,7 +9,9 @@ import { until, type SmokeSection } from '../../part';
 // The Git panel, on a repository of its own in a temporary folder opened as a second workspace: a file changed on disk
 // shows in the sidebar, its diff opens side by side and inline, it is staged and committed from the commit box, the
 // commit shows in the history, a branch is made from a dialog and another switched to from the list, the status bar
-// follows the branch with its ahead count, a merge conflict gets a note rather than a diff; then the pull requests
+// follows the branch with its ahead count, a merge conflict gets a note rather than a diff, a merge started here shows
+// the operation banner until it is continued, a change is stashed, popped and discarded, and the Branches tab lists,
+// filters, renames and cleans up branches; then the pull requests
 // against the fake gh of parts/git/pr.ts, with their check badges, a detail tab with the failed log on demand and a
 // todo made from it, and the empty state when gh is missing.
 
@@ -139,15 +141,15 @@ const section: SmokeSection = async ({ check, run, ws: mainWs }) => ({
       check('git ui: a changed file shows under Changes and a new one under Untracked', changed);
       await shot('32a-git-sidebar-changes-light');
 
-      // Its diff, side by side and then inline.
+      // Its diff, side by side as whole files in the merge view (the old side read from the index), then inline.
       await click('[data-testid=git-file][data-group=unstaged][data-path="app.txt"]');
-      await waitFor(`Boolean(${visible('[data-testid=git-patch]')})`);
+      await waitFor(`Boolean(${visible('[data-testid=git-full-diff] .cm-merge-b .cm-changedLine')})`);
       const split = await js(
-        `(() => { const t = ${visible('[data-testid=git-diff-tab]')}; const p = t?.querySelector('[data-testid=git-patch]'); return p ? { kind: t.getAttribute('data-kind'), path: t.getAttribute('data-path'), mode: p.getAttribute('data-mode'), del: [...p.querySelectorAll('td[data-kind=del]')].map((e) => e.textContent), add: [...p.querySelectorAll('td[data-kind=add]')].map((e) => e.textContent) } : null; })()`,
+        `(() => { const t = ${visible('[data-testid=git-diff-tab]')}; const v = t?.querySelector('[data-testid=git-full-diff]'); const lines = (sel) => [...v.querySelectorAll(sel)].map((e) => e.textContent); return v ? { kind: t.getAttribute('data-kind'), path: t.getAttribute('data-path'), old: lines('.cm-merge-a .cm-changedLine'), new: lines('.cm-merge-b .cm-changedLine'), whole: lines('.cm-merge-b .cm-line') } : null; })()`,
       );
       check(
-        'git ui: clicking the file opens its working diff side by side, the edit paired with the old line',
-        JSON.stringify(split) === JSON.stringify({ kind: 'working', path: 'app.txt', mode: 'split', del: ['two'], add: ['TWO', 'five'] }),
+        'git ui: clicking the file opens its working diff side by side as whole files, the edit marked on both sides',
+        JSON.stringify(split) === JSON.stringify({ kind: 'working', path: 'app.txt', old: ['two'], new: ['TWO', 'five'], whole: ['one', 'TWO', 'three', 'four', 'five', ''] }),
         split,
       );
       await shot('32b-git-diff-split-light');
@@ -212,7 +214,7 @@ const section: SmokeSection = async ({ check, run, ws: mainWs }) => ({
       await shot('32f-git-history-dark');
       await js(`document.documentElement.classList.remove('dark')`);
       await js(`${visible('[data-testid=git-commit-open-tab]')}?.click()`);
-      const commitTab = await waitFor(`${visible('[data-testid=git-diff-tab]')}?.getAttribute('data-kind') === 'commit' && Boolean(${visible('[data-testid=git-patch]')})`);
+      const commitTab = await waitFor(`${visible('[data-testid=git-diff-tab]')}?.getAttribute('data-kind') === 'commit' && Boolean(${visible('[data-testid=git-full-diff] .cm-mergeView')})`);
       check('git ui: a commit opens in a diff tab of its own', commitTab);
 
       // Switch branch from the list, then make one from the dialog.
@@ -262,6 +264,115 @@ const section: SmokeSection = async ({ check, run, ws: mainWs }) => ({
       await sh('checkout', '-q', 'ui/new-branch');
       await click('[data-testid=git-refresh]');
       await waitFor(`document.querySelector('[data-testid=git-current-branch]')?.textContent.trim() === 'ui/new-branch' && !document.querySelector('[data-testid=git-group][data-group=conflicts]')`);
+
+      // The operation banner: a merge started from Quiver stops on a conflict; Continue waits for it to be resolved.
+      // On a branch of its own, so ui/new-branch keeps the last commit the pull request form starts from.
+      const dialogButton = (label: string) => js(`(() => { const b = [...document.querySelectorAll('.fixed.inset-0 button')].find((e) => e.textContent.trim() === ${JSON.stringify(label)}); b?.click(); return Boolean(b); })()`);
+      const answerPrompt = (value: string, label: string) =>
+        js(`(() => { const set = ${setInput}; const form = document.querySelector('.fixed.inset-0 form'); if (!form) return false; set(form.querySelector('input, textarea'), ${JSON.stringify(value)}); const b = [...form.querySelectorAll('button')].find((e) => e.textContent.trim() === ${JSON.stringify(label)}); b?.click(); return Boolean(b); })()`);
+      const rightClick = (selector: string) =>
+        js(`(() => { const el = ${visible(selector)}; if (!el) return false; const r = el.getBoundingClientRect(); el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 40, clientY: r.top + r.height / 2 })); return true; })()`);
+      await sh('checkout', '-q', '-b', 'ui/ops');
+      await sh('checkout', '-q', '-b', 'ui/theirs');
+      await fs.writeFile(path.join(folder, 'app.txt'), 'theirs\n');
+      await sh('commit', '-q', '-am', 'Their app');
+      await sh('checkout', '-q', 'ui/ops');
+      await fs.writeFile(path.join(folder, 'app.txt'), 'ours\n');
+      await sh('commit', '-q', '-am', 'Our app');
+      await run('git.merge', { ref: 'ui/theirs' }, id);
+      const banner = await waitFor(`document.querySelector('[data-testid=git-operation]')?.getAttribute('data-operation') === 'merge' && document.querySelector('[data-testid=git-operation-continue]')?.disabled === true && !document.querySelector('[data-testid=git-operation-skip]')`);
+      check('git ui: a merge stopped on a conflict shows the banner, Continue waiting for the conflict and no Skip for a merge', banner, await js(`document.querySelector('[data-testid=git-operation]')?.textContent.trim() ?? null`));
+      await shot('32m-git-operation-banner-light');
+      await fs.writeFile(path.join(folder, 'app.txt'), 'ours and theirs\n');
+      await click('[data-testid=git-file][data-group=conflicts][data-path="app.txt"] [data-testid=git-stage]');
+      const canContinue = await waitFor(`document.querySelector('[data-testid=git-operation-continue]')?.disabled === false`);
+      await click('[data-testid=git-operation-continue]');
+      const finished = await waitFor(`!document.querySelector('[data-testid=git-operation]')`, 6000);
+      const mergeHead = (await run<{ commits: GitCommit[] }>('git.log', { limit: 1 }, id)).commits[0];
+      check('git ui: once the conflict is marked resolved, Continue commits the merge and the banner goes', canContinue && finished && mergeHead?.parents.length === 2, { canContinue, finished, mergeHead: mergeHead?.subject });
+
+      // The Stashes section: stash a change with a message, see it, pop it; then discard it from its row.
+      await fs.writeFile(path.join(folder, 'app.txt'), 'stash me\n');
+      await click('[data-testid=git-refresh]');
+      await waitFor(`Boolean(document.querySelector('[data-testid=git-file][data-group=unstaged][data-path="app.txt"]'))`);
+      await click('[data-testid=git-stash-push]');
+      await wait(250);
+      const stashPrompt = await answerPrompt('ui stash', 'Stash');
+      const stashed = await waitFor(`Boolean(document.querySelector('[data-testid=git-stash][data-index="0"][data-message="ui stash"]')) && !document.querySelector('[data-testid=git-file][data-path="app.txt"]')`);
+      check('git ui: Stash changes asks for a message and lists the stash, the change gone from the tree', stashPrompt === true && stashed && (await fs.readFile(path.join(folder, 'app.txt'), 'utf8')) === 'ours and theirs\n');
+      await shot('32n-git-stashes-light');
+      await click('[data-testid=git-stash][data-index="0"]');
+      const stashTab = await waitFor(`${visible('[data-testid=git-diff-tab]')}?.getAttribute('data-kind') === 'stash' && Boolean(${visible('[data-testid=git-full-diff] .cm-merge-b .cm-changedLine')})`, 6000);
+      check('git ui: a stash opens in a diff tab with its changes', stashTab);
+      await click('[data-testid=git-stash][data-index="0"] [data-testid=git-stash-pop]');
+      const popped = await waitFor(`Boolean(document.querySelector('[data-testid=git-stashes-empty]')) && Boolean(document.querySelector('[data-testid=git-file][data-group=unstaged][data-path="app.txt"]'))`);
+      check('git ui: Pop brings the change back and drops the stash', popped && (await fs.readFile(path.join(folder, 'app.txt'), 'utf8')) === 'stash me\n');
+      await click('[data-testid=git-file][data-group=unstaged][data-path="app.txt"] [data-testid=git-discard]');
+      await wait(250);
+      const discardTitle = await js(`document.querySelector('.fixed.inset-0 h2')?.textContent.trim() ?? null`);
+      await dialogButton('Discard');
+      const discarded = await waitFor(`!document.querySelector('[data-testid=git-file][data-path="app.txt"]')`);
+      check(
+        'git ui: Discard asks first, then puts the file back, leaving untracked files alone',
+        discardTitle === 'Discard the changes to app.txt?' && discarded && (await fs.readFile(path.join(folder, 'app.txt'), 'utf8')) === 'ours and theirs\n' && (await fs.stat(path.join(folder, 'notes.txt')).then(() => true, () => false)),
+        discardTitle,
+      );
+
+      // The Branches tab: local branches with their badges, remote branches and tags, a filter, a menu and Clean up.
+      await sh('branch', 'ui/merged', 'main');
+      await sh('tag', 'v0.1', 'HEAD~1');
+      await click('[data-testid=git-open-branches]');
+      const rowsOf = () =>
+        js(`[...(${visible('[data-testid=git-branches-tab]')}?.querySelectorAll('[data-testid=git-branches-row]') ?? [])].map((r) => [r.getAttribute('data-kind'), r.getAttribute('data-name'), r.getAttribute('data-current') === 'true' ? 'current' : r.getAttribute('data-merged') === 'true' ? 'merged' : ''].join(':'))`) as Promise<string[]>;
+      const branchesShown = await waitFor(`Boolean(${visible('[data-testid=git-branches-row][data-name="v0.1"]')})`, 6000);
+      const branchRows = await rowsOf();
+      check(
+        'git ui: the Branches tab lists local branches with current and merged badges (merged into main, which is never merged itself), and the tags',
+        branchesShown && branchRows.includes('local:ui/ops:current') && branchRows.includes('local:ui/merged:merged') && branchRows.includes('local:main:') && branchRows.includes('tag:v0.1:'),
+        branchRows,
+      );
+      await shot('32o-git-branches-light');
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(150);
+      await shot('32p-git-branches-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
+      await js(`(() => { const set = ${setInput}; set(${visible('[data-testid=git-branches-filter]')}, 'ui/mer'); })()`);
+      const filteredRows = await until(async () => JSON.stringify(await rowsOf()) === JSON.stringify(['local:ui/merged:merged']), 3000);
+      check('git ui: the filter keeps the branches and tags whose name matches', filteredRows, await rowsOf());
+      await js(`(() => { const set = ${setInput}; set(${visible('[data-testid=git-branches-filter]')}, ''); })()`);
+      // Rename from the row's menu.
+      await waitFor(`Boolean(${visible('[data-testid=git-branches-row][data-name="ui/theirs"]')})`);
+      await rightClick('[data-testid=git-branches-row][data-name="ui/theirs"]');
+      const menuShown = await waitFor(`Boolean(document.querySelector('[data-testid=context-menu] [data-testid=git-menu-rename]')) && Boolean(document.querySelector('[data-testid=context-menu] [data-testid=git-menu-delete]'))`, 2000);
+      await shot('32q-git-branch-menu-light');
+      await click('[data-testid=context-menu] [data-testid=git-menu-rename]');
+      await wait(250);
+      await answerPrompt('ui/theirs-renamed', 'Rename');
+      const renamedRow = await waitFor(`Boolean(${visible('[data-testid=git-branches-row][data-name="ui/theirs-renamed"]')})`, 4000);
+      check('git ui: a branch row has a menu, and Rename from it renames the branch', menuShown && renamedRow);
+      // Clean up offers the merged branches, ticked; deleting asks first.
+      await click('[data-testid=git-branches-cleanup]');
+      await waitFor(`Boolean(${visible('[data-testid=git-cleanup]')})`);
+      const offered = await js(`[...(${visible('[data-testid=git-cleanup]')}?.querySelectorAll('[data-testid=git-cleanup-row]') ?? [])].map((r) => r.getAttribute('data-name') + (r.querySelector('input').checked ? ':ticked' : ''))`);
+      await shot('32r-git-branches-cleanup-light');
+      // Only ui/merged goes: feature and ui/new-branch, merged into main too, are unticked, and the steps below need them.
+      await js(`[...(${visible('[data-testid=git-cleanup]')}?.querySelectorAll('[data-testid=git-cleanup-row]') ?? [])].filter((r) => r.getAttribute('data-name') !== 'ui/merged' && r.querySelector('input').checked).forEach((r) => r.querySelector('input').click())`);
+      await wait(150);
+      const ticked = await js(`[...(${visible('[data-testid=git-cleanup]')}?.querySelectorAll('[data-testid=git-cleanup-row]') ?? [])].filter((r) => r.querySelector('input').checked).map((r) => r.getAttribute('data-name'))`);
+      await click('[data-testid=git-cleanup-delete]');
+      await wait(250);
+      const confirmTitle = await js(`document.querySelector('.fixed.inset-0 h2')?.textContent.trim() ?? null`);
+      const confirmed = await dialogButton('Delete');
+      const branchNames = async () => (await run<{ name: string }[]>('git.branch.list', {}, id)).map((b) => b.name);
+      const cleaned = await until(async () => {
+        const names = await branchNames();
+        return !names.includes('ui/merged') && ['main', 'feature', 'ui/new-branch', 'ui/theirs-renamed'].every((n) => names.includes(n));
+      }, 5000);
+      check('git ui: Clean up lists the merged branches ticked, and deletes the ones left ticked after asking once, a branch merged into main going without force from another branch', cleaned && Array.isArray(offered) && (offered as string[]).includes('ui/merged:ticked'), { offered, ticked, confirmTitle, confirmed, names: await branchNames() });
+      await waitFor(`${visible('[data-testid=git-branches-tab]')}?.getAttribute('data-view') === 'list'`);
+      await sh('checkout', '-q', 'ui/new-branch');
+      await click('[data-testid=git-refresh]');
+      await waitFor(`document.querySelector('[data-testid=git-current-branch]')?.textContent.trim() === 'ui/new-branch'`);
 
       // Pull requests: the list with check badges and review decisions.
       await click('[data-testid=git-open-prs]');

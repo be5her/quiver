@@ -4,7 +4,7 @@
 
 ## Running part of it
 
-The checks are split into parts, one per module plus `shell` for the app around them. While working on a change, run the parts it touches; before committing, run the whole smoke once, because a change in one place can break another.
+The checks are split into parts, one per module plus `shell` for the app around them and `cli` for the `quiver` command line. While working on a change, run the parts it touches; before committing, run the whole smoke once, because a change in one place can break another.
 
 ```
 npm run smoke                       every part, after a full build (CI runs this)
@@ -26,7 +26,7 @@ The UI checks only run with screenshots (`--shots` or `QUIVER_SMOKE_SHOTS=<dir>`
 - `fixtures.ts` starts the local servers; the `fake-*.ts` files are the fakes with more to them. `certs/` holds test-only TLS material for the mutual-TLS server in `fake-network.ts` (see its README).
 - `part.ts` holds the contract and small helpers (`until`, `processAlive`, `freePort`, `runSections`).
 - `parts/<name>.ts` is one part. Its `run(t)` does the host checks: commands, files on disk and the same features as an agent sees them over MCP. It may return hooks that run later, each in its own phase and in part order: `renderer` once the window has loaded, `ui` with screenshots to drive the window, and `after` once every part's UI is done.
-- A part that several people work on at once is split into sections, `parts/<name>/<section>.ts`, each a `SmokeSection` with the same shape as `run`; `parts/<name>.ts` then only lists them, `run: (t) => runSections(t, [a, b, ui])`. The sections run in that order, and their hooks are chained in the same order per phase. A section that throws stops the part like any other failure, and the sections after it do not run. Git, the process runner and Queues are built this way.
+- A part that several people work on at once is split into sections, `parts/<name>/<section>.ts`, each a `SmokeSection` with the same shape as `run`; `parts/<name>.ts` then only lists them, `run: (t) => runSections(t, [a, b, ui])`. The sections run in that order, and their hooks are chained in the same order per phase. A section that throws stops the part like any other failure, and the sections after it do not run. Git, the process runner, Queues and MCP (the inspector, then agent permissions) are built this way.
 
 Every part runs in the same workspace and app, one after another, so a part may count on what it set up itself but not on another part: run alone, it must still pass. When a check needs something another module makes (a second environment, enough open tabs), the part creates it. Each part's UI starts in the light theme with whatever module was last on screen, so it opens its own module first and turns on the dark theme where a screenshot wants it. If a part throws, its remaining checks are skipped, the failure is reported under its name and the other parts still run.
 

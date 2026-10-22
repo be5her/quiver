@@ -1,6 +1,8 @@
 import {
   DbConnectionSchema,
   KUBE_CLUSTER_NAME,
+  KubeActionSchema,
+  KubePortForwardSpecSchema,
   KubeQuerySchema,
   QuiverError,
   lastKubeNamespace,
@@ -8,7 +10,10 @@ import {
   dbKindForProtocol,
   defineCommand,
   defineModule,
+  isDestructiveKubeAction,
+  isKubeProtected,
   isPinned,
+  kubeActionTarget,
   newDbConnection,
   normalizeProxy,
   nowIso,
@@ -16,12 +21,18 @@ import {
   parseTshKubeClusters,
   proxiesToAutoLogin,
   proxyAddress,
+  resolveKubeAction,
   sameProxy,
+  setKubeProtected,
   togglePin,
+  type Caller,
   type DbConnection,
   type DbConnectionSummary,
   type HostApi,
+  type KubeActionPreview,
+  type KubeActionResult,
   type KubeHistoryEntry,
+  type KubePortForward,
   type KubePreview,
   type KubeRunResult,
   type KubeStreamRead,
@@ -102,7 +113,7 @@ async function listDatabases(host: HostApi, proxy: string | undefined, refresh: 
 
 async function listKubeClusters(host: HostApi, proxy: string | undefined, refresh: boolean): Promise<TeleportKubeCluster[]> {
   const { session } = getTeleport(host);
-  const pins = host.config.get().teleport.pins;
+  const { pins, protectedKubes } = host.config.get().teleport;
   const out: TeleportKubeCluster[] = [];
   for (const cluster of targetClusters(session, proxy)) {
     const key = normalizeProxy(cluster.proxy);
@@ -112,7 +123,7 @@ async function listKubeClusters(host: HostApi, proxy: string | undefined, refres
       cached = { at: Date.now(), value: parseTshKubeClusters(stdout) };
       kubeCache.set(key, cached);
     }
-    for (const k of cached.value) out.push({ ...k, proxy: cluster.proxy, pinned: isPinned(pins, 'kube', cluster.proxy, k.name) });
+    for (const k of cached.value) out.push({ ...k, proxy: cluster.proxy, pinned: isPinned(pins, 'kube', cluster.proxy, k.name), protected: isKubeProtected(protectedKubes, cluster.proxy, k.name) });
   }
   return out;
 }
@@ -163,17 +174,21 @@ const loginCancel = defineCommand({
 const logout = defineCommand({
   id: 'teleport.logout',
   title: 'Log out of Teleport',
-  description: 'Runs tsh logout for one cluster (proxy) or for all of them. This also affects tsh and kubectl in your terminal since profiles are shared. Tunnels of the affected clusters are stopped.',
+  description:
+    'Runs tsh logout for one cluster (proxy) or for all of them. This also affects tsh and kubectl in your terminal since profiles are shared. Tunnels and Kubernetes port forwards of the affected clusters are stopped.',
   scope: 'global',
   mutating: true,
   input: z.object({ proxy: z.string().optional().describe('Proxy address; omit to log out of every cluster') }),
   handler: async ({ proxy }, ctx): Promise<TeleportStatus> => {
-    const { session, tunnels } = getTeleport(ctx.host);
-    if (proxy) await tunnels.stopCluster(proxy);
-    else await tunnels.stopAll();
-    invalidateCaches(proxy);
-    getTeleport(ctx.host).kube.forget(proxy);
-    return session.logout(proxy);
+    const { session, tunnels, forwards } = getTeleport(ctx.host);
+    // No port forward may start on the cluster between stopping its forwards and the end of the logout.
+    return forwards.refuseStartsWhile(proxy, async () => {
+      if (proxy) await Promise.all([tunnels.stopCluster(proxy), forwards.stopCluster(proxy)]);
+      else await Promise.all([tunnels.stopAll(), forwards.stopAll()]);
+      invalidateCaches(proxy);
+      getTeleport(ctx.host).kube.forget(proxy);
+      return session.logout(proxy);
+    });
   },
 });
 
@@ -197,14 +212,15 @@ const clusterAdd = defineCommand({
 const clusterRemove = defineCommand({
   id: 'teleport.cluster.remove',
   title: 'Remove Teleport cluster',
-  description: 'Removes a proxy address from Settings along with its pins, and stops its tunnels. The tsh profile on disk is untouched; use teleport.logout for that.',
+  description:
+    'Removes a proxy address from Settings along with its pins, and stops its tunnels and Kubernetes port forwards. Protected Kubernetes clusters stay protected. The tsh profile on disk is untouched; use teleport.logout for that.',
   scope: 'global',
   mutating: true,
   input: z.object({ proxy: z.string() }),
   handler: async ({ proxy }, ctx): Promise<TeleportStatus> => {
-    const { session, tunnels } = getTeleport(ctx.host);
+    const { session, tunnels, forwards } = getTeleport(ctx.host);
     const teleport = ctx.host.config.get().teleport;
-    await tunnels.stopCluster(proxy);
+    await Promise.all([tunnels.stopCluster(proxy), forwards.stopCluster(proxy)]);
     invalidateCaches(proxy);
     await ctx.host.config.update({
       teleport: { ...teleport, proxies: teleport.proxies.filter((p) => !sameProxy(p, proxy)), pins: teleport.pins.filter((p) => !sameProxy(p.proxy, proxy)) },
@@ -353,7 +369,7 @@ const kubeList = defineCommand({
   id: 'teleport.kube.list',
   title: 'List Teleport Kubernetes clusters',
   description:
-    'Kubernetes clusters reachable through Teleport (tsh kube ls) across every logged-in cluster, or one when proxy is given, with the one selected in kubeconfig and whether each is pinned. Cached for 30 seconds per cluster unless refresh is true.',
+    'Kubernetes clusters reachable through Teleport (tsh kube ls) across every logged-in cluster, or one when proxy is given, with the one selected in kubeconfig and whether each is pinned or protected. Cached for 30 seconds per cluster unless refresh is true.',
   scope: 'global',
   input: z.object({ proxy: ProxyInput, refresh: z.boolean().optional() }),
   handler: async ({ proxy, refresh }, ctx): Promise<TeleportKubeCluster[]> => listKubeClusters(ctx.host, proxy, Boolean(refresh)),
@@ -449,6 +465,167 @@ const kubeCancel = defineCommand({
   handler: async ({ runId }, ctx) => ({ cancelled: getTeleport(ctx.host).kube.cancel(runId) }),
 });
 
+// ---------- kubernetes actions and port forwards ----------
+
+const ConfirmClusterInput = z.string().max(253).optional().describe('For a protected cluster: its name, as the user typed it to confirm. Agents cannot act on protected clusters unless the user allows it in Settings.');
+
+/**
+ * Writes go only to a Kubernetes cluster `tsh kube ls` lists under exactly that name. `tsh kube
+ * login` also accepts other names for a cluster (an auto-discovered cluster's short name), which
+ * would reach a protected cluster without matching its entry in the protected list.
+ */
+async function requireExactKube(host: HostApi, proxy: string, cluster: string): Promise<void> {
+  if ((await listKubeClusters(host, proxy, false)).some((k) => k.name === cluster)) return;
+  if ((await listKubeClusters(host, proxy, true)).some((k) => k.name === cluster)) return;
+  throw new QuiverError('NOT_FOUND', `No Kubernetes cluster is named exactly "${cluster}" on ${proxy}. Actions and port forwards take the exact name from teleport.kube.list.`, { proxy, cluster });
+}
+
+/**
+ * Protected clusters: from Quiver (and the command line) the user's typed cluster name has to come
+ * with the call; agents are refused outright unless Settings > Teleport allows them. Port forwards
+ * change nothing in the cluster, so only agents are held back from them.
+ */
+async function guardProtected(host: HostApi, caller: Caller, proxy: string, cluster: string, confirmCluster: string | undefined, what: 'action' | 'port forward'): Promise<void> {
+  await requireExactKube(host, proxy, cluster);
+  const teleport = host.config.get().teleport;
+  if (!isKubeProtected(teleport.protectedKubes, proxy, cluster)) return;
+  if (caller === 'mcp') {
+    if (teleport.agentActionsOnProtected) return;
+    throw new QuiverError('MUTATION_BLOCKED', `${cluster} is a protected cluster: agents may not run Kubernetes ${what}s on it. Run it from Quiver, or allow agents on protected clusters in Settings > Teleport.`, {
+      reason: 'protected-cluster',
+      cluster,
+    });
+  }
+  if (what === 'action' && confirmCluster !== cluster) {
+    throw new QuiverError('INVALID_INPUT', `${cluster} is a protected cluster: type its name to confirm the action (confirmCluster).`, { reason: 'protected-cluster', needs: 'confirmCluster', cluster });
+  }
+}
+
+const KUBE_ACTION_SUMMARY =
+  'scale (deployments, statefulsets, replicasets; 0-1000 replicas), rollout-restart, rollout-undo (optionally toRevision), rollout-pause and rollout-resume (deployments), delete (one pod or one job, by name), cordon, uncordon, set-image (one container, a strict image reference) and cronjob-trigger (create job --from=cronjob/<name>)';
+
+const kubeAction = defineCommand({
+  id: 'teleport.kube.action',
+  title: 'Run a Kubernetes action',
+  description:
+    `Runs one predefined kubectl write action against a Kubernetes cluster reached through Teleport: ${KUBE_ACTION_SUMMARY}. ` +
+    'Every action changes exactly one named object in an explicit namespace: no selectors, no --all, no command, arguments, flags, YAML or patches; exec, apply, edit, patch and drain do not exist here. ' +
+    'Check the exact command first with teleport.kube.action.preview. A protected cluster refuses agents unless the user allows it in Settings. Recorded in the local history as an action. ' +
+    'Returns stdout, stderr, the exit code and the exact command that ran.',
+  scope: 'global',
+  mutating: true,
+  input: z.object({
+    proxy: ProxyInput,
+    cluster: KubeClusterInput,
+    action: KubeActionSchema,
+    runId: RunIdInput.optional(),
+    timeoutSeconds: z.number().int().min(1).max(600).optional().describe('Stop the action after this long (default 60)'),
+    confirmCluster: ConfirmClusterInput,
+  }),
+  // An agent is refused on a protected cluster whatever the user answers, so it is never asked about one.
+  beforeApproval: async ({ proxy, cluster }, ctx) => guardProtected(ctx.host, ctx.caller, await resolveKubeProxy(ctx.host, proxy, cluster), cluster, undefined, 'action'),
+  handler: async ({ proxy: proxyArg, cluster, action, runId, timeoutSeconds, confirmCluster }, ctx): Promise<KubeActionResult> => {
+    const proxy = await resolveKubeProxy(ctx.host, proxyArg, cluster);
+    await guardProtected(ctx.host, ctx.caller, proxy, cluster, confirmCluster, 'action');
+    return getTeleport(ctx.host).kube.runAction({ proxy, cluster, action: resolveKubeAction(action), runId, caller: ctx.caller, timeoutMs: (timeoutSeconds ?? 60) * 1000 });
+  },
+});
+
+const kubeActionPreview = defineCommand({
+  id: 'teleport.kube.action.preview',
+  title: 'Preview a Kubernetes action',
+  description:
+    'The exact command line and argv teleport.kube.action would spawn for an action, without running anything, plus the action with its defaults filled in (pass it back to run exactly this), the object it changes, whether it is destructive (delete, scale to 0, rollout-undo, cordon) and whether the cluster is protected.',
+  scope: 'global',
+  input: z.object({ proxy: ProxyInput, cluster: KubeClusterInput, action: KubeActionSchema }),
+  handler: async ({ proxy: proxyArg, cluster, action }, ctx): Promise<KubeActionPreview> => {
+    const proxy = await resolveKubeProxy(ctx.host, proxyArg, cluster);
+    await requireExactKube(ctx.host, proxy, cluster);
+    const resolved = resolveKubeAction(action);
+    const preview = await getTeleport(ctx.host).kube.previewAction(proxy, cluster, resolved);
+    return {
+      ...preview,
+      action: resolved,
+      target: kubeActionTarget(resolved),
+      destructive: isDestructiveKubeAction(resolved),
+      protected: isKubeProtected(ctx.host.config.get().teleport.protectedKubes, proxy, cluster),
+    };
+  },
+});
+
+/** Agents may protect clusters (it only makes Quiver stricter), so the list is capped to keep it from growing without end. */
+const MAX_PROTECTED_KUBES = 200;
+
+function refuseAgentUnprotect(caller: Caller, cluster: string, on: boolean): void {
+  if (!on && caller === 'mcp') throw new QuiverError('MUTATION_BLOCKED', 'Only the user can unprotect a cluster, from Quiver.', { reason: 'protected-cluster', cluster });
+}
+
+const kubeProtect = defineCommand({
+  id: 'teleport.kube.protect',
+  title: 'Protect a Kubernetes cluster',
+  description:
+    'Marks a Kubernetes cluster as protected, or no longer protected. Actions on a protected cluster need its name typed in Quiver, and agents are refused actions and port forwards on it unless the user allows them in Settings. Agents may protect a cluster (by the exact name teleport.kube.list gives) but never unprotect one.',
+  scope: 'global',
+  mutating: ({ protected: on }) => !on,
+  input: z.object({ proxy: ProxyInput, cluster: KubeClusterInput, protected: z.boolean() }),
+  // Refused whatever the user answers, so an agent's unprotect is never asked about.
+  beforeApproval: async ({ cluster, protected: on }, ctx) => refuseAgentUnprotect(ctx.caller, cluster, on),
+  handler: async ({ proxy: proxyArg, cluster, protected: on }, ctx) => {
+    refuseAgentUnprotect(ctx.caller, cluster, on);
+    const proxy = await resolveKubeProxy(ctx.host, proxyArg, cluster);
+    // An agent's entry under a name tsh does not list would protect nothing while looking as if it did.
+    if (on && ctx.caller === 'mcp') await requireExactKube(ctx.host, proxy, cluster);
+    const teleport = ctx.host.config.get().teleport;
+    if (on && !isKubeProtected(teleport.protectedKubes, proxy, cluster) && teleport.protectedKubes.length >= MAX_PROTECTED_KUBES) {
+      throw new QuiverError('INVALID_INPUT', `At most ${MAX_PROTECTED_KUBES} Kubernetes clusters can be protected. Unprotect one in Quiver first.`, { max: MAX_PROTECTED_KUBES });
+    }
+    await ctx.host.config.update({ teleport: { ...teleport, protectedKubes: setKubeProtected(teleport.protectedKubes, { proxy, name: cluster }, on) } });
+    ctx.host.emit('teleport.changed', { reason: 'protected' });
+    return { proxy, cluster, protected: on };
+  },
+});
+
+const ForwardFilter = { proxy: z.string().optional().describe('Only this Teleport cluster'), cluster: KubeClusterInput.optional() };
+
+const portForwardStart = defineCommand({
+  id: 'teleport.kube.portForward.start',
+  title: 'Forward a Kubernetes port',
+  description:
+    'Runs tsh kubectl port-forward --address 127.0.0.1 to one pod, service or deployment and keeps it running until stopped, on a free local port unless localPort is given. Returns the forward with its local URL; a running forward to the same target and port is reused. ' +
+    'Stopped by teleport.kube.portForward.stop, by logging out of the cluster and when Quiver quits. A protected cluster refuses agents unless the user allows it in Settings.',
+  scope: 'global',
+  mutating: true,
+  input: z.object({ proxy: ProxyInput, cluster: KubeClusterInput, ...KubePortForwardSpecSchema.shape }),
+  beforeApproval: async ({ proxy, cluster }, ctx) => guardProtected(ctx.host, ctx.caller, await resolveKubeProxy(ctx.host, proxy, cluster), cluster, undefined, 'port forward'),
+  handler: async ({ proxy: proxyArg, cluster, kind, name, namespace, remotePort, localPort }, ctx): Promise<KubePortForward> => {
+    const proxy = await resolveKubeProxy(ctx.host, proxyArg, cluster);
+    await guardProtected(ctx.host, ctx.caller, proxy, cluster, undefined, 'port forward');
+    return getTeleport(ctx.host).forwards.start({ proxy, cluster, spec: { kind, name, namespace, remotePort, localPort } });
+  },
+});
+
+const portForwardList = defineCommand({
+  id: 'teleport.kube.portForward.list',
+  title: 'List Kubernetes port forwards',
+  description: 'The running port forwards (all, one Teleport cluster or one Kubernetes cluster) with their target, local URL, state and last output. Forwards that exited on their own stay listed as exited until stopped.',
+  scope: 'global',
+  input: z.object(ForwardFilter),
+  handler: async ({ proxy, cluster }, ctx): Promise<KubePortForward[]> =>
+    getTeleport(ctx.host)
+      .forwards.list()
+      .filter((f) => (!proxy || sameProxy(f.proxy, proxy)) && (!cluster || f.cluster === cluster)),
+});
+
+const portForwardStop = defineCommand({
+  id: 'teleport.kube.portForward.stop',
+  title: 'Stop a Kubernetes port forward',
+  description: 'Stops a port forward by id, with every process tsh started for it, and removes it from the list (also for one that already exited).',
+  scope: 'global',
+  mutating: true,
+  input: z.object({ id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/) }),
+  handler: async ({ id }, ctx) => ({ stopped: await getTeleport(ctx.host).forwards.stop(id) }),
+});
+
 const HistoryFilter = { proxy: z.string().optional().describe('Only this Teleport cluster'), cluster: KubeClusterInput.optional() };
 
 function historyMatches(e: KubeHistoryEntry, proxy: string | undefined, cluster: string | undefined): boolean {
@@ -459,7 +636,7 @@ const kubeHistoryList = defineCommand({
   id: 'teleport.kube.history.list',
   title: 'Kubernetes query history',
   description:
-    'Past Kubernetes queries on this machine, newest first, pinned ones included: cluster, operation and parameters (never a command line), time, exit code and duration, plus the namespace last used when a cluster is given. Entries are validated like live queries; tampered ones are left out.',
+    'Past Kubernetes queries and actions on this machine, newest first, pinned ones included: kind (query or action), cluster, operation or action and its parameters (never a command line), time, exit code and duration, plus the namespace last used when a cluster is given. Entries are validated like live calls; tampered ones are left out.',
   scope: 'global',
   input: z.object({ ...HistoryFilter, limit: z.number().int().min(1).max(500).optional() }),
   handler: async ({ proxy, cluster, limit }, ctx): Promise<{ entries: KubeHistoryEntry[]; lastNamespace: string | null }> => {
@@ -470,17 +647,61 @@ const kubeHistoryList = defineCommand({
   },
 });
 
+/**
+ * The history entry a rerun names, read once per call: the registry hands the same input object to `mutating`,
+ * `beforeApproval` and the handler, so the entry the gate saw (a query or an action) is the one that runs.
+ */
+const rerunEntries = new WeakMap<object, Promise<KubeHistoryEntry | undefined>>();
+
+function historyEntry(host: HostApi, input: { id: string }): Promise<KubeHistoryEntry | undefined> {
+  let entry = rerunEntries.get(input);
+  if (!entry) {
+    entry = getTeleport(host)
+      .kube.loadHistory()
+      .then((entries) => entries.find((e) => e.id === input.id));
+    rerunEntries.set(input, entry);
+  }
+  return entry;
+}
+
+/**
+ * Agents rerun queries only. An action rerun would be decided by the agent rules for this command instead of those
+ * for teleport.kube.action, and its approval would show an entry id instead of the action, so an agent runs the
+ * entry's action (teleport.kube.history.list returns it) through teleport.kube.action.
+ */
+function refuseAgentActionRerun(caller: Caller, entry: KubeHistoryEntry): void {
+  if (caller !== 'mcp' || entry.kind !== 'action') return;
+  throw new QuiverError(
+    'MUTATION_BLOCKED',
+    `History entry ${entry.id} is a Kubernetes action, and agents do not rerun actions. Run it with teleport_kube_action, passing the entry's proxy, cluster and action from teleport_kube_history_list.`,
+    { reason: 'rerun-action', id: entry.id },
+  );
+}
+
 const kubeHistoryRerun = defineCommand({
   id: 'teleport.kube.history.rerun',
-  title: 'Run a Kubernetes query again',
-  description: 'Runs a history entry again on the same cluster. It goes through the same validation as teleport.kube.query.',
+  title: 'Run a Kubernetes query or action again',
+  description:
+    'Runs a history entry again on the same cluster, through the same validation as teleport.kube.query or teleport.kube.action. Running a query again is read-only; running an action again changes the cluster, so it is gated like teleport.kube.action, protected clusters included, and agents may not do it: they run the action of the entry with teleport.kube.action. A CronJob trigger gets a new job name.',
   scope: 'global',
-  input: z.object({ id: z.string(), runId: RunIdInput.optional() }),
-  handler: async ({ id, runId }, ctx): Promise<KubeRunResult> => {
+  mutating: async (input, ctx) => (await historyEntry(ctx.host, input))?.kind === 'action',
+  input: z.object({ id: z.string(), runId: RunIdInput.optional(), confirmCluster: ConfirmClusterInput }),
+  // Refused whatever the user answers, so an agent is never asked about rerunning an action.
+  beforeApproval: async (input, ctx) => {
+    const entry = await historyEntry(ctx.host, input);
+    if (entry) refuseAgentActionRerun(ctx.caller, entry);
+  },
+  handler: async (input, ctx): Promise<KubeRunResult | KubeActionResult> => {
+    const { id, runId, confirmCluster } = input;
     const kube = getTeleport(ctx.host).kube;
-    const entry = (await kube.loadHistory()).find((e) => e.id === id);
+    const entry = await historyEntry(ctx.host, input);
     if (!entry) throw new QuiverError('NOT_FOUND', `No Kubernetes history entry ${id}`);
-    return kube.run({ proxy: entry.proxy, cluster: entry.cluster, query: entry.query, runId, caller: ctx.caller, timeoutMs: 60_000, record: true });
+    if (entry.kind === 'query') return kube.run({ proxy: entry.proxy, cluster: entry.cluster, query: entry.query, runId, caller: ctx.caller, timeoutMs: 60_000, record: true });
+    refuseAgentActionRerun(ctx.caller, entry);
+    await guardProtected(ctx.host, ctx.caller, entry.proxy, entry.cluster, confirmCluster, 'action');
+    // A job name cannot be used twice, so a CronJob trigger gets a fresh one.
+    const action = entry.action.action === 'cronjob-trigger' ? resolveKubeAction({ ...entry.action, params: { ...entry.action.params, jobName: undefined } }) : resolveKubeAction(entry.action);
+    return kube.runAction({ proxy: entry.proxy, cluster: entry.cluster, action, runId, caller: ctx.caller, timeoutMs: 60_000 });
   },
 });
 
@@ -552,6 +773,12 @@ export const teleportModule = defineModule({
     kubePreview,
     kubeStreamRead,
     kubeCancel,
+    kubeAction,
+    kubeActionPreview,
+    kubeProtect,
+    portForwardStart,
+    portForwardList,
+    portForwardStop,
     kubeHistoryList,
     kubeHistoryRerun,
     kubeHistoryPin,
@@ -574,9 +801,9 @@ export const teleportModule = defineModule({
       .catch((err) => console.warn(`[quiver] teleport status failed: ${(err as Error).message}`));
   },
   onStop: async (host) => {
-    const { session, tunnels, kube } = getTeleport(host);
+    const { session, tunnels, kube, forwards } = getTeleport(host);
     session.stop();
     kube.stopAll();
-    await tunnels.stopAll();
+    await Promise.all([tunnels.stopAll(), forwards.stopAll()]);
   },
 });

@@ -1,7 +1,7 @@
-import { Component, Service, computed, inject, input, linkedSignal, model, signal } from '@angular/core';
-import type { GitDiffFile } from '@quiver/core';
-import { EmptyState, Segment, Segmented } from '@quiver/ui';
-import { codeClass, diffCode, parsePatch, splitPath, splitRows, type PatchRow, type SplitCell } from './git-format';
+import { Component, Service, computed, effect, inject, input, linkedSignal, model, signal } from '@angular/core';
+import type { GitDiffFile, GitFileContent } from '@quiver/core';
+import { DiffEditor, EmptyState, HostBridge, Segment, Segmented, Spinner } from '@quiver/ui';
+import { applyPatch, codeClass, diffCode, languageForPath, parsePatch, splitPath, splitRows, type DiffBase, type PatchRow, type SplitCell } from './git-format';
 
 export type DiffMode = 'split' | 'inline';
 
@@ -136,6 +136,70 @@ export class GitPatch {
   }
 }
 
+/** Whether a file's diff can be drawn whole: a text patch with hunks, not a conflict's combined diff. */
+function drawableWhole(f: GitDiffFile): boolean {
+  return !f.binary && f.patch !== undefined && !f.patch.startsWith('diff --cc ') && /^@@ /m.test(f.patch);
+}
+
+/**
+ * One file side by side in the shared CodeMirror merge view, whole, with unchanged stretches folded: the old side is
+ * read with `git.file.show` from the base, the new side worked out from it and the patch (`applyPatch`). When the old
+ * side cannot be had (over 2 MB, binary, gone) or the patch does not fit it, the file is drawn from its hunks instead.
+ */
+@Component({
+  selector: 'q-git-full-diff',
+  imports: [DiffEditor, GitPatch, Spinner],
+  template: `
+    @if (sides(); as s) {
+      <q-diff-editor class="rounded-none border-0" [left]="s.left" [right]="s.right" [language]="language()" data-testid="git-full-diff" [attr.data-path]="file().path" />
+    } @else if (failed()) {
+      <q-git-patch class="block h-full overflow-auto" [file]="file()" mode="split" />
+    } @else {
+      <div class="flex items-center justify-center h-full"><svg qSpinner></svg></div>
+    }
+  `,
+  host: { class: 'block h-full min-h-0' },
+})
+export class GitFullDiff {
+  private readonly host = inject(HostBridge);
+
+  readonly file = input.required<GitDiffFile>();
+  readonly base = input.required<DiffBase>();
+
+  /** The old side, kept with the file it was read for: a reload brings a new file object, and a stale side is never paired with it. */
+  private readonly loaded = signal<{ file: GitDiffFile; left: string | null } | null>(null);
+  protected readonly language = computed(() => languageForPath(this.file().path));
+  protected readonly sides = computed(() => {
+    const l = this.loaded();
+    if (!l || l.file !== this.file() || l.left === null) return null;
+    const right = applyPatch(l.left, this.file().patch ?? '');
+    return right === null ? null : { left: l.left, right };
+  });
+  protected readonly failed = computed(() => this.loaded()?.file === this.file() && !this.sides());
+
+  constructor() {
+    effect((onCleanup) => {
+      const file = this.file();
+      const base = this.base();
+      let live = true;
+      onCleanup(() => (live = false));
+      void this.read(file, base).then((left) => {
+        if (live) this.loaded.set({ file, left });
+      });
+    });
+  }
+
+  private async read(file: GitDiffFile, base: DiffBase): Promise<string | null> {
+    if (file.status === 'added') return '';
+    try {
+      const at = 'index' in base ? { index: true } : { ref: base.ref };
+      return (await this.host.invoke<GitFileContent>('git.file.show', { path: file.origPath ?? file.path, ...at })).content ?? null;
+    } catch {
+      return null;
+    }
+  }
+}
+
 /** The side-by-side / inline switch. */
 @Component({
   selector: 'q-git-diff-mode',
@@ -153,11 +217,12 @@ export class GitDiffMode {
 
 /**
  * Files with their patches: a list of the files on the left when there are several, the picked file's diff on the
- * right. Untracked files are not in a git diff; `note` explains an empty list.
+ * right, side by side as whole files when `base` says where the old sides are, else from the hunks. Untracked files
+ * are not in a git diff; `note` explains an empty list.
  */
 @Component({
   selector: 'q-git-diff-view',
-  imports: [EmptyState, GitDiffMode, GitPatch],
+  imports: [EmptyState, GitDiffMode, GitFullDiff, GitPatch],
   template: `
     @if (!files().length) {
       <q-empty-state [title]="emptyTitle()" [hint]="emptyHint()" data-testid="git-diff-empty" />
@@ -194,7 +259,15 @@ export class GitDiffMode {
               <span class="flex-1"></span>
               <q-git-diff-mode [(mode)]="mode" />
             </div>
-            <q-git-patch class="flex-1 min-h-0 overflow-auto" [file]="f" [mode]="mode()" />
+            @if (base(); as b) {
+              @if (mode() === 'split' && whole(f)) {
+                <q-git-full-diff class="flex-1 min-h-0" [file]="f" [base]="b" />
+              } @else {
+                <q-git-patch class="flex-1 min-h-0 overflow-auto" [file]="f" [mode]="mode()" />
+              }
+            } @else {
+              <q-git-patch class="flex-1 min-h-0 overflow-auto" [file]="f" [mode]="mode()" />
+            }
           </div>
         }
       </div>
@@ -208,6 +281,8 @@ export class GitDiffView {
   readonly emptyHint = input<string | null>(null);
   /** The path picked, two-way so a tab can keep it in its data. */
   readonly selected = model<string | undefined>(undefined);
+  /** Where the old sides are read from, for the whole-file view; without it (a pull request's files) only the hunks show. */
+  readonly base = input<DiffBase | null>(null);
   /** Side by side or inline, the same for every diff. */
   protected readonly mode = inject(GitDiffPrefs).mode;
 
@@ -217,6 +292,7 @@ export class GitDiffView {
   });
   protected readonly code = diffCode;
   protected readonly codeClass = codeClass;
+  protected readonly whole = drawableWhole;
 
   protected name(p: string): string {
     return splitPath(p).name;

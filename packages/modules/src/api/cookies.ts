@@ -1,4 +1,4 @@
-import { cookiesFor, expireCookies, storeCookies, type ApiResponse, type HostApi, type JarCookie, type WorkspaceApi } from '@quiver/core';
+import { QuiverError, cookiesFor, expireCookies, storeCookies, type ApiResponse, type HostApi, type JarCookie, type WorkspaceApi } from '@quiver/core';
 import type { CookieHooks } from './http';
 
 /** The workspace's cookie jar, per machine under `.quiver/local`. */
@@ -9,6 +9,23 @@ interface JarDoc {
   cipher: string;
 }
 
+/**
+ * Jars kept in memory, by workspace, by a host that cannot read the one on disk because the app encrypted it
+ * there (the headless CLI): the run gets its own jar, and the app's cookies are neither read nor replaced.
+ */
+const sealedJars = new Map<string, JarCookie[]>();
+
+/** Whether the jar on disk is one this host cannot decrypt, though the app on this machine can. */
+function sealed(host: HostApi, doc: JarDoc | JarCookie[]): boolean {
+  if (Array.isArray(doc) || !doc || typeof doc.cipher !== 'string') return false;
+  try {
+    host.secrets.decrypt(doc.cipher);
+    return false;
+  } catch (err) {
+    return err instanceof QuiverError && err.code === 'SECRET_UNAVAILABLE';
+  }
+}
+
 export async function readJar(w: WorkspaceApi, host: HostApi): Promise<JarCookie[]> {
   const doc = await w.store.readLocal<JarDoc | JarCookie[]>(COOKIES_DOC, []);
   let jar: unknown = [];
@@ -16,16 +33,18 @@ export async function readJar(w: WorkspaceApi, host: HostApi): Promise<JarCookie
   else if (doc && typeof doc.cipher === 'string') {
     try {
       jar = JSON.parse(host.secrets.decrypt(doc.cipher));
-    } catch {
-      // Written on another machine, or by another user: there is no reading it, and the next write replaces it.
-      jar = [];
+    } catch (err) {
+      // Sealed for the app on this machine: this run's own jar. Otherwise written on another machine, or by
+      // another user: there is no reading it, and the next write replaces it.
+      jar = err instanceof QuiverError && err.code === 'SECRET_UNAVAILABLE' ? (sealedJars.get(w.id) ?? []) : [];
     }
   }
   return expireCookies(Array.isArray(jar) ? (jar as JarCookie[]) : [], Date.now());
 }
 
 async function writeJar(w: WorkspaceApi, host: HostApi, jar: JarCookie[]): Promise<void> {
-  await w.store.writeLocal<JarDoc>(COOKIES_DOC, { cipher: host.secrets.encrypt(JSON.stringify(jar)) });
+  if (sealed(host, await w.store.readLocal<JarDoc | JarCookie[]>(COOKIES_DOC, []))) sealedJars.set(w.id, jar);
+  else await w.store.writeLocal<JarDoc>(COOKIES_DOC, { cipher: host.secrets.encrypt(JSON.stringify(jar)) });
   // writeLocal does not announce itself; the cookie tab and the response pane follow the jar.
   host.emit('store.changed', { workspaceId: w.id, collection: COOKIES_DOC });
 }

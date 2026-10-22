@@ -1,7 +1,7 @@
 import { NgTemplateOutlet } from '@angular/common';
-import { Component, computed, inject, input, linkedSignal, signal } from '@angular/core';
+import { Component, computed, inject, input, linkedSignal, signal, untracked } from '@angular/core';
 import { FormField, form } from '@angular/forms/signals';
-import { PALETTES, resolvePalette, type GlobalConfig, type TeleportStatus, type Variable } from '@quiver/core';
+import { PALETTES, resolvePalette, workspaceRulesFor, type AgentPermissionMode, type AgentPermissionRule, type AgentRuleAction, type GlobalConfig, type TeleportStatus, type Variable } from '@quiver/core';
 import {
   AppState,
   Button,
@@ -18,7 +18,9 @@ import {
   type TabComponent,
 } from '@quiver/ui';
 import { Copy, X } from 'lucide';
+import { AgentRulesEditor } from '../agents/rules-editor';
 import { AboutPanel } from './about-panel';
+import { CliPanel } from './cli-panel';
 
 type ThemePreference = GlobalConfig['theme'];
 
@@ -31,10 +33,10 @@ interface NetworkView {
   hasPassword: boolean;
 }
 
-/** Settings: appearance, the MCP server, Teleport, the network, global variables and About. Saved in the global config. */
+/** Settings: appearance, the MCP server and agent permissions, the command line, Teleport, the network, global variables and About. Saved in the global config. */
 @Component({
   selector: 'q-settings-tab',
-  imports: [AboutPanel, Button, Checkbox, FormField, Input, KeyValueEditor, Label, NgTemplateOutlet, Select],
+  imports: [AboutPanel, AgentRulesEditor, Button, CliPanel, Checkbox, FormField, Input, KeyValueEditor, Label, NgTemplateOutlet, Select],
   templateUrl: './settings-tab.html',
   host: { class: 'flex-1 overflow-auto p-6' },
 })
@@ -52,6 +54,9 @@ export class SettingsTab implements TabComponent {
   protected readonly variableSyntax = '{{name}}';
   protected readonly config = this.app.config;
   protected readonly mcp = this.app.mcpStatus;
+  protected readonly workspace = this.app.activeWorkspace;
+  /** The active workspace's own agent rules, kept in the global config on this machine. */
+  protected readonly workspaceRules = computed<AgentPermissionRule[]>(() => workspaceRulesFor(this.config()?.mcp ?? { workspaceRules: {} }, this.workspace()?.id));
   protected readonly teleport = invokeResource<TeleportStatus>('teleport.status', () => ({}), { workspaceId: null, refreshOnEvents: ['teleport.changed'] });
 
   /** Fields saved when they lose focus; they follow the stored values whenever the config changes. */
@@ -106,13 +111,31 @@ export class SettingsTab implements TabComponent {
     void this.update({ palette: key });
   }
 
-  protected toggleMcp(config: GlobalConfig, event: Event, key: 'enabled' | 'allowMutating'): void {
-    void this.update({ mcp: { ...config.mcp, [key]: (event.target as HTMLInputElement).checked } });
+  protected toggleMcp(config: GlobalConfig, event: Event): void {
+    // Only the field that changed: the host merges it, so a rule or a pause written since this view last read the
+    // config is not undone by an older copy of the section.
+    void this.update({ mcp: { enabled: (event.target as HTMLInputElement).checked } } as Partial<GlobalConfig>);
+  }
+
+  // The host applies each change to the permissions it holds, so two quick changes (a rule added, then the mode
+  // picked) never undo one another the way a whole section written back from this view could.
+  protected setMode(mode: AgentPermissionMode): void {
+    this.host.invoke('mcp.permissions.setMode', { mode }, null).catch((err) => this.toasts.error(err));
+  }
+
+  protected setRule(level: 'global' | 'workspace', change: { match: string; action: AgentRuleAction | null }): void {
+    this.host
+      .invoke('mcp.permissions.setRule', { level, ...change }, level === 'global' ? null : (untracked(this.workspace)?.id ?? null))
+      .catch((err) => this.toasts.error(err));
+  }
+
+  protected setPaused(event: Event): void {
+    this.host.invoke('mcp.pause', { paused: (event.target as HTMLInputElement).checked }, null).catch((err) => this.toasts.error(err));
   }
 
   protected savePort(config: GlobalConfig): void {
     const port = Number(this.fields().port);
-    if (port !== config.mcp.port) void this.update({ mcp: { ...config.mcp, port } });
+    if (port !== config.mcp.port) void this.update({ mcp: { port } } as Partial<GlobalConfig>);
   }
 
   protected saveTshPath(config: GlobalConfig): void {
@@ -122,6 +145,10 @@ export class SettingsTab implements TabComponent {
 
   protected toggleLoginOnLaunch(config: GlobalConfig, event: Event): void {
     void this.update({ teleport: { ...config.teleport, loginOnLaunch: (event.target as HTMLInputElement).checked } });
+  }
+
+  protected toggleAgentsOnProtected(config: GlobalConfig, event: Event): void {
+    void this.update({ teleport: { ...config.teleport, agentActionsOnProtected: (event.target as HTMLInputElement).checked } });
   }
 
   protected async addCluster(): Promise<void> {
