@@ -1,4 +1,4 @@
-import type { GitBranch, GitCommit, GitConflictKind, GitDiffFile, GitFileChange, GitStash, GitStatus, GitTag } from './models/git';
+import type { GitBranch, GitCommit, GitConflictKind, GitDiffFile, GitFileChange, GitStash, GitStatus, GitTag, GitWorktree } from './models/git';
 import type { GitBlame, GitBlameCommit, GitBlameLine } from './models/git';
 
 // Parsers for the git CLI's output, pure functions with unit tests. The commands in the git module ask git for
@@ -79,7 +79,7 @@ export function parseDecorations(d: string): string[] {
 }
 
 /** The `--format` that `parseBranches` reads, for `git for-each-ref refs/heads refs/remotes`. */
-export const GIT_BRANCH_FORMAT = '%(refname)%00%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track)%00%(objectname)%00%(contents:subject)%00%(committerdate:iso-strict)';
+export const GIT_BRANCH_FORMAT = '%(refname)%00%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track)%00%(objectname)%00%(contents:subject)%00%(committerdate:iso-strict)%00%(worktreepath)';
 
 export interface BranchMergeInfo {
   /** Full ref names (`refs/heads/x`) from `git for-each-ref --merged=<base>`. */
@@ -97,7 +97,7 @@ export function parseBranches(out: string, info: BranchMergeInfo = { merged: new
   const branches: GitBranch[] = [];
   for (const line of out.split('\n')) {
     if (!line.trim()) continue;
-    const [refname, name, head, upstream, track, objectname, subject, date] = line.replace(/\r$/, '').split('\0');
+    const [refname, name, head, upstream, track, objectname, subject, date, worktreePath] = line.replace(/\r$/, '').split('\0');
     const remote = refname.startsWith('refs/remotes/');
     if (remote && refname.endsWith('/HEAD')) continue;
     if (!remote && !refname.startsWith('refs/heads/')) continue;
@@ -116,6 +116,8 @@ export function parseBranches(out: string, info: BranchMergeInfo = { merged: new
       date: date ?? '',
       merged: info.merged.has(refname) && head !== '*' && !isDefault,
       gone: track === '[gone]',
+      // The current branch is checked out here; only another worktree's is worth naming.
+      ...(worktreePath && head !== '*' && !remote ? { worktreePath } : {}),
     });
   }
   return branches;
@@ -659,4 +661,95 @@ export function renderResolution(chunks: ConflictChunk[], choices: Readonly<Part
       return choice === undefined ? c.raw : resolveConflict(c, choice);
     })
     .join('');
+}
+
+// ---------- worktrees ----------
+
+/**
+ * A folder as a key to compare: forward slashes, no trailing slash, and lower case for a Windows path (a drive letter
+ * or a UNC path), where `C:\Repo` and `c:/repo` are one folder. Git prints forward slashes on Windows too.
+ */
+export function worktreePathKey(p: string): string {
+  let key = p.replace(/\\/g, '/');
+  if (key.length > 1) key = key.replace(/\/+$/, '');
+  return /^[a-zA-Z]:/.test(key) || key.startsWith('//') ? key.toLowerCase() : key;
+}
+
+export function sameWorktreePath(a: string, b: string): boolean {
+  return worktreePathKey(a) === worktreePathKey(b);
+}
+
+/** True when `child` is `parent` or a folder somewhere inside it. */
+export function isSameOrInside(child: string, parent: string): boolean {
+  const c = worktreePathKey(child);
+  const p = worktreePathKey(parent);
+  return c === p || c.startsWith(p.endsWith('/') ? p : `${p}/`);
+}
+
+/**
+ * `git worktree list --porcelain -z`: one record per worktree, its attributes NUL-terminated and the record ended by
+ * an empty one. The main worktree comes first; `currentPath`, the top of the worktree the workspace is in, marks
+ * `current`. Before the first commit HEAD is all zeros, given as null. Git before 2.36 has no `-z`: its
+ * `--porcelain` output, one attribute per line, is read the same way.
+ */
+export function parseWorktreeList(out: string, currentPath?: string): GitWorktree[] {
+  const list: Omit<GitWorktree, 'main' | 'current'>[] = [];
+  let wt: Omit<GitWorktree, 'main' | 'current'> | null = null;
+  for (const token of out.includes('\0') ? out.split('\0') : out.split(/\r?\n/)) {
+    if (!token.trim()) {
+      if (wt) list.push(wt);
+      wt = null;
+      continue;
+    }
+    const space = token.indexOf(' ');
+    const key = space < 0 ? token : token.slice(0, space);
+    const value = space < 0 ? '' : token.slice(space + 1);
+    if (key === 'worktree') {
+      if (wt) list.push(wt);
+      wt = { path: value, head: null, branch: null, detached: false, bare: false, locked: false, prunable: false };
+      continue;
+    }
+    if (!wt) continue;
+    if (key === 'HEAD') wt.head = /^0+$/.test(value) ? null : value;
+    else if (key === 'branch') wt.branch = value.replace(/^refs\/heads\//, '');
+    else if (key === 'detached') wt.detached = true;
+    else if (key === 'bare') wt.bare = true;
+    else if (key === 'locked') {
+      wt.locked = true;
+      if (value) wt.lockReason = value;
+    } else if (key === 'prunable') {
+      wt.prunable = true;
+      if (value) wt.prunableReason = value;
+    }
+  }
+  if (wt) list.push(wt);
+  return list.map((w, i) => ({ ...w, main: i === 0, current: currentPath !== undefined && sameWorktreePath(w.path, currentPath) }));
+}
+
+/** A branch name as one folder name: `/` and the characters Windows refuses in a file name become `-`. */
+export function worktreeFolderName(branch: string): string {
+  return branch.replace(/[\\/<>:"|?*\x00-\x1f]+/g, '-').replace(/^-+|-+$/g, '') || 'worktree';
+}
+
+/**
+ * Where a new worktree goes by default: `<folder holding the main worktree>/<its name>.worktrees/<branch, / as ->`,
+ * so worktrees sit together beside the repository rather than inside it. Written with the main path's separator.
+ */
+export function defaultWorktreePath(mainPath: string, branch: string): string {
+  const sep = mainPath.includes('\\') ? '\\' : '/';
+  const trimmed = mainPath.length > 1 ? mainPath.replace(/[\\/]+$/, '') : mainPath;
+  const cut = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+  const parent = cut >= 0 ? trimmed.slice(0, cut) : '.';
+  return [parent, `${trimmed.slice(cut + 1)}.worktrees`, worktreeFolderName(branch)].join(sep);
+}
+
+/**
+ * The branch and worktree in git's refusal to check out or delete a branch checked out in another worktree:
+ * "'x' is already checked out at '<path>'" (newer git: "is already used by worktree at"), and "cannot delete branch
+ * 'x' used by worktree at '<path>'" (older git: "checked out at"). Null for any other message. The path runs to the
+ * last quote on its line, since a folder name may hold a quote of its own.
+ */
+export function worktreeRefusal(message: string): { branch: string; path: string } | null {
+  const m = /'([^']+)' is already (?:checked out|used by worktree) at '(.+)'[ \t\r]*$/m.exec(message) ?? /branch '([^']+)' (?:used by worktree|checked out) at '(.+)'[ \t\r]*$/im.exec(message);
+  return m ? { branch: m[1], path: m[2] } : null;
 }

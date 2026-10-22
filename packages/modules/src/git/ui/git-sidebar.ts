@@ -26,6 +26,7 @@ import {
 import { GitActions } from './git-actions';
 import { injectGitChanged } from './git-events';
 import { ago, codeClass, codeWord, errorReason, groupChanges, splitPath } from './git-format';
+import { GitWorktreesSection } from './worktrees-section';
 
 /** How often the status is read while the sidebar is open: edits to working files are not watched by the host. */
 const STATUS_EVERY_MS = 5000;
@@ -173,7 +174,7 @@ function withOrigin(files: GitFileChange[]): string[] {
 /** The workspace repository: branch and remote, the operation in progress, the commit box, the changed files, the stashes and the branches. */
 @Component({
   selector: 'q-git-sidebar',
-  imports: [Button, Checkbox, EmptyState, FormField, GitChangeGroup, Icon, IconButton, SectionHeader, Spinner, TextArea],
+  imports: [Button, Checkbox, EmptyState, FormField, GitChangeGroup, GitWorktreesSection, Icon, IconButton, SectionHeader, Spinner, TextArea],
   template: `
     @if (statusError(); as error) {
       @if (!current()) {
@@ -364,6 +365,8 @@ function withOrigin(files: GitFileChange[]): string[] {
         }
       }
 
+      <q-git-worktrees-section />
+
       <!-- Views -->
       <q-section-header title="Views" class="mt-2" />
       <button type="button" class="flex items-center gap-2 px-3 h-7 text-[13px] hover:bg-elevated text-left" data-testid="git-open-branches" (click)="actions.openBranches()">
@@ -408,8 +411,9 @@ export class GitSidebar {
   });
 
   protected readonly groups = computed(() => groupChanges(this.current()?.files ?? []));
-  protected readonly localBranches = computed(() => (this.branches.value() ?? []).filter((b) => !b.remote));
-  protected readonly remoteCount = computed(() => (this.branches.value() ?? []).filter((b) => b.remote && !b.name.endsWith('/HEAD')).length);
+  // The list read for the workspace on screen only: another workspace's (another worktree's) would mark its branch current.
+  protected readonly localBranches = computed(() => (this.branches.current() ?? []).filter((b) => !b.remote));
+  protected readonly remoteCount = computed(() => (this.branches.current() ?? []).filter((b) => b.remote && !b.name.endsWith('/HEAD')).length);
   protected readonly branchTitle = computed(() => {
     const s = this.current();
     if (!s) return '';

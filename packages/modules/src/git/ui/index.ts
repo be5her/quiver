@@ -11,6 +11,7 @@ import { GitStatusItem } from './git-status-item';
 import { GitHistoryTab } from './history-tab';
 import { GitPrTab } from './pr-tab';
 import { GitPrsTab } from './prs-tab';
+import { GitWorktreeActions } from './worktree-actions';
 
 export const gitModuleUI = defineModuleUI({
   id: 'git',
@@ -31,6 +32,7 @@ export const gitModuleUI = defineModuleUI({
   },
   actions: () => {
     const git = inject(GitActions);
+    const worktrees = inject(GitWorktreeActions);
     const app = inject(AppState);
     const hasWorkspace = () => untracked(app.hasWorkspace);
     return [
@@ -51,6 +53,7 @@ export const gitModuleUI = defineModuleUI({
       { id: 'git.ui.prsReview', title: 'Pull requests waiting on my review', group: 'Git', keywords: ['github', 'pr', 'review'], run: () => git.openPullRequests({ filter: 'review-requested', view: 'list' }), when: hasWorkspace },
       { id: 'git.ui.prNew', title: 'New pull request', group: 'Git', keywords: ['github', 'pr', 'create'], run: () => git.openPullRequests({ view: 'new' }), when: hasWorkspace },
       { id: 'git.ui.blame', title: 'Blame file', group: 'Git', keywords: ['git', 'blame', 'annotate', 'who changed'], run: () => git.blameFromPalette(), when: hasWorkspace },
+      { id: 'git.ui.newWorktree', title: 'New worktree', group: 'Git', keywords: ['git', 'worktree', 'branch', 'folder'], run: () => void worktrees.newWorktree(), when: hasWorkspace },
     ];
   },
 });

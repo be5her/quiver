@@ -133,6 +133,7 @@ export class Host {
       web: opts.web,
       emit: (event, payload) => this.emit(event, payload),
       dialogs: opts.pickFile ? { pickFile: opts.pickFile } : undefined,
+      revealFolder: opts.revealFolder,
       approvals: { request: (request, signal) => this.approvals.request(request, signal) },
     };
 

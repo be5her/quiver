@@ -23,6 +23,8 @@ export interface GitStatus {
   files: GitFileChange[];
   /** True while a merge, rebase, cherry-pick or revert is in progress. */
   operation?: 'merge' | 'rebase' | 'cherry-pick' | 'revert';
+  /** Which worktree this is; `git.status` always sets it. */
+  worktree?: GitWorktreeInfo;
 }
 
 export interface GitBranch {
@@ -43,6 +45,8 @@ export interface GitBranch {
   merged: boolean;
   /** It has an upstream that no longer exists on the remote (a fetch pruned it). */
   gone: boolean;
+  /** The worktree it is checked out in, when that is another worktree than this one; git refuses to check it out here too. */
+  worktreePath?: string;
 }
 
 export interface GitTag {
@@ -432,3 +436,62 @@ export const GitPrDraftInputSchema = z.object({
   base: GitArgSchema.optional().describe("The branch (or ref) the pull request goes into. Default: the remote's default branch (origin/<default>), else a local main or master"),
   includePatch: z.boolean().default(false).describe('Add the base...HEAD diff as patch.text, cut at 200 KB (patch.truncated)'),
 });
+
+// ---------- worktrees ----------
+
+/** Where `git.status` was read: the main worktree, or a linked one (`git worktree add`) of the repository at `mainPath`. */
+export interface GitWorktreeInfo {
+  linked: boolean;
+  /** The main worktree's folder; this worktree's own when it is the main one. */
+  mainPath: string;
+}
+
+/** One worktree of the repository, from `git worktree list --porcelain -z`. */
+export interface GitWorktree {
+  path: string;
+  /** The commit checked out; null in a bare repository or before the first commit. */
+  head: string | null;
+  /** The branch checked out (`main`, not `refs/heads/main`); null when detached or bare. */
+  branch: string | null;
+  detached: boolean;
+  bare: boolean;
+  /** Locked with `git worktree lock`: prune and remove leave it alone. */
+  locked: boolean;
+  lockReason?: string;
+  /** Its folder is gone; `git.worktree.prune` removes what git keeps about it. */
+  prunable: boolean;
+  prunableReason?: string;
+  /** The repository's main worktree, always listed first. */
+  main: boolean;
+  /** The worktree the workspace is in. */
+  current: boolean;
+}
+
+/** A worktree's folder as given by a caller: absolute, or relative to the folder holding the main worktree. */
+export const GitWorktreePathSchema = GitArgSchema.refine((s) => !/[\0\r\n]/.test(s), { message: 'must not contain a line break' }).describe(
+  "The worktree's folder: absolute, or relative to the folder that holds the main worktree",
+);
+
+export const GitWorktreeAddInputSchema = z.object({
+  path: GitWorktreePathSchema.optional().describe(
+    'Where the worktree goes: absolute, or relative to the folder that holds the main worktree. Default: <that folder>/<repository name>.worktrees/<branch, with / as ->. Refused inside another worktree or in a folder that is not empty.',
+  ),
+  branch: GitArgSchema.optional().describe('An existing branch to check out in it; a branch checked out in another worktree is refused'),
+  newBranch: GitArgSchema.optional().describe('A new branch to create in it, at from'),
+  from: GitArgSchema.optional().describe('The commit, branch or tag newBranch (or a detached worktree) starts at; default HEAD'),
+  detach: z.boolean().default(false).describe('Check out from (default HEAD) without a branch'),
+});
+export const GitWorktreeRemoveInputSchema = z.object({
+  path: GitWorktreePathSchema,
+  force: z.boolean().default(false).describe('Remove it even with changes or untracked files in it, which are lost'),
+});
+export const GitWorktreeLockInputSchema = z.object({
+  path: GitWorktreePathSchema,
+  reason: z
+    .string()
+    .trim()
+    .min(1)
+    .refine((s) => !/[\0\r\n]/.test(s), { message: 'must be one line' })
+    .optional(),
+});
+export const GitWorktreePathInputSchema = z.object({ path: GitWorktreePathSchema });

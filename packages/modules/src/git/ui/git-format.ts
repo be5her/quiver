@@ -276,7 +276,8 @@ export function refMatches(ref: Pick<GitBranch | GitTag, 'name' | 'subject'>, fi
 
 /** The local branches "Clean up" offers: merged or gone, never the current one. */
 export function cleanupCandidates(branches: GitBranch[]): GitBranch[] {
-  return branches.filter((b) => !b.remote && !b.current && (b.merged || b.gone));
+  // A branch another worktree has checked out cannot be deleted until that worktree goes or switches.
+  return branches.filter((b) => !b.remote && !b.current && !b.worktreePath && (b.merged || b.gone));
 }
 
 /** `origin/feature` as its remote and the branch's name there. The remote is the part before the first slash. */

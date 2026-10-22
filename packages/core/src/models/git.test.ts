@@ -10,6 +10,9 @@ import {
   GitCherryPickInputSchema,
   GitDiffInputSchema,
   GitDiscardInputSchema,
+  GitWorktreeAddInputSchema,
+  GitWorktreeLockInputSchema,
+  GitWorktreeRemoveInputSchema,
   GitFileShowInputSchema,
   GitLogInputSchema,
   GitMergeInputSchema,
@@ -93,5 +96,22 @@ describe('branch management inputs', () => {
     expect(GitStashApplyInputSchema.parse({ index: 0 })).toEqual({ index: 0, pop: false });
     expect(GitDiscardInputSchema.parse({ paths: ['a'] })).toEqual({ paths: ['a'], staged: false });
     expect(GitFileShowInputSchema.parse({ path: 'a', ref: 'HEAD' })).toEqual({ path: 'a', ref: 'HEAD', index: false });
+  });
+});
+
+describe('worktree inputs', () => {
+  it('refuses option-like folders, branches and refs, and line breaks in a folder or a lock reason', () => {
+    expect(GitWorktreeAddInputSchema.safeParse({ path: '--force', newBranch: 'x' }).success).toBe(false);
+    expect(GitWorktreeAddInputSchema.safeParse({ newBranch: '-b' }).success).toBe(false);
+    expect(GitWorktreeAddInputSchema.safeParse({ branch: 'x', from: '--orphan' }).success).toBe(false);
+    expect(GitWorktreeRemoveInputSchema.safeParse({ path: 'a\nb' }).success).toBe(false);
+    expect(GitWorktreeLockInputSchema.safeParse({ path: 'a', reason: 'one\ntwo' }).success).toBe(false);
+    expect(GitWorktreeLockInputSchema.safeParse({ path: 'a', reason: '  ' }).success).toBe(false);
+  });
+
+  it('takes folders with spaces and fills the defaults', () => {
+    expect(GitWorktreeAddInputSchema.parse({ newBranch: 'feat/x', path: 'C:\\code\\my repo.worktrees\\x' })).toEqual({ newBranch: 'feat/x', path: 'C:\\code\\my repo.worktrees\\x', detach: false });
+    expect(GitWorktreeRemoveInputSchema.parse({ path: '../x' })).toEqual({ path: '../x', force: false });
+    expect(GitWorktreeLockInputSchema.parse({ path: 'x', reason: ' on a usb disk ' })).toEqual({ path: 'x', reason: 'on a usb disk' });
   });
 });

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, watch, type FSWatcher } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, watch, type FSWatcher } from 'node:fs';
 import path from 'node:path';
 import {
   GIT_BRANCH_FORMAT,
@@ -15,7 +15,10 @@ import {
   parseStashes,
   parseStatusV2,
   parseTags,
+  parseWorktreeList,
+  sameWorktreePath,
   splitPatch,
+  worktreeRefusal,
   type GitBranch,
   type GitCommit,
   type GitDiffFile,
@@ -24,6 +27,8 @@ import {
   type GitStash,
   type GitStatus,
   type GitTag,
+  type GitWorktree,
+  type GitWorktreeInfo,
   type HostApi,
   type WorkspaceApi,
 } from '@quiver/core';
@@ -145,7 +150,57 @@ export async function repoDirs(cwd: string): Promise<RepoDirs> {
     throw new QuiverError('REQUEST_FAILED', stderr || 'git rev-parse failed', { exitCode: result.code });
   }
   const [gitDir, common, top] = result.stdout.split(/\r?\n/);
-  return { gitDir, commonDir: path.resolve(cwd, common || gitDir), root: top ? path.resolve(top) : cwd };
+  // Resolved through the file system, so the two compare as folders: git prints the git dir as its real path
+  // (`C:/x/.git`, junctions and `subst` drives resolved, the drive letter upper case) but the common dir of the main
+  // worktree as `.git`, relative to `cwd`, which is the workspace folder as it was opened (`c:\x`, or a junction).
+  return { gitDir: realFolder(path.resolve(gitDir)), commonDir: realFolder(path.resolve(cwd, common || gitDir)), root: top ? path.resolve(top) : cwd };
+}
+
+/** A folder by its real path when it exists: links and junctions followed, and on Windows the case as on disk. */
+function realFolder(folder: string): string {
+  try {
+    return realpathSync.native(folder);
+  } catch {
+    return folder;
+  }
+}
+
+/** True in a linked worktree, whose git dir (`<common>/worktrees/<name>`) is apart from the common one. */
+function isLinked(dirs: RepoDirs): boolean {
+  return !sameWorktreePath(dirs.gitDir, dirs.commonDir);
+}
+
+/**
+ * Which worktree a repository folder is: linked when it has a git dir of its own (`<common>/worktrees/<name>`) apart
+ * from the common one. The main worktree is the common dir's parent in the usual layout; a bare repository or one
+ * with a separate git dir is asked (`git worktree list`, which always lists the main worktree first).
+ */
+async function worktreeInfo(dirs: RepoDirs): Promise<GitWorktreeInfo> {
+  if (!isLinked(dirs)) return { linked: false, mainPath: dirs.root };
+  if (path.basename(dirs.commonDir) === '.git') return { linked: true, mainPath: path.dirname(dirs.commonDir) };
+  const [main] = await worktrees(dirs.root);
+  return { linked: true, mainPath: main?.path ?? path.dirname(dirs.commonDir) };
+}
+
+/** Every worktree of the repository, the main one first, with native paths. */
+export async function worktrees(cwd: string): Promise<GitWorktree[]> {
+  const root = await repoRoot(cwd);
+  let result = await git(root, ['worktree', 'list', '--porcelain', '-z'], { allowFailure: true });
+  // `-z` came with git 2.36 (Ubuntu 22.04 has 2.34); before it, the porcelain output is one attribute per line.
+  if (result.code !== 0 && /unknown switch|usage:/i.test(result.stderr)) result = await git(root, ['worktree', 'list', '--porcelain'], { allowFailure: true });
+  if (result.code !== 0) throw gitFailure(['worktree', 'list'], result);
+  return parseWorktreeList(result.stdout, root).map((w) => ({ ...w, path: path.normalize(w.path) }));
+}
+
+/**
+ * Git's refusal to check out or delete a branch that another worktree has checked out, as a message naming that
+ * worktree (details.reason "checked-out-elsewhere", details.path); any other error as it was.
+ */
+export function inOtherWorktree(err: unknown, what: string): unknown {
+  const found = err instanceof QuiverError ? worktreeRefusal(err.message) : null;
+  if (!found) return err;
+  const where = path.normalize(found.path);
+  return new QuiverError('INVALID_INPUT', `${found.branch} is checked out in the worktree at ${where}; ${what}`, { reason: 'checked-out-elsewhere', branch: found.branch, path: where });
 }
 
 /** The repository root of a workspace folder, for commands that run git themselves. */
@@ -169,7 +224,8 @@ export async function status(cwd: string, options: { files?: boolean } = {}): Pr
     (name) => existsSync(path.join(dirs.gitDir, name)),
     (name) => readFileSync(path.join(dirs.gitDir, name), 'utf8'),
   );
-  return operation ? { ...parsed, operation } : parsed;
+  const worktree = await worktreeInfo(dirs);
+  return operation ? { ...parsed, operation, worktree } : { ...parsed, worktree };
 }
 
 /**
@@ -194,12 +250,18 @@ export async function defaultBranch(root: string): Promise<{ ref: string; name: 
 export async function branches(cwd: string): Promise<GitBranch[]> {
   const root = await repoRoot(cwd);
   const base = await defaultBranch(root);
-  const [list, merged] = await Promise.all([
-    git(root, ['for-each-ref', `--format=${GIT_BRANCH_FORMAT}`, '--sort=-committerdate', 'refs/heads', 'refs/remotes']),
+  const listArgs = (format: string) => ['for-each-ref', `--format=${format}`, '--sort=-committerdate', 'refs/heads', 'refs/remotes'];
+  const [listed, merged] = await Promise.all([
+    git(root, listArgs(GIT_BRANCH_FORMAT), { allowFailure: true }),
     git(root, ['for-each-ref', `--merged=${base?.ref ?? 'HEAD'}`, '--format=%(refname)', 'refs/heads', 'refs/remotes'], { allowFailure: true }),
   ]);
+  // `%(worktreepath)` came with git 2.23; an older git refuses the whole format, and then no branch names a worktree.
+  let list = listed;
+  if (list.code !== 0 && /worktreepath/.test(list.stderr)) list = await git(root, listArgs(GIT_BRANCH_FORMAT.replace('%00%(worktreepath)', '')), { allowFailure: true });
+  if (list.code !== 0) throw gitFailure(['for-each-ref'], list);
   const refs = merged.code === 0 ? merged.stdout.split(/\r?\n/).filter(Boolean) : [];
-  return parseBranches(list.stdout, { merged: new Set(refs), ...(base ? { defaultBranch: base.name } : {}) });
+  const parsed = parseBranches(list.stdout, { merged: new Set(refs), ...(base ? { defaultBranch: base.name } : {}) });
+  return parsed.map((b) => (b.worktreePath ? { ...b, worktreePath: path.normalize(b.worktreePath) } : b));
 }
 
 export async function tags(cwd: string): Promise<GitTag[]> {
@@ -402,13 +464,16 @@ export async function remoteDefaultBranch(root: string, remote: string, interact
 
 const watchers = new Map<string, { close(): void }>();
 
-type WatchReason = 'status' | 'branches' | 'stashes';
+type WatchReason = 'status' | 'branches' | 'stashes' | 'worktrees';
 
 const OPERATION_MARKERS = new Set(['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply', 'sequencer']);
 
 /**
  * Watch the repository's HEAD, index and refs and emit `git.changed`, debounced: `status` when HEAD or the index
- * moved, `branches` when HEAD or a ref did, `stashes` when `refs/stash` did. Edits to working files are not watched; the view refreshes those itself.
+ * moved, `branches` when HEAD or a ref did, `stashes` when `refs/stash` did, `worktrees` when a worktree was added,
+ * removed, locked or unlocked or another one switched branch. Edits to working files are not watched; the view
+ * refreshes those itself. In a linked worktree HEAD, the index and the operation markers are in its own git dir
+ * (`gitDir`), while refs, the stash and the list of worktrees are shared (`commonDir`); both are watched.
  * A folder that is not a repository (yet) gets no watcher; the next git command there tries again.
  */
 export async function ensureWatcher(ws: WorkspaceApi, host: HostApi): Promise<void> {
@@ -422,7 +487,9 @@ export async function ensureWatcher(ws: WorkspaceApi, host: HostApi): Promise<vo
   if (watchers.has(ws.id)) return;
   const pending = new Set<WatchReason>();
   let timer: NodeJS.Timeout | undefined;
+  let closed = false;
   const fire = (...reasons: WatchReason[]) => {
+    if (closed) return;
     for (const r of reasons) pending.add(r);
     clearTimeout(timer);
     timer = setTimeout(() => {
@@ -430,24 +497,85 @@ export async function ensureWatcher(ws: WorkspaceApi, host: HostApi): Promise<vo
       pending.clear();
     }, WATCH_DEBOUNCE_MS);
   };
-  const open: FSWatcher[] = [];
-  const add = (dir: string, recursive: boolean, onName: (name: string) => void) => {
+  const open = new Set<FSWatcher>();
+  const add = (dir: string, recursive: boolean, onName: (name: string, event: string) => void): FSWatcher | null => {
+    // An event already on its way when the workspace closed must not start a new watch.
+    if (closed) return null;
     try {
-      const w = watch(dir, { recursive, persistent: false }, (_event, name) => onName(String(name ?? '').replace(/\\/g, '/')));
-      w.on('error', () => w.close());
-      open.push(w);
+      const w = watch(dir, { recursive, persistent: false }, (event, name) => onName(String(name ?? '').replace(/\\/g, '/'), event));
+      w.on('error', () => {
+        w.close();
+        open.delete(w);
+      });
+      open.add(w);
+      return w;
     } catch {
       // A folder that cannot be watched (gone, or no permission) only loses the live refresh.
+      return null;
+    }
+  };
+  const linked = isLinked(dirs);
+  // `<common>/worktrees` holds one folder per linked worktree (its HEAD, index and lock). It only exists while there
+  // are linked worktrees: git deletes it with the last one, and makes it again for the next.
+  const worktreesDir = path.join(dirs.commonDir, 'worktrees');
+  let worktreesWatcher: FSWatcher | null = null;
+  const dropWorktreesWatcher = () => {
+    worktreesWatcher?.close();
+    if (worktreesWatcher) open.delete(worktreesWatcher);
+    worktreesWatcher = null;
+    fire('worktrees', 'branches');
+  };
+  const watchWorktrees = () => {
+    if (worktreesWatcher || !existsSync(worktreesDir)) return;
+    const w = add(worktreesDir, true, (name, event) => {
+      // Gone (the last worktree removed or pruned): on Windows a watcher of a deleted folder reports it without end.
+      // Dropped at once, also because the watch holds the folder open, and git makes it again for the next worktree.
+      if (!existsSync(worktreesDir)) {
+        if (worktreesWatcher === w) dropWorktreesWatcher();
+        return;
+      }
+      const [, file] = name.split('/');
+      if (name.endsWith('.lock')) return;
+      // A worktree's folder made or deleted; Windows also reports one as changed whenever a file in it is written.
+      if (!file) {
+        if (event === 'rename') fire('worktrees', 'branches');
+      } else if (file === 'HEAD') fire('worktrees', 'branches');
+      else if (file === 'locked' || file === 'gitdir') fire('worktrees');
+    });
+    if (!w) return;
+    worktreesWatcher = w;
+    // A watch that fails (Windows reports the deletion of the watched folder as an error) is dropped, so the
+    // folder's coming back is watched again.
+    w.on('error', () => {
+      if (worktreesWatcher === w) dropWorktreesWatcher();
+    });
+  };
+  // Only the folder's appearing matters here: what happens inside it is the watcher's above (Windows reports the
+  // folder as changed whenever a worktree writes its index).
+  const onCommon = (name: string) => {
+    if (name === 'worktrees' && !worktreesWatcher && existsSync(worktreesDir)) {
+      watchWorktrees();
+      fire('worktrees', 'branches');
     }
   };
   add(dirs.gitDir, false, (name) => {
     if (name.endsWith('.lock')) return;
-    // HEAD, or a marker of the operation in progress the status shows (see detectOperation).
-    if (name === 'HEAD' || name === 'ORIG_HEAD' || OPERATION_MARKERS.has(name.split('/')[0])) fire('status', 'branches');
+    // HEAD, or a marker of the operation in progress the status shows (see detectOperation). HEAD is also what the
+    // list of worktrees shows for this one.
+    if (name === 'HEAD' || name === 'ORIG_HEAD' || OPERATION_MARKERS.has(name.split('/')[0])) fire('status', 'branches', ...(name === 'HEAD' ? (['worktrees'] as const) : []));
     else if (name === 'index') fire('status');
-    else if (name === 'packed-refs' && dirs.commonDir === dirs.gitDir) fire('branches');
+    else if (name === 'packed-refs' && !linked) fire('branches');
+    else if (!linked) onCommon(name);
   });
-  if (dirs.commonDir !== dirs.gitDir) add(dirs.commonDir, false, (name) => name === 'packed-refs' && fire('branches'));
+  if (linked) {
+    add(dirs.commonDir, false, (name) => {
+      if (name === 'packed-refs') fire('branches');
+      // The main worktree's HEAD: its branch is in the list of worktrees, and is one this worktree cannot check out.
+      else if (name === 'HEAD') fire('branches', 'worktrees');
+      else onCommon(name);
+    });
+  }
+  watchWorktrees();
   add(path.join(dirs.commonDir, 'refs'), true, (name) => {
     if (name.endsWith('.lock')) return;
     // A stash push moves refs/stash; a drop of an older one only rewrites its reflog, so the commands announce that.
@@ -456,8 +584,10 @@ export async function ensureWatcher(ws: WorkspaceApi, host: HostApi): Promise<vo
   });
   watchers.set(ws.id, {
     close: () => {
+      closed = true;
       clearTimeout(timer);
       for (const w of open) w.close();
+      open.clear();
     },
   });
 }

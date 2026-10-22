@@ -183,6 +183,8 @@ export interface HostApi {
   dialogs?: {
     pickFile(options?: { title?: string; filters?: { name: string; extensions: string[] }[]; defaultPath?: string }): Promise<string | undefined>;
   };
+  /** Opens a folder in the system's file manager; present when the host has a window. */
+  revealFolder?(folder: string): Promise<void>;
   config: {
     get(): GlobalConfig;
     update(patch: Partial<GlobalConfig>): Promise<GlobalConfig>;
@@ -351,8 +353,8 @@ export interface HostEvents {
   'metabase.changed': { reason: 'session' | 'secret' | 'history'; url?: string; connectionId?: string; workspaceId?: string };
   /** The workspace's todo list changed. */
   'todo.changed': { workspaceId: string };
-  /** Git: the working tree, index or HEAD changed (`status`), branches or refs moved (`branches`), the stashes changed (`stashes`), or the pull request list was refreshed (`prs`). */
-  'git.changed': { workspaceId: string; reason: 'status' | 'branches' | 'stashes' | 'prs' };
+  /** Git: the working tree, index or HEAD changed (`status`), branches or refs moved (`branches`), the stashes changed (`stashes`), the pull request list was refreshed (`prs`), or worktrees were added, removed, locked or switched (`worktrees`). */
+  'git.changed': { workspaceId: string; reason: 'status' | 'branches' | 'stashes' | 'prs' | 'worktrees' };
   /** Process runner: saved tasks changed (`tasks`), a process changed state (`state`), or a run printed output (`output`, throttled). */
   'runner.changed': { workspaceId: string; reason: 'tasks' | 'state' | 'output'; taskId?: string; runId?: string };
   /** Queues: connections changed (`connections`), messages were produced or purged (`messages`), or a live consumer got messages or ended (`consumer`); `destination` when one topic or queue was touched. */

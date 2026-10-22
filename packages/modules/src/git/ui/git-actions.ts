@@ -1,8 +1,8 @@
 import { Service, inject, signal, untracked } from '@angular/core';
 import { toErrorPayload, type GitBranch, type GitCommit, type GitOperationResult, type GitStash, type GitStatus, type GitPullRequest, type GitTag, type TodoItem } from '@quiver/core';
 import { AppState, Dialogs, HostBridge, TabsState, Toasts, type ContextMenuItem } from '@quiver/ui';
-import { errorReason, groupChanges, isPushRejected, remotesOf, splitPath, splitRemoteBranch, type DiffSource, type GitLogPage, type GitRemoteResult, type PrFilter } from './git-format';
-import { blameKey, blameTitle, type BlameAt } from './git-format';
+import { blameKey, blameTitle, errorReason, groupChanges, isPushRejected, remotesOf, splitPath, splitRemoteBranch, type BlameAt, type DiffSource, type GitLogPage, type GitRemoteResult, type PrFilter } from './git-format';
+import { GitWorktreeActions } from './worktree-actions';
 
 /** A ref to pick in `pickRef`: a branch or tag name, and how the list shows it. */
 interface RefChoice {
@@ -20,6 +20,7 @@ export class GitActions {
   private readonly tabs = inject(TabsState);
   private readonly dialogs = inject(Dialogs);
   private readonly toasts = inject(Toasts);
+  private readonly worktrees = inject(GitWorktreeActions);
 
   /** Fetch, pull and push under way, so their buttons spin and are not pressed twice. */
   readonly busy = signal<ReadonlySet<RemoteOp>>(new Set());
@@ -163,7 +164,8 @@ export class GitActions {
       await this.host.invoke('git.checkout', { ref });
       return true;
     } catch (err) {
-      this.toasts.error(err);
+      // A branch another worktree has: offer to open that worktree instead.
+      if (!(await this.worktrees.offerOpen(err))) this.toasts.error(err);
       return false;
     }
   }
@@ -767,6 +769,7 @@ export class GitActions {
       { label: 'Switch to this branch', testId: 'git-menu-checkout', disabled: branch.current, select: () => void this.checkout(branch.name) },
       { label: 'New branch from here…', testId: 'git-menu-new-branch', select: () => void this.newBranch(branch.name) },
       { label: 'Rename…', testId: 'git-menu-rename', select: () => void this.renameBranch(branch.name) },
+      ...this.worktrees.branchItems(branch),
       'separator',
       ...onCurrent,
       'separator',
