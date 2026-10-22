@@ -32,8 +32,12 @@ export class AgentsState {
     const since = this.now() - 60_000;
     return this.calls().filter((c) => Date.parse(c.at) >= since).length;
   });
+  /** Approvals answered here that the list still shows until it reloads, so the dialog never offers them again. */
+  private readonly answered = signal<ReadonlySet<string>>(new Set());
+  /** The calls waiting for an answer, oldest first, without those just answered. */
+  readonly unanswered = computed(() => this.pending().filter((p) => !this.answered().has(p.id)));
   /** The approval the dialog shows: the oldest one waiting. */
-  readonly current = computed(() => this.pending()[0] ?? null);
+  readonly current = computed(() => this.unanswered()[0] ?? null);
   /** Set while an answer is on its way, so a double click cannot answer the next approval. */
   readonly answering = signal<string | null>(null);
 
@@ -51,6 +55,9 @@ export class AgentsState {
     this.answering.set(pending.id);
     try {
       const { level } = await this.host.invoke<{ level?: 'workspace' | 'global' }>('mcp.approval.respond', { id: pending.id, choice }, null);
+      // Forget the ids the list no longer holds, and hide this one until the reload drops it.
+      const still = new Set(untracked(this.pending).map((p) => p.id));
+      this.answered.update((ids) => new Set([...ids].filter((id) => still.has(id)).concat(pending.id)));
       if (choice === 'always') {
         const where = level === 'workspace' && pending.workspace ? ` in ${pending.workspace.name}` : '';
         this.toasts.notify(`${pending.commandId} is now always allowed for agents${where}. Change it in Settings > MCP.`, 'success');

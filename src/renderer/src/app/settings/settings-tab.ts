@@ -112,7 +112,9 @@ export class SettingsTab implements TabComponent {
   }
 
   protected toggleMcp(config: GlobalConfig, event: Event): void {
-    void this.update({ mcp: { ...config.mcp, enabled: (event.target as HTMLInputElement).checked } });
+    // Only the field that changed: the host merges it, so a rule or a pause written since this view last read the
+    // config is not undone by an older copy of the section.
+    void this.update({ mcp: { enabled: (event.target as HTMLInputElement).checked } } as Partial<GlobalConfig>);
   }
 
   // The host applies each change to the permissions it holds, so two quick changes (a rule added, then the mode
@@ -133,7 +135,7 @@ export class SettingsTab implements TabComponent {
 
   protected savePort(config: GlobalConfig): void {
     const port = Number(this.fields().port);
-    if (port !== config.mcp.port) void this.update({ mcp: { ...config.mcp, port } });
+    if (port !== config.mcp.port) void this.update({ mcp: { port } } as Partial<GlobalConfig>);
   }
 
   protected saveTshPath(config: GlobalConfig): void {

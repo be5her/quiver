@@ -30,7 +30,7 @@ export class CliAccess {
   }
 
   endpoint(host: Host): CliEndpoint {
-    return { token: () => this.token, run: (request) => runCliRequest(host, request) };
+    return { token: () => this.token, run: (request, signal) => runCliRequest(host, request, signal) };
   }
 
   /** Write the token (owner-only, through a rename so it is never readable half-written) and then the endpoint. */
@@ -68,7 +68,7 @@ export class CliAccess {
  * the call names (opened for the call when it is not open yet, without adding it to the reopened ones), or in
  * the workspace the app shows; a global command ignores it.
  */
-export async function runCliRequest(host: Host, request: CliRequest): Promise<CliOutcome> {
+export async function runCliRequest(host: Host, request: CliRequest, signal?: AbortSignal): Promise<CliOutcome> {
   const entry = host.registry.get(request.command);
   if (!entry) return { ok: false, error: { code: 'UNKNOWN_COMMAND', message: `Unknown command "${request.command}"; quiver list shows the commands` } };
   let workspaceId: string | null = null;
@@ -81,7 +81,7 @@ export async function runCliRequest(host: Host, request: CliRequest): Promise<Cl
       return { ok: false, error: err instanceof QuiverError ? toErrorPayload(err) : { code: 'NOT_FOUND', message: `No workspace at ${request.workspace}: ${(err as Error).message}` } };
     }
   }
-  return host.invoke(request.command, request.input ?? {}, { caller: 'cli', workspaceId });
+  return host.invoke(request.command, request.input ?? {}, { caller: 'cli', workspaceId, signal });
 }
 
 /** A command's input as JSON Schema, the way the CLI coerces flags and `describe` prints it. */

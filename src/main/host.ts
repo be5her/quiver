@@ -7,6 +7,7 @@ import {
   McpRecorder,
   QuiverError,
   RingBuffer,
+  decideAgentPermission,
   defineCommand,
   isValidRuleMatch,
   mcpRecordingFileName,
@@ -65,6 +66,8 @@ const ruleSchema = z.object({ match: z.string().trim().refine(isValidRuleMatch, 
 export interface InvokeOptions {
   caller: Caller;
   workspaceId?: string | null;
+  /** Aborts when whoever asked stops waiting, e.g. the command line was interrupted. */
+  signal?: AbortSignal;
 }
 
 export type InvokeOutcome = { ok: true; result: unknown } | { ok: false; error: ErrorPayload };
@@ -177,7 +180,7 @@ export class Host {
     try {
       const workspace = options.workspaceId ? this.workspaces.get(options.workspaceId) : undefined;
       if (options.workspaceId && !workspace) throw new QuiverError('NOT_FOUND', `Workspace ${options.workspaceId} is not open`);
-      const result = await this.registry.execute(id, input, { caller: options.caller, host: this.api, workspace });
+      const result = await this.registry.execute(id, input, { caller: options.caller, host: this.api, workspace, signal: options.signal });
       return { ok: true, result };
     } catch (err) {
       if (!(err instanceof QuiverError)) console.error(`[quiver] command ${id} failed`, err);
@@ -308,19 +311,30 @@ export class Host {
    * would beat a global allow), otherwise the global rules.
    */
   private allowLevel(pending: PendingApproval): 'workspace' | 'global' {
-    const wsRules = workspaceRulesFor(this.config.get().mcp, pending.workspace?.id);
-    return pending.workspace && wsRules.some((r) => ruleSpecificity(r.match, pending.commandId) >= 0) ? 'workspace' : 'global';
+    // A workspace allow does not count for a global command, so its rule goes in the global ones.
+    if (!pending.workspace || this.scopeOf(pending.commandId) !== 'workspace') return 'global';
+    const wsRules = workspaceRulesFor(this.config.get().mcp, pending.workspace.id);
+    return wsRules.some((r) => ruleSpecificity(r.match, pending.commandId) >= 0) ? 'workspace' : 'global';
   }
 
-  /** Adds the allow rule for a waiting call's tool at that level. */
-  private async allowForGood(pending: PendingApproval, level: 'workspace' | 'global'): Promise<void> {
+  private scopeOf(commandId: string): 'global' | 'workspace' {
+    return this.registry.get(commandId)?.command.scope ?? 'global';
+  }
+
+  /** The MCP section with an allow rule for a waiting call's tool added at that level. */
+  private withAllowRule(pending: PendingApproval, level: 'workspace' | 'global'): GlobalConfig['mcp'] {
     const mcp = this.config.get().mcp;
     const rule = { match: pending.commandId, action: 'allow' as const };
     if (level === 'workspace' && pending.workspace) {
-      await this.writeWorkspaceRules(pending.workspace.id, upsertRule(workspaceRulesFor(mcp, pending.workspace.id), rule));
-      return;
+      return { ...mcp, workspaceRules: withWorkspaceRules(mcp, pending.workspace.id, upsertRule(workspaceRulesFor(mcp, pending.workspace.id), rule)) };
     }
-    await this.config.update({ mcp: { ...mcp, permissions: { ...mcp.permissions, rules: upsertRule(mcp.permissions.rules, rule) } } });
+    return { ...mcp, permissions: { ...mcp.permissions, rules: upsertRule(mcp.permissions.rules, rule) } };
+  }
+
+  /** Whether an MCP section lets a waiting call through without asking, as the registry would decide it. */
+  private allowedBy(mcp: GlobalConfig['mcp'], pending: PendingApproval): boolean {
+    const workspaceRules = workspaceRulesFor(mcp, pending.workspace?.id, this.scopeOf(pending.commandId));
+    return decideAgentPermission({ commandId: pending.commandId, mutating: pending.mutating, permissions: mcp.permissions, workspaceRules }).action === 'allow';
   }
 
   /** Pauses or resumes every agent; pausing also refuses the calls that wait for an answer. */
@@ -639,11 +653,13 @@ export class Host {
           if (ctx.caller !== 'ui') throw new QuiverError('INVALID_INPUT', 'Only the Quiver window answers approvals');
           const pending = this.approvals.list().find((p) => p.id === id);
           if (!pending) throw new QuiverError('NOT_FOUND', `No approval ${id} is waiting; it may have been answered or timed out`);
-          // Answer first, so the call cannot time out while the rule is written. A workspace rule lets through only
-          // the calls waiting in that workspace.
+          // Answer first, so the call cannot time out while the rule is written. The new rule lets through only the
+          // other waiting calls it would let through later: a workspace rule only those in that workspace, and a global
+          // one not those a workspace rule still asks about.
           const level = choice === 'always' ? this.allowLevel(pending) : undefined;
-          const answered = this.approvals.respond(id, choice, level === 'workspace' ? { workspaceId: pending.workspace?.id ?? null } : {});
-          if (level) await this.allowForGood(pending, level);
+          const next = level ? this.withAllowRule(pending, level) : undefined;
+          const answered = this.approvals.respond(id, choice, next ? { covers: (other) => this.allowedBy(next, other) } : {});
+          if (next) await this.config.update({ mcp: next });
           return { answered, choice, level };
         },
       }),

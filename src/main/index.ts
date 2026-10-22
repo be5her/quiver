@@ -158,8 +158,22 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin' && !process.env.QUIVER_SMOKE) app.quit();
 });
 
-app.on('before-quit', () => {
-  void host?.stop();
+// Quitting waits for the host to stop (port forwards, tunnels and the processes behind them, the MCP server), at
+// most QUIT_STOP_MS, then quits for real: a stop left running would end with the process, and forwards and tunnels
+// on macOS and Linux lead their own process groups, so they would outlive Quiver. The smoke exits with app.exit,
+// which skips this.
+const QUIT_STOP_MS = 8000;
+let quitStage: 'running' | 'stopping' | 'stopped' = 'running';
+app.on('before-quit', (event) => {
+  if (!host || quitStage === 'stopped') return;
+  event.preventDefault();
+  if (quitStage === 'stopping') return;
+  quitStage = 'stopping';
+  const stopping = host.stop().catch((err) => console.warn(`[quiver] stopping before quit failed: ${(err as Error).message}`));
+  void Promise.race([stopping, new Promise((r) => setTimeout(r, QUIT_STOP_MS))]).finally(() => {
+    quitStage = 'stopped';
+    app.quit();
+  });
 });
 
 void main().catch((err) => {

@@ -109,6 +109,16 @@ describe('workspace rules in the config', () => {
     expect(withWorkspaceRules(mcp, 'a', [])).toEqual({});
     expect(mcp.workspaceRules).toEqual({ a: rules });
   });
+
+  it('keeps only the deny and ask rules for a global command', () => {
+    const rules: AgentPermissionRule[] = [
+      { match: '*', action: 'allow' },
+      { match: 'teleport.*', action: 'ask' },
+      { match: 'app.*', action: 'deny' },
+    ];
+    expect(workspaceRulesFor({ workspaceRules: { a: rules } }, 'a', 'global')).toEqual(rules.slice(1));
+    expect(workspaceRulesFor({ workspaceRules: { a: rules } }, 'a', 'workspace')).toEqual(rules);
+  });
 });
 
 describe('migrateMcpConfig', () => {
@@ -134,6 +144,14 @@ describe('migrateMcpConfig', () => {
     const allowed = migrateMcpConfig({ ...ask, allowMutating: true }, ask);
     expect(allowed).toMatchObject({ allowMutating: true, permissions: { mode: 'allow', rules: [{ match: 'git.*', action: 'deny' }] } });
     expect(migrateMcpConfig({ ...ask }, allowed).permissions.mode).toBe('ask');
+  });
+
+  it('keeps the rules when a patch names only the mode, and the mode when it names only the rules', () => {
+    const ask = migrateMcpConfig({ ...defaults, permissions: { mode: 'ask', rules: [{ match: 'git.*', action: 'deny' }] } }, defaults);
+    const modeOnly = migrateMcpConfig({ ...ask, permissions: { mode: 'allow' } } as never, ask);
+    expect(modeOnly.permissions).toEqual({ mode: 'allow', rules: [{ match: 'git.*', action: 'deny' }] });
+    const rulesOnly = migrateMcpConfig({ ...ask, permissions: { rules: [] } } as never, ask);
+    expect(rulesOnly.permissions).toEqual({ mode: 'ask', rules: [] });
   });
 
   it('falls back to read-only for an unknown mode and to false for paused', () => {

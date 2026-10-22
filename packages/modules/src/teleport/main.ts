@@ -181,11 +181,14 @@ const logout = defineCommand({
   input: z.object({ proxy: z.string().optional().describe('Proxy address; omit to log out of every cluster') }),
   handler: async ({ proxy }, ctx): Promise<TeleportStatus> => {
     const { session, tunnels, forwards } = getTeleport(ctx.host);
-    if (proxy) await Promise.all([tunnels.stopCluster(proxy), forwards.stopCluster(proxy)]);
-    else await Promise.all([tunnels.stopAll(), forwards.stopAll()]);
-    invalidateCaches(proxy);
-    getTeleport(ctx.host).kube.forget(proxy);
-    return session.logout(proxy);
+    // No port forward may start on the cluster between stopping its forwards and the end of the logout.
+    return forwards.refuseStartsWhile(proxy, async () => {
+      if (proxy) await Promise.all([tunnels.stopCluster(proxy), forwards.stopCluster(proxy)]);
+      else await Promise.all([tunnels.stopAll(), forwards.stopAll()]);
+      invalidateCaches(proxy);
+      getTeleport(ctx.host).kube.forget(proxy);
+      return session.logout(proxy);
+    });
   },
 });
 
@@ -550,18 +553,32 @@ const kubeActionPreview = defineCommand({
   },
 });
 
+/** Agents may protect clusters (it only makes Quiver stricter), so the list is capped to keep it from growing without end. */
+const MAX_PROTECTED_KUBES = 200;
+
+function refuseAgentUnprotect(caller: Caller, cluster: string, on: boolean): void {
+  if (!on && caller === 'mcp') throw new QuiverError('MUTATION_BLOCKED', 'Only the user can unprotect a cluster, from Quiver.', { reason: 'protected-cluster', cluster });
+}
+
 const kubeProtect = defineCommand({
   id: 'teleport.kube.protect',
   title: 'Protect a Kubernetes cluster',
   description:
-    'Marks a Kubernetes cluster as protected, or no longer protected. Actions on a protected cluster need its name typed in Quiver, and agents are refused actions and port forwards on it unless the user allows them in Settings. Agents may protect a cluster but never unprotect one.',
+    'Marks a Kubernetes cluster as protected, or no longer protected. Actions on a protected cluster need its name typed in Quiver, and agents are refused actions and port forwards on it unless the user allows them in Settings. Agents may protect a cluster (by the exact name teleport.kube.list gives) but never unprotect one.',
   scope: 'global',
   mutating: ({ protected: on }) => !on,
   input: z.object({ proxy: ProxyInput, cluster: KubeClusterInput, protected: z.boolean() }),
+  // Refused whatever the user answers, so an agent's unprotect is never asked about.
+  beforeApproval: async ({ cluster, protected: on }, ctx) => refuseAgentUnprotect(ctx.caller, cluster, on),
   handler: async ({ proxy: proxyArg, cluster, protected: on }, ctx) => {
-    if (!on && ctx.caller === 'mcp') throw new QuiverError('MUTATION_BLOCKED', 'Only the user can unprotect a cluster, from Quiver.', { reason: 'protected-cluster', cluster });
+    refuseAgentUnprotect(ctx.caller, cluster, on);
     const proxy = await resolveKubeProxy(ctx.host, proxyArg, cluster);
+    // An agent's entry under a name tsh does not list would protect nothing while looking as if it did.
+    if (on && ctx.caller === 'mcp') await requireExactKube(ctx.host, proxy, cluster);
     const teleport = ctx.host.config.get().teleport;
+    if (on && !isKubeProtected(teleport.protectedKubes, proxy, cluster) && teleport.protectedKubes.length >= MAX_PROTECTED_KUBES) {
+      throw new QuiverError('INVALID_INPUT', `At most ${MAX_PROTECTED_KUBES} Kubernetes clusters can be protected. Unprotect one in Quiver first.`, { max: MAX_PROTECTED_KUBES });
+    }
     await ctx.host.config.update({ teleport: { ...teleport, protectedKubes: setKubeProtected(teleport.protectedKubes, { proxy, name: cluster }, on) } });
     ctx.host.emit('teleport.changed', { reason: 'protected' });
     return { proxy, cluster, protected: on };
@@ -647,17 +664,32 @@ function historyEntry(host: HostApi, input: { id: string }): Promise<KubeHistory
   return entry;
 }
 
+/**
+ * Agents rerun queries only. An action rerun would be decided by the agent rules for this command instead of those
+ * for teleport.kube.action, and its approval would show an entry id instead of the action, so an agent runs the
+ * entry's action (teleport.kube.history.list returns it) through teleport.kube.action.
+ */
+function refuseAgentActionRerun(caller: Caller, entry: KubeHistoryEntry): void {
+  if (caller !== 'mcp' || entry.kind !== 'action') return;
+  throw new QuiverError(
+    'MUTATION_BLOCKED',
+    `History entry ${entry.id} is a Kubernetes action, and agents do not rerun actions. Run it with teleport_kube_action, passing the entry's proxy, cluster and action from teleport_kube_history_list.`,
+    { reason: 'rerun-action', id: entry.id },
+  );
+}
+
 const kubeHistoryRerun = defineCommand({
   id: 'teleport.kube.history.rerun',
   title: 'Run a Kubernetes query or action again',
   description:
-    'Runs a history entry again on the same cluster, through the same validation as teleport.kube.query or teleport.kube.action. Running a query again is read-only; running an action again changes the cluster, so it is gated like teleport.kube.action, protected clusters included. A CronJob trigger gets a new job name.',
+    'Runs a history entry again on the same cluster, through the same validation as teleport.kube.query or teleport.kube.action. Running a query again is read-only; running an action again changes the cluster, so it is gated like teleport.kube.action, protected clusters included, and agents may not do it: they run the action of the entry with teleport.kube.action. A CronJob trigger gets a new job name.',
   scope: 'global',
   mutating: async (input, ctx) => (await historyEntry(ctx.host, input))?.kind === 'action',
   input: z.object({ id: z.string(), runId: RunIdInput.optional(), confirmCluster: ConfirmClusterInput }),
+  // Refused whatever the user answers, so an agent is never asked about rerunning an action.
   beforeApproval: async (input, ctx) => {
     const entry = await historyEntry(ctx.host, input);
-    if (entry?.kind === 'action') await guardProtected(ctx.host, ctx.caller, entry.proxy, entry.cluster, undefined, 'action');
+    if (entry) refuseAgentActionRerun(ctx.caller, entry);
   },
   handler: async (input, ctx): Promise<KubeRunResult | KubeActionResult> => {
     const { id, runId, confirmCluster } = input;
@@ -665,6 +697,7 @@ const kubeHistoryRerun = defineCommand({
     const entry = await historyEntry(ctx.host, input);
     if (!entry) throw new QuiverError('NOT_FOUND', `No Kubernetes history entry ${id}`);
     if (entry.kind === 'query') return kube.run({ proxy: entry.proxy, cluster: entry.cluster, query: entry.query, runId, caller: ctx.caller, timeoutMs: 60_000, record: true });
+    refuseAgentActionRerun(ctx.caller, entry);
     await guardProtected(ctx.host, ctx.caller, entry.proxy, entry.cluster, confirmCluster, 'action');
     // A job name cannot be used twice, so a CronJob trigger gets a fresh one.
     const action = entry.action.action === 'cronjob-trigger' ? resolveKubeAction({ ...entry.action, params: { ...entry.action.params, jobName: undefined } }) : resolveKubeAction(entry.action);

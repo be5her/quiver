@@ -103,6 +103,18 @@ const section: SmokeSection = async (t) => {
     const untracked = (await list()).find((b) => b.name === 'new-name');
     check('git manage: setUpstream sets the upstream and null unsets it', tracked?.upstream === 'origin/main' && untracked?.upstream === undefined, { tracked, untracked });
 
+    // With origin/HEAD naming origin/main, the local main is no proof for itself either: from a branch behind it, with
+    // no upstream of its own, it is refused although origin/main holds its commits.
+    const hadOriginHead = (await sh('symbolic-ref', '-q', 'refs/remotes/origin/HEAD')).code === 0;
+    if (!hadOriginHead) await sh('remote', 'set-head', 'origin', 'main');
+    await sh('checkout', '-q', '-b', 'older', 'HEAD~1');
+    const localDefault = await failure('git.branch.delete', { name: 'main' });
+    const localMainKept = (await sh('rev-parse', '--verify', '--quiet', 'refs/heads/main')).code === 0;
+    await sh('checkout', '-q', 'main');
+    await sh('branch', '-q', '-D', 'older');
+    if (!hadOriginHead) await sh('remote', 'set-head', 'origin', '-d');
+    check("git manage: delete refuses the local main when the default branch is origin/main, and keeps it", localDefault.reason === 'not-merged' && localMainKept, { localDefault, localMainKept });
+
     // A branch whose upstream was deleted on the remote is gone after a fetch that prunes.
     await sh('push', '-q', '-u', 'origin', 'main:gone-branch');
     await sh('branch', 'gone-branch', 'main');
@@ -202,6 +214,19 @@ const section: SmokeSection = async (t) => {
         (await read('c.txt')) === 'picked\n',
       { soft: soft.files, mixed: mixed.files, hard: hard.files },
     );
+    // A commit already applied comes out empty: git fails and leaves the cherry-pick waiting for a skip or an abort.
+    events.length = 0;
+    const emptyPick = await t.host.invoke('git.cherryPick', { commits: [picked] }, { caller: 'ui', workspaceId: id });
+    const emptyDetails = (emptyPick.ok ? {} : emptyPick.error.details) as { reason?: string; operation?: string; status?: GitStatus } | undefined;
+    const emptyAnnounced = await until(() => events.some((e) => e.workspaceId === id && e.reason === 'status'), 3000);
+    const emptyInProgress = (await st()).operation;
+    check(
+      'git manage: a cherry-pick of a commit already applied fails saying the cherry-pick is still in progress, and is announced',
+      !emptyPick.ok && emptyDetails?.reason === 'operation-in-progress' && emptyDetails.operation === 'cherry-pick' && emptyDetails.status?.operation === 'cherry-pick' && emptyAnnounced && emptyInProgress === 'cherry-pick',
+      { emptyPick, emptyAnnounced, emptyInProgress },
+    );
+    const emptyAborted = await run<GitOperationResult>('git.operation.abort', {}, id);
+    check('git manage: the empty cherry-pick aborts back to where it was', emptyAborted.status.operation === undefined && emptyAborted.status.head === pickedHere, emptyAborted.status);
 
     // ---- Stashes ----
     events.length = 0;
@@ -216,11 +241,12 @@ const section: SmokeSection = async (t) => {
     check('git manage: stash push announces git.changed with reason stashes', await until(() => events.some((e) => e.workspaceId === id && e.reason === 'stashes'), 3000), events);
     await write('new.txt', 'untracked\n');
     const nothing = await failure('git.stash.push', {});
+    const afterNothing = (await run<GitStash[]>('git.stash.list', {}, id)).length;
     await run('git.stash.push', { includeUntracked: true }, id);
     const two = await run<GitStash[]>('git.stash.list', {}, id);
     check(
-      'git manage: stash push with only untracked files says nothing to stash, includeUntracked stashes them',
-      nothing.reason === 'nothing-to-stash' && two.length === 2 && two[0].message.startsWith('WIP') && two[1].message === 'wip one' && !(await exists('new.txt')),
+      'git manage: stash push with only untracked files says nothing to stash and adds none, includeUntracked stashes them',
+      nothing.reason === 'nothing-to-stash' && afterNothing === 1 && two.length === 2 && two[0].message.startsWith('WIP') && two[1].message === 'wip one' && !(await exists('new.txt')),
       { nothing, two },
     );
     const shown0 = await run<{ stash: GitStash; files: GitDiffFile[] }>('git.stash.show', { index: 0 }, id);

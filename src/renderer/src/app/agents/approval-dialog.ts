@@ -3,6 +3,9 @@ import { Autofocus, Button, Icon } from '@quiver/ui';
 import { ShieldAlert } from 'lucide';
 import { AgentsState } from './agents-state';
 
+/** How long a newly shown approval ignores clicks. */
+const ARM_DELAY_MS = 400;
+
 /**
  * Asks the user about an agent's call the permissions say to ask about. One at a time, the oldest first;
  * the others wait their turn. Mount once in the shell.
@@ -84,8 +87,15 @@ export class ApprovalDialog {
     const current = this.agents.current();
     return current ? [current] : [];
   });
-  protected readonly waiting = computed(() => Math.max(0, this.agents.pending().length - 1));
-  protected readonly busy = computed(() => this.agents.answering() === this.agents.current()?.id);
+  protected readonly waiting = computed(() => Math.max(0, this.agents.unanswered().length - 1));
+  /** The id alone, so a reload of the list that keeps the same approval on screen changes nothing below. */
+  private readonly currentId = computed(() => this.agents.current()?.id ?? null);
+  /** The approval whose buttons work: a new one only after a moment, so a click meant for the last one cannot answer it. */
+  private readonly armed = signal<string | null>(null);
+  protected readonly busy = computed(() => {
+    const id = this.currentId();
+    return this.agents.answering() === id || this.armed() !== id;
+  });
   protected readonly secondsLeft = computed(() => {
     const pending = this.agents.current();
     return pending ? Math.max(0, Math.ceil((Date.parse(pending.expiresAt) - this.now()) / 1000)) : 0;
@@ -98,6 +108,13 @@ export class ApprovalDialog {
       this.now.set(Date.now());
       const timer = setInterval(() => this.now.set(Date.now()), 1000);
       onCleanup(() => clearInterval(timer));
+    });
+    effect((onCleanup) => {
+      const id = this.currentId();
+      this.armed.set(null);
+      if (!id) return;
+      const timer = setTimeout(() => this.armed.set(id), ARM_DELAY_MS);
+      onCleanup(() => clearTimeout(timer));
     });
   }
 

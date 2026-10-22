@@ -5,6 +5,7 @@ import {
   nowIso,
   toHttpUrl,
   toWebSocketUrl,
+  withoutCliToken,
   type HostApi,
   type RealtimeConnection,
   type RealtimeConnectionSummary,
@@ -329,7 +330,7 @@ export class RealtimeRuntime {
     try {
       socket = new UndiciWebSocket(toWebSocketUrl(target.url), {
         protocols: def.protocols.length ? def.protocols : undefined,
-        headers: target.headers,
+        headers: withoutCliToken(target.headers),
         dispatcher: dispatcherFor(toHttpUrl(target.url), def.insecure, s.network),
       });
     } catch (err) {
@@ -393,7 +394,7 @@ export class RealtimeRuntime {
     const gen = ++s.generation;
     const controller = new AbortController();
     s.abort = controller;
-    const headers: [string, string][] = [...target.headers.filter(([k]) => !['accept', 'cache-control', 'last-event-id'].includes(k.toLowerCase()))];
+    const headers: [string, string][] = [...withoutCliToken(target.headers).filter(([k]) => !['accept', 'cache-control', 'last-event-id'].includes(k.toLowerCase()))];
     headers.push(['Accept', 'text/event-stream'], ['Cache-Control', 'no-cache']);
     if (s.lastEventId !== null) headers.push(['Last-Event-ID', s.lastEventId]);
 

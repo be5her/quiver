@@ -339,8 +339,8 @@ const agents: SmokeSection = async (t) => {
       const { js, wait, shot } = u;
       const approval = () =>
         js(
-          `(() => { const d = document.querySelector('[data-testid=agent-approval]'); if (!d) return null; const q = (id) => d.querySelector('[data-testid=' + id + ']')?.textContent.trim() ?? ''; return { tool: d.getAttribute('data-tool'), agent: q('agent-approval-agent'), toolText: q('agent-approval-tool'), input: q('agent-approval-input'), queue: q('agent-approval-queue'), text: d.textContent, focused: document.activeElement === d }; })()`,
-        ) as Promise<{ tool: string; agent: string; toolText: string; input: string; queue: string; text: string; focused: boolean } | null>;
+          `(() => { const d = document.querySelector('[data-testid=agent-approval]'); if (!d) return null; const q = (id) => d.querySelector('[data-testid=' + id + ']')?.textContent.trim() ?? ''; return { tool: d.getAttribute('data-tool'), agent: q('agent-approval-agent'), toolText: q('agent-approval-tool'), input: q('agent-approval-input'), queue: q('agent-approval-queue'), text: d.textContent, focused: document.activeElement === d, armed: d.querySelector('[data-testid=agent-approval-once]')?.disabled === false }; })()`,
+        ) as Promise<{ tool: string; agent: string; toolText: string; input: string; queue: string; text: string; focused: boolean; armed: boolean } | null>;
       const statusItem = () =>
         js(`(() => { const b = document.querySelector('[data-testid=agent-activity-status]'); return b ? { pending: b.getAttribute('data-pending'), calls: Number(b.getAttribute('data-calls')), paused: b.getAttribute('data-paused'), text: b.textContent.trim() } : null; })()`) as Promise<{
           pending: string;
@@ -376,6 +376,8 @@ const agents: SmokeSection = async (t) => {
         await wait(300);
         await shot('21f-mcp-agent-approval-dark');
         await js(`document.documentElement.classList.remove('dark')`);
+        const armed = await approval();
+        check('ui: the buttons of an approval on screen work once it has been there a moment, list reloads notwithstanding', armed?.armed === true, armed?.armed);
         await js(`document.querySelector('[data-testid=agent-approval-once]')?.click()`);
         const firstResult = await firstCall;
         await until(async () => (await approval())?.input.includes(second.id) ?? false, 3000);
@@ -385,6 +387,12 @@ const agents: SmokeSection = async (t) => {
           !firstResult.isError && !(await todoExists(first.id)) && Boolean(next?.input.includes(second.id)) && next?.queue === '' && next?.focused === true,
           { firstResult, next },
         );
+        // A newly shown approval ignores clicks for a moment, so a double click meant for the last one answers nothing.
+        await js(`document.querySelector('[data-testid=agent-approval-deny]')?.click()`);
+        await wait(100);
+        const stillWaiting = await approval();
+        check('ui: a click right after the next approval appears answers nothing', Boolean(stillWaiting?.input.includes(second.id)), stillWaiting);
+        await wait(500);
         await js(`document.querySelector('[data-testid=agent-approval-deny]')?.click()`);
         const secondResult = await secondCall;
         await wait(400);

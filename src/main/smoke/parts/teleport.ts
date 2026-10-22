@@ -372,7 +372,7 @@ export default definePart({
       check(
         'kube protected: agents are refused actions, reruns and port forwards there even with mutations allowed, and cannot unprotect it',
         blocked(agentOnProtected, 'protected-cluster') &&
-          blocked(agentRerunOnProtected, 'protected-cluster') &&
+          blocked(agentRerunOnProtected, 'rerun-action') &&
           blocked(agentForwardOnProtected, 'protected-cluster') &&
           blocked(agentUnprotect, 'protected-cluster') &&
           refusedOnProtected &&
@@ -380,6 +380,31 @@ export default definePart({
         { action: agentOnProtected.ok || agentOnProtected.error, unprotect: agentUnprotect.ok || agentUnprotect.error.code },
       );
       check('kube protected: agents with mutations allowed act on other clusters', agentOnOther.ok && (agentOnOther.result as KubeActionResult).exitCode === 0 && (agentOnOther.result as KubeActionResult).command.includes('--context=smoke.teleport.local-dev-eks'), agentOnOther.ok ? 'ok' : agentOnOther.error);
+      // A rerun would be decided by the rules for teleport.kube.history.rerun instead of teleport.kube.action, so agents
+      // never rerun an action, even with mutations allowed and off protected clusters; the user still can.
+      const devAction = (await run<{ entries: KubeHistoryEntry[] }>('teleport.kube.history.list', { proxy: first, cluster: 'dev-eks' }, null)).entries.find((e) => e.kind === 'action');
+      const callsBeforeAgentRerun = (await fakeTsh.kubectlCalls()).length;
+      const agentRerunOther = devAction ? await asAgent('teleport.kube.history.rerun', { id: devAction.id }) : null;
+      const agentRerunReachedKubectl = (await fakeTsh.kubectlCalls()).length !== callsBeforeAgentRerun;
+      const uiRerunOther = devAction ? await host.invoke('teleport.kube.history.rerun', { id: devAction.id }, { caller: 'ui', workspaceId: null }) : null;
+      check(
+        'kube actions: agents never rerun an action from history, even with mutations allowed; they are pointed at teleport_kube_action, and the user still reruns it',
+        Boolean(agentRerunOther && blocked(agentRerunOther, 'rerun-action') && !agentRerunOther.ok && agentRerunOther.error.message.includes('teleport_kube_action')) &&
+          !agentRerunReachedKubectl &&
+          Boolean(uiRerunOther?.ok && (uiRerunOther.result as KubeActionResult).exitCode === 0),
+        { entry: devAction?.id, agent: agentRerunOther && (agentRerunOther.ok || agentRerunOther.error), ui: uiRerunOther && (uiRerunOther.ok || uiRerunOther.error.code) },
+      );
+      // Agents may protect a cluster, by the exact name tsh lists only, so an entry never protects nothing.
+      const agentProtectOtherName = await asAgent('teleport.kube.protect', { proxy: first, cluster: 'DEV-EKS', protected: true });
+      const agentProtect = await asAgent('teleport.kube.protect', { proxy: first, cluster: 'dev-eks', protected: true });
+      const devProtected = host.config.get().teleport.protectedKubes.some((k) => k.name === 'dev-eks');
+      const wrongNameKept = host.config.get().teleport.protectedKubes.some((k) => k.name === 'DEV-EKS');
+      await run('teleport.kube.protect', { proxy: first, cluster: 'dev-eks', protected: false }, null);
+      check(
+        'kube protected: agents protect a cluster by its exact listed name only',
+        !agentProtectOtherName.ok && agentProtectOtherName.error.code === 'NOT_FOUND' && !wrongNameKept && agentProtect.ok && devProtected,
+        { otherName: agentProtectOtherName.ok || agentProtectOtherName.error.code, exact: agentProtect.ok || agentProtect.error, devProtected },
+      );
       // Agent permissions cover the kube actions: under mode ask an agent's action waits for the user, and runs once allowed.
       await run('config.update', { patch: { mcp: { ...host.config.get().mcp, permissions: { ...mcpBefore.permissions, mode: 'ask' } } } }, null);
       const approvals = () => run<PendingApproval[]>('mcp.approval.list', {}, null);
@@ -406,16 +431,24 @@ export default definePart({
       const askedProtected = await asAgent('teleport.kube.action', { ...target, action: samples[0].action });
       const askedProtectedRerun = await asAgent('teleport.kube.history.rerun', { id: actionEntries[0].id });
       const askedProtectedForward = await asAgent('teleport.kube.portForward.start', { ...target, kind: 'services', name: 'web', namespace: 'payments', remotePort: 80 });
+      // Refused whatever the user answers too: rerunning an action anywhere, and unprotecting.
+      const askedRerunOther = devAction ? await asAgent('teleport.kube.history.rerun', { id: devAction.id }) : null;
+      const askedUnprotect = await asAgent('teleport.kube.protect', { ...target, protected: false });
       check(
-        'kube protected: under mode ask an agent is refused on a protected cluster without an approval being raised',
+        'kube protected: under mode ask an agent is refused on a protected cluster, an action rerun and an unprotect without an approval being raised',
         blocked(askedProtected, 'protected-cluster') &&
-          blocked(askedProtectedRerun, 'protected-cluster') &&
+          blocked(askedProtectedRerun, 'rerun-action') &&
+          Boolean(askedRerunOther && blocked(askedRerunOther, 'rerun-action')) &&
+          blocked(askedUnprotect, 'protected-cluster') &&
+          isKubeStillProtected(host.config.get().teleport.protectedKubes) &&
           blocked(askedProtectedForward, 'protected-cluster') &&
           (await approvals()).length === 0 &&
           (await fakeTsh.kubectlCalls()).length === callsBeforeAskProtected,
         {
           action: askedProtected.ok || askedProtected.error,
           rerun: askedProtectedRerun.ok || askedProtectedRerun.error.code,
+          rerunOther: askedRerunOther && (askedRerunOther.ok || askedRerunOther.error.code),
+          unprotect: askedUnprotect.ok || askedUnprotect.error.code,
           forward: askedProtectedForward.ok || askedProtectedForward.error.code,
           pending: (await approvals()).map((p) => p.commandId),
         },

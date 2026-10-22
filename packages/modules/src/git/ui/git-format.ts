@@ -283,6 +283,14 @@ export function splitRemoteBranch(name: string): { remote: string; branch: strin
   return at < 0 ? { remote: name, branch: '' } : { remote: name.slice(0, at), branch: name.slice(at + 1) };
 }
 
+/**
+ * Whether a push failed because the remote branch has commits this one lacks (after an amend or a rebase), which a
+ * force push with lease can settle; any other failure (sign-in, network, a hook) is shown as it is.
+ */
+export function isPushRejected(message: string): boolean {
+  return /non-fast-forward|fetch first|\[rejected\]/i.test(message);
+}
+
 /** The remotes the branches mention, for picking one to push a tag to. */
 export function remotesOf(branches: GitBranch[]): string[] {
   return [...new Set(branches.filter((b) => b.remote).map((b) => splitRemoteBranch(b.name).remote))].sort();

@@ -31,7 +31,10 @@ export async function headless(dataDir: string, secretsFile: string | undefined,
     try {
       file = JSON.parse(await fs.readFile(path.resolve(secretsFile), 'utf8')) as Record<string, unknown>;
     } catch (err) {
-      throw new CliUsageError(`--secrets ${secretsFile}: ${(err as Error).message}`);
+      // JSON.parse quotes the text around the error, which here is a secret; say only where it is.
+      const at = err instanceof SyntaxError ? /position \d+/.exec(err.message)?.[0] : undefined;
+      const where = err instanceof SyntaxError ? `is not valid JSON${at ? ` (at ${at})` : ''}` : (err as Error).message;
+      throw new CliUsageError(`--secrets ${secretsFile}: ${where}`);
     }
     if (!file || typeof file !== 'object' || Array.isArray(file)) throw new CliUsageError(`--secrets ${secretsFile} must hold a JSON object of name to value`);
   }
@@ -44,7 +47,7 @@ export async function headless(dataDir: string, secretsFile: string | undefined,
       new Promise<CliOutcome>((resolve, reject) => {
         if (signal?.aborted) return reject(signal.reason);
         signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
-        runCliRequest(host, { command, input, workspace }).then(resolve, reject);
+        runCliRequest(host, { command, input, workspace }, signal).then(resolve, reject);
       }),
     close: () => host.stop(),
   };

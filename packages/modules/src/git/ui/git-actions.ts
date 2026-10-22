@@ -1,7 +1,7 @@
 import { Service, inject, signal, untracked } from '@angular/core';
 import { toErrorPayload, type GitBranch, type GitCommit, type GitOperationResult, type GitStash, type GitStatus, type GitPullRequest, type GitTag, type TodoItem } from '@quiver/core';
 import { AppState, Dialogs, HostBridge, TabsState, Toasts, type ContextMenuItem } from '@quiver/ui';
-import { errorReason, groupChanges, remotesOf, splitPath, splitRemoteBranch, type DiffSource, type GitLogPage, type GitRemoteResult, type PrFilter } from './git-format';
+import { errorReason, groupChanges, isPushRejected, remotesOf, splitPath, splitRemoteBranch, type DiffSource, type GitLogPage, type GitRemoteResult, type PrFilter } from './git-format';
 
 /** A ref to pick in `pickRef`: a branch or tag name, and how the list shows it. */
 interface RefChoice {
@@ -640,7 +640,7 @@ export class GitActions {
    */
   async push(status: GitStatus | undefined): Promise<void> {
     const publish = Boolean(status?.branch && !status.upstream);
-    const rejected = await this.remote('push', publish ? { setUpstream: true } : {}, publish ? `Published ${status?.branch}` : 'Pushed', (err) => !publish && /non-fast-forward|fetch first|[rejected]/i.test(toErrorPayload(err).message));
+    const rejected = await this.remote('push', publish ? { setUpstream: true } : {}, publish ? `Published ${status?.branch}` : 'Pushed', (err) => !publish && isPushRejected(toErrorPayload(err).message));
     if (!rejected) return;
     const ok = await this.dialogs.confirm({
       title: 'Force push?',

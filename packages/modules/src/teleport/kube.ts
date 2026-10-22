@@ -107,6 +107,9 @@ interface Prepared {
 }
 
 const WINDOWS = process.platform === 'win32';
+/** kubectl's errors for a private kubeconfig that is gone or lacks its context, all raised before it reaches the cluster. */
+const KUBECONFIG_MISSING =
+  /context "?[^"\n]*"? (does not exist|not found)|no context exists with the name|no configuration has been provided|error loading config file|\.kubeconfig[^\n]*(no such file or directory|cannot find the file)/i;
 
 /**
  * Runs catalogue queries and actions with `tsh kubectl`, which embeds kubectl, so no kubectl install is needed.
@@ -311,8 +314,9 @@ export class KubeRunner {
     const startedAt = nowIso();
     let { argv, live } = await attempt(false);
     // The private kubeconfig vanished or lost its context (data folder cleaned, tsh upgraded): log in again once.
-    // kubectl stops on these before it reaches the API server, so an action is never applied twice.
-    if (!live.running && live.exitCode !== 0 && /context .*(does not exist|not found)|no configuration has been provided|kubeconfig/i.test(live.stderr)) {
+    // kubectl stops on these before it reaches the API server, so only these errors are retried, never a run that was
+    // cancelled or timed out (exit code null), which may have been applied: an action is never applied twice.
+    if (!live.running && live.exitCode !== null && live.exitCode !== 0 && KUBECONFIG_MISSING.test(live.stderr)) {
       this.runs.delete(runId);
       ({ argv, live } = await attempt(true));
     }

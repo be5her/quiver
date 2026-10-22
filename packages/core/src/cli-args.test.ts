@@ -15,6 +15,7 @@ import {
   parseTimeout,
   resolveFieldName,
   resultFailures,
+  withoutCliToken,
   secretEnvName,
   typeLabel,
   type JsonSchema,
@@ -91,6 +92,12 @@ describe('parseCliArgs', () => {
 
   it('passes everything after -- on as positional', () => {
     expect(() => parseCliArgs(['todo.add', '--', '--title'])).toThrow(/Unexpected argument "--title"/);
+  });
+});
+
+describe('withoutCliToken', () => {
+  it('drops the command line token header in any case and keeps the rest', () => {
+    expect(withoutCliToken([['X-Quiver-Cli-Token', 't'], [' x-quiver-cli-token', 't'], ['Accept', '*/*']])).toEqual([['Accept', '*/*']]);
   });
 });
 
@@ -217,6 +224,7 @@ describe('results and exit codes', () => {
     expect(resultFailures({ items: [], failed: 2, status: 'failed' })).toBe(2);
     expect(resultFailures({ items: [], failed: 0, status: 'failed' })).toBe(1);
     expect(resultFailures({ items: [], failed: 0, status: 'passed' })).toBe(0);
+    expect(resultFailures({ items: [], failed: 0, status: 'cancelled' })).toBe(1);
     expect(resultFailures({ status: 200, checks: [{ ok: true }, { ok: false }] })).toBe(1);
     expect(resultFailures([{ ok: false }])).toBe(0);
     expect(resultFailures('text')).toBe(0);

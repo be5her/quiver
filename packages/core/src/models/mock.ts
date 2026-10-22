@@ -2,6 +2,7 @@ import { toCurl } from '../curl';
 import { newId, nowIso } from '../ids';
 import { resolveTemplate } from '../variables';
 import { z } from 'zod';
+import { withoutCliToken } from '../cli-args';
 import type { MockPortRecord } from '../types';
 import { HttpMethodSchema, KeyValueSchema, type HttpMethod, type KeyValue } from './api';
 
@@ -329,7 +330,8 @@ const HOP_BY_HOP = new Set(['host', 'content-length', 'connection', 'keep-alive'
 
 /** Headers of a captured request that make sense to send again elsewhere. */
 export function replayableHeaders(headers: [string, string][]): [string, string][] {
-  return headers.filter(([k]) => !HOP_BY_HOP.has(k.toLowerCase()));
+  // Never the command line's token: a replay or a forward to Quiver's own /cli would run a command as the user.
+  return withoutCliToken(headers).filter(([k]) => !HOP_BY_HOP.has(k.toLowerCase()));
 }
 
 /** Build the absolute URL a captured request would hit on another server, given a base or full URL. */

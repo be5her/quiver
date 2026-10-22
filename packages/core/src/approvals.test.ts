@@ -93,6 +93,18 @@ describe('AgentApprovals scope', () => {
     approvals.respond(approvals.list()[0].id, 'deny');
     await expect(otherWorkspace).resolves.toEqual({ approved: false, reason: 'denied' });
   });
+
+  it('lets an allow for good through only the waiting calls the new rule covers', async () => {
+    const inWorkspace = (agent: string, workspace: string): ApprovalRequest => ({ ...request(agent, 'todo.remove'), workspace: { id: workspace, name: workspace, path: `/${workspace}` } });
+    const approvals = new AgentApprovals();
+    const first = approvals.request(inWorkspace('claude', 'a'));
+    const stillAsks = approvals.request(inWorkspace('cursor', 'b'));
+    approvals.respond(approvals.list()[0].id, 'always', { covers: (other) => other.workspace?.id !== 'b' });
+    await expect(first).resolves.toEqual({ approved: true, how: 'always' });
+    expect(approvals.list().map((p) => p.workspace?.id)).toEqual(['b']);
+    approvals.respond(approvals.list()[0].id, 'deny');
+    await expect(stillAsks).resolves.toEqual({ approved: false, reason: 'denied' });
+  });
 });
 
 describe('AgentApprovals cancellation and pause', () => {

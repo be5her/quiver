@@ -181,6 +181,34 @@ describe('CommandRegistry', () => {
     });
   });
 
+  it('lets a workspace allow reach only workspace commands, while its deny reaches every command', async () => {
+    const allowAll = fakeHost({ workspaceRules: { w: [{ match: '*', action: 'allow' }] } });
+    await expect(registry.execute('test.destroy', {}, { caller: 'mcp', host: allowAll, workspace: workspaceWithRules([]) })).resolves.toBe('done');
+    // test.secret is a global command: the workspace allow does not count, so read-only refuses it.
+    await expect(registry.execute('test.secret', { password: 'x' }, { caller: 'mcp', host: allowAll, workspace: workspaceWithRules([]) })).rejects.toMatchObject({
+      details: { reason: 'read-only' },
+    });
+    const denyAll = fakeHost({ permissions: { mode: 'allow', rules: [] }, workspaceRules: { w: [{ match: '*', action: 'deny' }] } });
+    await expect(registry.execute('test.secret', { password: 'x' }, { caller: 'mcp', host: denyAll, workspace: workspaceWithRules([]) })).rejects.toMatchObject({
+      details: { reason: 'rule', level: 'workspace' },
+    });
+  });
+
+  it('decides again after the user allows a call, so a pause or a stricter policy set meanwhile wins', async () => {
+    const host = fakeHost({ permissions: { mode: 'ask', rules: [] } }, () => {
+      host.config.get().mcp.permissions = { mode: 'ask', rules: [{ match: 'test.destroy', action: 'deny' }] };
+      return { approved: true, how: 'once' };
+    });
+    const trace: ExecuteTrace = {};
+    await expect(registry.execute('test.destroy', {}, { caller: 'mcp', host, workspace: workspaceWithRules([]) }, trace)).rejects.toMatchObject({ details: { reason: 'rule' } });
+    expect(trace.decision).toBe('refused');
+    const pausing = fakeHost({ permissions: { mode: 'ask', rules: [] } }, () => {
+      pausing.config.get().mcp.paused = true;
+      return { approved: true, how: 'once' };
+    });
+    await expect(registry.execute('test.destroy', {}, { caller: 'mcp', host: pausing, workspace: workspaceWithRules([]) })).rejects.toMatchObject({ details: { reason: 'paused' } });
+  });
+
   it('ignores a rules file in the project folder, which anyone who can commit could have written', async () => {
     const ws = workspaceWithRules([{ match: '*', action: 'allow' }]);
     await expect(registry.execute('test.destroy', {}, { caller: 'mcp', host: fakeHost(), workspace: ws })).rejects.toMatchObject({ details: { reason: 'read-only' } });

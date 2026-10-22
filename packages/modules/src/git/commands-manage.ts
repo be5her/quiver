@@ -47,6 +47,18 @@ async function repo(ctx: CommandContext): Promise<{ ws: WorkspaceApi; root: stri
 }
 
 /**
+ * Runs a write and announces it also when git failed part-way: a merge or cherry-pick stopped by a hook or left empty,
+ * or a discard whose clean failed after the restore, has still changed the branch, the index or the files.
+ */
+async function announced<T>(ctx: CommandContext, ws: WorkspaceApi, reasons: ('status' | 'branches' | 'stashes')[], run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } finally {
+    changed(ctx, ws, ...reasons);
+  }
+}
+
+/**
  * A branch or tag as a plain name, or a clear error: no refspec (see `requireBranchName`), and no full ref name or
  * HEAD, which `push --delete` and friends would read as something other than the branch meant.
  */
@@ -78,8 +90,9 @@ const branchDelete = defineCommand({
       // Git's -d only looks at the upstream and HEAD. A branch git.branch.list calls merged has its commits in the
       // default branch, so nothing is lost when it goes from another branch.
       const base = await local.defaultBranch(root);
-      // Never the default branch itself, whose commits would trivially be "in" it.
-      const inDefault = base && base.ref !== `refs/heads/${name}` && (await local.git(root, ['merge-base', '--is-ancestor', `refs/heads/${name}`, base.ref], { allowFailure: true })).code === 0;
+      // Never the default branch itself, whose commits would trivially be "in" it: neither `main` when it is the base,
+      // nor the local `main` when the base is `origin/main`.
+      const inDefault = base && base.ref !== `refs/heads/${name}` && base.name !== name && (await local.git(root, ['merge-base', '--is-ancestor', `refs/heads/${name}`, base.ref], { allowFailure: true })).code === 0;
       if (!inDefault) throw new QuiverError('INVALID_INPUT', `${name} has commits that are not merged; delete it with force to drop them`, { reason: 'not-merged' });
       await local.git(root, ['branch', '-D', name]);
     }
@@ -160,9 +173,7 @@ const merge = defineCommand({
     const { ws, root } = await repo(ctx);
     await local.requireNoOperation(root);
     // The message as `--message=<text>`, so no part of it can be read as an option.
-    const result = await local.operation(root, ['merge', '--no-edit', ...(mode ? [MERGE_MODE[mode]] : []), ...(message ? [`--message=${message}`] : []), ref]);
-    changed(ctx, ws, 'status', 'branches');
-    return result;
+    return announced(ctx, ws, ['status', 'branches'], () => local.operation(root, ['merge', '--no-edit', ...(mode ? [MERGE_MODE[mode]] : []), ...(message ? [`--message=${message}`] : []), ref]));
   },
 });
 
@@ -177,9 +188,7 @@ const rebase = defineCommand({
   handler: async ({ onto }, ctx): Promise<GitOperationResult> => {
     const { ws, root } = await repo(ctx);
     await local.requireNoOperation(root);
-    const result = await local.operation(root, ['rebase', onto]);
-    changed(ctx, ws, 'status', 'branches');
-    return result;
+    return announced(ctx, ws, ['status', 'branches'], () => local.operation(root, ['rebase', onto]));
   },
 });
 
@@ -211,9 +220,7 @@ function operationCommand(action: GitOperationAction): CommandDefinition {
       if (!args) throw new QuiverError('INVALID_INPUT', `A ${st.operation} cannot skip; continue or abort it`);
       const conflicts = conflictedPaths(st.files);
       if (action === 'continue' && conflicts.length) throw new QuiverError('INVALID_INPUT', `Resolve and stage ${conflicts.join(', ')} first`, { reason: 'unresolved', conflicts });
-      const result = await local.operation(root, args);
-      changed(ctx, ws, 'status', 'branches');
-      return result;
+      return announced(ctx, ws, ['status', 'branches'], () => local.operation(root, args));
     },
   });
 }
@@ -231,9 +238,7 @@ const cherryPick = defineCommand({
   handler: async ({ commits }, ctx): Promise<GitOperationResult> => {
     const { ws, root } = await repo(ctx);
     await local.requireNoOperation(root);
-    const result = await local.operation(root, ['cherry-pick', ...commits]);
-    changed(ctx, ws, 'status', 'branches');
-    return result;
+    return announced(ctx, ws, ['status', 'branches'], () => local.operation(root, ['cherry-pick', ...commits]));
   },
 });
 
@@ -248,9 +253,7 @@ const revert = defineCommand({
   handler: async ({ commit }, ctx): Promise<GitOperationResult> => {
     const { ws, root } = await repo(ctx);
     await local.requireNoOperation(root);
-    const result = await local.operation(root, ['revert', '--no-edit', commit]);
-    changed(ctx, ws, 'status', 'branches');
-    return result;
+    return announced(ctx, ws, ['status', 'branches'], () => local.operation(root, ['revert', '--no-edit', commit]));
   },
 });
 
@@ -318,9 +321,11 @@ const stashPush = defineCommand({
     // Each path literal (`[id].tsx` is a file, not a glob), by its own magic: GIT_LITERAL_PATHSPECS would also switch
     // off the `:/` stash gives its own clean of untracked files, which would then leave them in place.
     const args = ['stash', 'push', ...(includeUntracked ? ['--include-untracked'] : []), ...(message ? [`--message=${message}`] : []), ...(paths ? ['--', ...paths.map((p) => `:(literal)${p}`)] : [])];
-    const result = await local.git(root, args);
-    // Git says so and exits 0.
-    if (/no local changes to save/i.test(local.output(result))) {
+    // Git says "No local changes to save" and exits 0, in the user's language; whether refs/stash moved says it in any.
+    const top = async () => (await local.git(root, ['rev-parse', '--quiet', '--verify', 'refs/stash'], { allowFailure: true })).stdout.trim();
+    const before = await top();
+    await local.git(root, args);
+    if ((await top()) === before) {
       throw new QuiverError('INVALID_INPUT', includeUntracked ? 'Nothing to stash: there are no local changes' : 'Nothing to stash: there are no changes to tracked files (untracked ones need includeUntracked)', { reason: 'nothing-to-stash' });
     }
     changed(ctx, ws, 'status', 'stashes');
@@ -338,11 +343,12 @@ const stashApply = defineCommand({
   input: GitStashApplyInputSchema,
   handler: async ({ index, hash, pop }, ctx): Promise<GitOperationResult> => {
     const { ws, root } = await repo(ctx);
-    await local.stashAt(root, index, hash);
+    const stash = await local.stashAt(root, index, hash);
     await local.requireNoOperation(root);
-    const result = await local.operation(root, ['stash', pop ? 'pop' : 'apply', `stash@{${index}}`]);
-    changed(ctx, ws, 'status', 'stashes');
-    return result;
+    // Apply takes the stash by its hash, so a stash pushed or dropped since the check cannot swap in another one. Pop
+    // needs the stash@{N} entry it drops; it is checked again just before, which leaves the smallest window.
+    if (pop) await local.stashAt(root, index, stash.hash);
+    return announced(ctx, ws, ['status', 'stashes'], () => local.operation(root, ['stash', pop ? 'pop' : 'apply', pop ? `stash@{${index}}` : stash.hash]));
   },
 });
 
@@ -374,12 +380,13 @@ const discard = defineCommand({
   input: GitDiscardInputSchema,
   handler: async ({ paths, staged }, ctx): Promise<GitStatus> => {
     const { ws, root } = await repo(ctx);
-    const plan = planDiscard((await local.status(root)).files, paths);
+    const plan = planDiscard((await local.status(root)).files, paths, staged);
     // Restored first: a path git does not know fails it before anything is deleted. Paths are literal, never globs.
     const env = local.LITERAL_PATHS_ENV;
-    if (plan.restore.length) await local.git(root, staged ? ['restore', '--source=HEAD', '--staged', '--worktree', '--', ...plan.restore] : ['restore', '--worktree', '--', ...plan.restore], { env });
-    if (plan.clean.length) await local.git(root, ['clean', '--force', ...(plan.cleanDirs ? ['-d'] : []), '--', ...plan.clean], { env });
-    changed(ctx, ws, 'status');
+    await announced(ctx, ws, ['status'], async () => {
+      if (plan.restore.length) await local.git(root, staged ? ['restore', '--source=HEAD', '--staged', '--worktree', '--', ...plan.restore] : ['restore', '--worktree', '--', ...plan.restore], { env });
+      if (plan.clean.length) await local.git(root, ['clean', '--force', ...(plan.cleanDirs ? ['-d'] : []), '--', ...plan.clean], { env });
+    });
     return local.status(root);
   },
 });

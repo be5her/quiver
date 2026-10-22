@@ -97,9 +97,9 @@ export class AgentApprovals {
   /**
    * Answers a waiting call. Allowing for the session also lets through the agent's other calls to the tool that wait,
    * and allowing for good every agent's; with `workspaceId` (an allow for good that only holds in one workspace), only
-   * those waiting in that workspace.
+   * those waiting in that workspace, and with `covers`, only those the new rule lets through.
    */
-  respond(id: string, choice: ApprovalChoice, scope: { workspaceId?: string | null } = {}): PendingApproval {
+  respond(id: string, choice: ApprovalChoice, scope: { workspaceId?: string | null; covers?(other: PendingApproval): boolean } = {}): PendingApproval {
     const entry = this.waiting.get(id);
     if (!entry) throw new QuiverError('NOT_FOUND', `No approval ${id} is waiting; it may have been answered or timed out`);
     const { pending } = entry;
@@ -111,7 +111,7 @@ export class AgentApprovals {
     this.settle(id, { approved: true, how: choice }, false);
     if (choice !== 'once') {
       for (const other of [...this.waiting.values()]) {
-        const inScope = scope.workspaceId === undefined || (other.pending.workspace?.id ?? null) === scope.workspaceId;
+        const inScope = (scope.workspaceId === undefined || (other.pending.workspace?.id ?? null) === scope.workspaceId) && (choice !== 'always' || !scope.covers || scope.covers(other.pending));
         const same = other.pending.commandId === pending.commandId && inScope && (choice === 'always' || other.pending.agent.name === pending.agent.name);
         if (same) this.settle(other.pending.id, { approved: true, how: choice }, false);
       }

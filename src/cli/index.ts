@@ -8,6 +8,10 @@ import type { CliOutcome } from '@quiver/mcp';
 import { Output, USAGE, formatDescribe, formatList, formatRun, type CommandRow, type Described } from './output';
 import { UnreachableError, appUserDataDir, connect, headlessDataDir, type Transport } from './transport';
 
+// The shims set this so the app binary runs this script as Node. Processes the commands start (runner tasks, git's
+// editor, tsh) must not inherit it, or an Electron app among them starts as plain Node.
+delete process.env.ELECTRON_RUN_AS_NODE;
+
 /** The version of the build this script belongs to: the package.json beside out/. */
 function cliVersion(): string {
   try {

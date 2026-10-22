@@ -241,19 +241,38 @@ export function operationArgs(operation: GitOperation, action: GitOperationActio
 /**
  * Which of the paths to discard go to `git restore` and which to `git clean`: only a path the status lists as
  * untracked is deleted (with `-d` for a folder entry, `new/`); every other path is restored, which never deletes a
- * file git does not track.
+ * file git does not track. With `staged` (back to HEAD), a staged rename's old path is restored too: the new path
+ * alone would go, and the old one stay deleted.
  */
-export function planDiscard(files: GitFileChange[], paths: string[]): { restore: string[]; clean: string[]; cleanDirs: boolean } {
+export function planDiscard(files: GitFileChange[], paths: string[], staged = false): { restore: string[]; clean: string[]; cleanDirs: boolean } {
   const untracked = new Set(files.filter((f) => f.index === '?').map((f) => f.path));
   const clean = paths.filter((p) => untracked.has(p));
-  return { restore: paths.filter((p) => !untracked.has(p)), clean, cleanDirs: clean.some((p) => p.endsWith('/')) };
+  const restore = paths.filter((p) => !untracked.has(p));
+  if (staged) {
+    for (const f of files) if (f.origPath && restore.includes(f.path) && !restore.includes(f.origPath)) restore.push(f.origPath);
+  }
+  return { restore, clean, cleanDirs: clean.some((p) => p.endsWith('/')) };
 }
 
-/** The operation in progress, from the marker files git leaves in its directory. */
-export function detectOperation(present: (name: string) => boolean): GitStatus['operation'] {
+/**
+ * The operation in progress, from the marker files git leaves in its directory. A cherry-pick or revert of several
+ * commits keeps `sequencer/` until the last one, also after the one it stopped on was committed by hand, which
+ * removes CHERRY_PICK_HEAD; its todo list (`read`) says which of the two it is.
+ */
+export function detectOperation(present: (name: string) => boolean, read?: (name: string) => string): GitStatus['operation'] {
   if (present('rebase-merge') || present('rebase-apply')) return 'rebase';
   if (present('MERGE_HEAD')) return 'merge';
   if (present('CHERRY_PICK_HEAD')) return 'cherry-pick';
   if (present('REVERT_HEAD')) return 'revert';
+  if (present('sequencer')) {
+    let todo = '';
+    try {
+      todo = read?.('sequencer/todo') ?? '';
+    } catch {
+      // Gone between the two looks: the operation just finished.
+      return undefined;
+    }
+    return /^\s*(revert|r)\s/m.test(todo) && !/^\s*(pick|p)\s/m.test(todo) ? 'revert' : 'cherry-pick';
+  }
   return undefined;
 }

@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { app } from 'electron';
-import { CLI_EXIT, CLI_TOKEN_HEADER, keyValue, newApiRequest, newCollection, newEnvironment, type ApiRun, type Check, type Environment, type GitStatus, type TodoItem, type WorkspaceInfo } from '@quiver/core';
+import { CLI_EXIT, CLI_TOKEN_HEADER, keyValue, newApiRequest, newCollection, newEnvironment, type ApiRun, type Check, type Environment, type GitStatus, type RealtimeConnectionSummary, type TodoItem, type WorkspaceInfo } from '@quiver/core';
 import { runToEnd } from '@quiver/core/node';
 import { CLI_ENDPOINT_FILE, CLI_TOKEN_FILE, type CliEndpointInfo } from '../../cli-files';
 import { definePart } from '../part';
@@ -228,6 +228,33 @@ export default definePart({
       'cli: the API client never sends the command line token, so an agent cannot relay calls to the endpoint through api.request.send',
       relayRefused(agentRelay) && relayRefused(agentRelayUpper) && relayRefused(userRelay),
       { agent: agentRelay.ok || agentRelay.error, agentUpper: agentRelayUpper.ok || agentRelayUpper.error.code, user: userRelay.ok || userRelay.error.code },
+    );
+    // Nor through a realtime SSE connection, which can POST a body with headers of its own: the token is dropped, so
+    // /cli answers 401 and the todo it carries is never added.
+    const relayTitle = `relayed over sse ${Date.now()}`;
+    const sseRelay = await run<RealtimeConnectionSummary>(
+      'realtime.connection.save',
+      {
+        connection: {
+          name: 'smoke cli relay',
+          kind: 'sse',
+          method: 'POST',
+          url: cliUrl,
+          reconnect: false,
+          headers: [keyValue(CLI_TOKEN_HEADER, token), keyValue('content-type', 'application/json')],
+          body: JSON.stringify({ command: 'todo.add', input: { title: relayTitle }, workspace: folder }),
+        },
+      },
+      ws.id,
+    );
+    const sseOpened = await run<RealtimeConnectionSummary>('realtime.connect', { id: sseRelay.id }, ws.id);
+    await run('realtime.disconnect', { id: sseRelay.id }, ws.id).catch(() => {});
+    await run('realtime.connection.delete', { id: sseRelay.id }, ws.id).catch(() => {});
+    const afterSse = await run<TodoItem[]>('todo.list', {}, ws.id);
+    check(
+      'cli: a realtime SSE connection never sends the command line token, so it cannot relay a call to the endpoint',
+      sseOpened.status !== 'open' && (sseOpened.error ?? '').includes('401') && !afterSse.some((todo) => todo.title === relayTitle),
+      { status: sseOpened.status, error: sseOpened.error, relayed: afterSse.some((todo) => todo.title === relayTitle) },
     );
 
     // No app: exit 3, unless --headless=auto runs it in-process instead.

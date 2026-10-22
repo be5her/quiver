@@ -120,8 +120,9 @@ export function upsertRule(rules: AgentPermissionRule[], rule: AgentPermissionRu
  * `allowMutating`, so it loads as `read-only`: the stricter of the two.
  */
 export function migrateMcpConfig(merged: McpConfig, before: McpConfig, loaded = false): McpConfig {
-  const given = merged.permissions as Partial<AgentPermissions> | undefined;
-  let mode: AgentPermissionMode = AGENT_PERMISSION_MODES.includes(given?.mode as AgentPermissionMode) ? (given!.mode as AgentPermissionMode) : 'read-only';
+  // A patch that names only the mode, or only the rules, keeps the other.
+  const given = { ...before.permissions, ...(merged.permissions as Partial<AgentPermissions> | undefined) } as Partial<AgentPermissions>;
+  let mode: AgentPermissionMode = AGENT_PERMISSION_MODES.includes(given.mode as AgentPermissionMode) ? (given.mode as AgentPermissionMode) : 'read-only';
   const flipped = Boolean(merged.allowMutating) !== Boolean(before.allowMutating);
   if (flipped && mode === before.permissions?.mode) mode = merged.allowMutating ? 'allow' : 'read-only';
   if (loaded && merged.allowMutating === false && mode === 'allow') mode = 'read-only';
@@ -129,7 +130,7 @@ export function migrateMcpConfig(merged: McpConfig, before: McpConfig, loaded = 
     ...merged,
     allowMutating: mode === 'allow',
     paused: merged.paused === true,
-    permissions: { mode, rules: normalizeRules(given?.rules) },
+    permissions: { mode, rules: normalizeRules(given.rules) },
     workspaceRules: normalizeWorkspaceRules(merged.workspaceRules),
   };
 }
@@ -147,10 +148,13 @@ function normalizeWorkspaceRules(value: unknown): Record<string, AgentPermission
 /**
  * A workspace's own rules. They live in the global config (`mcp.workspaceRules`, by workspace id), on this machine
  * only, and never in the project: a file in the project could come from anyone who can commit to it, and these rules
- * can allow more than the global ones.
+ * can allow more than the global ones. For a global command (`scope` 'global': Teleport, app updates, global
+ * variables) only the deny and ask rules count, so a loose rule in a scratch workspace never lets an agent connected
+ * there do more outside it.
  */
-export function workspaceRulesFor(mcp: Pick<McpConfig, 'workspaceRules'>, workspaceId: string | undefined | null): AgentPermissionRule[] {
-  return (workspaceId && mcp.workspaceRules?.[workspaceId]) || [];
+export function workspaceRulesFor(mcp: Pick<McpConfig, 'workspaceRules'>, workspaceId: string | undefined | null, scope: 'global' | 'workspace' = 'workspace'): AgentPermissionRule[] {
+  const rules = (workspaceId && mcp.workspaceRules?.[workspaceId]) || [];
+  return scope === 'global' ? rules.filter((r) => r.action !== 'allow') : rules;
 }
 
 /** `mcp.workspaceRules` with one workspace's rules replaced; a workspace left with none is dropped. */

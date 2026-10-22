@@ -85,18 +85,26 @@ export class CommandRegistry {
     if (mcp.paused) refuse('paused', 'paused', 'Agents are paused in Quiver. The user can resume them from the status bar or Settings > MCP.');
 
     const mutates = typeof command.mutating === 'function' ? await command.mutating(input as never, ctx) : Boolean(command.mutating);
-    const permissions = mcp.permissions ?? { mode: mcp.allowMutating ? 'allow' : 'read-only', rules: [] };
-    const decision = decideAgentPermission({ commandId: id, mutating: mutates, permissions, workspaceRules: workspaceRulesFor(mcp, ctx.workspace?.id) });
-    if (decision.action === 'allow') {
-      trace.decision = 'allowed';
-      return;
-    }
-    if (decision.action === 'deny') {
+    const decide = (config: typeof mcp) =>
+      decideAgentPermission({
+        commandId: id,
+        mutating: mutates,
+        permissions: config.permissions ?? { mode: config.allowMutating ? 'allow' : 'read-only', rules: [] },
+        workspaceRules: workspaceRulesFor(config, ctx.workspace?.id, command.scope),
+      });
+    const refuseDenied = (decision: ReturnType<typeof decide>): void => {
+      if (decision.action !== 'deny') return;
       if (decision.source === 'mode') {
         refuse('refused', 'read-only', `Command "${id}" can change data and agents are read-only. The user can allow it, or have Quiver ask each time, in Settings > MCP.`);
       }
       refuse('refused', 'rule', `Command "${id}" is denied to agents by a ${decision.level} rule (${decision.rule?.match}) in Settings > MCP.`, { rule: decision.rule, level: decision.level });
+    };
+    const decision = decide(mcp);
+    if (decision.action === 'allow') {
+      trace.decision = 'allowed';
+      return;
     }
+    refuseDenied(decision);
 
     if (!ctx.host.approvals) refuse('refused', 'no-approver', `Command "${id}" needs the user's approval, and this Quiver has no window to ask in.`);
     if (command.beforeApproval) {
@@ -111,6 +119,10 @@ export class CommandRegistry {
     const agent = ctx.agent ?? { name: 'unknown', version: null, userAgent: null };
     const outcome = await ctx.host.approvals!.request({ agent, workspace, commandId: id, title: command.title, input: maskArguments(input), mutating: mutates }, ctx.signal);
     if (outcome.approved) {
+      // The user may have paused agents or made the permissions stricter while the call waited; that wins.
+      const now = ctx.host.config.get().mcp;
+      if (now.paused) refuse('paused', 'paused', `Command "${id}" was waiting for the user's approval when agents were paused.`);
+      refuseDenied(decide(now));
       trace.decision = 'approved';
       return;
     }

@@ -13,6 +13,21 @@ const STOP_GRACE_MS = 3000;
 
 const WINDOWS = process.platform === 'win32';
 
+/**
+ * `killTree` leaves a process that has exited alone. When tsh exits first, kubectl, in tsh's process group, can still
+ * hold the port and the pipes (so `close` has not fired): on macOS and Linux the group is signalled directly. The
+ * group id stays taken while any member lives, so it cannot name another process's group.
+ */
+function signalOrphanedGroup(forward: LiveForward, signal: NodeJS.Signals = 'SIGTERM'): void {
+  const pid = forward.info.pid;
+  if (WINDOWS || !pid || forward.child.exitCode === null) return;
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    // The group is gone already.
+  }
+}
+
 export interface KubeForwardsOptions {
   runner: KubeRunner;
   onChange(): void;
@@ -44,8 +59,33 @@ export class KubeForwards {
   private readonly pending = new Map<string, Promise<KubePortForward>>();
   /** Starts past the cap check that have not settled yet, so concurrent starts to different targets cannot pass the cap together. */
   private starting = 0;
+  /** Proxies being logged out (normalized; `*` for all of them), with how many logouts hold each: no forward starts on them meanwhile. */
+  private readonly closing = new Map<string, number>();
 
   constructor(private readonly opts: KubeForwardsOptions) {}
+
+  /**
+   * Refuses new forwards on one Teleport cluster (every cluster without `proxy`) until `during` has settled, e.g. a
+   * logout that stops the cluster's forwards: a start that was still waiting for its command would otherwise spawn
+   * after the stop and keep running on the credentials kubectl had already loaded.
+   */
+  async refuseStartsWhile<T>(proxy: string | undefined, during: () => Promise<T>): Promise<T> {
+    const key = proxy ? normalizeProxy(proxy) : '*';
+    this.closing.set(key, (this.closing.get(key) ?? 0) + 1);
+    try {
+      return await during();
+    } finally {
+      const left = (this.closing.get(key) ?? 1) - 1;
+      if (left > 0) this.closing.set(key, left);
+      else this.closing.delete(key);
+    }
+  }
+
+  private refuseIfClosing(...proxies: string[]): void {
+    if (this.closing.has('*') || proxies.some((p) => this.closing.has(normalizeProxy(p)))) {
+      throw new QuiverError('REQUEST_FAILED', `Logging out of ${proxies[0]}; start the port forward again after logging in`);
+    }
+  }
 
   list(): KubePortForward[] {
     return [...this.live.values()].map((l) => ({ ...l.info, output: [...l.info.output] }));
@@ -68,6 +108,7 @@ export class KubeForwards {
 
   private async launch(req: KubeForwardRequest): Promise<KubePortForward> {
     const { spec } = req;
+    this.refuseIfClosing(req.proxy);
     const existing = [...this.live.values()].find(
       (l) =>
         l.info.state !== 'exited' &&
@@ -97,6 +138,8 @@ export class KubeForwards {
     const localPort = spec.localPort ?? (await freePort());
     const args = buildPortForwardArgs({ ...spec, localPort });
     const { tsh, argv, proxy } = await this.opts.runner.commandFor(req.proxy, req.cluster, args);
+    // A logout may have begun while the command was looked up.
+    this.refuseIfClosing(req.proxy, proxy);
 
     let child: ChildProcess;
     try {
@@ -131,9 +174,13 @@ export class KubeForwards {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        this.live.delete(info.id);
-        this.opts.onChange();
         reject(new QuiverError('REQUEST_FAILED', message, { output: info.output }));
+        // Listed until its process has gone, so stop, logout and quit still reach one that is slow to die.
+        void this.end(forward).finally(() => {
+          if (this.live.get(info.id) !== forward) return;
+          this.live.delete(info.id);
+          this.opts.onChange();
+        });
       };
       const keep = (line: string) => {
         if (!line.trim()) return;
@@ -156,7 +203,6 @@ export class KubeForwards {
       );
       child.stderr?.on('data', lineSplitter(keep));
       const timer = setTimeout(() => {
-        killTree(child);
         fail(`kubectl port-forward did not start listening within ${START_TIMEOUT_MS / 1000}s`);
       }, START_TIMEOUT_MS);
       timer.unref?.();
@@ -188,7 +234,7 @@ export class KubeForwards {
   /** Forwards of one Teleport cluster, e.g. on its logout. */
   async stopCluster(proxy: string): Promise<number> {
     const ids = [...this.live.values()].filter((l) => sameProxy(l.info.proxy, proxy)).map((l) => l.info.id);
-    for (const id of ids) await this.stop(id);
+    await Promise.all(ids.map((id) => this.stop(id)));
     return ids.length;
   }
 
@@ -202,8 +248,10 @@ export class KubeForwards {
   private async end(forward: LiveForward): Promise<void> {
     if (forward.info.state === 'exited') return;
     killTree(forward.child);
+    signalOrphanedGroup(forward);
     const force = setTimeout(() => {
       killTree(forward.child, 'SIGKILL');
+      signalOrphanedGroup(forward, 'SIGKILL');
       forward.child.stdout?.destroy();
       forward.child.stderr?.destroy();
     }, STOP_GRACE_MS);

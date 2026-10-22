@@ -1,4 +1,4 @@
-import { existsSync, watch, type FSWatcher } from 'node:fs';
+import { existsSync, readFileSync, watch, type FSWatcher } from 'node:fs';
 import path from 'node:path';
 import {
   GIT_BRANCH_FORMAT,
@@ -45,7 +45,11 @@ const WATCH_DEBOUNCE_MS = 250;
 
 /** Settings for every call: no colour, paths unquoted, no optional locks so a status never fights the user's own git. */
 const BASE_ARGS = ['-c', 'color.ui=false', '-c', 'core.quotepath=false'];
-const ENV: Record<string, string> = { GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', GIT_MERGE_AUTOEDIT: 'no' };
+/**
+ * `LANGUAGE` keeps git's messages in English whatever the user's locale (gettext reads it before LC_ALL and LANG), so
+ * the few that are matched as text ("not fully merged", "[rejected]") are found, and errors read like the rest of the app.
+ */
+const ENV: Record<string, string> = { GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', GIT_MERGE_AUTOEDIT: 'no', LANGUAGE: 'en' };
 /**
  * For a network call an agent made: `GIT_TERMINAL_PROMPT=0` only stops terminal prompts, while Git Credential Manager
  * opens a window when it has nothing stored, which would leave the call hanging behind a dialog nobody asked for. A
@@ -161,7 +165,10 @@ export async function status(cwd: string, options: { files?: boolean } = {}): Pr
   const which = options.files === false ? ['--untracked-files=no', '--ignore-submodules=all'] : ['--untracked-files=normal'];
   const { stdout } = await git(dirs.root, ['status', '--porcelain=v2', '--branch', '-z', ...which]);
   const parsed = options.files === false ? { ...parseStatusV2(stdout), files: [] } : parseStatusV2(stdout);
-  const operation = detectOperation((name) => existsSync(path.join(dirs.gitDir, name)));
+  const operation = detectOperation(
+    (name) => existsSync(path.join(dirs.gitDir, name)),
+    (name) => readFileSync(path.join(dirs.gitDir, name), 'utf8'),
+  );
   return operation ? { ...parsed, operation } : parsed;
 }
 
@@ -228,13 +235,24 @@ export async function requireNoOperation(root: string): Promise<void> {
 
 /**
  * Run an operation that may stop on conflicts. Stopping is not a failure: the result lists the conflicted paths and
- * the new status, and the operation waits for a continue or an abort. Any other non-zero exit fails with git's message.
+ * the new status, and the operation waits for a continue or an abort. Any other non-zero exit fails with git's
+ * message; when it left the operation in progress (a hook refused the commit, or a cherry-pick came out empty), the
+ * error says so and carries the operation and the new status (details.reason "operation-in-progress").
  */
 export async function operation(root: string, args: string[], options: { input?: string; env?: Record<string, string> } = {}): Promise<GitOperationResult> {
   const result = await git(root, args, { allowFailure: true, input: options.input, timeoutMs: OPERATION_TIMEOUT_MS, env: { ...NO_EDITOR_ENV, ...options.env } });
   const after = await status(root);
   const conflicts = conflictedPaths(after.files);
-  if (result.code !== 0 && !conflicts.length) throw gitFailure(args, result);
+  if (result.code !== 0 && !conflicts.length) {
+    const err = gitFailure(args, result);
+    if (!after.operation) throw err;
+    throw new QuiverError('REQUEST_FAILED', `${err.message}\nThe ${after.operation} is still in progress: continue, skip or abort it.`, {
+      exitCode: result.code,
+      reason: 'operation-in-progress',
+      operation: after.operation,
+      status: after,
+    });
+  }
   return { output: output(result), conflicts, status: after };
 }
 
@@ -386,6 +404,8 @@ const watchers = new Map<string, { close(): void }>();
 
 type WatchReason = 'status' | 'branches' | 'stashes';
 
+const OPERATION_MARKERS = new Set(['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply', 'sequencer']);
+
 /**
  * Watch the repository's HEAD, index and refs and emit `git.changed`, debounced: `status` when HEAD or the index
  * moved, `branches` when HEAD or a ref did, `stashes` when `refs/stash` did. Edits to working files are not watched; the view refreshes those itself.
@@ -422,7 +442,8 @@ export async function ensureWatcher(ws: WorkspaceApi, host: HostApi): Promise<vo
   };
   add(dirs.gitDir, false, (name) => {
     if (name.endsWith('.lock')) return;
-    if (name === 'HEAD' || name === 'MERGE_HEAD' || name === 'ORIG_HEAD') fire('status', 'branches');
+    // HEAD, or a marker of the operation in progress the status shows (see detectOperation).
+    if (name === 'HEAD' || name === 'ORIG_HEAD' || OPERATION_MARKERS.has(name.split('/')[0])) fire('status', 'branches');
     else if (name === 'index') fire('status');
     else if (name === 'packed-refs' && dirs.commonDir === dirs.gitDir) fire('branches');
   });

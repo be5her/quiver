@@ -58,6 +58,11 @@ describe('junitReport', () => {
     expect(xml).not.toContain('\u0001');
   });
 
+  it('leaves out half a surrogate pair and keeps whole ones', () => {
+    const broken = junitReport([{ ...run, collectionName: 'a\uD800b\uDC00c 😀' }]);
+    expect(broken).toContain('name="abc 😀"');
+  });
+
   it('adds runs up', () => {
     expect(junitReport([run, { ...run, id: 'r2' }])).toContain('<testsuites name="Quiver" tests="8" failures="2" errors="2" skipped="2" time="3.000">');
     expect(junitReport([])).toBe('<?xml version="1.0" encoding="UTF-8"?>\n<testsuites name="Quiver" tests="0" failures="0" errors="0" skipped="0" time="0.000">\n</testsuites>\n');

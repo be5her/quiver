@@ -187,6 +187,10 @@ describe('replay helpers', () => {
     expect(replayableHeaders(captured.headers).map(([k]) => k)).toEqual(['Content-Type', 'X-Hub-Signature']);
   });
 
+  it("never replays the quiver command line's token, in any case", () => {
+    expect(replayableHeaders([['X-Quiver-CLI-Token', 'abc'], ['x-quiver-cli-token', 'abc'], ['Accept', '*/*']])).toEqual([['Accept', '*/*']]);
+  });
+
   it('appends the captured path to a bare origin and keeps an explicit path', () => {
     expect(replayUrl('http://localhost:3000', captured)).toBe('http://localhost:3000/hooks/github?x=1');
     expect(replayUrl('localhost:3000/', captured)).toBe('http://localhost:3000/hooks/github?x=1');

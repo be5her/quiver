@@ -18,7 +18,8 @@ export type CliOutcome = { ok: true; result: unknown } | { ok: false; error: Err
 /** What the host gives the endpoint: the token of this run and how to execute a command as caller `cli`. */
 export interface CliEndpoint {
   token(): string;
-  run(request: CliRequest): Promise<CliOutcome>;
+  /** `signal` aborts when the command line stops waiting (Ctrl+C, --timeout), so a long command is cancelled too. */
+  run(request: CliRequest, signal?: AbortSignal): Promise<CliOutcome>;
 }
 
 function reply(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
@@ -70,9 +71,13 @@ export async function handleCliRequest(req: IncomingMessage, res: ServerResponse
     return reply(res, 400, { error: { code: 'INVALID_INPUT', message: 'The body is not JSON' } });
   }
   if (!parsed.success) return reply(res, 400, { error: { code: 'INVALID_INPUT', message: 'The body is { command, input, workspace }' } });
+  const stop = new AbortController();
+  res.on('close', () => {
+    if (!res.writableFinished) stop.abort(new Error('The command line stopped waiting'));
+  });
   let outcome: CliOutcome;
   try {
-    outcome = await endpoint.run(parsed.data);
+    outcome = await endpoint.run(parsed.data, stop.signal);
   } catch (err) {
     outcome = { ok: false, error: { code: 'INTERNAL', message: (err as Error).message } };
   }

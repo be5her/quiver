@@ -27,7 +27,10 @@ function fakeHost(): HostApi {
 
 describe('CLI endpoint', () => {
   let running: RunningMcpServer | undefined;
+  /** The commands whose signal aborted while they ran. */
+  const aborted: string[] = [];
   afterEach(async () => {
+    aborted.length = 0;
     await running?.close();
     running = undefined;
   });
@@ -44,9 +47,13 @@ describe('CLI endpoint', () => {
       cli: withCli
         ? {
             token: () => 'tok-123',
-            run: async (request) => {
+            run: async (request, signal) => {
               seen.push(request);
               if (request.command === 'boom') throw new Error('kaput');
+              if (request.command === 'slow') {
+                await new Promise((resolve) => signal?.addEventListener('abort', resolve, { once: true }));
+                aborted.push(request.command);
+              }
               return { ok: true, result: { echoed: request.input } };
             },
           }
@@ -82,6 +89,17 @@ describe('CLI endpoint', () => {
   it('answers a command that throws with its error', async () => {
     const { post } = await start();
     expect(await (await post({ command: 'boom' })).json()).toEqual({ ok: false, error: { code: 'INTERNAL', message: 'kaput' } });
+  });
+
+  it('aborts the command when the command line stops waiting', async () => {
+    const { url } = await start();
+    const client = new AbortController();
+    const sent = fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', [CLI_TOKEN_HEADER]: 'tok-123' }, body: JSON.stringify({ command: 'slow' }), signal: client.signal });
+    await new Promise((r) => setTimeout(r, 100));
+    client.abort();
+    await expect(sent).rejects.toThrow();
+    for (let i = 0; i < 50 && !aborted.length; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(aborted).toEqual(['slow']);
   });
 
   it('is off when the host gives no endpoint', async () => {

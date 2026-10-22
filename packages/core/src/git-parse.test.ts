@@ -134,6 +134,14 @@ describe('planDiscard', () => {
     // A file inside an untracked folder, or one the status does not list, is never handed to git clean.
     expect(planDiscard(files, ['newdir/a.txt', 'src'])).toEqual({ restore: ['newdir/a.txt', 'src'], clean: [], cleanDirs: false });
   });
+
+  it('restores the old path of a staged rename when going back to HEAD', () => {
+    const renamed = [...files, { path: 'new name.txt', origPath: 'old.txt', index: 'R', worktree: '.' }];
+    expect(planDiscard(renamed, ['new name.txt'], true)).toEqual({ restore: ['new name.txt', 'old.txt'], clean: [], cleanDirs: false });
+    expect(planDiscard(renamed, ['new name.txt', 'old.txt'], true).restore).toEqual(['new name.txt', 'old.txt']);
+    // Back to the index, the rename stays staged and only the working file is touched.
+    expect(planDiscard(renamed, ['new name.txt']).restore).toEqual(['new name.txt']);
+  });
 });
 
 describe('parseDiffSummary', () => {
@@ -222,6 +230,24 @@ describe('detectOperation', () => {
     expect(detectOperation((n) => n === 'rebase-merge' || n === 'MERGE_HEAD')).toBe('rebase');
     expect(detectOperation((n) => n === 'CHERRY_PICK_HEAD')).toBe('cherry-pick');
     expect(detectOperation((n) => n === 'REVERT_HEAD')).toBe('revert');
+  });
+
+  it('keeps a cherry-pick or revert of several commits in progress while sequencer/ is there', () => {
+    const sequencer = (todo: string) => detectOperation((n) => n === 'sequencer', () => todo);
+    expect(sequencer('pick 1a2b3c4 Add a\npick 5d6e7f8 Add b\n')).toBe('cherry-pick');
+    expect(sequencer('revert 1a2b3c4 Add a\n')).toBe('revert');
+    expect(detectOperation((n) => n === 'sequencer')).toBe('cherry-pick');
+    // Removed between the two looks: nothing is in progress.
+    expect(
+      detectOperation(
+        (n) => n === 'sequencer',
+        () => {
+          throw new Error('ENOENT');
+        },
+      ),
+    ).toBeUndefined();
+    // CHERRY_PICK_HEAD still decides when it is there.
+    expect(detectOperation((n) => n === 'sequencer' || n === 'REVERT_HEAD', () => 'pick 1a2b3c4 x\n')).toBe('revert');
   });
 
   it('lists the conflicted paths of a status', () => {

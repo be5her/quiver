@@ -58,6 +58,15 @@ export const CLI_PATH = '/cli';
 /** The header that carries the token the app writes to `<userData>/cli-token`. */
 export const CLI_TOKEN_HEADER = 'x-quiver-cli-token';
 
+/**
+ * Headers without the command line's token. Every outgoing request whose headers an agent can choose (realtime
+ * connections, MCP servers, mock replays and forwards) goes through this, so an agent that read the token file
+ * cannot relay a call to `/cli` through an open tool and run it as the user.
+ */
+export function withoutCliToken(headers: [string, string][]): [string, string][] {
+  return headers.filter(([name]) => name.trim().toLowerCase() !== CLI_TOKEN_HEADER);
+}
+
 export const CLI_EXIT = {
   ok: 0,
   /** The command failed; its error goes to stderr as JSON. */
@@ -439,7 +448,8 @@ export function exampleFor(command: string, schema: JsonSchema | undefined): { a
 export function resultFailures(result: unknown): number {
   if (!result || typeof result !== 'object') return 0;
   const r = result as { items?: unknown; failed?: unknown; status?: unknown; checks?: unknown };
-  if (Array.isArray(r.items) && typeof r.failed === 'number') return Math.max(r.failed, r.status === 'failed' ? 1 : 0);
+  // A run that failed or was cancelled before the end fails as a whole, even with no failed request.
+  if (Array.isArray(r.items) && typeof r.failed === 'number') return Math.max(r.failed, r.status === 'failed' || r.status === 'cancelled' ? 1 : 0);
   if (Array.isArray(r.checks)) return r.checks.filter((c) => c && typeof c === 'object' && (c as { ok?: unknown }).ok === false).length;
   return 0;
 }

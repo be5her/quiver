@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyPatch, checksSummary, cleanupCandidates, groupChanges, languageForPath, parsePatch, refMatches, remotesOf, splitPath, splitRemoteBranch, splitRows } from './git-format';
+import { applyPatch, checksSummary, cleanupCandidates, groupChanges, isPushRejected, languageForPath, parsePatch, refMatches, remotesOf, splitPath, splitRemoteBranch, splitRows } from './git-format';
 import type { GitBranch } from '@quiver/core';
 
 const PATCH = [
@@ -90,6 +90,16 @@ describe('helpers', () => {
     expect(checksSummary({ state: 'success', passed: 2, failed: 0, pending: 0 })).toBe('✓ 2');
     expect(checksSummary({ state: 'pending', passed: 1, failed: 0, pending: 1 })).toBe('● 1/2');
     expect(checksSummary({ state: 'none', passed: 0, failed: 0, pending: 0 })).toBe('');
+  });
+});
+
+describe('isPushRejected', () => {
+  it('offers a force push only when the remote branch moved on', () => {
+    expect(isPushRejected(' ! [rejected]        main -> main (non-fast-forward)\nerror: failed to push some refs')).toBe(true);
+    expect(isPushRejected(' ! [rejected]        main -> main (fetch first)')).toBe(true);
+    expect(isPushRejected("Authentication failed for 'https://github.com/o/r.git/'")).toBe(false);
+    expect(isPushRejected("Could not resolve host: github.com")).toBe(false);
+    expect(isPushRejected(' ! [remote rejected] main -> main (pre-receive hook declined)')).toBe(false);
   });
 });
 

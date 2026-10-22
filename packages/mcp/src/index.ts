@@ -98,7 +98,9 @@ export function buildMcpServer(opts: McpServerOptions, workspace: WorkspaceApi |
   const agent = session.agent ?? UNKNOWN_AGENT;
   const mcp = opts.host.config.get().mcp;
   const workspaceRules = session.workspaceRules ?? workspaceRulesFor(mcp, workspace?.id);
-  const decide = (commandId: string, mutating: boolean) => decideAgentPermission({ commandId, mutating, permissions: mcp.permissions, workspaceRules });
+  // As in the registry: for a global command, a workspace's allow rules do not count.
+  const decide = (commandId: string, mutating: boolean, scope: 'global' | 'workspace') =>
+    decideAgentPermission({ commandId, mutating, permissions: mcp.permissions, workspaceRules: scope === 'workspace' ? workspaceRules : workspaceRules.filter((r) => r.action !== 'allow') });
 
   server.registerTool(
     'workspace_current',
@@ -117,8 +119,8 @@ export function buildMcpServer(opts: McpServerOptions, workspace: WorkspaceApi |
     if (meta.hidden) continue;
     const entry = opts.registry.get(meta.id);
     if (!entry) continue;
-    const read = decide(meta.id, false);
-    const write = decide(meta.id, true);
+    const read = decide(meta.id, false, meta.scope);
+    const write = decide(meta.id, true, meta.scope);
     if (deniedByRule(meta.mutating && !meta.conditional ? write : read)) continue;
     const description = [meta.description, meta.scope === 'workspace' ? 'Runs against the bound workspace.' : '', permissionNote(meta, read, write)].filter(Boolean).join(' ');
 
