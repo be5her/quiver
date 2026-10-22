@@ -245,6 +245,10 @@ export default definePart({
       const preview = (action: unknown) => run<KubeActionPreview>('teleport.kube.action.preview', { ...target, action }, null);
       const lastArgv = async () => (await fakeTsh.kubectlCalls()).at(-1)?.argv.slice(0, -2) ?? [];
       const ns = { namespace: 'payments' };
+      // The fake now answers the action verbs, so prove here that no read query ever sent one.
+      const actionVerbs = ['scale', 'rollout restart', 'rollout undo', 'rollout pause', 'rollout resume', 'delete', 'cordon', 'uncordon', 'set image', 'create', 'port-forward'];
+      const writesByQueries = (await fakeTsh.kubectlCalls()).filter((c) => actionVerbs.some((v) => c.argv.slice(0, v.split(' ').length).join(' ') === v));
+      check('kube: no read query sent a write verb to kubectl', writesByQueries.length === 0, writesByQueries.map((c) => c.argv.slice(0, 3)));
       // Every action in the catalogue, previewed and then run with the action the preview gave back.
       const samples: { action: { action: string; params: Record<string, unknown> }; argv: (p: KubeActionPreview) => string[]; out: string }[] = [
         { action: { action: 'scale', params: { kind: 'deployments', name: 'api', ...ns, replicas: 3 } }, argv: () => ['scale', 'deployments', 'api', '--namespace', 'payments', '--replicas', '3'], out: 'deployment.apps/api scaled' },
@@ -353,6 +357,15 @@ export default definePart({
       const agentRerunOnProtected = await asAgent('teleport.kube.history.rerun', { id: actionEntries[0].id, confirmCluster: 'prod-eks' });
       const agentForwardOnProtected = await asAgent('teleport.kube.portForward.start', { ...target, kind: 'services', name: 'api', ...ns, remotePort: 80 });
       const agentUnprotect = await asAgent('teleport.kube.protect', { ...target, protected: false });
+      // tsh kube login also takes other names for a cluster (an auto-discovered one's short name): writes need the exact listed name.
+      const agentOtherName = await asAgent('teleport.kube.action', { proxy: first, cluster: 'PROD-EKS', action: samples[0].action });
+      const agentOtherNameForward = await asAgent('teleport.kube.portForward.start', { proxy: first, cluster: 'prod', kind: 'services', name: 'api', ...ns, remotePort: 80 });
+      const uiOtherName = await host.invoke('teleport.kube.action', { proxy: first, cluster: 'prod', action: samples[0].action }, { caller: 'ui', workspaceId: null });
+      check(
+        'kube protected: actions and port forwards need the exact listed cluster name, so another name cannot reach a protected cluster',
+        [agentOtherName, agentOtherNameForward, uiOtherName].every((r) => !r.ok && r.error.code === 'NOT_FOUND'),
+        [agentOtherName, agentOtherNameForward, uiOtherName].map((r) => (r.ok ? 'ok?' : r.error.code)),
+      );
       const refusedOnProtected = (await fakeTsh.kubectlCalls()).length === callsBeforeProtected;
       const agentOnOther = await asAgent('teleport.kube.action', { proxy: first, cluster: 'dev-eks', action: samples[0].action });
       check(
@@ -398,6 +411,11 @@ export default definePart({
         forwardStopped.stopped && listedAfter.length === 0 && (await until(() => !processAlive(forwardCall?.pid), 2000)) && (await readBanner(forward.localPort)) === null,
         { stopped: forwardStopped.stopped, left: listedAfter.length, alive: processAlive(forwardCall?.pid) },
       );
+      const twin = { ...target, kind: 'pods', name: 'api-7d9f-abc12', ...ns, remotePort: 8080 };
+      const [twinA, twinB] = await Promise.all([run<KubePortForward>('teleport.kube.portForward.start', twin, null), run<KubePortForward>('teleport.kube.portForward.start', twin, null)]);
+      const twinsListed = await run<KubePortForward[]>('teleport.kube.portForward.list', {}, null);
+      await run('teleport.kube.portForward.stop', { id: twinA.id }, null);
+      check('kube port forward: two identical starts at once share one forward', twinA.id === twinB.id && twinsListed.length === 1, { a: twinA.id, b: twinB.id, listed: twinsListed.length });
       const badForward = await host.invoke('teleport.kube.portForward.start', { ...target, kind: 'pods', name: 'no-such-pod', ...ns, remotePort: 80 }, { caller: 'ui', workspaceId: null });
       const flagForward = await host.invoke('teleport.kube.portForward.start', { ...target, kind: 'pods', name: '--address=0.0.0.0', ...ns, remotePort: 80 }, { caller: 'ui', workspaceId: null });
       check(

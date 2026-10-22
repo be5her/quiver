@@ -1,5 +1,5 @@
 import type { ChildProcess } from 'node:child_process';
-import { QuiverError, buildPortForwardArgs, formatCommandLine, newId, nowIso, sameProxy, type KubePortForward, type KubePortForwardSpec } from '@quiver/core';
+import { QuiverError, buildPortForwardArgs, formatCommandLine, newId, normalizeProxy, nowIso, sameProxy, type KubePortForward, type KubePortForwardSpec } from '@quiver/core';
 import type { KubeRunner } from './kube';
 import { killTree, lineSplitter, spawnTsh } from './tsh';
 import { freePort } from './tunnels';
@@ -40,6 +40,8 @@ interface LiveForward {
  */
 export class KubeForwards {
   private readonly live = new Map<string, LiveForward>();
+  /** Starts still waiting for kubectl, by target: a second identical start waits for the first instead of racing it. */
+  private readonly pending = new Map<string, Promise<KubePortForward>>();
 
   constructor(private readonly opts: KubeForwardsOptions) {}
 
@@ -47,8 +49,22 @@ export class KubeForwards {
     return [...this.live.values()].map((l) => ({ ...l.info, output: [...l.info.output] }));
   }
 
-  /** Start a forward, or return the running one for the same target and port. */
+  /** Start a forward, or return the running (or starting) one for the same target and port. */
   async start(req: KubeForwardRequest): Promise<KubePortForward> {
+    const { spec } = req;
+    const key = [normalizeProxy(req.proxy), req.cluster, spec.kind, spec.name, spec.namespace, spec.remotePort, spec.localPort ?? ''].join('|');
+    const inFlight = this.pending.get(key);
+    if (inFlight) return inFlight;
+    const started = this.launch(req);
+    this.pending.set(key, started);
+    const forget = () => {
+      if (this.pending.get(key) === started) this.pending.delete(key);
+    };
+    started.then(forget, forget);
+    return started;
+  }
+
+  private async launch(req: KubeForwardRequest): Promise<KubePortForward> {
     const { spec } = req;
     const existing = [...this.live.values()].find(
       (l) =>

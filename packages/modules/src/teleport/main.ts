@@ -467,11 +467,23 @@ const kubeCancel = defineCommand({
 const ConfirmClusterInput = z.string().max(253).optional().describe('For a protected cluster: its name, as the user typed it to confirm. Agents cannot act on protected clusters unless the user allows it in Settings.');
 
 /**
+ * Writes go only to a Kubernetes cluster `tsh kube ls` lists under exactly that name. `tsh kube
+ * login` also accepts other names for a cluster (an auto-discovered cluster's short name), which
+ * would reach a protected cluster without matching its entry in the protected list.
+ */
+async function requireExactKube(host: HostApi, proxy: string, cluster: string): Promise<void> {
+  if ((await listKubeClusters(host, proxy, false)).some((k) => k.name === cluster)) return;
+  if ((await listKubeClusters(host, proxy, true)).some((k) => k.name === cluster)) return;
+  throw new QuiverError('NOT_FOUND', `No Kubernetes cluster is named exactly "${cluster}" on ${proxy}. Actions and port forwards take the exact name from teleport.kube.list.`, { proxy, cluster });
+}
+
+/**
  * Protected clusters: from Quiver (and the command line) the user's typed cluster name has to come
  * with the call; agents are refused outright unless Settings > Teleport allows them. Port forwards
  * change nothing in the cluster, so only agents are held back from them.
  */
-function guardProtected(host: HostApi, caller: Caller, proxy: string, cluster: string, confirmCluster: string | undefined, what: 'action' | 'port forward'): void {
+async function guardProtected(host: HostApi, caller: Caller, proxy: string, cluster: string, confirmCluster: string | undefined, what: 'action' | 'port forward'): Promise<void> {
+  await requireExactKube(host, proxy, cluster);
   const teleport = host.config.get().teleport;
   if (!isKubeProtected(teleport.protectedKubes, proxy, cluster)) return;
   if (caller === 'mcp') {
@@ -509,7 +521,7 @@ const kubeAction = defineCommand({
   }),
   handler: async ({ proxy: proxyArg, cluster, action, runId, timeoutSeconds, confirmCluster }, ctx): Promise<KubeActionResult> => {
     const proxy = await resolveKubeProxy(ctx.host, proxyArg, cluster);
-    guardProtected(ctx.host, ctx.caller, proxy, cluster, confirmCluster, 'action');
+    await guardProtected(ctx.host, ctx.caller, proxy, cluster, confirmCluster, 'action');
     return getTeleport(ctx.host).kube.runAction({ proxy, cluster, action: resolveKubeAction(action), runId, caller: ctx.caller, timeoutMs: (timeoutSeconds ?? 60) * 1000 });
   },
 });
@@ -523,6 +535,7 @@ const kubeActionPreview = defineCommand({
   input: z.object({ proxy: ProxyInput, cluster: KubeClusterInput, action: KubeActionSchema }),
   handler: async ({ proxy: proxyArg, cluster, action }, ctx): Promise<KubeActionPreview> => {
     const proxy = await resolveKubeProxy(ctx.host, proxyArg, cluster);
+    await requireExactKube(ctx.host, proxy, cluster);
     const resolved = resolveKubeAction(action);
     const preview = await getTeleport(ctx.host).kube.previewAction(proxy, cluster, resolved);
     return {
@@ -566,7 +579,7 @@ const portForwardStart = defineCommand({
   input: z.object({ proxy: ProxyInput, cluster: KubeClusterInput, ...KubePortForwardSpecSchema.shape }),
   handler: async ({ proxy: proxyArg, cluster, kind, name, namespace, remotePort, localPort }, ctx): Promise<KubePortForward> => {
     const proxy = await resolveKubeProxy(ctx.host, proxyArg, cluster);
-    guardProtected(ctx.host, ctx.caller, proxy, cluster, undefined, 'port forward');
+    await guardProtected(ctx.host, ctx.caller, proxy, cluster, undefined, 'port forward');
     return getTeleport(ctx.host).forwards.start({ proxy, cluster, spec: { kind, name, namespace, remotePort, localPort } });
   },
 });
@@ -631,7 +644,7 @@ const kubeHistoryRerun = defineCommand({
     const entry = await historyEntry(ctx.host, id);
     if (!entry) throw new QuiverError('NOT_FOUND', `No Kubernetes history entry ${id}`);
     if (entry.kind === 'query') return kube.run({ proxy: entry.proxy, cluster: entry.cluster, query: entry.query, runId, caller: ctx.caller, timeoutMs: 60_000, record: true });
-    guardProtected(ctx.host, ctx.caller, entry.proxy, entry.cluster, confirmCluster, 'action');
+    await guardProtected(ctx.host, ctx.caller, entry.proxy, entry.cluster, confirmCluster, 'action');
     // A job name cannot be used twice, so a CronJob trigger gets a fresh one.
     const action = entry.action.action === 'cronjob-trigger' ? resolveKubeAction({ ...entry.action, params: { ...entry.action.params, jobName: undefined } }) : resolveKubeAction(entry.action);
     return kube.runAction({ proxy: entry.proxy, cluster: entry.cluster, action, runId, caller: ctx.caller, timeoutMs: 60_000 });
