@@ -38,10 +38,15 @@ export class CliAccess {
     try {
       await fs.mkdir(this.userDataDir, { recursive: true });
       const tmp = `${this.tokenFile}.${process.pid}.tmp`;
+      // A temp file left by a crashed run with this pid would keep its own mode; start from none.
+      await fs.rm(tmp, { force: true });
       await fs.writeFile(tmp, this.token, { mode: 0o600 });
       await fs.rename(tmp, this.tokenFile);
       const info: CliEndpointInfo = { port, url: `http://127.0.0.1:${port}${CLI_PATH}`, pid: process.pid, version: this.version };
-      await fs.writeFile(this.endpointFile, `${JSON.stringify(info, null, 2)}\n`);
+      // Through a rename as well: a CLI starting while the app does never reads half a file.
+      const endpointTmp = `${this.endpointFile}.${process.pid}.tmp`;
+      await fs.writeFile(endpointTmp, `${JSON.stringify(info, null, 2)}\n`);
+      await fs.rename(endpointTmp, this.endpointFile);
     } catch (err) {
       console.warn(`[quiver] the command line endpoint was not published: ${(err as Error).message}`);
     }

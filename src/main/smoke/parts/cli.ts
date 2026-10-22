@@ -226,6 +226,19 @@ export default definePart({
       );
       await fs.rm(secretsDoc, { force: true });
 
+      // A cookie jar the app encrypted is neither read nor replaced headless: the run keeps its cookies in memory.
+      const jarFile = path.join(project, '.quiver', 'local', 'cookies.json');
+      const sealedJar = JSON.stringify({ cipher: 'enc:YXBwLWNvb2tpZXM=' });
+      await fs.writeFile(jarFile, sealedJar);
+      const cookieSet = await headless(['api.cookie.set', '--url', 'http://ci.example/', '--cookie', 'ci=1']);
+      const jarAfter = await fs.readFile(jarFile, 'utf8').catch(() => '');
+      check(
+        'cli: headless leaves a cookie jar the app encrypted in place rather than writing over it',
+        cookieSet.code === 0 && jarAfter === sealedJar,
+        { code: cookieSet.code, stderr: cookieSet.stderr, jarAfter },
+      );
+      await fs.rm(jarFile, { force: true });
+
       // The CI test runner: a collection run followed to its end, a JUnit report, exit 4 when a check failed.
       const report = path.join(project, 'results.xml');
       const mixedRun = await headless(['api.collection.run', '--collection', mixed.id, '--environment', environment.id, '--reporter', 'junit', '--out', report], { QUIVER_SECRET_TOKEN: 'from-env' });

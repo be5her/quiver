@@ -130,7 +130,7 @@ export class Host {
       }
     }
     this.activeWorkspaceId = this.workspaces.list()[0]?.id ?? null;
-    if (config.mcp.enabled && this.opts.serve !== false) await this.startMcp();
+    if (config.mcp.enabled) await this.startMcp();
   }
 
   async stop(): Promise<void> {
@@ -198,6 +198,8 @@ export class Host {
   // ---------- MCP ----------
 
   async startMcp(): Promise<void> {
+    // The headless CLI never serves, also when a command it runs (mcp.restart, config.update) asks for it.
+    if (this.opts.serve === false) return;
     await this.stopMcp();
     const { port } = this.config.get().mcp;
     try {

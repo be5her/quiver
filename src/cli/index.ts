@@ -91,20 +91,43 @@ interface Deadline {
 
 /** A collection run answers at once with its id; the CLI follows it to the end, so the result is the finished run. */
 async function followRun(transport: Transport, deadline: Deadline, runId: string, workspace: string | null): Promise<ApiRun> {
-  for (;;) {
-    let run: ApiRun;
-    try {
-      run = await call<ApiRun>(transport, deadline, 'api.run.get', { runId }, workspace);
-    } catch (err) {
-      if (err instanceof CommandFailed && err.error.code === 'TIMEOUT') {
-        // Stop the requests still to go rather than leave them running in the app.
-        await transport.call('api.run.cancel', { runId }, workspace).catch(() => undefined);
+  // Ctrl+C stops the requests still to go too, rather than leave them running in the app.
+  interrupt = () => transport.call('api.run.cancel', { runId }, workspace, AbortSignal.timeout(2000));
+  try {
+    for (;;) {
+      let run: ApiRun;
+      try {
+        run = await call<ApiRun>(transport, deadline, 'api.run.get', { runId }, workspace);
+      } catch (err) {
+        if (err instanceof CommandFailed && err.error.code === 'TIMEOUT') {
+          // Stop the requests still to go rather than leave them running in the app.
+          await transport.call('api.run.cancel', { runId }, workspace, AbortSignal.timeout(2000)).catch(() => undefined);
+        }
+        throw err;
       }
-      throw err;
+      if (run.finishedAt) return run;
+      await new Promise((r) => setTimeout(r, 200));
     }
-    if (run.finishedAt) return run;
-    await new Promise((r) => setTimeout(r, 200));
+  } finally {
+    interrupt = undefined;
   }
+}
+
+/** What to stop before exiting on Ctrl+C (or a CI runner's SIGTERM): the collection run being followed. */
+let interrupt: (() => Promise<unknown>) | undefined;
+let interrupted = false;
+for (const [signal, code] of [
+  ['SIGINT', 130],
+  ['SIGTERM', 143],
+] as const) {
+  process.on(signal, () => {
+    // A second Ctrl+C does not wait for the first one's cancel.
+    if (interrupted || !interrupt) process.exit(code);
+    interrupted = true;
+    void interrupt()
+      .catch(() => undefined)
+      .finally(() => process.exit(code));
+  });
 }
 
 /** The Host and every module load only for a headless run; connected calls start without them. */

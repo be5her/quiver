@@ -1,4 +1,5 @@
 import { promises as fs } from 'node:fs';
+import { request } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { CLI_PATH, CLI_TOKEN_HEADER, appDataFolder } from '@quiver/core';
@@ -53,23 +54,40 @@ export async function connect(userDataDir: string): Promise<Transport> {
   return {
     mode: 'connected',
     async call(command, input, workspace, signal) {
-      let res: Response;
+      let res: { status: number; text: string };
       try {
-        res = await fetch(`${base}${CLI_PATH}`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', [CLI_TOKEN_HEADER]: token },
-          body: JSON.stringify({ command, input, workspace }),
-          signal,
-        });
+        res = await post(`${base}${CLI_PATH}`, token, JSON.stringify({ command, input, workspace }), signal);
       } catch (err) {
         if (signal?.aborted) throw err;
         throw new UnreachableError(`Quiver stopped answering: ${(err as Error).message}`);
       }
       if (res.status === 401) throw new UnreachableError('Quiver refused the command line token. It changes on every start of the app: is another Quiver using the same user data folder?');
-      const body = (await res.json().catch(() => null)) as CliOutcome | { error?: { message?: string } } | null;
+      let body: CliOutcome | { error?: { message?: string } } | null = null;
+      try {
+        body = JSON.parse(res.text) as CliOutcome | { error?: { message?: string } };
+      } catch {
+        // Not JSON: reported below with the status.
+      }
       if (res.status !== 200 || !body || !('ok' in body)) throw new Error(`Quiver answered ${res.status}: ${(body as { error?: { message?: string } } | null)?.error?.message ?? 'no body'}`);
       return body;
     },
     async close() {},
   };
+}
+
+/**
+ * One call to the endpoint with node:http rather than fetch: fetch gives up on an answer whose headers take
+ * over 300 s, and a command (a long query, a slow pull) may take longer. Only `--timeout` cuts a call short.
+ */
+function post(url: string, token: string, body: string, signal?: AbortSignal): Promise<{ status: number; text: string }> {
+  return new Promise((resolve, reject) => {
+    const req = request(url, { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), [CLI_TOKEN_HEADER]: token }, signal }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (chunk: Buffer) => chunks.push(chunk));
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8') }));
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+    req.end(body);
+  });
 }
