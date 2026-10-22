@@ -14,8 +14,17 @@ export class GitWorktreeActions {
   /** The New worktree dialog, which the sidebar's Worktrees section draws. */
   readonly dialogOpen = signal(false);
 
-  /** The palette's New worktree: the Git sidebar, with the dialog over it. */
-  newWorktree(): void {
+  /**
+   * The palette's New worktree: the Git sidebar, with the dialog over it. Outside a repository it says so instead:
+   * the sidebar then draws no Worktrees section, and the dialog would stay pending until one did.
+   */
+  async newWorktree(): Promise<void> {
+    try {
+      await this.host.invoke('git.worktree.list', {});
+    } catch (err) {
+      this.toasts.error(err);
+      return;
+    }
     this.app.setActiveModule('git');
     this.dialogOpen.set(true);
   }
@@ -103,7 +112,7 @@ export class GitWorktreeActions {
     }
   }
 
-  /** A worktree for a branch, at the default folder or one typed; offers to open it once made. */
+  /** A worktree for a branch, at the default folder or one typed; its row in the Worktrees section opens it. */
   async newFromBranch(branch: string): Promise<void> {
     let mainPath: string;
     try {
@@ -118,7 +127,7 @@ export class GitWorktreeActions {
     await this.add({ branch, path: folder.trim() });
   }
 
-  /** `git.worktree.add`, then a toast with Open; gives the new worktree, or null after a toast saying why not. */
+  /** `git.worktree.add`, then a toast naming its folder; gives the new worktree, or null after a toast saying why not. */
   async add(input: { path?: string; branch?: string; newBranch?: string; from?: string }): Promise<GitWorktree | null> {
     try {
       const wt = await this.host.invoke<GitWorktree>('git.worktree.add', input);

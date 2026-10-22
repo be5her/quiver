@@ -400,8 +400,9 @@ export class GitSidebar {
   });
 
   protected readonly groups = computed(() => groupChanges(this.current()?.files ?? []));
-  protected readonly localBranches = computed(() => (this.branches.value() ?? []).filter((b) => !b.remote));
-  protected readonly remoteCount = computed(() => (this.branches.value() ?? []).filter((b) => b.remote && !b.name.endsWith('/HEAD')).length);
+  // The list read for the workspace on screen only: another workspace's (another worktree's) would mark its branch current.
+  protected readonly localBranches = computed(() => (this.branches.current() ?? []).filter((b) => !b.remote));
+  protected readonly remoteCount = computed(() => (this.branches.current() ?? []).filter((b) => b.remote && !b.name.endsWith('/HEAD')).length);
   protected readonly branchTitle = computed(() => {
     const s = this.current();
     if (!s) return '';

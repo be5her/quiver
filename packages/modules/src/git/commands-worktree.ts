@@ -1,4 +1,4 @@
-import { promises as fs } from 'node:fs';
+import { promises as fs, realpath } from 'node:fs';
 import path from 'node:path';
 import {
   GitWorktreeAddInputSchema,
@@ -44,10 +44,26 @@ function resolveFolder(r: Repo, given: string): string {
   return path.resolve(path.dirname(r.list[0]?.path ?? r.root), given);
 }
 
+/**
+ * A folder by its real path, as git lists worktrees: through junctions and links, and with Windows' long names in
+ * place of 8.3 ones (`C:\Users\RUNNER~1`, as a temp folder can be given). As given when it does not exist.
+ */
+async function realFolder(folder: string): Promise<string> {
+  return new Promise((resolve) => realpath.native(folder, (err, real) => resolve(err ? folder : real)));
+}
+
+/** The listed worktree at a folder, as given or by its real path. */
+async function listedAt(list: GitWorktree[], folder: string): Promise<GitWorktree | undefined> {
+  const found = list.find((w) => sameWorktreePath(w.path, folder));
+  if (found) return found;
+  const real = await realFolder(folder);
+  return list.find((w) => sameWorktreePath(w.path, real));
+}
+
 /** The worktree at a folder as given, or a clear error when git lists none there. */
-function findWorktree(r: Repo, given: string): GitWorktree {
+async function findWorktree(r: Repo, given: string): Promise<GitWorktree> {
   const target = resolveFolder(r, given);
-  const found = r.list.find((w) => sameWorktreePath(w.path, target));
+  const found = await listedAt(r.list, target);
   if (!found) throw new QuiverError('NOT_FOUND', `${target} is not a worktree of this repository (see git.worktree.list)`, { reason: 'not-a-worktree' });
   return found;
 }
@@ -102,7 +118,9 @@ const add = defineCommand({
       name = `detached-${short.stdout.trim()}`;
     }
     const target = given ? resolveFolder(r, given) : path.normalize(defaultWorktreePath(r.list[0]?.path ?? r.root, name));
-    const inside = r.list.find((w) => isSameOrInside(target, w.path));
+    // Also by the real path of the folder it goes in, so a junction or link into a worktree does not get past.
+    const realTarget = path.join(await realFolder(path.dirname(target)), path.basename(target));
+    const inside = r.list.find((w) => isSameOrInside(target, w.path) || isSameOrInside(realTarget, w.path));
     if (inside) throw new QuiverError('INVALID_INPUT', `${target} is inside the worktree at ${inside.path}; pick a folder outside every worktree`, { reason: 'inside-worktree', path: inside.path });
     const stat = await fs.stat(target).catch(() => null);
     if (stat && !stat.isDirectory()) throw new QuiverError('INVALID_INPUT', `${target} is a file`, { reason: 'not-empty' });
@@ -116,7 +134,7 @@ const add = defineCommand({
       // A failed add may still have made the branch.
       changed(ctx, r.ws, 'worktrees', 'branches');
     }
-    const made = (await local.worktrees(r.root)).find((w) => sameWorktreePath(w.path, target));
+    const made = await listedAt(await local.worktrees(r.root), target);
     if (!made) throw new QuiverError('REQUEST_FAILED', `git did not list a worktree at ${target}`);
     return made;
   },
@@ -132,10 +150,12 @@ const remove = defineCommand({
   input: GitWorktreeRemoveInputSchema,
   handler: async ({ path: given, force }, ctx): Promise<GitWorktree[]> => {
     const r = await repo(ctx);
-    const wt = findWorktree(r, given);
+    const wt = await findWorktree(r, given);
     if (wt.main) throw new QuiverError('INVALID_INPUT', `${wt.path} is the main worktree, the repository itself; it is not removed from here`, { reason: 'main-worktree' });
     if (wt.current) throw new QuiverError('INVALID_INPUT', `${wt.path} is the worktree this workspace is in; remove it from another worktree`, { reason: 'current-worktree' });
-    const open = ctx.host.workspaces.list().find((w) => isSameOrInside(w.path, wt.path));
+    // By real path too: a workspace may have been opened through a junction, or with the drive letter in another case.
+    const workspaces = await Promise.all(ctx.host.workspaces.list().map(async (w) => ({ w, real: await realFolder(w.path) })));
+    const open = workspaces.find(({ w, real }) => isSameOrInside(w.path, wt.path) || isSameOrInside(real, wt.path))?.w;
     if (open) throw new QuiverError('INVALID_INPUT', `${wt.path} is open as the workspace ${open.name}; close it first`, { reason: 'open-workspace' });
     if (wt.locked) throw new QuiverError('INVALID_INPUT', `${wt.path} is locked${wt.lockReason ? ` (${wt.lockReason})` : ''}; unlock it first`, { reason: 'locked' });
     const args = ['worktree', 'remove', ...(force ? ['--force'] : []), '--', wt.path];
@@ -159,7 +179,7 @@ const lock = defineCommand({
   input: GitWorktreeLockInputSchema,
   handler: async ({ path: given, reason }, ctx): Promise<GitWorktree[]> => {
     const r = await repo(ctx);
-    const wt = findWorktree(r, given);
+    const wt = await findWorktree(r, given);
     if (wt.main) throw new QuiverError('INVALID_INPUT', 'The main worktree cannot be locked', { reason: 'main-worktree' });
     await local.git(r.root, ['worktree', 'lock', ...(reason ? [`--reason=${reason}`] : []), '--', wt.path]);
     changed(ctx, r.ws, 'worktrees');
@@ -176,7 +196,7 @@ const unlock = defineCommand({
   input: GitWorktreePathInputSchema,
   handler: async ({ path: given }, ctx): Promise<GitWorktree[]> => {
     const r = await repo(ctx);
-    const wt = findWorktree(r, given);
+    const wt = await findWorktree(r, given);
     await local.git(r.root, ['worktree', 'unlock', '--', wt.path]);
     changed(ctx, r.ws, 'worktrees');
     return local.worktrees(r.root);
@@ -209,7 +229,9 @@ const reveal = defineCommand({
   input: GitWorktreePathInputSchema,
   handler: async ({ path: given }, ctx): Promise<{ path: string; revealed: boolean }> => {
     if (ctx.caller !== 'ui') throw new QuiverError('INVALID_INPUT', 'Revealing a folder is only available from the UI');
-    const wt = findWorktree(await repo(ctx), given);
+    const wt = await findWorktree(await repo(ctx), given);
+    // The host opens the path with the system's default handler, which runs a program: only ever a folder.
+    if (!(await fs.stat(wt.path).catch(() => null))?.isDirectory()) throw new QuiverError('NOT_FOUND', `${wt.path} is not a folder (any more); prune the worktree`);
     await ctx.host.revealFolder?.(wt.path);
     return { path: wt.path, revealed: Boolean(ctx.host.revealFolder) };
   },

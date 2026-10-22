@@ -348,6 +348,12 @@ describe('worktrees', () => {
     expect(parseWorktreeList('')).toEqual([]);
   });
 
+  it('reads the output of a git without -z (before 2.36), one attribute per line', () => {
+    const lines = listed.split('\0').join('\n').replace(/\n/g, '\r\n');
+    expect(parseWorktreeList(lines, `${W}/lk`)).toEqual(parseWorktreeList(listed, `${W}/lk`));
+    expect(parseWorktreeList(lines).map((w) => w.path)).toEqual([`${W}/repo`, `${W}/det`, `${W}/gone`, `${W}/lk`, `${W}/lk2`, `${W}/with space`]);
+  });
+
   it('compares folders across slashes, trailing separators and, on Windows, case', () => {
     expect(sameWorktreePath('C:/Repo/', 'c:\\repo')).toBe(true);
     expect(sameWorktreePath('/home/me/Repo', '/home/me/repo')).toBe(false);
@@ -369,6 +375,7 @@ describe('worktrees', () => {
     expect(worktreeRefusal("fatal: 'feat/x' is already checked out at '/home/me/x y'")).toEqual({ branch: 'feat/x', path: '/home/me/x y' });
     expect(worktreeRefusal("cannot delete branch 'main' used by worktree at 'C:/tmp/repo'")).toEqual({ branch: 'main', path: 'C:/tmp/repo' });
     expect(worktreeRefusal("error: Cannot delete branch 'b' checked out at '/r'")).toEqual({ branch: 'b', path: '/r' });
+    expect(worktreeRefusal("'x' is already used by worktree at 'C:/code/bob's tree'\r\nhint: something")).toEqual({ branch: 'x', path: "C:/code/bob's tree" });
     expect(worktreeRefusal('pathspec did not match')).toBeNull();
   });
 

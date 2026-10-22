@@ -62,6 +62,22 @@ const section: SmokeSection = async (t) => {
 
     const mainStatus = await run<GitStatus>('git.status', {}, ws.id);
     check('git worktrees: status in the main worktree says it is not linked', mainStatus.worktree?.linked === false && same(mainStatus.worktree.mainPath, repo), mainStatus.worktree);
+    // The same folder opened through a junction (a link elsewhere) and, on Windows, with a lower-case drive letter: git
+    // gives the git dir by its real path and the common dir as `.git` beside the folder opened, which still compare.
+    const link = path.join(base, 'repo-link');
+    await fs.symlink(repo, link, 'junction');
+    const aliases = [link, ...(process.platform === 'win32' ? [repo.replace(/^[A-Z]:/, (d) => d.toLowerCase())] : [])];
+    const aliased: unknown[] = [];
+    for (const alias of aliases) {
+      const other = await run<WorkspaceInfo>('workspace.open', { path: alias }, null);
+      aliased.push((await run<GitStatus>('git.status', { files: false }, other.id)).worktree);
+      if (other.id !== ws.id) {
+        await run('workspace.close', { id: other.id }, null);
+        await run('workspace.forgetRecent', { path: other.path }, null).catch(() => {});
+      }
+    }
+    await fs.unlink(link);
+    check('git worktrees: the main worktree opened through a junction or a lower-case drive letter is not taken for a linked one', aliased.every((w) => (w as GitStatus['worktree'])?.linked === false), aliased);
     const alone = await run<GitWorktree[]>('git.worktree.list', {}, ws.id);
     check('git worktrees: a repository alone lists its main worktree, current', alone.length === 1 && alone[0].main && alone[0].current && alone[0].branch === 'main' && same(alone[0].path, repo), alone);
 
@@ -267,6 +283,26 @@ const section: SmokeSection = async (t) => {
       check(`git worktrees: ${tool} is gated for agents`, blocked.result?.isError === true && (blocked.result.content?.[0]?.text ?? '').includes('MUTATION_BLOCKED'), blocked.result?.content?.[0]?.text);
     }
     check('git worktrees: the gated calls changed nothing', (await run<GitWorktree[]>('git.worktree.list', {}, ws.id)).length === 2 && !(await exists(path.join(base, 'repo.worktrees', 'agent'))));
+    const agentReveal = await rpc('git_worktree_reveal', { path: wt1Path });
+    check('git worktrees: agents cannot have a folder opened (reveal is for the UI only)', agentReveal.result?.isError === true || Boolean((agentReveal as { error?: unknown }).error), agentReveal);
+
+    // The last linked worktree removed, git deletes <common>/worktrees; the next one makes it again, and the watcher
+    // follows it there: a lock written inside the new folder is seen.
+    await run('workspace.close', { id: linked.id }, null);
+    await run('workspace.forgetRecent', { path: linked.path }, null).catch(() => {});
+    opened.splice(opened.indexOf(linked), 1);
+    await run('git.worktree.remove', { path: wt1Path, force: true }, ws.id);
+    const dirGone = !(await exists(path.join(repo, '.git', 'worktrees')));
+    await new Promise((r) => setTimeout(r, 400));
+    events.length = 0;
+    const wt4Path = path.join(base, 'later');
+    await sh(repo, 'worktree', 'add', '-q', '-b', 'later', '--', wt4Path);
+    const reAdded = await until(() => events.some((e) => e.workspaceId === ws.id && e.reason === 'worktrees'), 5000);
+    await new Promise((r) => setTimeout(r, 400));
+    events.length = 0;
+    await sh(repo, 'worktree', 'lock', '--', wt4Path);
+    const reLocked = await until(() => events.some((e) => e.workspaceId === ws.id && e.reason === 'worktrees'), 5000);
+    check('git worktrees: the watcher drops its watch on worktrees/ when git deletes it, and watches it again when the next worktree makes it', dirGone && reAdded && reLocked, { dirGone, reAdded, reLocked, events });
   } finally {
     t.host.emit = emit;
     for (const w of opened.reverse()) {
@@ -366,6 +402,10 @@ const section: SmokeSection = async (t) => {
         const markerMain = String(await js(`document.querySelector('[data-testid=git-status-item]')?.getAttribute('data-worktree') ?? ''`));
         check('git worktrees ui: Open as workspace opens the worktree, and the status bar marks it as linked to the main worktree', linkedOpen && markerShown && same(markerMain, uiRepo), { linkedOpen, markerMain });
         await waitFor(`document.querySelector('[data-testid=git-worktree][data-current=true]')?.getAttribute('data-branch') === 'ui/side'`, 4000);
+        // The sidebar's branches are the linked worktree's, never the main workspace's list still on screen.
+        const currentBranches = () => js(`[...document.querySelectorAll('[data-testid=git-branch][data-current=true]')].map((r) => r.getAttribute('data-name'))`) as Promise<string[]>;
+        const sidebarCurrent = await until(async () => JSON.stringify(await currentBranches()) === '["ui/side"]', 4000);
+        check('git worktrees ui: in the linked worktree the sidebar marks its own branch current, not the main worktree\'s', sidebarCurrent, await currentBranches());
         await shot('33e-git-worktree-linked-light');
 
         // Back on the main worktree: close the linked workspace, then remove it from its row after asking.

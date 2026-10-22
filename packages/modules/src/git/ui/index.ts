@@ -48,7 +48,7 @@ export const gitModuleUI = defineModuleUI({
       { id: 'git.ui.prs', title: 'Open pull requests', group: 'Git', keywords: ['github', 'pr', 'gh'], run: () => git.openPullRequests(), when: hasWorkspace },
       { id: 'git.ui.prsReview', title: 'Pull requests waiting on my review', group: 'Git', keywords: ['github', 'pr', 'review'], run: () => git.openPullRequests({ filter: 'review-requested', view: 'list' }), when: hasWorkspace },
       { id: 'git.ui.prNew', title: 'New pull request', group: 'Git', keywords: ['github', 'pr', 'create'], run: () => git.openPullRequests({ view: 'new' }), when: hasWorkspace },
-      { id: 'git.ui.newWorktree', title: 'New worktree', group: 'Git', keywords: ['git', 'worktree', 'branch', 'folder'], run: () => worktrees.newWorktree(), when: hasWorkspace },
+      { id: 'git.ui.newWorktree', title: 'New worktree', group: 'Git', keywords: ['git', 'worktree', 'branch', 'folder'], run: () => void worktrees.newWorktree(), when: hasWorkspace },
     ];
   },
 });

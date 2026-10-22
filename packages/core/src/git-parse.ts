@@ -305,12 +305,13 @@ export function isSameOrInside(child: string, parent: string): boolean {
 /**
  * `git worktree list --porcelain -z`: one record per worktree, its attributes NUL-terminated and the record ended by
  * an empty one. The main worktree comes first; `currentPath`, the top of the worktree the workspace is in, marks
- * `current`. Before the first commit HEAD is all zeros, given as null.
+ * `current`. Before the first commit HEAD is all zeros, given as null. Git before 2.36 has no `-z`: its
+ * `--porcelain` output, one attribute per line, is read the same way.
  */
 export function parseWorktreeList(out: string, currentPath?: string): GitWorktree[] {
   const list: Omit<GitWorktree, 'main' | 'current'>[] = [];
   let wt: Omit<GitWorktree, 'main' | 'current'> | null = null;
-  for (const token of out.split('\0')) {
+  for (const token of out.includes('\0') ? out.split('\0') : out.split(/\r?\n/)) {
     if (!token.trim()) {
       if (wt) list.push(wt);
       wt = null;
@@ -361,9 +362,10 @@ export function defaultWorktreePath(mainPath: string, branch: string): string {
 /**
  * The branch and worktree in git's refusal to check out or delete a branch checked out in another worktree:
  * "'x' is already checked out at '<path>'" (newer git: "is already used by worktree at"), and "cannot delete branch
- * 'x' used by worktree at '<path>'" (older git: "checked out at"). Null for any other message.
+ * 'x' used by worktree at '<path>'" (older git: "checked out at"). Null for any other message. The path runs to the
+ * last quote on its line, since a folder name may hold a quote of its own.
  */
 export function worktreeRefusal(message: string): { branch: string; path: string } | null {
-  const m = /'([^']+)' is already (?:checked out|used by worktree) at '([^']+)'/.exec(message) ?? /branch '([^']+)' (?:used by worktree|checked out) at '([^']+)'/i.exec(message);
+  const m = /'([^']+)' is already (?:checked out|used by worktree) at '(.+)'[ \t\r]*$/m.exec(message) ?? /branch '([^']+)' (?:used by worktree|checked out) at '(.+)'[ \t\r]*$/im.exec(message);
   return m ? { branch: m[1], path: m[2] } : null;
 }

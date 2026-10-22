@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, watch, type FSWatcher } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, watch, type FSWatcher } from 'node:fs';
 import path from 'node:path';
 import {
   GIT_BRANCH_FORMAT,
@@ -16,6 +16,7 @@ import {
   parseStatusV2,
   parseTags,
   parseWorktreeList,
+  sameWorktreePath,
   splitPatch,
   worktreeRefusal,
   type GitBranch,
@@ -149,8 +150,24 @@ export async function repoDirs(cwd: string): Promise<RepoDirs> {
     throw new QuiverError('REQUEST_FAILED', stderr || 'git rev-parse failed', { exitCode: result.code });
   }
   const [gitDir, common, top] = result.stdout.split(/\r?\n/);
-  // Resolved, so the two compare as folders: git prints `C:/x/.git` on Windows, and the common dir relative to `cwd`.
-  return { gitDir: path.resolve(gitDir), commonDir: path.resolve(cwd, common || gitDir), root: top ? path.resolve(top) : cwd };
+  // Resolved through the file system, so the two compare as folders: git prints the git dir as its real path
+  // (`C:/x/.git`, junctions and `subst` drives resolved, the drive letter upper case) but the common dir of the main
+  // worktree as `.git`, relative to `cwd`, which is the workspace folder as it was opened (`c:\x`, or a junction).
+  return { gitDir: realFolder(path.resolve(gitDir)), commonDir: realFolder(path.resolve(cwd, common || gitDir)), root: top ? path.resolve(top) : cwd };
+}
+
+/** A folder by its real path when it exists: links and junctions followed, and on Windows the case as on disk. */
+function realFolder(folder: string): string {
+  try {
+    return realpathSync.native(folder);
+  } catch {
+    return folder;
+  }
+}
+
+/** True in a linked worktree, whose git dir (`<common>/worktrees/<name>`) is apart from the common one. */
+function isLinked(dirs: RepoDirs): boolean {
+  return !sameWorktreePath(dirs.gitDir, dirs.commonDir);
 }
 
 /**
@@ -159,7 +176,7 @@ export async function repoDirs(cwd: string): Promise<RepoDirs> {
  * with a separate git dir is asked (`git worktree list`, which always lists the main worktree first).
  */
 async function worktreeInfo(dirs: RepoDirs): Promise<GitWorktreeInfo> {
-  if (dirs.gitDir === dirs.commonDir) return { linked: false, mainPath: dirs.root };
+  if (!isLinked(dirs)) return { linked: false, mainPath: dirs.root };
   if (path.basename(dirs.commonDir) === '.git') return { linked: true, mainPath: path.dirname(dirs.commonDir) };
   const [main] = await worktrees(dirs.root);
   return { linked: true, mainPath: main?.path ?? path.dirname(dirs.commonDir) };
@@ -168,8 +185,11 @@ async function worktreeInfo(dirs: RepoDirs): Promise<GitWorktreeInfo> {
 /** Every worktree of the repository, the main one first, with native paths. */
 export async function worktrees(cwd: string): Promise<GitWorktree[]> {
   const root = await repoRoot(cwd);
-  const { stdout } = await git(root, ['worktree', 'list', '--porcelain', '-z']);
-  return parseWorktreeList(stdout, root).map((w) => ({ ...w, path: path.normalize(w.path) }));
+  let result = await git(root, ['worktree', 'list', '--porcelain', '-z'], { allowFailure: true });
+  // `-z` came with git 2.36 (Ubuntu 22.04 has 2.34); before it, the porcelain output is one attribute per line.
+  if (result.code !== 0 && /unknown switch|usage:/i.test(result.stderr)) result = await git(root, ['worktree', 'list', '--porcelain'], { allowFailure: true });
+  if (result.code !== 0) throw gitFailure(['worktree', 'list'], result);
+  return parseWorktreeList(result.stdout, root).map((w) => ({ ...w, path: path.normalize(w.path) }));
 }
 
 /**
@@ -230,10 +250,15 @@ export async function defaultBranch(root: string): Promise<{ ref: string; name: 
 export async function branches(cwd: string): Promise<GitBranch[]> {
   const root = await repoRoot(cwd);
   const base = await defaultBranch(root);
-  const [list, merged] = await Promise.all([
-    git(root, ['for-each-ref', `--format=${GIT_BRANCH_FORMAT}`, '--sort=-committerdate', 'refs/heads', 'refs/remotes']),
+  const listArgs = (format: string) => ['for-each-ref', `--format=${format}`, '--sort=-committerdate', 'refs/heads', 'refs/remotes'];
+  const [listed, merged] = await Promise.all([
+    git(root, listArgs(GIT_BRANCH_FORMAT), { allowFailure: true }),
     git(root, ['for-each-ref', `--merged=${base?.ref ?? 'HEAD'}`, '--format=%(refname)', 'refs/heads', 'refs/remotes'], { allowFailure: true }),
   ]);
+  // `%(worktreepath)` came with git 2.23; an older git refuses the whole format, and then no branch names a worktree.
+  let list = listed;
+  if (list.code !== 0 && /worktreepath/.test(list.stderr)) list = await git(root, listArgs(GIT_BRANCH_FORMAT.replace('%00%(worktreepath)', '')), { allowFailure: true });
+  if (list.code !== 0) throw gitFailure(['for-each-ref'], list);
   const refs = merged.code === 0 ? merged.stdout.split(/\r?\n/).filter(Boolean) : [];
   const parsed = parseBranches(list.stdout, { merged: new Set(refs), ...(base ? { defaultBranch: base.name } : {}) });
   return parsed.map((b) => (b.worktreePath ? { ...b, worktreePath: path.normalize(b.worktreePath) } : b));
@@ -462,7 +487,9 @@ export async function ensureWatcher(ws: WorkspaceApi, host: HostApi): Promise<vo
   if (watchers.has(ws.id)) return;
   const pending = new Set<WatchReason>();
   let timer: NodeJS.Timeout | undefined;
+  let closed = false;
   const fire = (...reasons: WatchReason[]) => {
+    if (closed) return;
     for (const r of reasons) pending.add(r);
     clearTimeout(timer);
     timer = setTimeout(() => {
@@ -472,6 +499,8 @@ export async function ensureWatcher(ws: WorkspaceApi, host: HostApi): Promise<vo
   };
   const open = new Set<FSWatcher>();
   const add = (dir: string, recursive: boolean, onName: (name: string, event: string) => void): FSWatcher | null => {
+    // An event already on its way when the workspace closed must not start a new watch.
+    if (closed) return null;
     try {
       const w = watch(dir, { recursive, persistent: false }, (event, name) => onName(String(name ?? '').replace(/\\/g, '/'), event));
       w.on('error', () => {
@@ -485,20 +514,24 @@ export async function ensureWatcher(ws: WorkspaceApi, host: HostApi): Promise<vo
       return null;
     }
   };
-  const linked = dirs.commonDir !== dirs.gitDir;
+  const linked = isLinked(dirs);
   // `<common>/worktrees` holds one folder per linked worktree (its HEAD, index and lock). It only exists while there
   // are linked worktrees: git deletes it with the last one, and makes it again for the next.
   const worktreesDir = path.join(dirs.commonDir, 'worktrees');
   let worktreesWatcher: FSWatcher | null = null;
+  const dropWorktreesWatcher = () => {
+    worktreesWatcher?.close();
+    if (worktreesWatcher) open.delete(worktreesWatcher);
+    worktreesWatcher = null;
+    fire('worktrees', 'branches');
+  };
   const watchWorktrees = () => {
     if (worktreesWatcher || !existsSync(worktreesDir)) return;
-    worktreesWatcher = add(worktreesDir, true, (name, event) => {
+    const w = add(worktreesDir, true, (name, event) => {
       // Gone (the last worktree removed or pruned): on Windows a watcher of a deleted folder reports it without end.
+      // Dropped at once, also because the watch holds the folder open, and git makes it again for the next worktree.
       if (!existsSync(worktreesDir)) {
-        worktreesWatcher?.close();
-        if (worktreesWatcher) open.delete(worktreesWatcher);
-        worktreesWatcher = null;
-        fire('worktrees', 'branches');
+        if (worktreesWatcher === w) dropWorktreesWatcher();
         return;
       }
       const [, file] = name.split('/');
@@ -508,6 +541,13 @@ export async function ensureWatcher(ws: WorkspaceApi, host: HostApi): Promise<vo
         if (event === 'rename') fire('worktrees', 'branches');
       } else if (file === 'HEAD') fire('worktrees', 'branches');
       else if (file === 'locked' || file === 'gitdir') fire('worktrees');
+    });
+    if (!w) return;
+    worktreesWatcher = w;
+    // A watch that fails (Windows reports the deletion of the watched folder as an error) is dropped, so the
+    // folder's coming back is watched again.
+    w.on('error', () => {
+      if (worktreesWatcher === w) dropWorktreesWatcher();
     });
   };
   // Only the folder's appearing matters here: what happens inside it is the watcher's above (Windows reports the
@@ -544,6 +584,7 @@ export async function ensureWatcher(ws: WorkspaceApi, host: HostApi): Promise<vo
   });
   watchers.set(ws.id, {
     close: () => {
+      closed = true;
       clearTimeout(timer);
       for (const w of open) w.close();
       open.clear();
