@@ -1,0 +1,41 @@
+<p class="text-xs text-muted mb-3">
+  <code class="font-mono">quiver</code> runs any command from a terminal or CI: <code class="font-mono whitespace-nowrap">quiver list</code>, <code class="font-mono whitespace-nowrap">quiver describe &lt;command&gt;</code>,
+  <code class="font-mono whitespace-nowrap">quiver &lt;command&gt; --field value</code>. While Quiver runs, it connects to this app and acts as you: agent permissions do not apply and secrets are not masked.
+  <code class="font-mono">--headless</code> runs without the app, for CI.
+</p>
+@if (status.value(); as s) {
+  <p class="text-xs mb-3" data-testid="cli-status" [attr.data-connected]="s.connected" [class]="s.connected ? 'text-success' : 'text-muted'">
+    @if (s.connected) {
+      Connected mode is ready on {{ s.url }}
+    } @else if (!s.mcpEnabled) {
+      Connected mode is off with the MCP server, which carries it; <code class="font-mono">--headless</code> still works.
+    } @else {
+      Connected mode is waiting for the MCP server to start.
+    }
+  </p>
+  @if (s.shims) {
+    <label qLabel>Shim folder</label>
+    <ng-container *ngTemplateOutlet="copyRow; context: { $implicit: s.shims, testid: 'cli-shims' }" />
+    @for (p of s.pathLines; track p.shell) {
+      <label qLabel class="mt-2">Add to PATH: {{ p.shell }}</label>
+      <ng-container *ngTemplateOutlet="copyRow; context: { $implicit: p.line, testid: 'cli-path-line' }" />
+    }
+    <p class="text-[11px] text-muted mt-2">
+      Quiver never changes PATH itself. Open a new terminal after adding it.
+      @if (s.appImage) {
+        An AppImage mounts somewhere new on every launch, so this folder changes; the .deb has a fixed one.
+      }
+    </p>
+  } @else {
+    <label qLabel>From this checkout</label>
+    <ng-container *ngTemplateOutlet="copyRow; context: { $implicit: devCommand, testid: 'cli-dev-command' }" />
+    <p class="text-[11px] text-muted mt-2">A development build has no shims; installed builds put them in their resources folder.</p>
+  }
+}
+
+<ng-template #copyRow let-text let-testid="testid">
+  <div class="flex items-center gap-2">
+    <code class="flex-1 text-xs font-mono bg-surface border border-edge rounded-md px-2 py-1.5 truncate" [attr.data-testid]="testid" [title]="text">{{ text }}</code>
+    <button qButton size="sm" variant="ghost" [icon]="icons.Copy" (click)="copy(text)">Copy</button>
+  </div>
+</ng-template>

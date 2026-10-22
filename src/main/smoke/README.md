@@ -4,7 +4,7 @@
 
 ## Running part of it
 
-The checks are split into parts, one per module plus `shell` for the app around them. While working on a change, run the parts it touches; before committing, run the whole smoke once, because a change in one place can break another.
+The checks are split into parts, one per module plus `shell` for the app around them and `cli` for the `quiver` command line. While working on a change, run the parts it touches; before committing, run the whole smoke once, because a change in one place can break another.
 
 ```
 npm run smoke                       every part, after a full build (CI runs this)

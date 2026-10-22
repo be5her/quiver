@@ -19,6 +19,7 @@ import {
 } from '@quiver/ui';
 import { Copy, X } from 'lucide';
 import { AboutPanel } from './about-panel';
+import { CliPanel } from './cli-panel';
 
 type ThemePreference = GlobalConfig['theme'];
 
@@ -31,10 +32,10 @@ interface NetworkView {
   hasPassword: boolean;
 }
 
-/** Settings: appearance, the MCP server, Teleport, the network, global variables and About. Saved in the global config. */
+/** Settings: appearance, the MCP server, the command line, Teleport, the network, global variables and About. Saved in the global config. */
 @Component({
   selector: 'q-settings-tab',
-  imports: [AboutPanel, Button, Checkbox, FormField, Input, KeyValueEditor, Label, NgTemplateOutlet, Select],
+  imports: [AboutPanel, Button, CliPanel, Checkbox, FormField, Input, KeyValueEditor, Label, NgTemplateOutlet, Select],
   templateUrl: './settings-tab.html',
   host: { class: 'flex-1 overflow-auto p-6' },
 })

@@ -24,6 +24,7 @@ import { GlobalStore, WorkspaceManager, workspaceIdFor, type WorkspaceSession } 
 import { startMcpServer, type RunningMcpServer } from '@quiver/mcp';
 import { mainModules } from '@quiver/modules/main';
 import { z } from 'zod';
+import { CliAccess, cliCommands } from './cli-access';
 
 export interface HostOptions {
   userDataDir: string;
@@ -40,6 +41,10 @@ export interface HostOptions {
   updates?: UpdatesApi;
   /** Browser sessions for web sign-ins (Grafana). */
   web?: WebSessionsApi;
+  /** Serve MCP and the command line endpoint when the config enables them; false for the headless CLI, which runs commands in-process. */
+  serve?: boolean;
+  /** The folder of the packaged `quiver` shims, for Settings; absent in development. */
+  cliShims?: string;
 }
 
 export interface InvokeOptions {
@@ -60,8 +65,11 @@ export class Host {
   private recordingTimer: NodeJS.Timeout | null = null;
   private recordingDirty = false;
   private activeWorkspaceId: string | null = null;
+  /** The token and endpoint file the `quiver` command line connects with. */
+  readonly cli: CliAccess;
 
   constructor(private readonly opts: HostOptions) {
+    this.cli = new CliAccess(opts.userDataDir, opts.version);
     this.config = new GlobalStore(path.join(opts.userDataDir, 'config.json'), (config) => this.emit('config.changed', { config }));
 
     this.workspaces = new WorkspaceManager({
@@ -97,6 +105,7 @@ export class Host {
     };
 
     this.registry.registerModule({ id: 'host', commands: this.hostCommands() });
+    this.registry.registerModule({ id: 'cli', commands: cliCommands(this, this.cli, opts.cliShims) });
     for (const mod of mainModules) this.registry.registerModule(mod);
   }
 
@@ -121,7 +130,7 @@ export class Host {
       }
     }
     this.activeWorkspaceId = this.workspaces.list()[0]?.id ?? null;
-    if (config.mcp.enabled) await this.startMcp();
+    if (config.mcp.enabled && this.opts.serve !== false) await this.startMcp();
   }
 
   async stop(): Promise<void> {
@@ -200,7 +209,9 @@ export class Host {
         resolveWorkspace: (hint) => this.resolveWorkspace(hint),
         onCall: (entry) => this.emit('mcp.call', entry),
         calls: this.recorder,
+        cli: this.cli.endpoint(this),
       });
+      await this.cli.publish(port);
       this.emit('mcp.status', { running: true, port });
       console.log(`[quiver] MCP server listening on ${this.mcp.url}`);
     } catch (err) {
@@ -214,6 +225,7 @@ export class Host {
     if (!this.mcp) return;
     await this.mcp.close();
     this.mcp = null;
+    await this.cli.withdraw();
     this.emit('mcp.status', { running: false, port: this.config.get().mcp.port });
   }
 
