@@ -32,7 +32,7 @@ export type DiffSource =
   | { kind: 'working'; path?: string }
   | { kind: 'staged'; path?: string }
   | { kind: 'commit'; ref: string; path?: string }
-  /** Two refs: what `to` has that `from` has not, as `git diff from to`. */
+  /** Two refs: how `to` differs from `from`, as `git diff from to` (both ways, not only what `to` added). */
   | { kind: 'compare'; from: string; to: string; path?: string }
   /** A stash by its index, with its hash so a tab whose stash has gone (or moved up) says so. */
   | { kind: 'stash'; index: number; hash: string; path?: string };

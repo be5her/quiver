@@ -293,9 +293,9 @@ const stashShow = defineCommand({
   description: 'One stash and its changes as git.diff gives them (patches unless statOnly), against the commit it was made on; untracked files it holds come last, as added.',
   scope: 'workspace',
   input: GitStashIndexInputSchema.extend({ statOnly: z.boolean().default(false) }),
-  handler: async ({ index, statOnly }, ctx): Promise<GitStashShowResult> => {
+  handler: async ({ index, hash, statOnly }, ctx): Promise<GitStashShowResult> => {
     const { root } = await repo(ctx);
-    const stash = await local.stashAt(root, index);
+    const stash = await local.stashAt(root, index, hash);
     const { parents } = await local.commitInfo(root, stash.hash);
     const files = await local.diffFiles(root, [parents[0], stash.hash], undefined, statOnly);
     // A stash made with --include-untracked has a third parent holding the untracked files.
@@ -314,7 +314,9 @@ const stashPush = defineCommand({
   input: GitStashPushInputSchema,
   handler: async ({ message, includeUntracked, paths }, ctx): Promise<GitStatus> => {
     const { ws, root } = await repo(ctx);
-    const args = ['stash', 'push', ...(includeUntracked ? ['--include-untracked'] : []), ...(message ? [`--message=${message}`] : []), ...(paths ? ['--', ...paths] : [])];
+    // Each path literal (`[id].tsx` is a file, not a glob), by its own magic: GIT_LITERAL_PATHSPECS would also switch
+    // off the `:/` stash gives its own clean of untracked files, which would then leave them in place.
+    const args = ['stash', 'push', ...(includeUntracked ? ['--include-untracked'] : []), ...(message ? [`--message=${message}`] : []), ...(paths ? ['--', ...paths.map((p) => `:(literal)${p}`)] : [])];
     const result = await local.git(root, args);
     // Git says so and exits 0.
     if (/no local changes to save/i.test(local.output(result))) {
@@ -333,9 +335,9 @@ const stashApply = defineCommand({
   scope: 'workspace',
   mutating: true,
   input: GitStashApplyInputSchema,
-  handler: async ({ index, pop }, ctx): Promise<GitOperationResult> => {
+  handler: async ({ index, hash, pop }, ctx): Promise<GitOperationResult> => {
     const { ws, root } = await repo(ctx);
-    await local.stashAt(root, index);
+    await local.stashAt(root, index, hash);
     await local.requireNoOperation(root);
     const result = await local.operation(root, ['stash', pop ? 'pop' : 'apply', `stash@{${index}}`]);
     changed(ctx, ws, 'status', 'stashes');
@@ -350,9 +352,9 @@ const stashDrop = defineCommand({
   scope: 'workspace',
   mutating: true,
   input: GitStashIndexInputSchema,
-  handler: async ({ index }, ctx): Promise<GitStash[]> => {
+  handler: async ({ index, hash }, ctx): Promise<GitStash[]> => {
     const { ws, root } = await repo(ctx);
-    await local.stashAt(root, index);
+    await local.stashAt(root, index, hash);
     await local.git(root, ['stash', 'drop', `stash@{${index}}`]);
     changed(ctx, ws, 'stashes');
     return local.stashes(root);
@@ -372,9 +374,10 @@ const discard = defineCommand({
   handler: async ({ paths, staged }, ctx): Promise<GitStatus> => {
     const { ws, root } = await repo(ctx);
     const plan = planDiscard((await local.status(root)).files, paths);
-    // Restored first: a path git does not know fails it before anything is deleted.
-    if (plan.restore.length) await local.git(root, staged ? ['restore', '--source=HEAD', '--staged', '--worktree', '--', ...plan.restore] : ['restore', '--worktree', '--', ...plan.restore]);
-    if (plan.clean.length) await local.git(root, ['clean', '--force', ...(plan.cleanDirs ? ['-d'] : []), '--', ...plan.clean]);
+    // Restored first: a path git does not know fails it before anything is deleted. Paths are literal, never globs.
+    const env = local.LITERAL_PATHS_ENV;
+    if (plan.restore.length) await local.git(root, staged ? ['restore', '--source=HEAD', '--staged', '--worktree', '--', ...plan.restore] : ['restore', '--worktree', '--', ...plan.restore], { env });
+    if (plan.clean.length) await local.git(root, ['clean', '--force', ...(plan.cleanDirs ? ['-d'] : []), '--', ...plan.clean], { env });
     changed(ctx, ws, 'status');
     return local.status(root);
   },

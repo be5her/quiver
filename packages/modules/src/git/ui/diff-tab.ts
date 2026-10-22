@@ -129,7 +129,8 @@ export class GitDiffTab implements TabComponent {
     const s = this.source();
     if (s.kind === 'staged') return 'index against HEAD';
     if (s.kind === 'working') return 'working tree against the index';
-    if (s.kind === 'compare') return `what ${s.to} has that ${s.from} has not`;
+    // A two-dot diff: also what `from` has and `to` has not, shown as removed.
+    if (s.kind === 'compare') return `${s.to} against ${s.from}`;
     if (s.kind === 'stash') return this.stash.value()?.stash.branch ? `made on ${this.stash.value()?.stash.branch}` : '';
     return '';
   });

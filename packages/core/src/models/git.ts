@@ -179,7 +179,14 @@ export const GitResetInputSchema = z.object({
   mode: z.enum(['soft', 'mixed', 'hard']).describe('soft keeps the index and files; mixed keeps the files and empties the index; hard discards every uncommitted change'),
 });
 
-export const GitStashIndexInputSchema = z.object({ index: z.number().int().min(0).describe('The N of stash@{N}, as git.stash.list gives it; 0 is the newest') });
+export const GitStashIndexInputSchema = z.object({
+  index: z.number().int().min(0).describe('The N of stash@{N}, as git.stash.list gives it; 0 is the newest'),
+  hash: z
+    .string()
+    .regex(/^[0-9a-fA-F]{4,64}$/, 'must be a commit hash')
+    .optional()
+    .describe('The stash\'s hash from git.stash.list: the call is refused (details.reason "stash-moved") when stash@{index} is another stash by now'),
+});
 export const GitStashPushInputSchema = z.object({
   message: z.string().trim().min(1).optional(),
   includeUntracked: z.boolean().default(false),

@@ -366,7 +366,7 @@ export class GitActions {
     }
   }
 
-  /** What the current branch would get from a ref: `git diff HEAD <ref>`, in a diff tab. */
+  /** How a ref differs from the current branch: `git diff HEAD <ref>`, in a diff tab. */
   compare(ref: string): void {
     this.openDiff({ kind: 'compare', from: 'HEAD', to: ref });
   }
@@ -552,20 +552,27 @@ export class GitActions {
     }
   }
 
-  async applyStash(stash: Pick<GitStash, 'index' | 'message'>, pop: boolean): Promise<void> {
+  /** Apply or pop a stash; its hash goes along, so a list that went stale never applies or drops another stash. */
+  async applyStash(stash: Pick<GitStash, 'index' | 'hash' | 'message'>, pop: boolean): Promise<void> {
     try {
-      const result = await this.host.invoke<GitOperationResult>('git.stash.apply', { index: stash.index, pop });
-      if (result.conflicts.length && pop) this.toasts.notify('The stash is kept, since it did not apply cleanly');
-      this.reportOperation(result, pop ? `Popped ${stash.message}` : `Applied ${stash.message}`, 'stash apply');
+      const result = await this.host.invoke<GitOperationResult>('git.stash.apply', { index: stash.index, hash: stash.hash, pop });
+      if (result.conflicts.length) {
+        // There is no operation to continue: the files are resolved and staged like a merge's, and that is all.
+        const n = result.conflicts.length;
+        this.toasts.notify(`The stash stopped on conflicts in ${n} file${n === 1 ? '' : 's'}${pop ? ' and is kept' : ''}. Resolve and stage them in the Git sidebar.`);
+        this.app.setActiveModule('git');
+        return;
+      }
+      this.toasts.notify(pop ? `Popped ${stash.message}` : `Applied ${stash.message}`, 'success');
     } catch (err) {
       this.toasts.error(err);
     }
   }
 
-  async dropStash(stash: Pick<GitStash, 'index' | 'message'>): Promise<void> {
+  async dropStash(stash: Pick<GitStash, 'index' | 'hash' | 'message'>): Promise<void> {
     if (!(await this.dialogs.confirm({ title: 'Drop this stash?', message: `"${stash.message}" is deleted with its changes.`, confirmLabel: 'Drop', danger: true }))) return;
     try {
-      await this.host.invoke('git.stash.drop', { index: stash.index });
+      await this.host.invoke('git.stash.drop', { index: stash.index, hash: stash.hash });
       this.toasts.notify('Dropped the stash', 'success');
     } catch (err) {
       this.toasts.error(err);
@@ -749,7 +756,8 @@ export class GitActions {
       ...(branch.upstream ? [{ label: `Unset upstream (${branch.upstream})`, testId: 'git-menu-unset-upstream', select: () => void this.unsetUpstream(branch) }] : []),
       'separator',
       { label: 'Delete…', testId: 'git-menu-delete', danger: true, disabled: branch.current, select: () => void this.deleteBranch(branch.name) },
-      ...(branch.upstream && !branch.gone ? [{ label: `Delete ${branch.upstream} on the remote…`, testId: 'git-menu-delete-remote', danger: true, select: () => void this.deleteRemoteBranch(branch.upstream!) }] : []),
+      // Only an upstream on a remote (`origin/x`); a local branch as upstream has nothing to delete there.
+      ...(branch.upstream?.includes('/') && !branch.gone ? [{ label: `Delete ${branch.upstream} on the remote…`, testId: 'git-menu-delete-remote', danger: true, select: () => void this.deleteRemoteBranch(branch.upstream!) }] : []),
       copy,
     ];
   }

@@ -82,6 +82,8 @@ describe('branch management inputs', () => {
     expect(GitMergeInputSchema.safeParse({ ref: 'main', mode: 'octopus' }).success).toBe(false);
     expect(GitCherryPickInputSchema.safeParse({ commits: [] }).success).toBe(false);
     expect(GitStashApplyInputSchema.safeParse({ index: -1 }).success).toBe(false);
+    expect(GitStashApplyInputSchema.safeParse({ index: 0, hash: '--all' }).success).toBe(false);
+    expect(GitStashApplyInputSchema.safeParse({ index: 0, hash: 'abc1234' }).success).toBe(true);
   });
 
   it('fill in their defaults', () => {

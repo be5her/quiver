@@ -34,6 +34,8 @@ import { runToEnd, whichSync, type RunToEndResult } from '@quiver/core/node';
 
 const READ_TIMEOUT_MS = 30_000;
 const NETWORK_TIMEOUT_MS = 180_000;
+/** A merge, rebase, cherry-pick or revert replays commits and runs their hooks, which can take far longer than a read. */
+const OPERATION_TIMEOUT_MS = 180_000;
 const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 /** A single file's patch over this is left out and the file marked truncated. */
 const MAX_PATCH_BYTES = 512 * 1024;
@@ -56,6 +58,12 @@ const NON_INTERACTIVE_ENV: Record<string, string> = { GCM_INTERACTIVE: 'never' }
  * interactive rebase, which no command starts; it is set all the same.
  */
 export const NO_EDITOR_ENV: Record<string, string> = { GIT_EDITOR: ':', GIT_SEQUENCE_EDITOR: ':' };
+/**
+ * For a restore or clean whose paths name files rather than patterns (discard): git also reads a path as a glob, so
+ * `git clean -- 'n[x].txt'` would delete an untracked `nx.txt` too, and `[id].tsx` is an everyday file name. Not for
+ * a command that runs others with pathspec magic of its own (stash push uses `:/`); those take `:(literal)` per path.
+ */
+export const LITERAL_PATHS_ENV: Record<string, string> = { GIT_LITERAL_PATHSPECS: '1' };
 
 let gitPath: string | null = null;
 /** When git was last looked for and not found. */
@@ -199,9 +207,11 @@ export async function stashes(cwd: string): Promise<GitStash[]> {
 }
 
 /** One stash by its index, or a clear error when there is no such stash. */
-export async function stashAt(root: string, index: number): Promise<GitStash> {
+export async function stashAt(root: string, index: number, hash?: string): Promise<GitStash> {
   const found = parseStashes((await git(root, ['stash', 'list', `--format=${GIT_STASH_FORMAT}`])).stdout).find((s) => s.index === index);
   if (!found) throw new QuiverError('NOT_FOUND', `There is no stash@{${index}}`);
+  // The list the caller read may be stale: a stash pushed, or an older one dropped, since then moves the others.
+  if (hash && !found.hash.startsWith(hash.toLowerCase())) throw new QuiverError('INVALID_INPUT', `stash@{${index}} is another stash now; read the list again`, { reason: 'stash-moved' });
   return found;
 }
 
@@ -221,7 +231,7 @@ export async function requireNoOperation(root: string): Promise<void> {
  * the new status, and the operation waits for a continue or an abort. Any other non-zero exit fails with git's message.
  */
 export async function operation(root: string, args: string[], options: { input?: string; env?: Record<string, string> } = {}): Promise<GitOperationResult> {
-  const result = await git(root, args, { allowFailure: true, input: options.input, env: { ...NO_EDITOR_ENV, ...options.env } });
+  const result = await git(root, args, { allowFailure: true, input: options.input, timeoutMs: OPERATION_TIMEOUT_MS, env: { ...NO_EDITOR_ENV, ...options.env } });
   const after = await status(root);
   const conflicts = conflictedPaths(after.files);
   if (result.code !== 0 && !conflicts.length) throw gitFailure(args, result);
@@ -237,6 +247,8 @@ export async function fileAt(cwd: string, input: { ref?: string; index: boolean;
   // `<ref>:<path>` is split on the first colon, so a colon in the ref would move part of it into the path.
   if (input.ref?.includes(':')) throw new QuiverError('INVALID_INPUT', `${input.ref} is not a ref: give the ref and the path apart`);
   if (/[\r\n]/.test(input.path)) throw new QuiverError('INVALID_INPUT', 'A path must not contain a line break');
+  // `<ref>:<path>` takes forward slashes only; a Windows file name cannot hold a backslash, so there one is a separator.
+  if (process.platform === 'win32') input = { ...input, path: input.path.replace(/\\/g, '/') };
   const root = await repoRoot(cwd);
   const spec = input.index ? `:0:${input.path}` : `${input.ref}:${input.path}`;
   const where = input.index ? 'the index' : input.ref;

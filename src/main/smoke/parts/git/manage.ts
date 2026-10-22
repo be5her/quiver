@@ -226,9 +226,32 @@ const section: SmokeSection = async (t) => {
     await run('git.stash.apply', { index: 0, pop: true }, id);
     const afterPop = await run<GitStash[]>('git.stash.list', {}, id);
     check('git manage: stash pop applies the newest and drops it', (await read('new.txt')) === 'untracked\n' && afterPop.length === 1 && afterPop[0].message === 'wip one', afterPop);
+    const moved = await failure('git.stash.drop', { index: 0, hash: 'deadbeef' });
+    const movedApply = await failure('git.stash.apply', { index: 0, hash: 'deadbeef' });
+    check(
+      'git manage: stash drop and apply with a hash that is no longer at that index are refused, and the stash stays',
+      moved.reason === 'stash-moved' && movedApply.reason === 'stash-moved' && (await run<GitStash[]>('git.stash.list', {}, id)).length === 1,
+      { moved, movedApply },
+    );
     const missing = await failure('git.stash.drop', { index: 5 });
     const dropped = await run<GitStash[]>('git.stash.drop', { index: 0 }, id);
     check('git manage: stash drop deletes it, and a missing index is NOT_FOUND', dropped.length === 0 && missing.message.includes('stash@{5}'), { dropped, missing });
+    // Paths are file names, never globs: stashing `p[1].txt` leaves `p1.txt` alone.
+    await write('p[1].txt', 'p\n');
+    await write('p1.txt', 'p\n');
+    await sh('add', '--', 'p[1].txt', 'p1.txt');
+    await sh('commit', '-q', '-m', 'Bracket names');
+    await write('p[1].txt', 'p edited\n');
+    await write('p1.txt', 'p1 edited\n');
+    await run('git.stash.push', { paths: ['p[1].txt'] }, id);
+    const byPath = await run<{ stash: GitStash; files: GitDiffFile[] }>('git.stash.show', { index: 0 }, id);
+    check(
+      'git manage: stash push with paths stashes the file named like a glob alone',
+      byPath.files.map((f) => f.path).join() === 'p[1].txt' && (await read('p[1].txt')) === 'p\n' && (await read('p1.txt')) === 'p1 edited\n',
+      byPath.files.map((f) => f.path),
+    );
+    await run('git.stash.drop', { index: 0 }, id);
+    await run('git.reset', { ref: 'HEAD', mode: 'hard' }, id);
 
     // ---- Discard ----
     await write('a.txt', 'edited\n');
@@ -247,6 +270,12 @@ const section: SmokeSection = async (t) => {
     );
     await run('git.discard', { paths: ['newdir/'] }, id);
     check('git manage: discard of an untracked folder entry deletes the folder', !(await exists('newdir')));
+    // A path is a file name, never a glob: `n[x].txt` would otherwise take an untracked `nx.txt` with it.
+    await write('n[x].txt', 'brackets\n');
+    await write('nx.txt', 'sibling\n');
+    await run('git.discard', { paths: ['n[x].txt'] }, id);
+    check('git manage: discard of a file named like a glob deletes that file alone', !(await exists('n[x].txt')) && (await exists('nx.txt')));
+    await fs.rm(path.join(folder, 'nx.txt'));
     await write('a.txt', 'staged\n');
     await run('git.stage', { paths: ['a.txt'] }, id);
     await write('a.txt', 'staged and more\n');
