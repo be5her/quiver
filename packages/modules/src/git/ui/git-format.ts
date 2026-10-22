@@ -1,4 +1,5 @@
-import { shortRelativeTime, type GitCommit, type GitDiffFile, type GitFileChange, type GitPrCheckState, type GitPullRequest, type GitStatus } from '@quiver/core';
+import { isUnmerged, shortRelativeTime, type GitBranch, type GitCommit, type GitDiffFile, type GitFileChange, type GitPrCheckState, type GitPullRequest, type GitStash, type GitStatus, type GitTag } from '@quiver/core';
+import type { CodeLanguage } from '@quiver/ui';
 
 // What the Git panel shows, worked out from what the host commands give back. No Angular here.
 
@@ -20,16 +21,27 @@ export interface GitRemoteResult {
   status: GitStatus;
 }
 
+/** `git.stash.show`: one stash and its changes. */
+export interface GitStashShowResult {
+  stash: GitStash;
+  files: GitDiffFile[];
+}
+
 /** Where a diff tab's files come from. */
 export type DiffSource =
   | { kind: 'working'; path?: string }
   | { kind: 'staged'; path?: string }
-  | { kind: 'commit'; ref: string; path?: string };
+  | { kind: 'commit'; ref: string; path?: string }
+  /** Two refs: what `to` has that `from` has not, as `git diff from to`. */
+  | { kind: 'compare'; from: string; to: string; path?: string }
+  /** A stash by its index, with its hash so a tab whose stash has gone (or moved up) says so. */
+  | { kind: 'stash'; index: number; hash: string; path?: string };
+
+/** Where the old side of a diff's files is read from, so the merge view can show whole files: a ref, or the index. */
+export type DiffBase = { ref: string } | { index: true };
 
 /** Unmerged entries: git's XY pairs for a conflict (UU, AA, DD, AU, UA, DU, UD). */
-export function isConflict(f: GitFileChange): boolean {
-  return f.index === 'U' || f.worktree === 'U' || (f.index === 'A' && f.worktree === 'A') || (f.index === 'D' && f.worktree === 'D');
-}
+export const isConflict: (f: GitFileChange) => boolean = isUnmerged;
 
 export interface GroupedChanges {
   conflicts: GitFileChange[];
@@ -173,6 +185,107 @@ export function splitRows(rows: PatchRow[]): SplitRow[] {
   }
   flush();
   return out;
+}
+
+/**
+ * The new side of a file from its old side and its unified patch, or null when they do not fit (a context or deleted
+ * line that is not in the old side, a combined diff of a conflict): a file is then drawn from its hunks rather than
+ * shown wrong. Line endings stay as they are, `\r` included.
+ */
+export function applyPatch(old: string, patch: string): string | null {
+  if (patch.startsWith('diff --cc ') || patch.startsWith('diff --combined ')) return null;
+  const source = old === '' ? [] : old.split('\n');
+  let endsWithNewline = old === '' || old.endsWith('\n');
+  if (old.endsWith('\n')) source.pop();
+  const lines = patch.split('\n');
+  if (lines[lines.length - 1] === '') lines.pop();
+  const out: string[] = [];
+  let at = 0;
+  let inHunk = false;
+  let last: ' ' | '-' | '+' | null = null;
+  for (const line of lines) {
+    const hunk = /^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@/.exec(line);
+    if (hunk) {
+      // `-n,0` is an insertion after line n; otherwise the hunk starts at line n.
+      const start = hunk[2] === '0' ? Number(hunk[1]) : Number(hunk[1]) - 1;
+      if (start < at || start > source.length) return null;
+      out.push(...source.slice(at, start));
+      at = start;
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk) continue;
+    // An empty line is an empty context line whose leading space was trimmed, as parsePatch reads it.
+    const mark = line === '' ? ' ' : line[0];
+    const text = line.slice(1);
+    if (mark === ' ' || mark === '-') {
+      if (source[at] !== text) return null;
+      at++;
+      if (mark === ' ') out.push(text);
+      last = mark;
+    } else if (mark === '+') {
+      out.push(text);
+      last = mark;
+    } else if (mark === '\\') {
+      // `\ No newline at end of file` after an old-side line: the old file lacked it, so the new one ends with one
+      // unless a marker after a new-side line says otherwise.
+      endsWithNewline = last === '-';
+    } else return null;
+  }
+  out.push(...source.slice(at));
+  if (!out.length) return '';
+  return out.join('\n') + (endsWithNewline ? '\n' : '');
+}
+
+const LANGUAGE: Record<string, CodeLanguage> = {
+  json: 'json',
+  js: 'javascript',
+  mjs: 'javascript',
+  cjs: 'javascript',
+  jsx: 'javascript',
+  ts: 'javascript',
+  mts: 'javascript',
+  cts: 'javascript',
+  tsx: 'javascript',
+  html: 'html',
+  htm: 'html',
+  xml: 'xml',
+  svg: 'xml',
+  csproj: 'xml',
+  sql: 'sql',
+  graphql: 'graphql',
+  gql: 'graphql',
+};
+
+/** The editor language for a file, by its extension; plain text when there is none for it. */
+export function languageForPath(p: string): CodeLanguage {
+  const name = splitPath(p).name.toLowerCase();
+  const dot = name.lastIndexOf('.');
+  return dot > 0 ? (LANGUAGE[name.slice(dot + 1)] ?? 'text') : 'text';
+}
+
+// ---- Branches and tags ----
+
+/** A branch or tag matches the filter when its name, or its last commit's subject, holds the text (case aside). */
+export function refMatches(ref: Pick<GitBranch | GitTag, 'name' | 'subject'>, filter: string): boolean {
+  const text = filter.trim().toLowerCase();
+  return !text || ref.name.toLowerCase().includes(text) || ref.subject.toLowerCase().includes(text);
+}
+
+/** The local branches "Clean up" offers: merged or gone, never the current one. */
+export function cleanupCandidates(branches: GitBranch[]): GitBranch[] {
+  return branches.filter((b) => !b.remote && !b.current && (b.merged || b.gone));
+}
+
+/** `origin/feature` as its remote and the branch's name there. The remote is the part before the first slash. */
+export function splitRemoteBranch(name: string): { remote: string; branch: string } {
+  const at = name.indexOf('/');
+  return at < 0 ? { remote: name, branch: '' } : { remote: name.slice(0, at), branch: name.slice(at + 1) };
+}
+
+/** The remotes the branches mention, for picking one to push a tag to. */
+export function remotesOf(branches: GitBranch[]): string[] {
+  return [...new Set(branches.filter((b) => b.remote).map((b) => splitRemoteBranch(b.name).remote))].sort();
 }
 
 // ---- Pull requests ----

@@ -1,5 +1,30 @@
 import { describe, expect, it } from 'vitest';
-import { GitArgSchema, GitBranchCreateInputSchema, GitCheckoutInputSchema, GitDiffInputSchema, GitLogInputSchema, GitPathsInputSchema, GitPrCreateInputSchema, GitPushInputSchema, GitRemoteInputSchema } from './git';
+import {
+  GitArgSchema,
+  GitBranchCreateInputSchema,
+  GitBranchDeleteInputSchema,
+  GitBranchDeleteRemoteInputSchema,
+  GitBranchRenameInputSchema,
+  GitBranchSetUpstreamInputSchema,
+  GitCheckoutInputSchema,
+  GitCherryPickInputSchema,
+  GitDiffInputSchema,
+  GitDiscardInputSchema,
+  GitFileShowInputSchema,
+  GitLogInputSchema,
+  GitMergeInputSchema,
+  GitPathsInputSchema,
+  GitPrCreateInputSchema,
+  GitPushInputSchema,
+  GitRebaseInputSchema,
+  GitRemoteInputSchema,
+  GitResetInputSchema,
+  GitRevertInputSchema,
+  GitStashApplyInputSchema,
+  GitStashPushInputSchema,
+  GitTagCreateInputSchema,
+  GitTagPushInputSchema,
+} from './git';
 
 describe('git command inputs', () => {
   it('refuse anything git would read as an option', () => {
@@ -30,5 +55,41 @@ describe('git command inputs', () => {
     expect(GitPathsInputSchema.parse({ paths: ['a', 'b/c'] }).paths).toEqual(['a', 'b/c']);
     expect(GitPushInputSchema.parse({ remote: 'origin', branch: 'main', setUpstream: true })).toMatchObject({ forceWithLease: false });
     expect(GitPrCreateInputSchema.parse({ title: 't', base: 'main', labels: ['bug'] })).toMatchObject({ base: 'main', labels: ['bug'], draft: false, body: '' });
+  });
+});
+
+describe('branch management inputs', () => {
+  it('refuse anything git would read as an option', () => {
+    // git rebase --exec runs a command; git merge -s picks a strategy program; git branch -D forces a delete.
+    const bad: [{ safeParse(v: unknown): { success: boolean } }, unknown][] = [
+      [GitBranchDeleteInputSchema, { name: '-D' }],
+      [GitBranchDeleteRemoteInputSchema, { remote: '--receive-pack=calc', name: 'x' }],
+      [GitBranchRenameInputSchema, { to: '--force' }],
+      [GitBranchSetUpstreamInputSchema, { upstream: '--unset-upstream' }],
+      [GitMergeInputSchema, { ref: '--strategy=calc' }],
+      [GitRebaseInputSchema, { onto: '--exec=calc' }],
+      [GitCherryPickInputSchema, { commits: ['main', '--strategy-option=x'] }],
+      [GitRevertInputSchema, { commit: '-m' }],
+      [GitResetInputSchema, { ref: '--hard', mode: 'soft' }],
+      [GitStashPushInputSchema, { paths: ['--', 'a'] }],
+      [GitDiscardInputSchema, { paths: ['--all'] }],
+      [GitTagCreateInputSchema, { name: 'v1', ref: '--sort=x' }],
+      [GitTagPushInputSchema, { remote: 'origin', name: '--mirror' }],
+      [GitFileShowInputSchema, { path: '--output=x', ref: 'HEAD' }],
+    ];
+    for (const [schema, input] of bad) expect(schema.safeParse(input).success, JSON.stringify(input)).toBe(false);
+    expect(GitResetInputSchema.safeParse({ ref: 'HEAD~1', mode: 'keep' }).success).toBe(false);
+    expect(GitMergeInputSchema.safeParse({ ref: 'main', mode: 'octopus' }).success).toBe(false);
+    expect(GitCherryPickInputSchema.safeParse({ commits: [] }).success).toBe(false);
+    expect(GitStashApplyInputSchema.safeParse({ index: -1 }).success).toBe(false);
+  });
+
+  it('fill in their defaults', () => {
+    expect(GitBranchDeleteInputSchema.parse({ name: 'x' })).toEqual({ name: 'x', force: false });
+    expect(GitBranchSetUpstreamInputSchema.parse({ upstream: null })).toEqual({ upstream: null });
+    expect(GitStashPushInputSchema.parse({})).toEqual({ includeUntracked: false });
+    expect(GitStashApplyInputSchema.parse({ index: 0 })).toEqual({ index: 0, pop: false });
+    expect(GitDiscardInputSchema.parse({ paths: ['a'] })).toEqual({ paths: ['a'], staged: false });
+    expect(GitFileShowInputSchema.parse({ path: 'a', ref: 'HEAD' })).toEqual({ path: 'a', ref: 'HEAD', index: false });
   });
 });
