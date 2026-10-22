@@ -213,6 +213,53 @@ export const GitFileShowInputSchema = z.object({
   index: z.boolean().default(false).describe('Read the staged version instead of one at a ref'),
 });
 
+// ---------- Blame ----------
+
+/** A commit that `git.blame` names for some lines, listed once however many lines it has. */
+export interface GitBlameCommit {
+  hash: string;
+  author: string;
+  authorEmail: string;
+  /** ISO 8601. */
+  authorTime: string;
+  /** The first line of its message. */
+  summary: string;
+  /** The file's path in this commit; differs from the blamed path when the file was renamed since. */
+  path: string;
+  /** The commit before it that held these lines, and the file's path there: where "blame before this commit" goes. */
+  previous?: { commit: string; path: string };
+  /** The history stops here (a root commit, or the boundary of a range): the lines may be older than it. */
+  boundary: boolean;
+}
+
+/** One line of the blamed file. */
+export interface GitBlameLine {
+  /** 1-based, in the file as blamed. */
+  line: number;
+  /** The commit that last changed the line; null for a line not committed yet (changed in the working tree). */
+  commit: string | null;
+  /** 1-based, the line's number in that commit's version of the file. */
+  originalLine: number;
+  /** The line's text, without its line ending. */
+  text: string;
+}
+
+/** `git.blame`: who last changed each line of a file, at a ref or in the working tree. */
+export interface GitBlame {
+  path: string;
+  /** The ref it was blamed at; absent for the working tree. */
+  ref?: string;
+  lines: GitBlameLine[];
+  /** Keyed by hash. */
+  commits: Record<string, GitBlameCommit>;
+}
+
+export const GitBlameInputSchema = z.object({
+  path: GitArgSchema.describe('The file, relative to the repository root'),
+  ref: GitArgSchema.optional().describe('A commit, branch or tag to blame the file at; default: the working tree, where uncommitted lines have commit null'),
+  ignoreWhitespace: z.boolean().default(false).describe('Ignore whitespace-only changes when finding the commit of a line (git blame -w)'),
+});
+
 /** Whether `gh` can be used here: installed, signed in, and the workspace is a GitHub repository. */
 export interface GhStatus {
   installed: boolean;

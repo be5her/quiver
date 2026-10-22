@@ -74,6 +74,7 @@ const GROUP_TITLE: Record<Group, string> = { conflicts: 'Merge conflicts', stage
           [title]="tooltip(f)"
           (click)="opened.emit(f)"
           (keydown.enter)="opened.emit(f)"
+          (contextmenu)="fileMenu($event, f)"
         >
           <span class="truncate text-[13px]">{{ name(f.path) }}</span>
           <span class="truncate text-[11px] text-muted flex-1 min-w-0">{{ dir(f.path) }}</span>
@@ -97,6 +98,7 @@ const GROUP_TITLE: Record<Group, string> = { conflicts: 'Merge conflicts', stage
 export class GitChangeGroup {
   private readonly tree = inject(TreeState);
   private readonly actions = inject(GitActions);
+  private readonly contextMenu = inject(ContextMenu);
 
   readonly group = input.required<Group>();
   readonly files = input.required<GitFileChange[]>();
@@ -151,6 +153,15 @@ export class GitChangeGroup {
   protected discardAll(event: Event): void {
     event.stopPropagation();
     void this.actions.discard(this.files().map((f) => f.path), this.group() === 'untracked');
+  }
+
+  /** Right-click on a file: open its changes, or blame it (as committed, at HEAD, when it was deleted). Git cannot blame an untracked file. */
+  protected fileMenu(event: MouseEvent, f: GitFileChange): void {
+    const deleted = (this.group() === 'staged' ? f.index : f.worktree) === 'D';
+    this.contextMenu.open(event, [
+      { label: 'Open changes', testId: 'git-menu-open', select: () => this.opened.emit(f) },
+      { label: 'Blame', testId: 'git-menu-blame', disabled: this.group() === 'untracked', select: () => this.actions.openBlame(f.path, deleted ? 'HEAD' : undefined) },
+    ]);
   }
 }
 

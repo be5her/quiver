@@ -82,7 +82,7 @@ const PAGE = 100;
             </div>
           </div>
           <div class="flex-1 min-h-0">
-            <q-git-diff-view [files]="d.files" [base]="base()" emptyTitle="No file changes" />
+            <q-git-diff-view [files]="d.files" [base]="base()" [blameAt]="d.commit.hash" emptyTitle="No file changes" />
           </div>
         } @else if (detail.error(); as error) {
           <p class="p-4 text-sm text-danger">{{ error.message }}</p>

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { applyPatch, checksSummary, cleanupCandidates, groupChanges, isPushRejected, languageForPath, parsePatch, refMatches, remotesOf, splitPath, splitRemoteBranch, splitRows } from './git-format';
 import type { GitBranch } from '@quiver/core';
+import { blameBefore, blameKey, blameMarkers, blameTitle } from './git-format';
+import type { GitBlameCommit } from '@quiver/core';
 
 const PATCH = [
   'diff --git a/a.txt b/a.txt',
@@ -153,5 +155,45 @@ describe('branches', () => {
     expect(languageForPath('package.json')).toBe('json');
     expect(languageForPath('Makefile')).toBe('text');
     expect(languageForPath('.gitignore')).toBe('text');
+  });
+});
+
+describe('blame', () => {
+  const old = 'a'.repeat(40);
+  const recent = 'b'.repeat(40);
+  const commit = (hash: string, authorTime: string, over: Partial<GitBlameCommit> = {}): GitBlameCommit => ({ hash, author: 'Ann', authorEmail: 'ann@x.test', authorTime, summary: `Commit ${hash[0]}`, path: 'f.ts', boundary: false, ...over });
+  const blame = {
+    lines: [
+      { line: 1, commit: old, originalLine: 1, text: 'a' },
+      { line: 2, commit: old, originalLine: 2, text: 'b' },
+      { line: 3, commit: recent, originalLine: 1, text: 'c' },
+      { line: 4, commit: null, originalLine: 4, text: 'd' },
+      { line: 5, commit: old, originalLine: 3, text: 'e' },
+    ],
+    commits: { [old]: commit(old, '2026-01-01T00:00:00.000Z', { boundary: true }), [recent]: commit(recent, '2026-10-01T00:00:00.000Z', { previous: { commit: old, path: 'old name.ts' } }) },
+  };
+
+  it('labels each run of lines once, coloured from faint (oldest) to strong (newest)', () => {
+    const markers = blameMarkers(blame, Date.parse('2026-10-22T00:00:00Z'), (iso) => `on ${iso}`);
+    expect(markers.map((m) => [m.text, m.start, m.id])).toEqual([
+      ['aaaaaaa Ann · 9mo ago', true, old],
+      ['', false, old],
+      ['bbbbbbb Ann · 21d ago', true, recent],
+      ['Not committed yet', true, undefined],
+      ['aaaaaaa Ann · 9mo ago', true, old],
+    ]);
+    expect(markers[0].color).toContain('20%');
+    expect(markers[2].color).toContain('90%');
+    expect(markers[3].color).toBe('var(--warning)');
+    expect(markers[2].title).toContain('bbbbbbb Commit b\nAnn <ann@x.test>\non 2026-10-01T00:00:00.000Z');
+    expect(markers[0].title).toContain('The history stops here');
+  });
+
+  it('blames before a commit at its previous commit and path, and names tabs by file and ref', () => {
+    expect(blameBefore(blame.commits[recent])).toEqual({ path: 'old name.ts', ref: old });
+    expect(blameBefore(blame.commits[old])).toBeNull();
+    expect(blameTitle({ path: 'src/f.ts' })).toBe('f.ts (blame)');
+    expect(blameTitle({ path: 'src/f.ts', ref: old })).toBe('f.ts (blame @ aaaaaaa)');
+    expect(blameKey({ path: 'src/f.ts', ref: 'main' })).toBe('src/f.ts@main');
   });
 });

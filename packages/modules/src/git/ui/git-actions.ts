@@ -2,6 +2,7 @@ import { Service, inject, signal, untracked } from '@angular/core';
 import { toErrorPayload, type GitBranch, type GitCommit, type GitOperationResult, type GitStash, type GitStatus, type GitPullRequest, type GitTag, type TodoItem } from '@quiver/core';
 import { AppState, Dialogs, HostBridge, TabsState, Toasts, type ContextMenuItem } from '@quiver/ui';
 import { errorReason, groupChanges, isPushRejected, remotesOf, splitPath, splitRemoteBranch, type DiffSource, type GitLogPage, type GitRemoteResult, type PrFilter } from './git-format';
+import { blameKey, blameTitle, type BlameAt } from './git-format';
 
 /** A ref to pick in `pickRef`: a branch or tag name, and how the list shows it. */
 interface RefChoice {
@@ -47,6 +48,18 @@ export class GitActions {
 
   openHistory(): void {
     this.tabs.openTab(this.scope(), { type: 'git.history', title: 'History', data: { id: 'history' } }, { singletonKey: 'git.history:history' });
+  }
+
+  /** Who last changed each line of a file, at a ref or in the working tree: one tab per path and ref. */
+  openBlame(path: string, ref?: string): void {
+    const at: BlameAt = { path, ...(ref ? { ref } : {}) };
+    this.tabs.openTab(this.scope(), { type: 'git.blame', title: blameTitle(at), data: { id: blameKey(at), ...at } }, { singletonKey: `git.blame:${blameKey(at)}` });
+  }
+
+  /** The palette's Blame file: asks for the path. */
+  async blameFromPalette(): Promise<void> {
+    const path = await this.dialogs.prompt({ title: 'Blame file', label: 'Path, relative to the repository root', placeholder: 'src/index.ts', confirmLabel: 'Blame' });
+    if (path?.trim()) this.openBlame(path.trim());
   }
 
   openBranches(): void {

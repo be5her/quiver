@@ -1,4 +1,5 @@
 import type { GitBranch, GitCommit, GitDiffFile, GitFileChange, GitStash, GitStatus, GitTag } from './models/git';
+import type { GitBlame, GitBlameCommit, GitBlameLine } from './models/git';
 
 // Parsers for the git CLI's output, pure functions with unit tests. The commands in the git module ask git for
 // NUL-separated output (`-z`, `%x00`), so paths with spaces, quotes or newlines come through unquoted and intact.
@@ -275,4 +276,101 @@ export function detectOperation(present: (name: string) => boolean, read?: (name
     return /^\s*(revert|r)\s/m.test(todo) && !/^\s*(pick|p)\s/m.test(todo) ? 'revert' : 'cherry-pick';
   }
   return undefined;
+}
+
+// ---------- Blame ----------
+
+/** The escapes of git's C-style quoting besides octal bytes. */
+const C_ESCAPES: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, '\\': 92 };
+
+/**
+ * A path as git prints it where it may quote one (`"tab\there"`, `"caf\303\251"`): with the quotes, C escapes and octal
+ * UTF-8 bytes undone. A path git did not quote comes back as it is; one never starts with a double quote, which git
+ * would have quoted.
+ */
+export function unquoteGitPath(s: string): string {
+  if (s.length < 2 || !s.startsWith('"') || !s.endsWith('"')) return s;
+  const chars = [...s.slice(1, -1)];
+  const bytes: number[] = [];
+  const encoder = new TextEncoder();
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i];
+    if (ch !== '\\' || i === chars.length - 1) {
+      bytes.push(...encoder.encode(ch));
+      continue;
+    }
+    const next = chars[++i];
+    const octal = /^[0-7]{3}$/.test(chars.slice(i, i + 3).join('')) ? chars.slice(i, i + 3).join('') : null;
+    if (octal) {
+      bytes.push(parseInt(octal, 8));
+      i += 2;
+    } else bytes.push(...(C_ESCAPES[next] !== undefined ? [C_ESCAPES[next]] : encoder.encode(next)));
+  }
+  return new TextDecoder().decode(new Uint8Array(bytes));
+}
+
+/** A line's header in `git blame --porcelain`: hash, its line in that commit, its line now, and the group's size on a group's first line. */
+const BLAME_HEADER = /^([0-9a-f]{40}|[0-9a-f]{64}) (\d+) (\d+)(?: \d+)?$/;
+
+/**
+ * `git blame --porcelain`. A commit's details (author, time, summary, `previous`, `boundary`, `filename`) follow only
+ * the first line it is named for, so each commit is listed once; every line then names its commit by hash. A line
+ * not committed yet (the all-zero hash, "Not Committed Yet") gets `commit: null` and no entry in `commits`. Each
+ * line's text follows a tab and ends at the newline (its CR, in a CRLF file, is dropped); paths may be C-quoted.
+ */
+export function parseBlamePorcelain(out: string, info: { path: string; ref?: string }): GitBlame {
+  const lines: GitBlameLine[] = [];
+  const commits: Record<string, GitBlameCommit> = {};
+  let current: { hash: string; original: number; final: number; committed: boolean } | null = null;
+  for (const row of out.split('\n')) {
+    if (row.startsWith('\t')) {
+      if (current) lines.push({ line: current.final, commit: current.committed ? current.hash : null, originalLine: current.original, text: row.slice(1).replace(/\r$/, '') });
+      current = null;
+      continue;
+    }
+    const header = BLAME_HEADER.exec(row);
+    if (header) {
+      const hash = header[1];
+      const committed = !/^0+$/.test(hash);
+      current = { hash, original: Number(header[2]), final: Number(header[3]), committed };
+      if (committed && !commits[hash]) commits[hash] = { hash, author: '', authorEmail: '', authorTime: '', summary: '', path: '', boundary: false };
+      continue;
+    }
+    const commit = current?.committed ? commits[current.hash] : undefined;
+    if (!commit) continue;
+    const space = row.indexOf(' ');
+    const key = space < 0 ? row : row.slice(0, space);
+    const value = space < 0 ? '' : row.slice(space + 1);
+    switch (key) {
+      case 'author':
+        commit.author = value;
+        break;
+      case 'author-mail':
+        commit.authorEmail = value.replace(/^<(.*)>$/, '$1');
+        break;
+      case 'author-time': {
+        const seconds = Number(value);
+        commit.authorTime = Number.isFinite(seconds) ? new Date(seconds * 1000).toISOString() : '';
+        break;
+      }
+      case 'summary':
+        commit.summary = value;
+        break;
+      case 'boundary':
+        commit.boundary = true;
+        break;
+      case 'previous': {
+        // A commit that touched several paths may be named again with another; its first ones stay.
+        const at = value.indexOf(' ');
+        if (at > 0 && !commit.previous) commit.previous = { commit: value.slice(0, at), path: unquoteGitPath(value.slice(at + 1)) };
+        break;
+      }
+      case 'filename':
+        if (!commit.path) commit.path = unquoteGitPath(value);
+        break;
+    }
+  }
+  for (const c of Object.values(commits)) if (!c.path) c.path = info.path;
+  lines.sort((a, b) => a.line - b.line);
+  return { path: info.path, ...(info.ref ? { ref: info.ref } : {}), lines, commits };
 }
