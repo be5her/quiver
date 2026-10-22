@@ -250,7 +250,8 @@ export default definePart({
         const clickedCompare = await js(
           `(() => { const pane = [...document.querySelectorAll('[data-tab-type="env.file"]')].find((el) => !el.classList.contains('hidden')); const btn = pane && [...pane.querySelectorAll('[role=tab]')].find((b) => b.textContent.startsWith('Compare')); if (btn) btn.click(); return Boolean(btn); })()`,
         );
-        await wait(1200);
+        // The diff loads after the tab shows, and again on each env.changed: on a busy machine it takes more than a moment.
+        await until(async () => Boolean(await js(`document.querySelectorAll('[data-testid=env-compare-missing] li').length > 0`)), 6000);
         const compareAgainst = await js(`document.querySelector('[data-testid=env-compare-select]')?.value ?? ''`);
         const missingKeys = await js(`[...document.querySelectorAll('[data-testid=env-compare-missing] li')].map((li) => li.textContent.replace(/Add$/, '').trim())`);
         check('ui: compare view defaults to the example and lists the missing keys', clickedCompare === true && compareAgainst === '.env.example' && Array.isArray(missingKeys) && missingKeys.join() === 'FEATURE_FLAG,NEW_KEY', { compareAgainst, missingKeys });

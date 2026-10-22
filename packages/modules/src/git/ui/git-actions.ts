@@ -1,7 +1,8 @@
 import { Service, inject, signal, untracked } from '@angular/core';
 import { toErrorPayload, type GitBranch, type GitCommit, type GitOperationResult, type GitStash, type GitStatus, type GitPullRequest, type GitTag, type TodoItem } from '@quiver/core';
 import { AppState, Dialogs, HostBridge, TabsState, Toasts, type ContextMenuItem } from '@quiver/ui';
-import { errorReason, groupChanges, isPushRejected, remotesOf, splitPath, splitRemoteBranch, type DiffSource, type GitLogPage, type GitRemoteResult, type PrFilter } from './git-format';
+import { blameKey, blameTitle, errorReason, groupChanges, isPushRejected, remotesOf, splitPath, splitRemoteBranch, type BlameAt, type DiffSource, type GitLogPage, type GitRemoteResult, type PrFilter } from './git-format';
+import { GitWorktreeActions } from './worktree-actions';
 
 /** A ref to pick in `pickRef`: a branch or tag name, and how the list shows it. */
 interface RefChoice {
@@ -19,6 +20,7 @@ export class GitActions {
   private readonly tabs = inject(TabsState);
   private readonly dialogs = inject(Dialogs);
   private readonly toasts = inject(Toasts);
+  private readonly worktrees = inject(GitWorktreeActions);
 
   /** Fetch, pull and push under way, so their buttons spin and are not pressed twice. */
   readonly busy = signal<ReadonlySet<RemoteOp>>(new Set());
@@ -49,6 +51,18 @@ export class GitActions {
     this.tabs.openTab(this.scope(), { type: 'git.history', title: 'History', data: { id: 'history' } }, { singletonKey: 'git.history:history' });
   }
 
+  /** Who last changed each line of a file, at a ref or in the working tree: one tab per path and ref. */
+  openBlame(path: string, ref?: string): void {
+    const at: BlameAt = { path, ...(ref ? { ref } : {}) };
+    this.tabs.openTab(this.scope(), { type: 'git.blame', title: blameTitle(at), data: { id: blameKey(at), ...at } }, { singletonKey: `git.blame:${blameKey(at)}` });
+  }
+
+  /** The palette's Blame file: asks for the path. */
+  async blameFromPalette(): Promise<void> {
+    const path = await this.dialogs.prompt({ title: 'Blame file', label: 'Path, relative to the repository root', placeholder: 'src/index.ts', confirmLabel: 'Blame' });
+    if (path?.trim()) this.openBlame(path.trim());
+  }
+
   openBranches(): void {
     this.tabs.openTab(this.scope(), { type: 'git.branches', title: 'Branches', data: { id: 'branches' } }, { singletonKey: 'git.branches:branches' });
   }
@@ -64,6 +78,11 @@ export class GitActions {
 
   openPullRequest(pr: Pick<GitPullRequest, 'number' | 'title'>): void {
     this.tabs.openTab(this.scope(), { type: 'git.pr', title: `#${pr.number} ${pr.title}`, data: { id: pr.number } }, { singletonKey: `git.pr:${pr.number}` });
+  }
+
+  /** The conflict editor of one conflicted file. */
+  openConflict(path: string): void {
+    this.tabs.openTab(this.scope(), { type: 'git.conflict', title: `${splitPath(path).name} (conflict)`, data: { id: path, path } }, { singletonKey: `git.conflict:${path}` });
   }
 
   // ---- Index and commits ----
@@ -145,7 +164,8 @@ export class GitActions {
       await this.host.invoke('git.checkout', { ref });
       return true;
     } catch (err) {
-      this.toasts.error(err);
+      // A branch another worktree has: offer to open that worktree instead.
+      if (!(await this.worktrees.offerOpen(err))) this.toasts.error(err);
       return false;
     }
   }
@@ -749,6 +769,7 @@ export class GitActions {
       { label: 'Switch to this branch', testId: 'git-menu-checkout', disabled: branch.current, select: () => void this.checkout(branch.name) },
       { label: 'New branch from here…', testId: 'git-menu-new-branch', select: () => void this.newBranch(branch.name) },
       { label: 'Rename…', testId: 'git-menu-rename', select: () => void this.renameBranch(branch.name) },
+      ...this.worktrees.branchItems(branch),
       'separator',
       ...onCurrent,
       'separator',

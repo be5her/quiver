@@ -719,6 +719,7 @@ const redisInfo = defineCommand({
 
 export const dbModule = defineModule({
   id: 'db',
+  collections: { [COLLECTIONS.connections]: DbConnectionSchema, [COLLECTIONS.queries]: SavedQuerySchema },
   commands: [
     connectionList,
     connectionGet,

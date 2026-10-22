@@ -1,5 +1,5 @@
-import { isUnmerged, shortRelativeTime, type GitBranch, type GitCommit, type GitDiffFile, type GitFileChange, type GitPrCheckState, type GitPullRequest, type GitStash, type GitStatus, type GitTag } from '@quiver/core';
-import type { CodeLanguage } from '@quiver/ui';
+import { isUnmerged, shortRelativeTime, type GitBlame, type GitBlameCommit, type GitBranch, type GitCommit, type GitDiffFile, type GitFileChange, type GitPrCheckState, type GitPullRequest, type GitStash, type GitStatus, type GitTag } from '@quiver/core';
+import type { CodeLanguage, LineMarker } from '@quiver/ui';
 
 // What the Git panel shows, worked out from what the host commands give back. No Angular here.
 
@@ -274,7 +274,8 @@ export function refMatches(ref: Pick<GitBranch | GitTag, 'name' | 'subject'>, fi
 
 /** The local branches "Clean up" offers: merged or gone, never the current one. */
 export function cleanupCandidates(branches: GitBranch[]): GitBranch[] {
-  return branches.filter((b) => !b.remote && !b.current && (b.merged || b.gone));
+  // A branch another worktree has checked out cannot be deleted until that worktree goes or switches.
+  return branches.filter((b) => !b.remote && !b.current && !b.worktreePath && (b.merged || b.gone));
 }
 
 /** `origin/feature` as its remote and the branch's name there. The remote is the part before the first slash. */
@@ -347,4 +348,66 @@ export function prStateLabel(pr: Pick<GitPullRequest, 'state' | 'draft'>): strin
 export function errorReason(error: { details?: unknown } | null | undefined): string | undefined {
   const details = error?.details;
   return details && typeof details === 'object' && 'reason' in details && typeof details.reason === 'string' ? details.reason : undefined;
+}
+
+// ---- Blame ----
+
+/** What a blame tab shows: a file, at a ref or (without one) in the working tree. */
+export interface BlameAt {
+  path: string;
+  ref?: string;
+}
+
+/** A blame tab's key: one tab per path and ref. */
+export function blameKey(at: BlameAt): string {
+  return `${at.path}@${at.ref ?? ''}`;
+}
+
+/** A ref as a tab or header shows it: a full hash cut to seven characters. */
+export function shortRef(ref: string): string {
+  return /^[0-9a-f]{40,64}$/.test(ref) ? ref.slice(0, 7) : ref;
+}
+
+export function blameTitle(at: BlameAt): string {
+  return `${splitPath(at.path).name} (blame${at.ref ? ` @ ${shortRef(at.ref)}` : ''})`;
+}
+
+/**
+ * The blamed file as the editor shows it, one editor line per blamed line. Git ends a line at a newline only, while
+ * CodeMirror also breaks at a lone CR, which would push every marker below it off its line; such a CR is drawn as ␍.
+ */
+export function blameText(lines: readonly { text: string }[]): string {
+  return lines.map((l) => l.text.replace(/\r/g, '␍')).join('\n');
+}
+
+/** Where "Blame before this commit" goes: the commit before it that held the lines, with the file's path there (renames followed); null when the file starts in it. */
+export function blameBefore(commit: Pick<GitBlameCommit, 'previous'>): BlameAt | null {
+  return commit.previous ? { path: commit.previous.path, ref: commit.previous.commit } : null;
+}
+
+/**
+ * The blame gutter: one marker per line. The first line of each run of lines from one commit shows the short hash,
+ * the author and how long ago, the rest of the run only the colour; the tooltip has the summary and the full date.
+ * The colour goes from faint for the file's oldest commit to strong for its newest; lines not committed yet are in
+ * the warning colour. `formatDate` is the full date in the tooltip.
+ */
+export function blameMarkers(blame: Pick<GitBlame, 'lines' | 'commits'>, now = Date.now(), formatDate: (iso: string) => string = (iso) => new Date(iso).toLocaleString()): LineMarker[] {
+  const times = Object.values(blame.commits)
+    .map((c) => Date.parse(c.authorTime))
+    .filter((t) => !Number.isNaN(t));
+  const oldest = Math.min(...times);
+  const newest = Math.max(...times);
+  const colour = (iso: string) => {
+    const t = Date.parse(iso);
+    const share = Number.isNaN(t) || newest <= oldest ? 1 : (t - oldest) / (newest - oldest);
+    return `color-mix(in srgb, var(--accent) ${Math.round(20 + 70 * share)}%, transparent)`;
+  };
+  return blame.lines.map((l, i) => {
+    const start = i === 0 || blame.lines[i - 1].commit !== l.commit;
+    const c = l.commit ? blame.commits[l.commit] : undefined;
+    if (!c) return { text: start ? 'Not committed yet' : '', title: 'Not committed yet: changed in the working tree\nClick to see the working changes', color: 'var(--warning)', start };
+    const short = c.hash.slice(0, 7);
+    const title = `${short} ${c.summary}\n${c.author} <${c.authorEmail}>\n${formatDate(c.authorTime)}${c.boundary ? '\nThe history stops here; the line may be older' : ''}\nClick to open the commit, right-click for more`;
+    return { text: start ? `${short} ${c.author} · ${ago(c.authorTime, now)}` : '', title, color: colour(c.authorTime), start, id: c.hash };
+  });
 }

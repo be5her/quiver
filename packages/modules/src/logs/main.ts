@@ -335,5 +335,6 @@ const historyClear = defineCommand({
 
 export const logsModule = defineModule({
   id: 'logs',
+  collections: { [LOGS_COLLECTION]: LogsConnectionSchema },
   commands: [connectionList, connectionGet, connectionSave, connectionDelete, session, signIn, signOut, datasources, query, hits, fields, values, historyList, historyClear],
 });

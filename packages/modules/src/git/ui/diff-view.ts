@@ -1,7 +1,9 @@
 import { Component, Service, computed, effect, inject, input, linkedSignal, model, signal } from '@angular/core';
 import type { GitDiffFile, GitFileContent } from '@quiver/core';
-import { DiffEditor, EmptyState, HostBridge, Segment, Segmented, Spinner } from '@quiver/ui';
-import { applyPatch, codeClass, diffCode, languageForPath, parsePatch, splitPath, splitRows, type DiffBase, type PatchRow, type SplitCell } from './git-format';
+import { Button, ContextMenu, DiffEditor, EmptyState, HostBridge, Segment, Segmented, Spinner } from '@quiver/ui';
+import { FileUser } from 'lucide';
+import { GitActions } from './git-actions';
+import { applyPatch, codeClass, diffCode, languageForPath, parsePatch, splitPath, splitRows, type BlameAt, type DiffBase, type PatchRow, type SplitCell } from './git-format';
 
 export type DiffMode = 'split' | 'inline';
 
@@ -27,7 +29,10 @@ const ROW_CLASS: Record<string, string> = {
   template: `
     @let f = file();
     @if (conflicted()) {
-      <p class="p-4 text-xs text-muted" data-testid="git-patch-note" data-conflict="true">This file has merge conflicts. Resolve the conflict markers in your editor, then mark it resolved (Stage) in the sidebar.</p>
+      <div class="p-4 flex flex-col items-start gap-2 text-xs text-muted" data-testid="git-patch-note" data-conflict="true">
+        <p>This file has merge conflicts.</p>
+        <button qButton size="sm" variant="secondary" data-testid="git-conflict-open" (click)="actions.openConflict(f.path)">Open conflict editor</button>
+      </div>
     } @else if (f.binary) {
       <p class="p-4 text-xs text-muted" data-testid="git-patch-note">Binary file; no text diff.</p>
     } @else if (f.patch === undefined) {
@@ -89,8 +94,10 @@ const ROW_CLASS: Record<string, string> = {
     }
   `,
   host: { class: 'block' },
+  imports: [Button],
 })
 export class GitPatch {
+  protected readonly actions = inject(GitActions);
   readonly file = input.required<GitDiffFile>();
   readonly mode = input<DiffMode>('split');
 
@@ -222,7 +229,7 @@ export class GitDiffMode {
  */
 @Component({
   selector: 'q-git-diff-view',
-  imports: [EmptyState, GitDiffMode, GitFullDiff, GitPatch],
+  imports: [Button, EmptyState, GitDiffMode, GitFullDiff, GitPatch],
   template: `
     @if (!files().length) {
       <q-empty-state [title]="emptyTitle()" [hint]="emptyHint()" data-testid="git-diff-empty" />
@@ -239,6 +246,7 @@ export class GitDiffMode {
                 data-testid="git-diff-file"
                 [attr.data-path]="f.path"
                 (click)="selected.set(f.path)"
+                (contextmenu)="fileMenu($event, f)"
               >
                 <span class="font-mono text-[11px] font-bold w-3 shrink-0" [class]="codeClass(code(f))">{{ code(f) }}</span>
                 <span class="truncate">{{ name(f.path) }}</span>
@@ -257,6 +265,9 @@ export class GitDiffMode {
               <span class="text-[11px] text-success shrink-0">+{{ f.additions }}</span>
               <span class="text-[11px] text-danger shrink-0">-{{ f.deletions }}</span>
               <span class="flex-1"></span>
+              @if (blameTarget(f); as at) {
+                <button qButton size="sm" variant="ghost" [icon]="icons.FileUser" title="Who last changed each line of this file" data-testid="git-diff-blame" (click)="actions.openBlame(at.path, at.ref)">Blame</button>
+              }
               <q-git-diff-mode [(mode)]="mode" />
             </div>
             @if (base(); as b) {
@@ -285,6 +296,32 @@ export class GitDiffView {
   readonly base = input<DiffBase | null>(null);
   /** Side by side or inline, the same for every diff. */
   protected readonly mode = inject(GitDiffPrefs).mode;
+  /**
+   * Where a file's Blame opens: a ref (the commit shown, the ref compared to), null for the working tree, undefined
+   * for no Blame (a pull request's files, whose commits may not be local).
+   */
+  readonly blameAt = input<string | null | undefined>(undefined);
+  protected readonly actions = inject(GitActions);
+  private readonly contextMenu = inject(ContextMenu);
+  protected readonly icons = { FileUser };
+
+  /** The file and ref Blame opens; a deleted file is blamed where it still was, on the old side. */
+  protected blameTarget(f: GitDiffFile): BlameAt | null {
+    const at = this.blameAt();
+    if (at === undefined) return null;
+    if (f.status === 'deleted') {
+      const base = this.base();
+      return { path: f.origPath ?? f.path, ref: base && 'ref' in base ? base.ref : 'HEAD' };
+    }
+    return { path: f.path, ...(at ? { ref: at } : {}) };
+  }
+
+  /** Right-click on a file in the list: Blame, where the diff has one. */
+  protected fileMenu(event: MouseEvent, f: GitDiffFile): void {
+    const at = this.blameTarget(f);
+    if (!at) return;
+    this.contextMenu.open(event, [{ label: 'Blame', testId: 'git-menu-blame', select: () => this.actions.openBlame(at.path, at.ref) }]);
+  }
 
   protected readonly current = computed<GitDiffFile | undefined>(() => {
     const files = this.files();

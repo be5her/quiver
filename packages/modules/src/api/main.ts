@@ -1715,6 +1715,7 @@ export const apiModule = defineModule({
     for (const live of runs.values()) if (live.workspaceId === w.id) live.controller.abort();
     for (const live of streams.values()) if (live.workspaceId === w.id) live.controller.abort();
   },
+  collections: { [COLLECTIONS.requests]: ApiRequestSchema, [COLLECTIONS.collections]: ApiCollectionSchema, [COLLECTIONS.environments]: EnvironmentSchema },
   commands: [
     requestList,
     requestGet,

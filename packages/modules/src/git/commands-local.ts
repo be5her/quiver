@@ -38,7 +38,7 @@ export function interactive(ctx: CommandContext): boolean {
 }
 
 /** Announce a change at once; the watcher's debounced event follows, but the view should not wait for it. */
-export function changed(ctx: CommandContext, ws: WorkspaceApi, ...reasons: ('status' | 'branches' | 'stashes')[]): void {
+export function changed(ctx: CommandContext, ws: WorkspaceApi, ...reasons: ('status' | 'branches' | 'stashes' | 'worktrees')[]): void {
   for (const reason of reasons) ctx.host.emit('git.changed', { workspaceId: ws.id, reason });
 }
 
@@ -46,7 +46,7 @@ const status = defineCommand({
   id: 'git.status',
   title: 'Git status',
   description:
-    'The workspace repository: current branch (null when detached), HEAD, upstream with ahead/behind counts, the operation in progress (merge, rebase, cherry-pick, revert) and every changed file with its index and worktree codes (M modified, A added, D deleted, R renamed, U unmerged, ? untracked, . unchanged). Paths are relative to the repository root (an untracked folder is one entry, "new/"), and every other git command takes them that way. files: false leaves the files out (an empty list) and is faster in a big repository, for when only the branch is wanted.',
+    'The workspace repository: current branch (null when detached), HEAD, upstream with ahead/behind counts, the operation in progress (merge, rebase, cherry-pick, revert) and every changed file with its index and worktree codes (M modified, A added, D deleted, R renamed, U unmerged, ? untracked, . unchanged). Paths are relative to the repository root (an untracked folder is one entry, "new/"), and every other git command takes them that way. files: false leaves the files out (an empty list) and is faster in a big repository, for when only the branch is wanted. worktree.linked says the workspace is a linked worktree (git worktree add) of the repository whose main worktree is worktree.mainPath.',
   scope: 'workspace',
   input: z.object({ files: z.boolean().optional() }),
   handler: async (i, ctx): Promise<GitStatus> => local.status(workspace(ctx).path, { files: i.files }),
@@ -56,7 +56,7 @@ const branchList = defineCommand({
   id: 'git.branch.list',
   title: 'Git branches',
   description:
-    'Local and remote-tracking branches, newest commit first, with the current one, upstream, ahead/behind, head commit, subject and date. merged: all its commits are in the default branch (origin/HEAD, else a local main or master), or in the current branch when there is none; never set on that branch or the current one. gone: its upstream was deleted on the remote.',
+    'Local and remote-tracking branches, newest commit first, with the current one, upstream, ahead/behind, head commit, subject and date. merged: all its commits are in the default branch (origin/HEAD, else a local main or master), or in the current branch when there is none; never set on that branch or the current one. gone: its upstream was deleted on the remote. worktreePath: the other worktree it is checked out in, where it cannot be checked out here.',
   scope: 'workspace',
   input: z.object({}),
   handler: async (_i, ctx): Promise<GitBranch[]> => local.branches(workspace(ctx).path),
@@ -108,13 +108,16 @@ const fetch = defineCommand({
 const checkout = defineCommand({
   id: 'git.checkout',
   title: 'Git checkout',
-  description: 'Switches to a branch, tag or commit. A remote branch name without its remote ("feature" for origin/feature) creates a local tracking branch. Fails rather than overwrite uncommitted changes.',
+  description:
+    'Switches to a branch, tag or commit. A remote branch name without its remote ("feature" for origin/feature) creates a local tracking branch. Fails rather than overwrite uncommitted changes, and for a branch checked out in another worktree (details.reason "checked-out-elsewhere", details.path that worktree).',
   scope: 'workspace',
   mutating: true,
   input: GitCheckoutInputSchema,
   handler: async ({ ref }, ctx): Promise<GitStatus> => {
     const ws = workspace(ctx);
-    await local.git(await local.repoRoot(ws.path), ['checkout', ref, '--']);
+    await local.git(await local.repoRoot(ws.path), ['checkout', ref, '--']).catch((err: unknown) => {
+      throw local.inOtherWorktree(err, 'open that worktree, or switch it to another branch first');
+    });
     changed(ctx, ws, 'status', 'branches');
     return local.status(ws.path);
   },

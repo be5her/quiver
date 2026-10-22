@@ -1,13 +1,15 @@
 import { Component, computed, effect, inject, input, linkedSignal, output, signal, untracked } from '@angular/core';
 import { FormField, form } from '@angular/forms/signals';
-import type { GhStatus, GitPullRequest, GitStatus } from '@quiver/core';
-import { Badge, Button, Checkbox, EmptyState, HostBridge, Icon, Input, Label, Segment, Segmented, Select, Spinner, TabsState, TextArea, Toasts, invokeResource, type Tab, type TabComponent } from '@quiver/ui';
-import { CloudUpload, GitPullRequest as GitPullRequestIcon, GitPullRequestCreate, MessageSquare, Plus, RefreshCw } from 'lucide';
+import type { GhStatus, GitPrDraft, GitPullRequest, GitStatus } from '@quiver/core';
+import { Badge, Button, Checkbox, Dialogs, EmptyState, HostBridge, Icon, Input, Label, Segment, Segmented, Select, Spinner, TabsState, TextArea, Toasts, invokeResource, type Tab, type TabComponent } from '@quiver/ui';
+import { CloudUpload, FilePen, GitPullRequest as GitPullRequestIcon, GitPullRequestCreate, MessageSquare, Plus, RefreshCw } from 'lucide';
 import { GitActions } from './git-actions';
 import { injectGitChanged, injectPrPolling, tabVisible } from './git-events';
 import { REVIEW_LABEL, ago, checkClass, checksSummary, prStateClass, prStateLabel, reviewClass, type PrFilter } from './git-format';
 
 type PrState = 'open' | 'closed' | 'merged' | 'all';
+/** The fields of the new pull request form that a draft fills. */
+type DraftField = 'title' | 'body' | 'base' | 'labels';
 const FILTERS: PrFilter[] = ['all', 'mine', 'review-requested'];
 
 /** gh missing, signed out, or the folder not on GitHub: what to do instead of a list. */
@@ -74,7 +76,46 @@ export class GitGhMissing {
         } @else if (view() === 'new') {
           <div class="flex-1 min-h-0 overflow-y-auto" data-testid="git-pr-create">
             <div class="max-w-2xl p-4 flex flex-col gap-3">
-              <p class="text-sm font-medium">New pull request from <span class="font-mono">{{ local.value()?.branch ?? '…' }}</span></p>
+              <div class="flex items-center gap-2">
+                <p class="text-sm font-medium flex-1 min-w-0 truncate">New pull request from <span class="font-mono">{{ local.value()?.branch ?? '…' }}</span></p>
+                <button
+                  qButton
+                  size="sm"
+                  variant="secondary"
+                  [icon]="icons.FilePen"
+                  [loading]="drafting()"
+                  title="Fill the title, description, base and labels from the branch's commits and files"
+                  data-testid="git-pr-draft-fill"
+                  (click)="fillFromDraft(true)"
+                >
+                  Draft from changes
+                </button>
+              </div>
+              @if (summary(); as s) {
+                <div class="flex flex-col gap-1 px-2.5 py-2 rounded border border-edge text-xs" data-testid="git-pr-draft-summary" [attr.data-commits]="s.stats.commits" [attr.data-files]="s.stats.files">
+                  @if (s.stats.commits) {
+                    <span class="text-muted">
+                      {{ s.stats.commits }} commit{{ s.stats.commits === 1 ? '' : 's' }} · {{ s.stats.files }} file{{ s.stats.files === 1 ? '' : 's' }} changed
+                      <span class="font-mono"><span class="text-success">+{{ s.stats.additions }}</span>&nbsp;<span class="text-danger">−{{ s.stats.deletions }}</span></span>
+                      against <span class="font-mono">{{ s.baseRef }}</span>
+                      @if (s.templatePath) {
+                        · template <span class="font-mono">{{ s.templatePath }}</span>
+                      }
+                    </span>
+                  } @else {
+                    <span class="text-muted">No commits that <span class="font-mono">{{ s.baseRef }}</span> does not have yet.</span>
+                  }
+                  @for (c of s.commits.slice(0, 5); track c.hash) {
+                    <span class="flex gap-2 min-w-0" data-testid="git-pr-draft-commit">
+                      <span class="font-mono text-muted shrink-0">{{ c.hash.slice(0, 7) }}</span>
+                      <span class="truncate">{{ c.subject }}</span>
+                    </span>
+                  }
+                  @if (s.stats.commits > 5) {
+                    <span class="text-muted">and {{ s.stats.commits - 5 }} more</span>
+                  }
+                </div>
+              }
               @if (pushNote(); as note) {
                 <div class="flex items-center gap-2 px-2 py-1.5 rounded bg-warning/10 text-warning text-xs" data-testid="git-pr-push-note">
                   <span class="flex-1">{{ note }}</span>
@@ -96,6 +137,12 @@ export class GitGhMissing {
                   <label qLabel for="git-pr-base">Into</label>
                   <input qInput id="git-pr-base" class="font-mono" placeholder="the default branch" [formField]="createForm.base" data-testid="git-pr-base" />
                 </div>
+                <div class="flex-1 min-w-0">
+                  <label qLabel for="git-pr-labels">Labels</label>
+                  <input qInput id="git-pr-labels" placeholder="comma-separated, as the repository names them" [formField]="createForm.labels" data-testid="git-pr-labels" />
+                </div>
+              </div>
+              <div class="flex items-center gap-3">
                 <label class="flex items-center gap-1.5 text-sm h-8"><input type="checkbox" qCheckbox [formField]="createForm.draft" data-testid="git-pr-draft" /> Draft</label>
                 <span class="flex-1"></span>
                 <button qButton size="sm" variant="ghost" (click)="showList()">Cancel</button>
@@ -185,11 +232,12 @@ export class GitPrsTab implements TabComponent {
   private readonly host = inject(HostBridge);
   private readonly toasts = inject(Toasts);
   private readonly tabs = inject(TabsState);
+  private readonly dialogs = inject(Dialogs);
 
   readonly tab = input.required<Tab>();
   readonly scope = input.required<string>();
 
-  protected readonly icons = { CloudUpload, GitPullRequestCreate, GitPullRequestIcon, MessageSquare, Plus, RefreshCw };
+  protected readonly icons = { CloudUpload, FilePen, GitPullRequestCreate, GitPullRequestIcon, MessageSquare, Plus, RefreshCw };
   protected readonly gh = invokeResource<GhStatus>('git.pr.status');
   protected readonly ready = computed(() => {
     const s = this.gh.value();
@@ -215,9 +263,14 @@ export class GitPrsTab implements TabComponent {
 
   /** The current branch, for the form: whether it is pushed, and where. */
   protected readonly local = invokeResource<GitStatus>('git.status', () => ({}), { enabled: () => this.view() === 'new' });
-  protected readonly draft = signal({ title: '', body: '', base: '', draft: false });
+  protected readonly draft = signal({ title: '', body: '', base: '', labels: '', draft: false });
   protected readonly createForm = form(this.draft);
   protected readonly creating = signal(false);
+  /** `git.pr.draft` of the branch: the commits and files the summary shows. */
+  protected readonly summary = signal<GitPrDraft | null>(null);
+  protected readonly drafting = signal(false);
+  /** What the form filled in by itself: a field still holding it counts as empty, not as text the user typed. */
+  private filled: Partial<Record<DraftField, string>> = {};
   protected readonly pushNote = computed(() => {
     const s = this.local.value();
     if (!s) return null;
@@ -246,15 +299,84 @@ export class GitPrsTab implements TabComponent {
       if (p.reason === 'prs') this.list.reload();
       else if (this.view() === 'new') this.local.reload();
     });
-    // The form starts from the branch's last commit, the way GitHub fills it for a single commit.
+    // Opening the form drafts it from the branch: empty fields are filled when the branch has commits of its own,
+    // else the title and description start from the last commit, the way GitHub fills them for a single commit.
     effect(() => {
-      if (this.view() !== 'new' || untracked(this.draft).title) return;
-      void this.actions.lastMessage().then((message) => {
-        if (untracked(this.draft).title) return;
-        const [title, ...rest] = message.split('\n');
-        this.draft.update((d) => ({ ...d, title: title.trim(), body: rest.join('\n').trim() }));
-      });
+      if (this.view() === 'new') untracked(() => void this.fillFromDraft(false));
     });
+  }
+
+  /** Whether a field holds text the user typed: not empty, and not what the form filled in itself. */
+  private typed(field: DraftField): boolean {
+    const value = untracked(this.draft)[field];
+    return Boolean(value.trim()) && value !== this.filled[field];
+  }
+
+  /** Put values in the form, remembering them as filled in by the form. */
+  private fill(values: Partial<Record<DraftField, string>>): void {
+    Object.assign(this.filled, values);
+    this.draft.update((d) => ({ ...d, ...values }));
+  }
+
+  /**
+   * Fill the form from `git.pr.draft`. From the button (`asked`): the title, description, base and labels, after
+   * asking when that replaces a title, description or labels the user typed, and nothing when the branch has no
+   * commits against the base. On opening: only the fields still empty, and only when the branch has commits against
+   * the base.
+   */
+  protected async fillFromDraft(asked: boolean): Promise<void> {
+    if (this.drafting()) return;
+    this.drafting.set(true);
+    // Only a base the user typed is passed: the one the form filled in is a bare name (`main`), which would compare
+    // with the local branch rather than the remote's default branch the draft found.
+    const base = asked && this.typed('base') ? untracked(this.draft).base.trim() : '';
+    let result: GitPrDraft;
+    try {
+      result = await this.host.invoke<GitPrDraft>('git.pr.draft', base ? { base } : {});
+    } catch (err) {
+      this.drafting.set(false);
+      this.summary.set(null);
+      if (asked) this.toasts.error(err);
+      else await this.fillFromLastCommit();
+      return;
+    }
+    this.drafting.set(false);
+    this.summary.set(result);
+    const labels = result.labels.join(', ');
+    if (!asked) {
+      if (!result.commits.length) return this.fillFromLastCommit();
+      const values: Partial<Record<DraftField, string>> = {};
+      if (!this.typed('title')) values.title = result.title;
+      if (!this.typed('body')) values.body = result.body;
+      if (!this.typed('base')) values.base = result.base;
+      if (!this.typed('labels') && labels) values.labels = labels;
+      this.fill(values);
+      return;
+    }
+    if (!result.commits.length) {
+      this.toasts.notify(`Nothing to draft: the branch has no commits that ${result.baseRef} does not have`);
+      return;
+    }
+    const current = untracked(this.draft);
+    const next: Record<'title' | 'body' | 'labels', string> = { title: result.title, body: result.body, labels };
+    const names = { title: 'title', body: 'description', labels: 'labels' } as const;
+    // Labels are only replaced when the draft has some.
+    const replaced = (['title', 'body', 'labels'] as const).filter((f) => this.typed(f) && current[f] !== next[f] && (f !== 'labels' || labels)).map((f) => names[f]);
+    if (replaced.length) {
+      const what = replaced.length === 1 ? replaced[0] : `${replaced.slice(0, -1).join(', ')} and ${replaced[replaced.length - 1]}`;
+      const ok = await this.dialogs.confirm({ title: `Replace the ${what} you wrote?`, message: `The ${what} you wrote ${replaced.length > 1 || replaced[0] === 'labels' ? 'are' : 'is'} replaced by the draft from the branch's commits and files.`, confirmLabel: 'Replace' });
+      if (!ok) return;
+    }
+    this.fill({ title: result.title, body: result.body, base: result.base, ...(labels ? { labels } : {}) });
+  }
+
+  /** The title and description from the branch's last commit, into the fields still empty. */
+  private async fillFromLastCommit(): Promise<void> {
+    if (this.typed('title')) return;
+    const message = await this.actions.lastMessage();
+    if (this.typed('title') || !message) return;
+    const [title, ...rest] = message.split('\n');
+    this.fill({ title: title.trim(), ...(this.typed('body') ? {} : { body: rest.join('\n').trim() }) });
   }
 
   protected checksTitle(pr: GitPullRequest): string {
@@ -284,9 +406,15 @@ export class GitPrsTab implements TabComponent {
     if (!d.title.trim() || this.creating()) return;
     this.creating.set(true);
     try {
-      const pr = await this.host.invoke<GitPullRequest>('git.pr.create', { title: d.title.trim(), body: d.body, draft: d.draft, ...(d.base.trim() ? { base: d.base.trim() } : {}) });
+      const labels = d.labels
+        .split(',')
+        .map((l) => l.trim())
+        .filter(Boolean);
+      const pr = await this.host.invoke<GitPullRequest>('git.pr.create', { title: d.title.trim(), body: d.body, draft: d.draft, labels, ...(d.base.trim() ? { base: d.base.trim() } : {}) });
       this.toasts.notify(`Opened #${pr.number}`, 'success');
-      this.draft.set({ title: '', body: '', base: '', draft: false });
+      this.draft.set({ title: '', body: '', base: '', labels: '', draft: false });
+      this.filled = {};
+      this.summary.set(null);
       this.showList();
       this.actions.openPullRequest(pr);
     } catch (err) {

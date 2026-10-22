@@ -26,6 +26,7 @@ import {
 import { GitActions } from './git-actions';
 import { injectGitChanged } from './git-events';
 import { ago, codeClass, codeWord, errorReason, groupChanges, splitPath } from './git-format';
+import { GitWorktreesSection } from './worktrees-section';
 
 /** How often the status is read while the sidebar is open: edits to working files are not watched by the host. */
 const STATUS_EVERY_MS = 5000;
@@ -74,6 +75,7 @@ const GROUP_TITLE: Record<Group, string> = { conflicts: 'Merge conflicts', stage
           [title]="tooltip(f)"
           (click)="opened.emit(f)"
           (keydown.enter)="opened.emit(f)"
+          (contextmenu)="fileMenu($event, f)"
         >
           <span class="truncate text-[13px]">{{ name(f.path) }}</span>
           <span class="truncate text-[11px] text-muted flex-1 min-w-0">{{ dir(f.path) }}</span>
@@ -97,6 +99,7 @@ const GROUP_TITLE: Record<Group, string> = { conflicts: 'Merge conflicts', stage
 export class GitChangeGroup {
   private readonly tree = inject(TreeState);
   private readonly actions = inject(GitActions);
+  private readonly contextMenu = inject(ContextMenu);
 
   readonly group = input.required<Group>();
   readonly files = input.required<GitFileChange[]>();
@@ -121,7 +124,7 @@ export class GitChangeGroup {
   }
 
   protected tooltip(f: GitFileChange): string {
-    const what = this.group() === 'staged' ? codeWord(f.index) : this.group() === 'conflicts' ? 'Conflict' : codeWord(f.worktree);
+    const what = this.group() === 'staged' ? codeWord(f.index) : this.group() === 'conflicts' ? 'Conflict: click to resolve it' : codeWord(f.worktree);
     return `${f.origPath ? `${f.origPath} → ` : ''}${f.path} · ${what}`;
   }
 
@@ -152,6 +155,16 @@ export class GitChangeGroup {
     event.stopPropagation();
     void this.actions.discard(this.files().map((f) => f.path), this.group() === 'untracked');
   }
+
+  /** Right-click on a file: open its changes, or blame it (as committed, at HEAD, when it was deleted). Git cannot blame an untracked file. */
+  protected fileMenu(event: MouseEvent, f: GitFileChange): void {
+    const deleted = (this.group() === 'staged' ? f.index : f.worktree) === 'D';
+    this.contextMenu.open(event, [
+      // A conflicted row opens the conflict editor, as its click does.
+      { label: this.group() === 'conflicts' ? 'Open conflict editor' : 'Open changes', testId: 'git-menu-open', select: () => this.opened.emit(f) },
+      { label: 'Blame', testId: 'git-menu-blame', disabled: this.group() === 'untracked', select: () => this.actions.openBlame(f.path, deleted ? 'HEAD' : undefined) },
+    ]);
+  }
 }
 
 /** The paths to unstage: a staged rename's old path too, or its deletion would stay staged. */
@@ -162,7 +175,7 @@ function withOrigin(files: GitFileChange[]): string[] {
 /** The workspace repository: branch and remote, the operation in progress, the commit box, the changed files, the stashes and the branches. */
 @Component({
   selector: 'q-git-sidebar',
-  imports: [Button, Checkbox, EmptyState, FormField, GitChangeGroup, Icon, IconButton, SectionHeader, Spinner, TextArea],
+  imports: [Button, Checkbox, EmptyState, FormField, GitChangeGroup, GitWorktreesSection, Icon, IconButton, SectionHeader, Spinner, TextArea],
   template: `
     @if (statusError(); as error) {
       @if (!current()) {
@@ -259,7 +272,7 @@ function withOrigin(files: GitFileChange[]): string[] {
       </q-section-header>
       @let g = groups();
       @if (g.conflicts.length) {
-        <q-git-change-group group="conflicts" [files]="g.conflicts" (opened)="openFile($event, 'working')" />
+        <q-git-change-group group="conflicts" [files]="g.conflicts" (opened)="actions.openConflict($event.path)" />
       }
       @if (g.staged.length) {
         <q-git-change-group group="staged" [files]="g.staged" (opened)="openFile($event, 'staged')" />
@@ -353,6 +366,8 @@ function withOrigin(files: GitFileChange[]): string[] {
         }
       }
 
+      <q-git-worktrees-section />
+
       <!-- Views -->
       <q-section-header title="Views" class="mt-2" />
       <button type="button" class="flex items-center gap-2 px-3 h-7 text-[13px] hover:bg-elevated text-left" data-testid="git-open-branches" (click)="actions.openBranches()">
@@ -397,8 +412,9 @@ export class GitSidebar {
   });
 
   protected readonly groups = computed(() => groupChanges(this.current()?.files ?? []));
-  protected readonly localBranches = computed(() => (this.branches.value() ?? []).filter((b) => !b.remote));
-  protected readonly remoteCount = computed(() => (this.branches.value() ?? []).filter((b) => b.remote && !b.name.endsWith('/HEAD')).length);
+  // The list read for the workspace on screen only: another workspace's (another worktree's) would mark its branch current.
+  protected readonly localBranches = computed(() => (this.branches.current() ?? []).filter((b) => !b.remote));
+  protected readonly remoteCount = computed(() => (this.branches.current() ?? []).filter((b) => b.remote && !b.name.endsWith('/HEAD')).length);
   protected readonly branchTitle = computed(() => {
     const s = this.current();
     if (!s) return '';

@@ -23,6 +23,8 @@ export interface GitStatus {
   files: GitFileChange[];
   /** True while a merge, rebase, cherry-pick or revert is in progress. */
   operation?: 'merge' | 'rebase' | 'cherry-pick' | 'revert';
+  /** Which worktree this is; `git.status` always sets it. */
+  worktree?: GitWorktreeInfo;
 }
 
 export interface GitBranch {
@@ -43,6 +45,8 @@ export interface GitBranch {
   merged: boolean;
   /** It has an upstream that no longer exists on the remote (a fetch pruned it). */
   gone: boolean;
+  /** The worktree it is checked out in, when that is another worktree than this one; git refuses to check it out here too. */
+  worktreePath?: string;
 }
 
 export interface GitTag {
@@ -213,6 +217,53 @@ export const GitFileShowInputSchema = z.object({
   index: z.boolean().default(false).describe('Read the staged version instead of one at a ref'),
 });
 
+// ---------- Blame ----------
+
+/** A commit that `git.blame` names for some lines, listed once however many lines it has. */
+export interface GitBlameCommit {
+  hash: string;
+  author: string;
+  authorEmail: string;
+  /** ISO 8601. */
+  authorTime: string;
+  /** The first line of its message. */
+  summary: string;
+  /** The file's path in this commit; differs from the blamed path when the file was renamed since. */
+  path: string;
+  /** The commit before it that held these lines, and the file's path there: where "blame before this commit" goes. */
+  previous?: { commit: string; path: string };
+  /** The history stops here (a root commit, or the boundary of a range): the lines may be older than it. */
+  boundary: boolean;
+}
+
+/** One line of the blamed file. */
+export interface GitBlameLine {
+  /** 1-based, in the file as blamed. */
+  line: number;
+  /** The commit that last changed the line; null for a line not committed yet (changed in the working tree). */
+  commit: string | null;
+  /** 1-based, the line's number in that commit's version of the file. */
+  originalLine: number;
+  /** The line's text, without its line ending. */
+  text: string;
+}
+
+/** `git.blame`: who last changed each line of a file, at a ref or in the working tree. */
+export interface GitBlame {
+  path: string;
+  /** The ref it was blamed at; absent for the working tree. */
+  ref?: string;
+  lines: GitBlameLine[];
+  /** Keyed by hash. */
+  commits: Record<string, GitBlameCommit>;
+}
+
+export const GitBlameInputSchema = z.object({
+  path: GitArgSchema.describe('The file, relative to the repository root'),
+  ref: GitArgSchema.optional().describe('A commit, branch or tag to blame the file at; default: the working tree, where uncommitted lines have commit null'),
+  ignoreWhitespace: z.boolean().default(false).describe('Ignore whitespace-only changes when finding the commit of a line (git blame -w)'),
+});
+
 /** Whether `gh` can be used here: installed, signed in, and the workspace is a GitHub repository. */
 export interface GhStatus {
   installed: boolean;
@@ -288,3 +339,165 @@ export const GitPrCreateInputSchema = z.object({
   labels: z.array(GitArgSchema.refine((s) => !/[,"]/.test(s), { message: 'must not contain a comma or a double quote' })).default([]),
 });
 export const GitPrCommentInputSchema = GitPrRefInputSchema.extend({ body: z.string().trim().min(1) });
+
+// ---------- Conflict resolution (git.conflict.*) ----------
+
+/**
+ * What a conflicted path is, from its status codes: both sides changed it (UU) or added it (AA), one side deleted it
+ * while the other changed it (DU, UD), one side added it where the other had nothing to merge with (AU, UA, from a
+ * rename or a folder conflict), or both deleted it (DD, after a rename on each side).
+ */
+export type GitConflictKind = 'both-modified' | 'both-added' | 'both-deleted' | 'deleted-by-us' | 'deleted-by-them' | 'added-by-us' | 'added-by-them';
+
+/** A conflicted file: the three index stages, the file on disk with its markers, and what ours and theirs stand for. */
+export interface GitConflict {
+  path: string;
+  kind: GitConflictKind;
+  /** The operation that stopped on it; absent after a stash apply, which leaves none. */
+  operation?: GitStatus['operation'];
+  /** Index stage 2, the side checked out when the operation stopped; null when that side has no file. */
+  ours: string | null;
+  /** Index stage 3, the side coming in; null when that side has no file. */
+  theirs: string | null;
+  /** Index stage 1, the common ancestor; null when there is none (both added it). */
+  base: string | null;
+  /** The file on disk, with git's conflict markers; null when it is not there. */
+  working: string | null;
+  /**
+   * What ours and theirs stand for. In a merge, cherry-pick or revert ours is the current branch; in a rebase they
+   * swap: ours is the branch being rebased onto and theirs the commit being replayed.
+   */
+  labels: { ours: string; theirs: string };
+  /**
+   * The commits the sides come from, as full hashes, so a side can be blamed: ours is HEAD, theirs the commit coming
+   * in (MERGE_HEAD, CHERRY_PICK_HEAD or REBASE_HEAD). Theirs is absent in a revert (its incoming side is the reverted
+   * commit's parent, not a commit of its own) and after a stash apply.
+   */
+  commits: { ours?: string; theirs?: string };
+  /** A side or the file on disk is binary (a NUL in its first 8000 bytes): no contents then, only a whole side can be taken. */
+  binary: boolean;
+  /** A side or the file on disk is over 2 MB: no contents then, only a whole side can be taken. */
+  tooLarge: boolean;
+  /** The length of the conflict markers: the path's `conflict-marker-size` attribute, 7 by default. */
+  markerSize: number;
+}
+
+export const GitConflictGetInputSchema = z.object({ path: GitArgSchema.describe('A conflicted path, relative to the repository root, as git.status gives it') });
+
+export const GitConflictResolveInputSchema = z.object({
+  path: GitArgSchema.describe('A conflicted path, relative to the repository root, as git.status gives it'),
+  content: z.string().optional().describe('The resolved file, written as given and staged. Give this or take, not both'),
+  take: z
+    .enum(['ours', 'theirs', 'base', 'delete'])
+    .optional()
+    .describe('Resolve with one whole side and stage it: ours (index stage 2), theirs (stage 3), base (stage 1), or delete the file. Taking a side that has no file deletes it'),
+  allowMarkers: z.boolean().default(false).describe('Write content although it still holds conflict markers (refused otherwise, details.reason "markers")'),
+});
+
+// ---------- pull request draft (git.pr.draft) ----------
+
+/** A commit of the branch a pull request draft is made from. */
+export interface GitPrDraftCommit {
+  hash: string;
+  subject: string;
+  body: string;
+}
+
+/** A file the branch changed against its merge base with the base branch. */
+export interface GitPrDraftFile {
+  path: string;
+  origPath?: string;
+  status: GitDiffFile['status'];
+  additions: number;
+  deletions: number;
+  binary: boolean;
+}
+
+/** A title, description and labels for a pull request, made from git alone (`git.pr.draft`). */
+export interface GitPrDraft {
+  /** The current branch, or the short hash of a detached HEAD. */
+  head: string;
+  /** The base as a pull request names it: a branch name without its remote (`main`), or the ref given. */
+  base: string;
+  /** The ref the branch was compared against (`origin/main`, `main`, or the ref given). */
+  baseRef: string;
+  mergeBase: string;
+  title: string;
+  body: string;
+  /** Oldest first; at most the newest 250, `stats.commits` counts them all. */
+  commits: GitPrDraftCommit[];
+  files: GitPrDraftFile[];
+  stats: { commits: number; files: number; additions: number; deletions: number };
+  /** The repository's pull request template the body was filled from, as found; null when it has none. */
+  template: string | null;
+  /** Where the template was found, relative to the repository root. */
+  templatePath?: string;
+  /** Suggested from the branch prefix, kept only when gh can list the repository's labels and has them. */
+  labels: string[];
+  /** The `base...HEAD` diff with `includePatch`, cut to 200 KB at a line end (`truncated`). */
+  patch?: { text: string; truncated: boolean };
+}
+
+export const GitPrDraftInputSchema = z.object({
+  base: GitArgSchema.optional().describe("The branch (or ref) the pull request goes into. Default: the remote's default branch (origin/<default>), else a local main or master"),
+  includePatch: z.boolean().default(false).describe('Add the base...HEAD diff as patch.text, cut at 200 KB (patch.truncated)'),
+});
+
+// ---------- worktrees ----------
+
+/** Where `git.status` was read: the main worktree, or a linked one (`git worktree add`) of the repository at `mainPath`. */
+export interface GitWorktreeInfo {
+  linked: boolean;
+  /** The main worktree's folder; this worktree's own when it is the main one. */
+  mainPath: string;
+}
+
+/** One worktree of the repository, from `git worktree list --porcelain -z`. */
+export interface GitWorktree {
+  path: string;
+  /** The commit checked out; null in a bare repository or before the first commit. */
+  head: string | null;
+  /** The branch checked out (`main`, not `refs/heads/main`); null when detached or bare. */
+  branch: string | null;
+  detached: boolean;
+  bare: boolean;
+  /** Locked with `git worktree lock`: prune and remove leave it alone. */
+  locked: boolean;
+  lockReason?: string;
+  /** Its folder is gone; `git.worktree.prune` removes what git keeps about it. */
+  prunable: boolean;
+  prunableReason?: string;
+  /** The repository's main worktree, always listed first. */
+  main: boolean;
+  /** The worktree the workspace is in. */
+  current: boolean;
+}
+
+/** A worktree's folder as given by a caller: absolute, or relative to the folder holding the main worktree. */
+export const GitWorktreePathSchema = GitArgSchema.refine((s) => !/[\0\r\n]/.test(s), { message: 'must not contain a line break' }).describe(
+  "The worktree's folder: absolute, or relative to the folder that holds the main worktree",
+);
+
+export const GitWorktreeAddInputSchema = z.object({
+  path: GitWorktreePathSchema.optional().describe(
+    'Where the worktree goes: absolute, or relative to the folder that holds the main worktree. Default: <that folder>/<repository name>.worktrees/<branch, with / as ->. Refused inside another worktree or in a folder that is not empty.',
+  ),
+  branch: GitArgSchema.optional().describe('An existing branch to check out in it; a branch checked out in another worktree is refused'),
+  newBranch: GitArgSchema.optional().describe('A new branch to create in it, at from'),
+  from: GitArgSchema.optional().describe('The commit, branch or tag newBranch (or a detached worktree) starts at; default HEAD'),
+  detach: z.boolean().default(false).describe('Check out from (default HEAD) without a branch'),
+});
+export const GitWorktreeRemoveInputSchema = z.object({
+  path: GitWorktreePathSchema,
+  force: z.boolean().default(false).describe('Remove it even with changes or untracked files in it, which are lost'),
+});
+export const GitWorktreeLockInputSchema = z.object({
+  path: GitWorktreePathSchema,
+  reason: z
+    .string()
+    .trim()
+    .min(1)
+    .refine((s) => !/[\0\r\n]/.test(s), { message: 'must be one line' })
+    .optional(),
+});
+export const GitWorktreePathInputSchema = z.object({ path: GitWorktreePathSchema });

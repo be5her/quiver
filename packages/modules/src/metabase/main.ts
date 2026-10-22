@@ -520,6 +520,7 @@ const historyClear = defineCommand({
 
 export const metabaseModule = defineModule({
   id: 'metabase',
+  collections: { [METABASE_COLLECTION]: MetabaseConnectionSchema },
   commands: [
     connectionList,
     connectionGet,

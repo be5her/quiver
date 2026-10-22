@@ -1,6 +1,8 @@
 import { promises as fs, watch, type FSWatcher } from 'node:fs';
 import path from 'node:path';
+import type { z } from 'zod';
 import type { Entity, StoreApi } from '../types';
+import { keepUnknownFields } from '../unknown-fields';
 
 const SAFE_NAME = /^[A-Za-z0-9._-]+$/;
 
@@ -37,10 +39,14 @@ export class FileStore implements StoreApi {
   private readonly pending = new Map<string, ReturnType<typeof setTimeout>>();
   /** This store's own writes in flight, per collection. */
   private readonly writing = new Map<string, number>();
+  /** The reload of each collection under way, so the next waits for it. */
+  private readonly reloading = new Map<string, Promise<boolean>>();
 
   constructor(
     readonly root: string,
     private readonly onChange: (collection: string) => void = () => {},
+    /** The schema of a collection's items, when known: a put keeps the fields of the stored item that it does not know. */
+    private readonly schemaOf: (collection: string) => z.ZodType | undefined = () => undefined,
   ) {}
 
   get localDir(): string {
@@ -160,6 +166,18 @@ export class FileStore implements StoreApi {
 
   /** Re-read a collection from disk; reports a change when it differs from what was cached. */
   async reload(collection: string): Promise<boolean> {
+    // One at a time per collection: a second reload started while the first has dropped the cache would find nothing
+    // cached and report a change that is not there (the watcher can fire twice that close together).
+    const run = (this.reloading.get(collection) ?? Promise.resolve(false)).catch(() => false).then(() => this.reloadNow(collection));
+    this.reloading.set(collection, run);
+    try {
+      return await run;
+    } finally {
+      if (this.reloading.get(collection) === run) this.reloading.delete(collection);
+    }
+  }
+
+  private async reloadNow(collection: string): Promise<boolean> {
     const before = this.cache.get(collection);
     this.cache.delete(collection);
     const after = await this.load(collection);
@@ -186,10 +204,14 @@ export class FileStore implements StoreApi {
     assertSafe(item.id, 'id');
     const dir = this.collectionDir(collection);
     return this.write(collection, async () => {
+      const map = await this.load(collection);
+      const schema = this.schemaOf(collection);
+      const saved = schema ? keepUnknownFields(schema, map.get(item.id), item) : item;
       await fs.mkdir(dir, { recursive: true });
-      await writeAtomic(path.join(dir, `${item.id}.json`), JSON.stringify(item, null, 2) + '\n');
-      (await this.load(collection)).set(item.id, item);
+      await writeAtomic(path.join(dir, `${item.id}.json`), JSON.stringify(saved, null, 2) + '\n');
+      map.set(item.id, saved);
       this.onChange(collection);
+      // The caller gets back what it saved; the fields kept for a newer Quiver stay in the file and the cache.
       return item;
     });
   }
