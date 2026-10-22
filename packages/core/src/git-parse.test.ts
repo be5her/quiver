@@ -353,6 +353,15 @@ describe('parseBlamePorcelain', () => {
     expect(parseBlamePorcelain(crlf, { path: 'a.txt' }).lines.map((l) => l.text)).toEqual(['\tindented', '  spaced  ']);
   });
 
+  it('keeps a lone CR inside a line, and reads a last line without a newline (git adds one)', () => {
+    // What git 2.47 printed for "one\rtwo\nthree", the file ending without a newline.
+    const out = [`${first} 1 1 2`, ...details('Ann', 1767225600, 'First'), 'filename cr.txt', '\tone\rtwo', `${first} 2 2`, '\tthree', ''].join('\n');
+    expect(parseBlamePorcelain(out, { path: 'cr.txt' }).lines.map((l) => [l.line, l.text])).toEqual([
+      [1, 'one\rtwo'],
+      [2, 'three'],
+    ]);
+  });
+
   it('unquotes C-quoted file names in filename and previous', () => {
     const quoted = [`${second} 1 1 1`, ...details('Bob', 1769904000, 'Second'), `previous ${first} "old\\tname \\"q\\".txt"`, 'filename "caf\\303\\251 \\\\ x.txt"', '\tx', ''].join('\n');
     const c = parseBlamePorcelain(quoted, { path: 'café \\ x.txt' }).commits[second];

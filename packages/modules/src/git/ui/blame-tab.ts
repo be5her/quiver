@@ -5,7 +5,7 @@ import { Button, Checkbox, CodeEditor, ContextMenu, EmptyState, Icon, Input, Spi
 import { ArrowLeft, FileUser, RefreshCw } from 'lucide';
 import { GitActions } from './git-actions';
 import { injectGitChanged, injectReloadWhenShown, tabVisible } from './git-events';
-import { blameBefore, blameKey, blameMarkers, blameTitle, languageForPath, shortRef, type BlameAt } from './git-format';
+import { blameBefore, blameKey, blameMarkers, blameText, blameTitle, languageForPath, shortRef, type BlameAt } from './git-format';
 
 /** What a blame tab keeps in its data: the file and ref on screen, the whitespace setting, and where Back goes. */
 interface BlameTabData extends BlameAt {
@@ -107,7 +107,7 @@ export class GitBlameTab implements TabComponent {
     return b && b.path === at.path && (b.ref ?? '') === (at.ref ?? '') ? b : undefined;
   });
   protected readonly failed = computed(() => (this.blame.isLoading() ? null : this.blame.error()));
-  protected readonly content = computed(() => (this.shown()?.lines ?? []).map((l) => l.text).join('\n'));
+  protected readonly content = computed(() => blameText(this.shown()?.lines ?? []));
   protected readonly markers = computed(() => {
     const b = this.shown();
     return b ? blameMarkers(b) : null;

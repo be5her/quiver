@@ -373,6 +373,14 @@ export function blameTitle(at: BlameAt): string {
   return `${splitPath(at.path).name} (blame${at.ref ? ` @ ${shortRef(at.ref)}` : ''})`;
 }
 
+/**
+ * The blamed file as the editor shows it, one editor line per blamed line. Git ends a line at a newline only, while
+ * CodeMirror also breaks at a lone CR, which would push every marker below it off its line; such a CR is drawn as ␍.
+ */
+export function blameText(lines: readonly { text: string }[]): string {
+  return lines.map((l) => l.text.replace(/\r/g, '␍')).join('\n');
+}
+
 /** Where "Blame before this commit" goes: the commit before it that held the lines, with the file's path there (renames followed); null when the file starts in it. */
 export function blameBefore(commit: Pick<GitBlameCommit, 'previous'>): BlameAt | null {
   return commit.previous ? { path: commit.previous.path, ref: commit.previous.commit } : null;

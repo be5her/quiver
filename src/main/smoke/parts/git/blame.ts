@@ -139,21 +139,41 @@ const section: SmokeSection = async (t) => {
     const folderPath = await failure({ path: 'sub' });
     const missing = await failure({ path: 'gone.txt' });
     const missingAtRef = await failure({ path: 'hello.ts', ref: c1 });
+    const outsideAtRef = await failure({ path: '../outside.txt', ref: 'HEAD' });
+    await fs.writeFile(path.join(folder, 'new.txt'), 'not added\n');
+    const untracked = await failure({ path: 'new.txt' });
+    await fs.rm(path.join(folder, 'new.txt'));
     const owned = await fs.stat(path.join(folder, 'owned.txt')).then(() => true, () => false);
     check(
-      'git blame: an option-like path or ref, a path outside the repository, a folder and a missing file are refused, and nothing is written',
-      Boolean(optionPath.message && optionRef.message && outside.message && folderPath.message.includes('folder') && missing.message.includes('not in the working tree') && missingAtRef.message) && !owned,
-      { optionPath, optionRef, outside, folderPath, missing, missingAtRef, owned },
+      'git blame: an option-like path or ref, a path outside the repository (also at a ref), a folder, a missing file and an untracked one are refused, and nothing is written',
+      Boolean(
+        optionPath.message &&
+          optionRef.message &&
+          outside.message.includes('not a file inside the repository') &&
+          outsideAtRef.message.includes('not a file inside the repository') &&
+          folderPath.message.includes('folder') &&
+          missing.message.includes('not in the working tree') &&
+          missingAtRef.message &&
+          untracked.reason === 'untracked',
+      ) && !owned,
+      { optionPath, optionRef, outside, outsideAtRef, folderPath, missing, missingAtRef, untracked, owned },
     );
     const binaryHead = await failure({ path: 'bin.dat', ref: 'HEAD' });
     const binaryWorking = await failure({ path: 'bin.dat' });
     await fs.writeFile(path.join(folder, 'big.txt'), 'x'.repeat(2 * 1024 * 1024 + 10));
     const big = await failure({ path: 'big.txt' });
-    await fs.rm(path.join(folder, 'big.txt'));
+    // At a ref the committed file is measured, not the working tree's: small on disk, over 2 MB at HEAD.
+    await sh('add', '--', 'big.txt');
+    await sh('commit', '-q', '-m', 'Big');
+    await fs.writeFile(path.join(folder, 'big.txt'), 'small now\n');
+    const bigAtRef = await failure({ path: 'big.txt', ref: 'HEAD' });
+    const smallNow = await failure({ path: 'big.txt' });
+    await sh('rm', '-q', '-f', '--', 'big.txt');
+    await sh('commit', '-q', '-m', 'No big');
     check(
-      'git blame: a binary file (at a ref and in the working tree) and one over 2 MB are refused with a clear reason',
-      binaryHead.reason === 'binary' && binaryWorking.reason === 'binary' && big.reason === 'too-large' && big.message.includes('2 MB'),
-      { binaryHead, binaryWorking, big },
+      'git blame: a binary file (at a ref and in the working tree) and one over 2 MB (on disk, and at a ref whatever the working tree holds) are refused with a clear reason',
+      binaryHead.reason === 'binary' && binaryWorking.reason === 'binary' && big.reason === 'too-large' && big.message.includes('2 MB') && bigAtRef.reason === 'too-large' && smallNow.message === '',
+      { binaryHead, binaryWorking, big, bigAtRef, smallNow },
     );
 
     // Agents may read a blame.

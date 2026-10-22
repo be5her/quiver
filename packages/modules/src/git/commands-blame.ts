@@ -21,14 +21,23 @@ function binary(file: string): QuiverError {
   return new QuiverError('INVALID_INPUT', `${file} is a binary file; blame shows text files only`, { reason: 'binary' });
 }
 
-/** The working tree's copy of a file: inside the repository, a file, at most 2 MB and not binary (a NUL in its first 8000 bytes, git's own test). */
-async function checkWorkingFile(root: string, file: string): Promise<void> {
+/** A path that stays inside the repository, checked for a blame at a ref as much as in the working tree (git's own refusal names the repository's folder). */
+function checkInside(root: string, file: string): string {
   const abs = path.resolve(root, file);
   const inside = path.relative(root, abs);
-  if (!inside || inside.startsWith('..') || path.isAbsolute(inside)) throw new QuiverError('INVALID_INPUT', `${file} is not a file inside the repository`);
-  const stat = await fs.stat(abs).catch(() => null);
+  if (!inside || inside === '..' || inside.startsWith(`..${path.sep}`) || path.isAbsolute(inside)) throw new QuiverError('INVALID_INPUT', `${file} is not a file inside the repository`);
+  return abs;
+}
+
+/**
+ * The working tree's copy of a file: a file, at most 2 MB and not binary (a NUL in its first 8000 bytes, git's own
+ * test). A symbolic link is not followed: git blames the link itself, its target path.
+ */
+async function checkWorkingFile(abs: string, file: string): Promise<void> {
+  const stat = await fs.lstat(abs).catch(() => null);
   if (!stat) throw new QuiverError('NOT_FOUND', `${file} is not in the working tree; give a ref (HEAD) to blame it as committed`);
   if (stat.isDirectory()) throw new QuiverError('INVALID_INPUT', `${file} is a folder`);
+  if (stat.isSymbolicLink()) return;
   if (stat.size > local.MAX_FILE_BYTES) throw tooLarge(file, stat.size);
   const handle = await fs.open(abs, 'r');
   try {
@@ -50,21 +59,24 @@ export async function blame(cwd: string, input: { path: string; ref?: string; ig
   // Git takes forward slashes; a Windows file name cannot hold a backslash, so there one is a separator.
   const file = process.platform === 'win32' ? input.path.replace(/\\/g, '/') : input.path;
   const root = await local.repoRoot(cwd);
+  const abs = checkInside(root, file);
   if (input.ref) {
     const content = await local.fileAt(root, { ref: input.ref, index: false, path: file });
     if (content.tooLarge) throw tooLarge(file, content.size);
     if (content.binary) throw binary(file);
-  } else await checkWorkingFile(root, file);
+  } else await checkWorkingFile(abs, file);
   const base = ['blame', '--porcelain', ...(input.ignoreWhitespace ? ['-w'] : [])];
   const tail = [...(input.ref ? [input.ref] : []), '--', file];
   const ignoreRevs = existsSync(path.join(root, IGNORE_REVS_FILE));
   const runBlame = (withIgnore: boolean) => local.git(root, [...base, ...(withIgnore ? [`--ignore-revs-file=${IGNORE_REVS_FILE}`] : []), ...tail], { timeoutMs: BLAME_TIMEOUT_MS, allowFailure: true });
   let result = await runBlame(ignoreRevs);
-  if (result.code !== 0 && ignoreRevs) {
-    const without = await runBlame(false);
-    if (without.code === 0) result = without;
+  // Without the file, whatever git says is the answer: when both runs fail, its error is the real one.
+  if (result.code !== 0 && ignoreRevs) result = await runBlame(false);
+  if (result.code !== 0) {
+    // A file on disk git has never been told about (untracked, not in the index) has no history.
+    if (!input.ref && /no such path .* in HEAD/.test(result.stderr)) throw new QuiverError('NOT_FOUND', `${file} is not tracked by git yet, so it has no history to blame`, { reason: 'untracked' });
+    throw local.gitFailure(base, result);
   }
-  if (result.code !== 0) throw local.gitFailure(base, result);
   if (result.truncated) throw new QuiverError('REQUEST_FAILED', `The blame of ${file} is larger than git's output limit`);
   return parseBlamePorcelain(result.stdout, { path: file, ...(input.ref ? { ref: input.ref } : {}) });
 }

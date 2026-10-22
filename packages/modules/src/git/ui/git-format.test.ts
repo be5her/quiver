@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { applyPatch, checksSummary, cleanupCandidates, groupChanges, isPushRejected, languageForPath, parsePatch, refMatches, remotesOf, splitPath, splitRemoteBranch, splitRows } from './git-format';
 import type { GitBranch } from '@quiver/core';
-import { blameBefore, blameKey, blameMarkers, blameTitle } from './git-format';
+import { blameBefore, blameKey, blameMarkers, blameText, blameTitle } from './git-format';
 import type { GitBlameCommit } from '@quiver/core';
 
 const PATCH = [
@@ -195,5 +195,10 @@ describe('blame', () => {
     expect(blameTitle({ path: 'src/f.ts' })).toBe('f.ts (blame)');
     expect(blameTitle({ path: 'src/f.ts', ref: old })).toBe('f.ts (blame @ aaaaaaa)');
     expect(blameKey({ path: 'src/f.ts', ref: 'main' })).toBe('src/f.ts@main');
+  });
+
+  it('gives the editor one line per blamed line, a lone CR inside a line drawn rather than breaking it', () => {
+    expect(blameText([{ text: 'one\rtwo' }, { text: '\tthree' }, { text: '' }])).toBe('one␍two\n\tthree\n');
+    expect(blameText([])).toBe('');
   });
 });
