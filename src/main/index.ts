@@ -1,8 +1,8 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { BrowserWindow, app, dialog, safeStorage, shell } from 'electron';
-import type { SecretsApi } from '@quiver/core';
+import { BrowserWindow, Notification, app, dialog, safeStorage, shell } from 'electron';
+import type { PendingApproval, SecretsApi } from '@quiver/core';
 import { Host } from './host';
 import { registerIpc } from './ipc';
 import { runSmokeTest } from './smoke';
@@ -69,6 +69,21 @@ async function revealFolder(folder: string): Promise<void> {
   if (error) throw new Error(error);
 }
 
+/** An agent's call waits for an answer while Quiver is behind other windows: a click on the notification brings it up. */
+function notifyApproval(pending: PendingApproval): void {
+  if (BrowserWindow.getFocusedWindow() || !Notification.isSupported()) return;
+  const where = pending.workspace ? ` in ${pending.workspace.name}` : '';
+  const notification = new Notification({ title: `${pending.agent.name} asks to run ${pending.title}`, body: `${pending.commandId}${where}. Open Quiver to allow or deny it.` });
+  notification.on('click', () => {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (!win) return;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+  });
+  notification.show();
+}
+
 let host: Host | null = null;
 
 async function main(): Promise<void> {
@@ -99,6 +114,7 @@ async function main(): Promise<void> {
     updates,
     // The smoke signs in against a local fake that needs no hands, so its window stays hidden.
     web: new ElectronWebSessions({ show: !process.env.QUIVER_SMOKE }),
+    notifyApproval: process.env.QUIVER_SMOKE ? undefined : notifyApproval,
   });
   registerIpc(host);
   await host.start();

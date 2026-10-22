@@ -30,18 +30,15 @@
       </div>
     </section>
 
-    <section>
+    <section data-testid="settings-mcp">
       <h2 class="text-sm font-semibold mb-3 pb-1 border-b border-edge">MCP server</h2>
       <p class="text-xs text-muted mb-3">
         Every non-hidden command is exposed as an MCP tool over Streamable HTTP. Add <code class="font-mono">?workspace=&lt;folder&gt;</code> to the URL to bind a client to a
         specific project, otherwise it follows the workspace you are viewing.
       </p>
       <div class="flex items-center gap-4 flex-wrap">
-        <label class="flex items-center gap-2 text-sm"><input qCheckbox [checked]="config.mcp.enabled" (change)="toggleMcp(config, $event, 'enabled')" />Enabled</label>
+        <label class="flex items-center gap-2 text-sm"><input qCheckbox [checked]="config.mcp.enabled" (change)="toggleMcp(config, $event)" />Enabled</label>
         <label class="flex items-center gap-2 text-sm">Port<input qInput type="number" class="w-24" [formField]="fieldsForm.port" (blur)="savePort(config)" /></label>
-        <label class="flex items-center gap-2 text-sm" title="Lets agents run commands that delete data or send mutating database statements"
-          ><input qCheckbox [checked]="config.mcp.allowMutating" (change)="toggleMcp(config, $event, 'allowMutating')" />Allow mutating commands</label
-        >
         <span class="text-xs" [class]="mcp()?.running ? 'text-success' : 'text-danger'">{{ mcp()?.running ? 'running on ' + mcp()?.port : (mcp()?.error ?? 'stopped') }}</span>
       </div>
       <div class="mt-3">
@@ -52,6 +49,37 @@
         <label qLabel>Generic HTTP endpoint</label>
         <ng-container *ngTemplateOutlet="copyRow; context: { $implicit: httpUrl() }" />
       </div>
+
+      <h3 class="text-xs font-semibold mt-5 mb-2">Agent permissions</h3>
+      <p class="text-xs text-muted mb-3">
+        Commands that only read are open to agents; the mode decides what commands that delete, write or change shared state get. Rules come first: a command id
+        (<code class="font-mono">db.query.run</code>), a module (<code class="font-mono">git.*</code>) or <code class="font-mono">*</code>. A deny anywhere wins and hides
+        the tool from agents, then the most specific rule, workspace rules before these. The command line and this window are you, so none of this applies to them.
+      </p>
+      <div class="flex items-center gap-4 flex-wrap">
+        <label class="flex items-center gap-2 text-sm"
+          >Mutating commands
+          <select qSelect class="w-56" data-testid="mcp-mode" [value]="config.mcp.permissions.mode" (change)="setMode($any($event.target).value)">
+            <option value="read-only">Refused (read-only)</option>
+            <option value="ask">Ask me each time</option>
+            <option value="allow">Allowed</option>
+          </select>
+        </label>
+        <label class="flex items-center gap-2 text-sm" [class.text-warning]="config.mcp.paused" title="Refuses every MCP call until resumed; agents still see their tools"
+          ><input qCheckbox data-testid="mcp-paused" [checked]="config.mcp.paused" (change)="setPaused($event)" />Pause agents</label
+        >
+      </div>
+      <label qLabel class="mt-3">Rules for every workspace</label>
+      <q-agent-rules-editor
+        testId="mcp-rules-global"
+        emptyText="No rules: read-only commands are allowed and the mode decides the rest."
+        [rules]="config.mcp.permissions.rules"
+        (changed)="setRule('global', $event)"
+      />
+      @if (workspace(); as ws) {
+        <label qLabel class="mt-3">Rules for {{ ws.name }} only <span class="font-normal text-muted">(on this machine, never in the project)</span></label>
+        <q-agent-rules-editor testId="mcp-rules-workspace" emptyText="No rules for this workspace." [rules]="workspaceRules()" (changed)="setRule('workspace', $event)" />
+      }
     </section>
 
     <section>

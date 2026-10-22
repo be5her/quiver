@@ -1,5 +1,12 @@
+import { maskArguments, type AgentCallDecision } from './approvals';
 import { QuiverError } from './errors';
+import { decideAgentPermission, workspaceRulesFor } from './permissions';
 import type { AnyZodObject, CommandContext, CommandDefinition, CommandMeta, ModuleMain } from './types';
+
+/** Filled in by `execute` for an `mcp` call: how the call got past the permissions, or why it did not. */
+export interface ExecuteTrace {
+  decision?: AgentCallDecision;
+}
 
 interface Registered {
   module: string;
@@ -48,7 +55,7 @@ export class CommandRegistry {
     }));
   }
 
-  async execute<O = unknown>(id: string, rawInput: unknown, ctx: CommandContext): Promise<O> {
+  async execute<O = unknown>(id: string, rawInput: unknown, ctx: CommandContext, trace: ExecuteTrace = {}): Promise<O> {
     const entry = this.commands.get(id);
     if (!entry) throw new QuiverError('UNKNOWN_COMMAND', `Unknown command "${id}"`);
     const { command } = entry;
@@ -62,16 +69,47 @@ export class CommandRegistry {
       throw new QuiverError('INVALID_INPUT', `Invalid input for "${id}": ${issues}`, parsed.error.issues);
     }
 
-    if (ctx.caller === 'mcp' && !ctx.host.config.get().mcp.allowMutating) {
-      const mutates = typeof command.mutating === 'function' ? await command.mutating(parsed.data, ctx) : Boolean(command.mutating);
-      if (mutates) {
-        throw new QuiverError(
-          'MUTATION_BLOCKED',
-          `Command "${id}" can change data and MCP mutations are disabled. Enable them in Settings > MCP.`,
-        );
-      }
-    }
+    // Agents only: the UI is the user, and the CLI is the user's own process.
+    if (ctx.caller === 'mcp') await this.authorize(command, parsed.data, ctx, trace);
     return (await command.handler(parsed.data, ctx)) as O;
+  }
+
+  /** Lets an agent's call through, asks the user about it, or refuses it, as the permissions say. */
+  private async authorize(command: CommandDefinition, input: unknown, ctx: CommandContext, trace: ExecuteTrace): Promise<void> {
+    const { id } = command;
+    const mcp = ctx.host.config.get().mcp;
+    const refuse = (decision: AgentCallDecision, reason: string, message: string, extra: Record<string, unknown> = {}): never => {
+      trace.decision = decision;
+      throw new QuiverError('MUTATION_BLOCKED', message, { reason, ...extra });
+    };
+    if (mcp.paused) refuse('paused', 'paused', 'Agents are paused in Quiver. The user can resume them from the status bar or Settings > MCP.');
+
+    const mutates = typeof command.mutating === 'function' ? await command.mutating(input as never, ctx) : Boolean(command.mutating);
+    const permissions = mcp.permissions ?? { mode: mcp.allowMutating ? 'allow' : 'read-only', rules: [] };
+    const decision = decideAgentPermission({ commandId: id, mutating: mutates, permissions, workspaceRules: workspaceRulesFor(mcp, ctx.workspace?.id) });
+    if (decision.action === 'allow') {
+      trace.decision = 'allowed';
+      return;
+    }
+    if (decision.action === 'deny') {
+      if (decision.source === 'mode') {
+        refuse('refused', 'read-only', `Command "${id}" can change data and agents are read-only. The user can allow it, or have Quiver ask each time, in Settings > MCP.`);
+      }
+      refuse('refused', 'rule', `Command "${id}" is denied to agents by a ${decision.level} rule (${decision.rule?.match}) in Settings > MCP.`, { rule: decision.rule, level: decision.level });
+    }
+
+    if (!ctx.host.approvals) refuse('refused', 'no-approver', `Command "${id}" needs the user's approval, and this Quiver has no window to ask in.`);
+    const workspace = ctx.workspace ? { id: ctx.workspace.id, name: ctx.workspace.name, path: ctx.workspace.path } : null;
+    const agent = ctx.agent ?? { name: 'unknown', version: null, userAgent: null };
+    const outcome = await ctx.host.approvals!.request({ agent, workspace, commandId: id, title: command.title, input: maskArguments(input), mutating: mutates }, ctx.signal);
+    if (outcome.approved) {
+      trace.decision = 'approved';
+      return;
+    }
+    if (outcome.reason === 'approval-timeout') refuse('approval-timeout', 'approval-timeout', `Command "${id}" waited for the user's approval and got no answer in time.`);
+    if (outcome.reason === 'paused') refuse('paused', 'paused', `Command "${id}" was waiting for the user's approval when agents were paused.`);
+    if (outcome.reason === 'cancelled') refuse('cancelled', 'cancelled', `Command "${id}" stopped waiting for the user's approval because the call was cancelled.`);
+    refuse('denied', 'denied', `The user denied "${id}".`);
   }
 }
 

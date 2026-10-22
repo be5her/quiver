@@ -5,6 +5,8 @@ export * from './ids';
 export * from './arrays';
 export * from './activity-bar';
 export * from './registry';
+export * from './permissions';
+export * from './approvals';
 export * from './variables';
 export * from './redact';
 export * from './curl';
