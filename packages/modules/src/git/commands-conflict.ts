@@ -7,9 +7,11 @@ import {
   QuiverError,
   conflictKind,
   conflictLabels,
+  conflictMarkerLines,
   conflictRegions,
   defineCommand,
   mergeMessageName,
+  parseMarkerSize,
   parseUnmergedEntries,
   type CommandDefinition,
   type ConflictLabelInfo,
@@ -81,8 +83,15 @@ async function stages(root: string, rel: string) {
   return parseUnmergedEntries(out.stdout).filter((e) => e.path === rel);
 }
 
-/** A blob's text, or why there is none. */
-async function blob(root: string, object: string): Promise<Contents> {
+/** The path's `conflict-marker-size` attribute, which sets how long git writes its markers (7 by default). */
+async function markerSize(root: string, rel: string): Promise<number> {
+  const out = await local.git(root, ['check-attr', '-z', 'conflict-marker-size', '--', rel], { allowFailure: true });
+  return parseMarkerSize(out.code === 0 ? out.stdout : '');
+}
+
+/** A blob's text, or why there is none. A submodule's entry (mode 160000) names a commit, not a blob: no contents. */
+async function blob(root: string, object: string, mode: string): Promise<Contents> {
+  if (mode === '160000') return { text: null, binary: true, tooLarge: false };
   const size = Number((await local.git(root, ['cat-file', '-s', object])).stdout.trim());
   if (size > MAX_FILE_BYTES) return { text: null, binary: false, tooLarge: true };
   const { stdout } = await local.git(root, ['cat-file', 'blob', object]);
@@ -140,7 +149,7 @@ const get = defineCommand({
   id: 'git.conflict.get',
   title: 'Get git conflict',
   description:
-    'One conflicted file: kind (both-modified, both-added, both-deleted, deleted-by-us, deleted-by-them, added-by-us, added-by-them, from git.status), the three index stages as ours (stage 2), theirs (stage 3) and base (stage 1, the common ancestor), each null when that side has no file, the working file with its conflict markers, and labels naming what ours and theirs are. In a merge, cherry-pick or revert ours is the current branch; in a rebase they swap: ours is the branch being rebased onto, theirs the commit being replayed. A binary file or one over 2 MB comes back without contents (binary, tooLarge). Refused for a path with no conflict (details.reason "not-unmerged").',
+    'One conflicted file: kind (both-modified, both-added, both-deleted, deleted-by-us, deleted-by-them, added-by-us, added-by-them, from git.status), the three index stages as ours (stage 2), theirs (stage 3) and base (stage 1, the common ancestor), each null when that side has no file, the working file with its conflict markers, and labels naming what ours and theirs are. In a merge, cherry-pick or revert ours is the current branch; in a rebase they swap: ours is the branch being rebased onto, theirs the commit being replayed. A binary file or one over 2 MB comes back without contents (binary, tooLarge). markerSize is the length of its conflict markers (the conflict-marker-size attribute, 7 by default). Refused for a path with no conflict (details.reason "not-unmerged").',
   scope: 'workspace',
   input: GitConflictGetInputSchema,
   handler: async ({ path: input }, ctx): Promise<GitConflict> => {
@@ -152,9 +161,9 @@ const get = defineCommand({
     const entries = await stages(root, rel);
     const at = async (stage: 1 | 2 | 3): Promise<Contents | null> => {
       const entry = entries.find((e) => e.stage === stage);
-      return entry ? blob(root, entry.object) : null;
+      return entry ? blob(root, entry.object, entry.mode) : null;
     };
-    const [base, ours, theirs, file] = await Promise.all([at(1), at(2), at(3), working(abs)]);
+    const [base, ours, theirs, file, size] = await Promise.all([at(1), at(2), at(3), working(abs), markerSize(root, rel)]);
     const all = [base, ours, theirs, file].filter((c): c is Contents => c !== null);
     const binary = all.some((c) => c.binary);
     const tooLarge = all.some((c) => c.tooLarge);
@@ -170,6 +179,7 @@ const get = defineCommand({
       labels: await labels(root, status),
       binary,
       tooLarge,
+      markerSize: size,
     };
   },
 });
@@ -178,7 +188,7 @@ const resolve = defineCommand({
   id: 'git.conflict.resolve',
   title: 'Resolve git conflict',
   description:
-    'Resolves one conflicted file and stages it, with exactly one of: content, the whole resolved file, written as given (refused while it still holds conflict markers, details.reason "markers", unless allowMarkers); or take, one whole side: ours (index stage 2), theirs (stage 3), base (stage 1; refused when there is none) or delete. Taking a side that has no file (ours of a file deleted by us) deletes it. The path must be conflicted (details.reason "not-unmerged") and inside the repository. Gives back the new status; continue the operation with git.operation.continue once nothing is left in conflict.',
+    'Resolves one conflicted file and stages it, with exactly one of: content, the whole resolved file, written as given (refused while it still holds a conflict or a leftover start, base or end marker line, details.reason "markers" with conflicts and lines, unless allowMarkers); or take, one whole side: ours (index stage 2), theirs (stage 3), base (stage 1; refused when there is none) or delete. Taking a side that has no file (ours of a file deleted by us) deletes it. The path must be conflicted (details.reason "not-unmerged") and inside the repository. Gives back the new status; continue the operation with git.operation.continue once nothing is left in conflict.',
   scope: 'workspace',
   mutating: true,
   input: GitConflictResolveInputSchema,
@@ -191,9 +201,16 @@ const resolve = defineCommand({
     await conflicted(root, rel);
     const literal = { env: local.LITERAL_PATHS_ENV };
     if (content !== undefined) {
-      const left = conflictRegions(content).length;
-      if (left && !allowMarkers) {
-        throw new QuiverError('INVALID_INPUT', `${rel} still has ${left} conflict${left === 1 ? '' : 's'} marked in it; resolve ${left === 1 ? 'it' : 'them'} first, or pass allowMarkers to write it as it is`, { reason: 'markers', conflicts: left });
+      if (!allowMarkers) {
+        const size = await markerSize(root, rel);
+        const left = conflictRegions(content, size).length;
+        const lines = conflictMarkerLines(content, size);
+        if (left) {
+          throw new QuiverError('INVALID_INPUT', `${rel} still has ${left} conflict${left === 1 ? '' : 's'} marked in it; resolve ${left === 1 ? 'it' : 'them'} first, or pass allowMarkers to write it as it is`, { reason: 'markers', conflicts: left, lines });
+        }
+        if (lines.length) {
+          throw new QuiverError('INVALID_INPUT', `${rel} still has a conflict marker on line ${lines.join(', ')}; remove it, or pass allowMarkers to write it as it is`, { reason: 'markers', conflicts: 0, lines });
+        }
       }
       await requireWritable(root, rel, abs);
       await mkdir(path.dirname(abs), { recursive: true });

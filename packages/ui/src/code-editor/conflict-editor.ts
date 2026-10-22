@@ -1,7 +1,7 @@
 import { Component, DestroyRef, ElementRef, afterNextRender, computed, effect, inject, input, model, untracked, viewChild } from '@angular/core';
 import { Annotation, EditorState, StateEffect, StateField, type Range } from '@codemirror/state';
 import { Decoration, EditorView, WidgetType, type DecorationSet } from '@codemirror/view';
-import { conflictRegions, resolveConflict, type ConflictChoice, type ConflictRegion } from '@quiver/core';
+import { DEFAULT_MARKER_SIZE, conflictRegions, resolveConflict, type ConflictChoice, type ConflictRegion } from '@quiver/core';
 import { AppState } from '../state/app-state';
 import { VariableHover } from '../variables/variable-hover';
 import { editorExtensions, type CodeLanguage } from './code-editor-extensions';
@@ -21,6 +21,13 @@ const labelsField = StateField.define<ConflictSideLabels>({
   update: (value, tr) => tr.effects.find((e) => e.is(setLabels))?.value ?? value,
 });
 
+/** The length of the markers, from the path's `conflict-marker-size` attribute. */
+const setMarkerSize = StateEffect.define<number>();
+const markerSizeField = StateField.define<number>({
+  create: () => DEFAULT_MARKER_SIZE,
+  update: (value, tr) => tr.effects.find((e) => e.is(setMarkerSize))?.value ?? value,
+});
+
 /** The actions a conflict offers, in the order its bar shows them. */
 const ACTIONS: { choice: Exclude<ConflictChoice, object>; label: string; base?: true }[] = [
   { choice: 'ours', label: 'Accept current' },
@@ -32,7 +39,7 @@ const ACTIONS: { choice: Exclude<ConflictChoice, object>; label: string; base?: 
 
 /** Replace one conflict, found again by its index in the text as it is now, with the choice's text; undoable. */
 function accept(view: EditorView, index: number, choice: ConflictChoice): void {
-  const region = conflictRegions(view.state.doc.toString())[index];
+  const region = conflictRegions(view.state.doc.toString(), view.state.field(markerSizeField))[index];
   if (!region) return;
   view.dispatch({ changes: { from: region.from, to: region.to, insert: resolveConflict(region, choice) }, userEvent: 'input.conflict' });
 }
@@ -109,7 +116,7 @@ function decorate(state: EditorState): DecorationSet {
     decorations.push(Decoration.line({ class: `cm-conflict-marker ${cls}` }).range(line.from));
     if (note) decorations.push(Decoration.widget({ widget: new SideNote(note), side: 1 }).range(line.to));
   };
-  for (const r of conflictRegions(doc.toString())) {
+  for (const r of conflictRegions(doc.toString(), state.field(markerSizeField))) {
     decorations.push(Decoration.widget({ widget: new ConflictActions(r, labels), side: -1, block: true }).range(r.from));
     marker(r.from, 'cm-conflict-marker-ours', `current${labels.ours ? ` · ${labels.ours}` : ''}`);
     lines(r.oursFrom, r.oursTo, 'cm-conflict-ours');
@@ -126,7 +133,7 @@ function decorate(state: EditorState): DecorationSet {
 
 const conflictField = StateField.define<DecorationSet>({
   create: decorate,
-  update: (value, tr) => (tr.docChanged || tr.effects.some((e) => e.is(setLabels)) ? decorate(tr.state) : value),
+  update: (value, tr) => (tr.docChanged || tr.effects.some((e) => e.is(setLabels) || e.is(setMarkerSize)) ? decorate(tr.state) : value),
   provide: (field) => EditorView.decorations.from(field),
 });
 
@@ -164,8 +171,10 @@ export class ConflictEditor {
   readonly value = model('');
   readonly language = input<CodeLanguage>('text');
   readonly labels = input<ConflictSideLabels>({ ours: '', theirs: '' });
+  /** The length of the markers: the path's `conflict-marker-size` attribute, 7 by default. */
+  readonly markerSize = input<number>(DEFAULT_MARKER_SIZE);
   /** The conflicts left in the text. */
-  readonly count = computed(() => conflictRegions(this.value()).length);
+  readonly count = computed(() => conflictRegions(this.value(), this.markerSize()).length);
 
   protected readonly containerClass = computed(() => `cm-theme-${this.theme()}`);
 
@@ -187,6 +196,7 @@ export class ConflictEditor {
       run: () => undefined,
     }),
     labelsField,
+    markerSizeField,
     conflictField,
     conflictTheme,
   ]);
@@ -197,7 +207,7 @@ export class ConflictEditor {
         state: EditorState.create({ doc: untracked(this.value), extensions: untracked(this.extensions) }),
         parent: this.container().nativeElement,
       });
-      this.view.dispatch({ effects: setLabels.of(untracked(this.labels)) });
+      this.view.dispatch({ effects: [setLabels.of(untracked(this.labels)), setMarkerSize.of(untracked(this.markerSize))] });
     });
     effect(() => {
       const extensions = this.extensions();
@@ -206,6 +216,10 @@ export class ConflictEditor {
     effect(() => {
       const labels = this.labels();
       untracked(() => this.view?.dispatch({ effects: setLabels.of(labels) }));
+    });
+    effect(() => {
+      const size = this.markerSize();
+      untracked(() => this.view?.dispatch({ effects: setMarkerSize.of(size) }));
     });
     effect(() => {
       const value = this.value();
@@ -220,7 +234,7 @@ export class ConflictEditor {
   /** Scroll to a conflict and put the cursor at its start. */
   goTo(index: number): void {
     const view = this.view;
-    const region = view ? conflictRegions(view.state.doc.toString())[index] : undefined;
+    const region = view ? conflictRegions(view.state.doc.toString(), view.state.field(markerSizeField))[index] : undefined;
     if (!view || !region) return;
     view.dispatch({ selection: { anchor: region.from }, effects: EditorView.scrollIntoView(region.from, { y: 'start', yMargin: 48 }) });
     view.focus();

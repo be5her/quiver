@@ -1,5 +1,30 @@
 import { describe, expect, it } from 'vitest';
-import { attachPatches, conflictKind, conflictLabels, conflictRegions, conflictedPaths, detectOperation, mergeMessageName, operationArgs, parseBranches, parseConflictMarkers, parseDecorations, parseDiffSummary, parseLog, parseStashes, parseStatusV2, parseTags, parseUnmergedEntries, planDiscard, renderResolution, resolveConflict, splitPatch } from './git-parse';
+import {
+  attachPatches,
+  conflictKind,
+  conflictLabels,
+  conflictMarkerLines,
+  conflictRegions,
+  conflictedPaths,
+  detectOperation,
+  dropAddedFinalNewline,
+  mergeMessageName,
+  operationArgs,
+  parseBranches,
+  parseConflictMarkers,
+  parseDecorations,
+  parseDiffSummary,
+  parseLog,
+  parseMarkerSize,
+  parseStashes,
+  parseStatusV2,
+  parseTags,
+  parseUnmergedEntries,
+  planDiscard,
+  renderResolution,
+  resolveConflict,
+  splitPatch,
+} from './git-parse';
 
 // The fixtures are what git 2.43 printed for a small repository, with the hashes shortened.
 
@@ -299,6 +324,20 @@ describe('mergeMessageName', () => {
     expect(mergeMessageName("Merge commit 'abc1234'")).toBe('abc1234');
     expect(mergeMessageName('Something else')).toBeNull();
   });
+
+  it('names the remote of a pull, whose branch often has the current branch\'s name', () => {
+    expect(mergeMessageName("Merge branch 'main' of github.com:owner/repo\n")).toBe('main of github.com:owner/repo');
+  });
+});
+
+describe('parseMarkerSize', () => {
+  it('reads check-attr -z, falling back to 7 when the attribute is unset or not a positive number', () => {
+    const out = (value: string) => ['a.txt', 'conflict-marker-size', value, ''].join('\0');
+    expect(parseMarkerSize(out('32'))).toBe(32);
+    expect(parseMarkerSize(out('unspecified'))).toBe(7);
+    expect(parseMarkerSize(out('0'))).toBe(7);
+    expect(parseMarkerSize('')).toBe(7);
+  });
 });
 
 describe('conflictLabels', () => {
@@ -371,9 +410,52 @@ describe('parseConflictMarkers', () => {
     expect(chunks[0]).toEqual({ kind: 'text', text: '<<<<<<< HEAD\nlost\n' });
   });
 
+  it('reads markers of the size the conflict-marker-size attribute sets, and only those', () => {
+    const sized = ['a', '<<<<<<<<<< HEAD', '<<<<<<< not a marker', 'x', '==========', 'y', '>>>>>>>>>> side', ''].join('\n');
+    expect(conflictRegions(sized)).toEqual([]);
+    expect(conflictRegions(sized, 10)[0]).toMatchObject({ ours: '<<<<<<< not a marker\nx\n', theirs: 'y\n', oursLabel: 'HEAD', theirsLabel: 'side' });
+  });
+
+  it('keeps the longer markers git writes for conflicts nested in a recursive merge\'s base as part of the base', () => {
+    const nested = ['<<<<<<< HEAD', 'ours', '||||||| merged common ancestors', '<<<<<<<<< Temporary merge branch 1', 'b1', '=========', 'b2', '>>>>>>>>> Temporary merge branch 2', '=======', 'theirs', '>>>>>>> side', ''].join('\n');
+    const [region] = conflictRegions(nested);
+    expect(region.base).toBe('<<<<<<<<< Temporary merge branch 1\nb1\n=========\nb2\n>>>>>>>>> Temporary merge branch 2\n');
+    expect(region.theirs).toBe('theirs\n');
+  });
+
+  it('reads the diff3 style with CRLF lines', () => {
+    const crlf = 'a\r\n<<<<<<< ours\r\nB2\r\n||||||| base\r\nb\r\n=======\r\nB1\r\n>>>>>>> theirs\r\n';
+    expect(conflictRegions(crlf)[0]).toMatchObject({ ours: 'B2\r\n', base: 'b\r\n', theirs: 'B1\r\n', baseLabel: 'base', eol: '\r\n' });
+    expect(renderResolution(parseConflictMarkers(crlf), { 0: 'base' })).toBe('a\r\nb\r\n');
+  });
+
   it('finds no conflict in plain or empty text', () => {
     expect(parseConflictMarkers('')).toEqual([]);
     expect(conflictRegions('just text\nno markers')).toEqual([]);
+  });
+});
+
+describe('conflictMarkerLines', () => {
+  it('finds start, base and end marker lines left over, whole conflicts or not, but not a lone separator', () => {
+    expect(conflictMarkerLines(['a', 'B2', '=======', 'B1', '>>>>>>> side', 'c'].join('\n'))).toEqual([5]);
+    expect(conflictMarkerLines(['<<<<<<< HEAD\r', 'x\r', '||||||| base\r', ''].join('\n'))).toEqual([1, 3]);
+    expect(conflictMarkerLines(['Title', '=======', '<<<<<<<< eight', '>>>>>>>tight'].join('\n'))).toEqual([]);
+    expect(conflictMarkerLines('<<<<<<< HEAD\n', 10)).toEqual([]);
+  });
+});
+
+describe('dropAddedFinalNewline', () => {
+  // git ends the last marker line with a line break even when neither side has a final one.
+  const working = 'a\n<<<<<<< HEAD\nmain\n=======\nside\n>>>>>>> side\n';
+
+  it('drops the final line break git added when the last conflict ends the file and no side has one', () => {
+    expect(dropAddedFinalNewline('a\nside\n', { working, ours: 'a\nmain', theirs: 'a\nside' })).toBe('a\nside');
+  });
+
+  it('keeps it when a side has one, the file goes on after the conflict, or a side is missing', () => {
+    expect(dropAddedFinalNewline('a\nside\n', { working, ours: 'a\nmain\n', theirs: 'a\nside' })).toBe('a\nside\n');
+    expect(dropAddedFinalNewline('a\nside\nz', { working: `${working}z`, ours: 'a\nmain\nz', theirs: 'a\nside\nz' })).toBe('a\nside\nz');
+    expect(dropAddedFinalNewline('a\nside\n', { working, ours: null, theirs: 'a\nside' })).toBe('a\nside\n');
   });
 });
 

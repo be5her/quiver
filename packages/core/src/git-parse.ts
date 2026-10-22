@@ -312,10 +312,27 @@ export function parseUnmergedEntries(out: string): UnmergedEntry[] {
   return entries;
 }
 
-/** The other side of a merge as `.git/MERGE_MSG` names it ("Merge branch 'side'" → side); null when it names none. */
+/**
+ * The other side of a merge as `.git/MERGE_MSG` names it ("Merge branch 'side'" → side); null when it names none. A
+ * pull names the remote too ("Merge branch 'main' of github.com:o/r" → "main of github.com:o/r"), so the incoming
+ * side is not taken for the current branch of the same name.
+ */
 export function mergeMessageName(message: string): string | null {
-  const m = /^Merge (?:remote-tracking branch|branch|tag|commit) '([^']+)'/.exec(message);
-  return m ? m[1] : null;
+  const m = /^Merge (?:remote-tracking branch|branch|tag|commit) '([^']+)'(?: of (\S+))?/.exec(message);
+  return m ? (m[2] ? `${m[1]} of ${m[2]}` : m[1]) : null;
+}
+
+/** git's default `conflict-marker-size`. */
+export const DEFAULT_MARKER_SIZE = 7;
+
+/**
+ * The `conflict-marker-size` attribute of a path from `git check-attr -z conflict-marker-size -- <path>`
+ * (`<path>\0conflict-marker-size\0<value>\0`): a positive number, else git's default of 7, as git reads it.
+ */
+export function parseMarkerSize(out: string): number {
+  const value = out.split('\0')[2] ?? '';
+  const size = /^\d+$/.test(value) ? Number(value) : 0;
+  return size > 0 ? size : DEFAULT_MARKER_SIZE;
 }
 
 /** What is known about the operation in progress, for `conflictLabels`. */
@@ -386,20 +403,38 @@ export interface ConflictRegion {
 
 export type ConflictChunk = { kind: 'text'; text: string } | ({ kind: 'conflict' } & ConflictRegion);
 
-const START_MARKER = /^<{7}(?: (.*))?$/;
-const BASE_MARKER = /^\|{7}(?: (.*))?$/;
-const SEPARATOR = /^={7}$/;
-const END_MARKER = /^>{7}(?: (.*))?$/;
+interface MarkerPatterns {
+  start: RegExp;
+  base: RegExp;
+  separator: RegExp;
+  end: RegExp;
+}
+
+const markerCache = new Map<number, MarkerPatterns>();
+
+/** The four marker lines for a marker size: exactly that many characters, the labelled ones then a space or nothing. */
+function markers(size: number): MarkerPatterns {
+  const n = Number.isInteger(size) && size > 0 ? size : DEFAULT_MARKER_SIZE;
+  let found = markerCache.get(n);
+  if (!found) {
+    found = { start: new RegExp(`^<{${n}}(?: (.*))?$`), base: new RegExp(`^\\|{${n}}(?: (.*))?$`), separator: new RegExp(`^={${n}}$`), end: new RegExp(`^>{${n}}(?: (.*))?$`) };
+    markerCache.set(n, found);
+  }
+  return found;
+}
 
 /**
  * A file's text split into plain stretches and conflicts, in order; joined back they give the text unchanged. Markers
- * are git's, of the default size: exactly seven characters at the start of a line, the start and end ones followed by
- * a space and a label or nothing, the separator alone. The `merge`, `diff3` and `zdiff3` styles are read (zdiff3 only
- * moves common lines out of the conflict). CRLF lines are kept as they are. Lines that only look like markers (eight
- * `<`, `=======` with text after it, a separator or end marker outside a conflict) are plain text, and so is a
- * conflict that is never closed; a start marker inside an open conflict starts a new one, the unclosed one staying text.
+ * are git's: exactly `markerSize` characters at the start of a line (7 unless the path's `conflict-marker-size`
+ * attribute says otherwise), the start and end ones followed by a space and a label or nothing, the separator alone.
+ * The `merge`, `diff3` and `zdiff3` styles are read (zdiff3 only moves common lines out of the conflict). CRLF lines
+ * are kept as they are. Lines that only look like markers (a marker of another size, as git writes for the conflicts
+ * nested in a recursive merge's base, `=======` with text after it, a separator or end marker outside a conflict) are
+ * plain text, and so is a conflict that is never closed; a start marker inside an open conflict starts a new one, the
+ * unclosed one staying text.
  */
-export function parseConflictMarkers(text: string): ConflictChunk[] {
+export function parseConflictMarkers(text: string, markerSize = DEFAULT_MARKER_SIZE): ConflictChunk[] {
+  const { start: START_MARKER, base: BASE_MARKER, separator: SEPARATOR, end: END_MARKER } = markers(markerSize);
   const chunks: ConflictChunk[] = [];
   let plainFrom = 0;
   let offset = 0;
@@ -465,8 +500,35 @@ export function parseConflictMarkers(text: string): ConflictChunk[] {
 }
 
 /** The conflicts of a text, in order. */
-export function conflictRegions(text: string): ConflictRegion[] {
-  return parseConflictMarkers(text).filter((c): c is { kind: 'conflict' } & ConflictRegion => c.kind === 'conflict');
+export function conflictRegions(text: string, markerSize = DEFAULT_MARKER_SIZE): ConflictRegion[] {
+  return parseConflictMarkers(text, markerSize).filter((c): c is { kind: 'conflict' } & ConflictRegion => c.kind === 'conflict');
+}
+
+/**
+ * The 1-based numbers of the lines that are a start, base or end marker, whole conflicts or not: what is left over
+ * when a conflict was half deleted by hand (its `>>>>>>>` line kept, say). The separator alone is left out, since a
+ * line of `=` is ordinary text in Markdown or reStructuredText.
+ */
+export function conflictMarkerLines(text: string, markerSize = DEFAULT_MARKER_SIZE): number[] {
+  const { start, base, end } = markers(markerSize);
+  const found: number[] = [];
+  text.split('\n').forEach((line, i) => {
+    const body = line.endsWith('\r') ? line.slice(0, -1) : line;
+    if (start.test(body) || base.test(body) || end.test(body)) found.push(i + 1);
+  });
+  return found;
+}
+
+/**
+ * git ends a conflict's last marker line with a line break even when no side ends with one, so a file without a final
+ * line break gains one in the working copy. When the last conflict ends the file and neither side has a final line
+ * break, the resolution drops it again, as taking either side whole would.
+ */
+export function dropAddedFinalNewline(resolved: string, file: { working: string | null; ours: string | null; theirs: string | null }, markerSize = DEFAULT_MARKER_SIZE): string {
+  if (file.working === null || file.ours === null || file.theirs === null) return resolved;
+  if (file.ours.endsWith('\n') || file.theirs.endsWith('\n')) return resolved;
+  const chunks = parseConflictMarkers(file.working, markerSize);
+  return chunks.at(-1)?.kind === 'conflict' ? resolved.replace(/\r?\n$/, '') : resolved;
 }
 
 /**

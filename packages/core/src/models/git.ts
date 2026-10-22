@@ -321,6 +321,8 @@ export interface GitConflict {
   binary: boolean;
   /** A side or the file on disk is over 2 MB: no contents then, only a whole side can be taken. */
   tooLarge: boolean;
+  /** The length of the conflict markers: the path's `conflict-marker-size` attribute, 7 by default. */
+  markerSize: number;
 }
 
 export const GitConflictGetInputSchema = z.object({ path: GitArgSchema.describe('A conflicted path, relative to the repository root, as git.status gives it') });

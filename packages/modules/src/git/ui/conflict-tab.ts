@@ -1,6 +1,6 @@
-import { Component, computed, inject, input, linkedSignal, signal, viewChild } from '@angular/core';
-import { conflictedPaths, type GitConflict, type GitConflictKind, type GitStatus } from '@quiver/core';
-import { AppState, Badge, Button, CodeEditor, ConflictEditor, Dialogs, EmptyState, HostBridge, Icon, IconButton, Spinner, Toasts, invokeResource, type Tab, type TabComponent } from '@quiver/ui';
+import { Component, computed, effect, inject, input, linkedSignal, signal, untracked, viewChild } from '@angular/core';
+import { DEFAULT_MARKER_SIZE, conflictMarkerLines, conflictedPaths, dropAddedFinalNewline, type GitConflict, type GitConflictKind, type GitStatus } from '@quiver/core';
+import { AppState, Badge, Button, CodeEditor, ConflictEditor, Dialogs, EmptyState, HostBridge, Icon, IconButton, Spinner, TabsState, Toasts, invokeResource, type Tab, type TabComponent } from '@quiver/ui';
 import { Check, ChevronDown, ChevronUp, GitMerge, RefreshCw } from 'lucide';
 import { GitActions } from './git-actions';
 import { injectGitChanged, injectReloadWhenShown, tabVisible } from './git-events';
@@ -8,6 +8,11 @@ import { errorReason, languageForPath } from './git-format';
 
 type View = 'loading' | 'error' | 'resolved' | 'text' | 'one-sided' | 'whole';
 type Take = 'ours' | 'theirs' | 'base' | 'delete';
+/** The text being edited and the file on disk it started from (both with LF line breaks). */
+interface Edit {
+  base: string;
+  text: string;
+}
 
 const KIND_TEXT: Record<GitConflictKind, string> = {
   'both-modified': 'Both modified',
@@ -81,8 +86,8 @@ const KIND_TEXT: Record<GitConflictKind, string> = {
               variant="primary"
               [icon]="icons.Check"
               [loading]="busy()"
-              [disabled]="count() > 0 || busy()"
-              [title]="count() ? 'Resolve every conflict first: ' + count() + ' left' : 'Save the file and stage it'"
+              [disabled]="count() > 0 || leftover().length > 0 || busy()"
+              [title]="count() ? 'Resolve every conflict first: ' + count() + ' left' : leftover().length ? 'Remove the leftover conflict marker first' : 'Save the file and stage it'"
               data-testid="git-conflict-mark-resolved"
               (click)="markResolved()"
             >
@@ -94,7 +99,21 @@ const KIND_TEXT: Record<GitConflictKind, string> = {
               In a rebase, current is {{ c?.labels.ours }}, the branch being rebased onto, and incoming is the commit being replayed.
             </p>
           }
-          <q-conflict-editor class="flex-1 min-h-0 rounded-none border-0" [(value)]="draft" [language]="language()" [labels]="c?.labels ?? { ours: '', theirs: '' }" data-testid="git-conflict-editor" />
+          @if (changedOnDisk()) {
+            <div class="flex items-center gap-2 px-3 py-1 text-[11px] text-warning border-b border-edge" data-testid="git-conflict-changed-on-disk">
+              <span class="flex-1 min-w-0">The file changed on disk since you started editing it here.</span>
+              <button qButton size="sm" variant="ghost" data-testid="git-conflict-use-disk" (click)="useDisk()">Use the file on disk</button>
+            </div>
+          }
+          <q-conflict-editor
+            class="flex-1 min-h-0 rounded-none border-0"
+            [value]="draft()"
+            (valueChange)="setDraft($event)"
+            [language]="language()"
+            [labels]="c?.labels ?? { ours: '', theirs: '' }"
+            [markerSize]="markerSize()"
+            data-testid="git-conflict-editor"
+          />
         }
         @case ('one-sided') {
           <div class="flex flex-col gap-3 p-4 text-sm" data-testid="git-conflict-one-sided">
@@ -129,6 +148,7 @@ export class GitConflictTab implements TabComponent {
   protected readonly actions = inject(GitActions);
   private readonly host = inject(HostBridge);
   private readonly app = inject(AppState);
+  private readonly tabs = inject(TabsState);
   private readonly dialogs = inject(Dialogs);
   private readonly toasts = inject(Toasts);
   private readonly editor = viewChild(ConflictEditor);
@@ -158,16 +178,33 @@ export class GitConflictTab implements TabComponent {
     return 'text';
   });
 
-  /** The file on disk; a reload that reads the same text keeps the edits made here. */
+  /** The file on disk. */
   private readonly working = computed(() => this.conflict.value()?.working ?? null);
   /** Whether the file uses CRLF: CodeMirror edits with LF, and the file is written back as it was. */
   private readonly crlf = computed(() => /\r\n/.test(this.working() ?? ''));
-  protected readonly draft = linkedSignal(() => (this.working() ?? '').replace(/\r\n/g, '\n'));
+  private readonly diskText = computed(() => (this.working() ?? '').replace(/\r\n/g, '\n'));
+  protected readonly markerSize = computed(() => this.conflict.value()?.markerSize ?? DEFAULT_MARKER_SIZE);
+  /** Follows the file on disk while nothing was edited here; keeps the edits (and what they started from) otherwise. */
+  private readonly edit = linkedSignal<string, Edit>({
+    source: this.diskText,
+    computation: (text, previous) => (previous && previous.value.text !== previous.value.base ? previous.value : { base: text, text }),
+  });
+  protected readonly draft = computed(() => this.edit().text);
+  /** Edits made here and not written yet; the tab asks before it is closed with them. */
+  protected readonly dirty = computed(() => this.view() === 'text' && this.edit().text !== this.diskText());
+  protected readonly changedOnDisk = computed(() => {
+    const edit = this.edit();
+    return this.view() === 'text' && edit.text !== edit.base && edit.base !== this.diskText();
+  });
   protected readonly count = computed(() => this.editor()?.count() ?? 0);
+  /** Start, base or end marker lines left once no whole conflict is (one half deleted by hand). */
+  protected readonly leftover = computed(() => (this.count() ? [] : conflictMarkerLines(this.draft(), this.markerSize())));
   /** The conflict the counter is on, 0-based. */
   private readonly index = signal(0);
   protected readonly counter = computed(() => {
     const n = this.count();
+    const left = this.leftover();
+    if (!n && left.length) return `A conflict marker is left on line ${left.join(', ')}`;
     return n ? `Conflict ${Math.min(this.index(), n - 1) + 1} of ${n}` : 'No conflicts left';
   });
   protected readonly busy = signal(false);
@@ -209,9 +246,9 @@ export class GitConflictTab implements TabComponent {
   protected readonly wholeText = computed(() => {
     const c = this.conflict.value();
     if (!c) return '';
-    if (c.binary) return 'This file is binary, so it cannot be merged line by line. Take one side as a whole.';
+    if (c.binary) return 'This file is binary (or a submodule), so it cannot be merged line by line. Take one side as a whole.';
     if (c.tooLarge) return 'This file is over 2 MB, too large to edit here. Take one side as a whole, or resolve it in your editor.';
-    return 'The file is not on disk. Take one side as a whole.';
+    return 'The file is not on disk as a regular file (it was deleted, or it is a symbolic link). Take one side as a whole.';
   });
 
   protected readonly reloadShown = injectReloadWhenShown(tabVisible(this.tab, this.scope), () => this.reload());
@@ -220,6 +257,21 @@ export class GitConflictTab implements TabComponent {
     injectGitChanged((p) => {
       if (p.reason === 'status') this.reloadShown();
     });
+    effect(() => {
+      const dirty = this.dirty();
+      const tab = this.tab();
+      if (Boolean(tab.dirty) !== dirty) untracked(() => this.tabs.updateTab(this.scope(), tab.id, { dirty }));
+    });
+  }
+
+  protected setDraft(text: string): void {
+    this.edit.update((edit) => ({ ...edit, text }));
+  }
+
+  /** Drop the edits made here for the file as it is on disk now. */
+  protected useDisk(): void {
+    const text = this.diskText();
+    this.edit.set({ base: text, text });
   }
 
   protected kindText(kind: GitConflictKind): string {
@@ -245,14 +297,14 @@ export class GitConflictTab implements TabComponent {
 
   /** Save the edited file and stage it; the host refuses it while markers are left. */
   protected async markResolved(): Promise<void> {
-    const text = this.draft();
+    const c = this.conflict.value();
+    const text = c ? dropAddedFinalNewline(this.draft(), { working: this.diskText(), ours: c.ours, theirs: c.theirs }, this.markerSize()) : this.draft();
     await this.resolve({ content: this.crlf() ? text.replace(/\n/g, '\r\n') : text }, `Marked ${this.path()} resolved`);
   }
 
   /** Resolve with a whole side, or delete the file; edits made here are lost, so that asks first when there are some. */
   protected async take(take: Take): Promise<void> {
-    const edited = this.view() === 'text' && this.draft() !== (this.working() ?? '').replace(/\r\n/g, '\n');
-    if (edited && !(await this.dialogs.confirm({ title: 'Discard your edits?', message: `The edits made here are replaced by the whole file as ${take === 'ours' ? 'current' : 'incoming'} has it.`, confirmLabel: 'Take it', danger: true }))) return;
+    if (this.dirty() && !(await this.dialogs.confirm({ title: 'Discard your edits?', message: `The edits made here are replaced by the whole file as ${take === 'ours' ? 'current' : 'incoming'} has it.`, confirmLabel: 'Take it', danger: true }))) return;
     const done = take === 'delete' ? `Deleted ${this.path()}` : `Resolved ${this.path()} with ${take === 'ours' ? 'current' : take === 'theirs' ? 'incoming' : 'the base'}`;
     await this.resolve({ take }, done);
   }
@@ -261,6 +313,8 @@ export class GitConflictTab implements TabComponent {
     this.busy.set(true);
     try {
       await this.host.invoke('git.conflict.resolve', { path: this.path(), ...input });
+      // The text is settled: once the file is read again it follows the disk, also when a later step conflicts in it again.
+      this.edit.update((edit) => ({ base: edit.text, text: edit.text }));
       this.toasts.notify(done, 'success');
       this.reload();
     } catch (err) {

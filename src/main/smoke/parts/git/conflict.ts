@@ -6,8 +6,9 @@ import { runToEnd } from '@quiver/core/node';
 import { until, type RpcResult, type SmokeSection } from '../../part';
 
 // Git: the conflict editor's commands (git.conflict.get and git.conflict.resolve) on a merge that stops on a text, a
-// binary and a deleted-by-them conflict and on a rebase whose labels swap, in a repository of its own in a temporary
-// folder; then, with screenshots, the Conflicts tab on a repository opened as another workspace.
+// binary and a deleted-by-them conflict, on a rebase whose labels swap, a cherry-pick with longer markers, a revert, a
+// stash apply and a rename on both sides, in a repository of its own in a temporary folder; then, with screenshots, the
+// Conflicts tab on a repository opened as another workspace.
 
 const section: SmokeSection = async (t) => {
   const { check, run, mcpPort } = t;
@@ -172,6 +173,99 @@ const section: SmokeSection = async (t) => {
     const tookTheirs = await read('a.txt');
     const replayed = await run<GitOperationResult>('git.operation.continue', {}, id);
     check('git conflict: take theirs in a rebase keeps the replayed commit\'s side, and the rebase continues', tookTheirs === 'one\ntwo topic\nthree\n' && replayed.status.operation === undefined && replayed.status.branch === 'topic', { tookTheirs, status: replayed.status });
+
+    // ---- A cherry-pick, with the markers lengthened by the conflict-marker-size attribute ----
+    const short = async (ref: string) => (await sh('log', '-1', '--format=%h %s', ref)).stdout.trim();
+    await sh('checkout', '-q', '-b', 'pick', 'main');
+    await write('a.txt', 'one\ntwo pick\nthree\n');
+    await commitAll('Pick edit');
+    await fs.mkdir(path.join(folder, '.git', 'info'), { recursive: true });
+    await fs.writeFile(path.join(folder, '.git', 'info', 'attributes'), 'a.txt conflict-marker-size=10\n');
+    await sh('cherry-pick', 'topic');
+    const picked = await get('a.txt');
+    const pickedMarkers = await failure('git.conflict.resolve', { path: 'a.txt', content: picked.working });
+    const leftover = await failure('git.conflict.resolve', { path: 'a.txt', content: 'one\ntwo pick\n>>>>>>>>>> topic\nthree\n' });
+    const sevenWide = 'one\n<<<<<<< not a marker at this size\nthree\n';
+    await run('git.conflict.resolve', { path: 'a.txt', content: sevenWide }, id);
+    check(
+      'git conflict: a cherry-pick labels ours the current branch and theirs the picked commit, and markers are as long as conflict-marker-size says',
+      picked.operation === 'cherry-pick' &&
+        JSON.stringify(picked.labels) === JSON.stringify({ ours: 'pick', theirs: await short('topic') }) &&
+        picked.markerSize === 10 &&
+        Boolean(picked.working?.includes('<<<<<<<<<< HEAD\n')) &&
+        pickedMarkers.reason === 'markers' &&
+        leftover.reason === 'markers' &&
+        leftover.message.includes('line 3') &&
+        (await read('a.txt')) === sevenWide &&
+        !(await unmerged('a.txt')),
+      { labels: picked.labels, markerSize: picked.markerSize, pickedMarkers, leftover },
+    );
+    await sh('cherry-pick', '--abort');
+    await fs.rm(path.join(folder, '.git', 'info', 'attributes'), { force: true });
+
+    // ---- A revert: theirs is the revert of the commit ----
+    await write('a.txt', 'one\ntwo pick again\nthree\n');
+    await commitAll('Pick again');
+    await sh('revert', '--no-edit', 'HEAD~1');
+    const reverting = await get('a.txt');
+    check(
+      'git conflict: a revert labels ours the current branch and theirs the revert of the commit',
+      reverting.operation === 'revert' && JSON.stringify(reverting.labels) === JSON.stringify({ ours: 'pick', theirs: `revert of ${await short('HEAD~1')}` }),
+      reverting.labels,
+    );
+    await run('git.conflict.resolve', { path: 'a.txt', take: 'base' }, id);
+    check('git conflict: take base writes the common ancestor (in a revert, the reverted commit) and stages it', (await read('a.txt')) === 'one\ntwo pick\nthree\n' && !(await unmerged('a.txt')));
+    await sh('revert', '--abort');
+
+    // ---- A stash apply leaves conflicts and no operation; they resolve all the same ----
+    await write('a.txt', 'one\ntwo stashed\nthree\n');
+    await sh('stash', 'push', '-q');
+    await write('a.txt', 'one\ntwo committed\nthree\n');
+    await commitAll('Committed over the stash');
+    await sh('stash', 'apply');
+    const stashed = await get('a.txt');
+    await run('git.conflict.resolve', { path: 'a.txt', take: 'theirs' }, id);
+    check(
+      'git conflict: a stash apply conflict has no operation, and take theirs resolves it with the stash\'s side',
+      stashed.operation === undefined && JSON.stringify(stashed.labels) === JSON.stringify({ ours: 'pick', theirs: 'the incoming changes' }) && (await read('a.txt')) === 'one\ntwo stashed\nthree\n' && !(await unmerged('a.txt')),
+      { operation: stashed.operation, labels: stashed.labels },
+    );
+    await sh('reset', '-q', '--hard');
+    await sh('stash', 'drop', '-q');
+
+    // ---- Both sides rename one file: both-deleted, added-by-us and added-by-them ----
+    await write('r.txt', 'renamed on both sides\nwith a few lines\nso git sees renames\n');
+    await commitAll('Add r');
+    await sh('checkout', '-q', '-b', 'rename-theirs');
+    await sh('mv', 'r.txt', 'r-theirs.txt');
+    await commitAll('Rename theirs');
+    await sh('checkout', '-q', 'pick');
+    await sh('mv', 'r.txt', 'r-ours.txt');
+    await commitAll('Rename ours');
+    await sh('merge', 'rename-theirs');
+    const [dd, au, ua] = await Promise.all([get('r.txt'), get('r-ours.txt'), get('r-theirs.txt')]);
+    check(
+      'git conflict: a rename on both sides gives both-deleted (base only), added-by-us (ours only) and added-by-them (theirs only)',
+      dd.kind === 'both-deleted' && dd.base !== null && dd.ours === null && dd.theirs === null && dd.working === null &&
+        au.kind === 'added-by-us' && au.ours !== null && au.theirs === null && au.base === null &&
+        ua.kind === 'added-by-them' && ua.theirs !== null && ua.ours === null && ua.base === null,
+      { dd: dd.kind, au: au.kind, ua: ua.kind },
+    );
+    const noBase = await failure('git.conflict.resolve', { path: 'r-ours.txt', take: 'base' });
+    await run('git.conflict.resolve', { path: 'r.txt', take: 'delete' }, id);
+    await run('git.conflict.resolve', { path: 'r-ours.txt', take: 'ours' }, id);
+    await run('git.conflict.resolve', { path: 'r-theirs.txt', take: 'ours' }, id);
+    const renamed = await st();
+    check(
+      'git conflict: delete, keep and take of a side with no file resolve them; base is refused when there is none',
+      noBase.reason === 'no-base' &&
+        !renamed.files.some((f) => f.index === 'U' || f.worktree === 'U' || (f.index === 'D' && f.worktree === 'D') || (f.index === 'A' && f.worktree === 'A')) &&
+        (await read('r-ours.txt')) !== null &&
+        (await read('r-theirs.txt')) === null &&
+        (await read('r.txt')) === null,
+      renamed.files,
+    );
+    await sh('merge', '--abort');
   } finally {
     t.host.emit = emit;
     if (ws) await run('workspace.close', { id: ws.id }, null).catch(() => {});
@@ -248,6 +342,32 @@ const section: SmokeSection = async (t) => {
         await wait(100);
         const stepped = ((await state()) as { counter: string } | null)?.counter;
         check('git conflict ui: Next moves the counter to the second conflict', stepped === 'Conflict 2 of 2', stepped);
+
+        // Edits made here survive a reload of the same file and mark the tab unsaved; a change on disk is pointed out
+        // rather than dropping them, and Use the file on disk takes it.
+        const dirtyDot = `Boolean([...document.querySelectorAll('[data-testid=tab][data-title="conf.txt (conflict)"]')].find((e) => e.offsetParent !== null)?.querySelector('.bg-warning'))`;
+        await js(`${tab}?.querySelector('[data-testid=conflict-actions][data-index="0"] [data-choice=ours]')?.click()`);
+        await js(`[...${tab}?.querySelectorAll('button') ?? []].find((b) => b.textContent.trim() === 'Refresh')?.click()`);
+        await wait(400);
+        const kept = await state();
+        const markedDirty = await js(dirtyDot);
+        const original = await fs.readFile(path.join(ui, 'conf.txt'), 'utf8');
+        await fs.writeFile(path.join(ui, 'conf.txt'), original.replace('tail\n', 'tail edited\n'));
+        await js(`[...${tab}?.querySelectorAll('button') ?? []].find((b) => b.textContent.trim() === 'Refresh')?.click()`);
+        const noted = await waitFor(`Boolean(${tab}?.querySelector('[data-testid=git-conflict-changed-on-disk]'))`, 3000);
+        const stillKept = await state();
+        await shot('33e-git-conflict-changed-on-disk-light');
+        await click('[data-testid=git-conflict-tab][data-path="conf.txt"] [data-testid=git-conflict-use-disk]');
+        const tookDisk = await waitFor(`${tab}?.querySelectorAll('[data-testid=conflict-actions]').length === 2 && !${tab}?.querySelector('[data-testid=git-conflict-changed-on-disk]')`, 3000);
+        await fs.writeFile(path.join(ui, 'conf.txt'), original);
+        await js(`[...${tab}?.querySelectorAll('button') ?? []].find((b) => b.textContent.trim() === 'Refresh')?.click()`);
+        const backToDisk = await waitFor(`!${tab}?.querySelector('.cm-content')?.textContent.includes('tail edited')`, 3000);
+        const clean = !(await js(dirtyDot));
+        check(
+          'git conflict ui: an edit survives a reload and marks the tab unsaved; a change on disk is noted, and Use the file on disk takes it',
+          (kept as { counter: string } | null)?.counter === 'Conflict 1 of 1' && Boolean(markedDirty) && noted && (stillKept as { counter: string } | null)?.counter === 'Conflict 1 of 1' && tookDisk && backToDisk && clean,
+          { kept, markedDirty, noted, stillKept, tookDisk, backToDisk, clean },
+        );
 
         // Accept incoming on both; Mark resolved then saves and stages the file.
         await js(`${tab}?.querySelector('[data-testid=conflict-actions][data-index="0"] [data-choice=theirs]')?.click()`);
