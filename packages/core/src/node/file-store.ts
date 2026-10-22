@@ -39,6 +39,8 @@ export class FileStore implements StoreApi {
   private readonly pending = new Map<string, ReturnType<typeof setTimeout>>();
   /** This store's own writes in flight, per collection. */
   private readonly writing = new Map<string, number>();
+  /** The reload of each collection under way, so the next waits for it. */
+  private readonly reloading = new Map<string, Promise<boolean>>();
 
   constructor(
     readonly root: string,
@@ -164,6 +166,18 @@ export class FileStore implements StoreApi {
 
   /** Re-read a collection from disk; reports a change when it differs from what was cached. */
   async reload(collection: string): Promise<boolean> {
+    // One at a time per collection: a second reload started while the first has dropped the cache would find nothing
+    // cached and report a change that is not there (the watcher can fire twice that close together).
+    const run = (this.reloading.get(collection) ?? Promise.resolve(false)).catch(() => false).then(() => this.reloadNow(collection));
+    this.reloading.set(collection, run);
+    try {
+      return await run;
+    } finally {
+      if (this.reloading.get(collection) === run) this.reloading.delete(collection);
+    }
+  }
+
+  private async reloadNow(collection: string): Promise<boolean> {
     const before = this.cache.get(collection);
     this.cache.delete(collection);
     const after = await this.load(collection);

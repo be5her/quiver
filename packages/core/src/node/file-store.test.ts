@@ -51,6 +51,16 @@ describe('FileStore external changes', () => {
     expect(changes).toEqual(['requests']);
   });
 
+  it('two reloads of a collection at once report nothing when the files did not change', async () => {
+    const { store, changes } = await tempStore();
+    await store.put('requests', { id: 'a', name: 'one' });
+    changes.length = 0;
+    // The second used to start while the first had dropped the cache, find nothing cached and report a change.
+    expect(await Promise.all([store.reload('requests'), store.reload('requests')])).toEqual([false, false]);
+    expect(changes).toEqual([]);
+    expect((await store.list('requests')).map((r) => r.id)).toEqual(['a']);
+  });
+
   it('the watcher does not report a first save into a new collection twice, however fast it fires', async () => {
     const { store, changes } = await tempStore();
     // A 1 ms debounce makes the watcher's reload run while the save is still landing (what a slow
