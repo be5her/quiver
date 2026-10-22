@@ -1,6 +1,6 @@
 # Plan: Git branch management, Kubernetes actions, agent permissions, CLI
 
-**Status: combined, in final review.** The four lanes are built, reviewed and merged into `feat/agent-git-kube-cli` with the cross-lane work below (lane pull requests #50, #47, #48 and #49, left open for the owner); the combined pull request waits for the final review and the whole smoke. What was built, the deviations and what is left are under [Done / follow-ups](#done--follow-ups).
+**Status: combined, in final review.** The four lanes are built, reviewed and merged into `feat/agent-git-kube-cli` with the cross-lane work below (lane pull requests #50, #47, #48 and #49, left open for the owner); the combined pull request, #51, waits for the final review and the whole smoke. What was built, the deviations and what is left are under [Done / follow-ups](#done--follow-ups).
 
 ## How the work runs
 
