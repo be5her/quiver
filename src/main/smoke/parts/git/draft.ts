@@ -148,6 +148,33 @@ const section: SmokeSection = async (t) => {
       { noRef, range, optionLike, leaked },
     );
 
+    // Without a base given, a remote gh would open the pull request on comes first with its own main, even when
+    // origin has a HEAD (a fork's origin, an upstream fetched without its HEAD).
+    await sh('remote', 'add', 'upstream', 'https://example.invalid/upstream.git');
+    await sh('update-ref', 'refs/remotes/upstream/main', 'main');
+    const onUpstream = await run<GitPrDraft>('git.pr.draft', {}, id).catch((err: Error) => ({ error: err.message }) as unknown as GitPrDraft);
+    await sh('remote', 'remove', 'upstream');
+    check('git draft: the default base is the first remote in the order gh picks with a main, before origin/HEAD', onUpstream.baseRef === 'upstream/main' && onUpstream.base === 'main', onUpstream);
+
+    // A detached HEAD: named by its short hash, titled by the first commit, no labels from a branch prefix.
+    await sh('checkout', '-q', '--detach', 'feat/pr-draft');
+    const detached = await run<GitPrDraft>('git.pr.draft', {}, id).catch((err: Error) => ({ error: err.message }) as unknown as GitPrDraft);
+    await sh('checkout', '-q', 'feat/pr-draft');
+    check('git draft: a detached HEAD is drafted under its short hash with the first subject as the title', /^[0-9a-f]{7}$/.test(detached.head ?? '') && detached.title === 'Add the parser' && detached.labels?.length === 0 && detached.stats?.commits === 2, detached);
+
+    // A template reached through a linked folder that leads out of the repository is not read.
+    const outside = path.join(ghDir, 'outside');
+    await fs.mkdir(outside, { recursive: true });
+    await fs.writeFile(path.join(outside, 'pull_request_template.md'), '## Summary\n\nOUTSIDE-SECRET\n');
+    const linked = await fs.symlink(outside, path.join(folder, '.github'), 'junction').then(
+      () => true,
+      () => false,
+    );
+    if (linked) {
+      const escaped = await run<GitPrDraft>('git.pr.draft', {}, id).finally(() => fs.unlink(path.join(folder, '.github')).catch(() => {}));
+      check('git draft: a template behind a linked .github folder outside the repository is not read', escaped.template === null && !escaped.body.includes('OUTSIDE-SECRET'), { template: escaped.template, templatePath: escaped.templatePath });
+    }
+
     // The patch: whole under the cap, cut at a line end over it.
     const withPatch = await run<GitPrDraft>('git.pr.draft', { includePatch: true }, id);
     check('git draft: includePatch gives the base...HEAD diff', withPatch.patch?.truncated === false && withPatch.patch.text.includes('+++ b/src/parser.ts') && withPatch.patch.text.includes('+there'), withPatch.patch);
@@ -254,6 +281,8 @@ const section: SmokeSection = async (t) => {
         await shot('32pe-git-pr-draft-replace-dark');
         await js(`document.documentElement.classList.remove('dark')`);
         await dialogButton('Cancel');
+        // The first dialog has to be gone, or the second wait below finds it and Replace clicks a closing dialog.
+        await waitFor(`!document.querySelector('.fixed.inset-0 h2')`, 4000);
         await wait(200);
         const kept = await value('git-pr-title');
         await js(`${visible('[data-testid=git-pr-draft-fill]')}?.click()`);
@@ -261,6 +290,9 @@ const section: SmokeSection = async (t) => {
         await dialogButton('Replace');
         const replaced = await waitFor(`${visible('[data-testid=git-pr-title]')}?.value === 'Pr draft'`, 4000);
         check('git draft ui: Draft from changes asks before replacing a typed title, and keeps it when told no', asked && kept === 'My own title' && replaced, { asked, kept, replaced });
+        // The base the form filled in (`main`) is not passed back: the draft still compares with origin/main.
+        const against = (await js(`${visible('[data-testid=git-pr-draft-summary]')}?.textContent.replace(/\\s+/g, ' ') ?? ''`)) as string;
+        check('git draft ui: drafting again keeps comparing with the remote default branch, not the local base the form filled in', against.includes('against origin/main'), against);
       } finally {
         await js(`[...document.querySelectorAll('.fixed.inset-0 button')].find((b) => b.textContent.trim() === 'Cancel')?.click()`).catch(() => {});
         restoreGh();

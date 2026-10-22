@@ -100,8 +100,9 @@ describe('commitsMarkdown', () => {
     expect(md).toBe(['- Add the parser', '  It reads porcelain.', '', '  Second paragraph.', '- Test it'].join('\n'));
   });
 
-  it('counts the commits left out', () => {
-    expect(commitsMarkdown([commit('One')], 3)).toBe('- One\n- … and 2 more commits');
+  it('counts the earlier commits left out, before the newest ones listed', () => {
+    expect(commitsMarkdown([commit('Three')], 3)).toBe('- … 2 earlier commits not listed\n- Three');
+    expect(commitsMarkdown([commit('Two'), commit('Three')], 3)).toBe('- … 1 earlier commit not listed\n- Two\n- Three');
   });
 });
 

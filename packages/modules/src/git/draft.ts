@@ -31,23 +31,37 @@ const MAX_TEMPLATE_BYTES = 64 * 1024;
 /** gh is only asked for labels; a slow one should not hold the draft up for the usual 30 seconds. */
 const LABELS_TIMEOUT_MS = 15_000;
 
-/** A regular file's text when it is not over the cap; null otherwise (missing, a folder, a link, too large). */
-async function readSmallFile(file: string): Promise<string | null> {
+/** Whether `file` is inside `root`, both already resolved by `realpath`. */
+function inside(root: string, file: string): boolean {
+  const fold = (p: string) => (process.platform === 'win32' ? p.toLowerCase() : p);
+  const rel = path.relative(fold(root), fold(file));
+  return Boolean(rel) && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+/**
+ * A regular file's text when it is not over the cap; null otherwise: missing, a folder, a link, too large, or reached
+ * through a linked folder that leads out of the repository (a cloned repository can link `.github` anywhere, and the
+ * template ends up in a pull request's description).
+ */
+async function readSmallFile(realRoot: string, file: string): Promise<string | null> {
   const stat = await fs.lstat(file).catch(() => null);
   if (!stat?.isFile() || stat.size > MAX_TEMPLATE_BYTES) return null;
-  return (await fs.readFile(file, 'utf8').catch(() => null))?.replace(/^﻿/, '') ?? null;
+  const real = await fs.realpath(file).catch(() => null);
+  if (!real || !inside(realRoot, real)) return null;
+  return (await fs.readFile(real, 'utf8').catch(() => null))?.replace(/^\uFEFF/, '') ?? null;
 }
 
 /** The repository's pull request template, from the places GitHub reads it, in `PR_TEMPLATE_PATHS` order, then the first file of `PR_TEMPLATE_DIR`. */
 export async function findTemplate(root: string): Promise<{ path: string; text: string } | null> {
+  const realRoot = await fs.realpath(root).catch(() => root);
   for (const rel of PR_TEMPLATE_PATHS) {
-    const text = await readSmallFile(path.join(root, rel));
+    const text = await readSmallFile(realRoot, path.join(root, rel));
     if (text !== null) return { path: rel, text };
   }
   const names = await fs.readdir(path.join(root, PR_TEMPLATE_DIR)).catch(() => [] as string[]);
   for (const name of names.filter((n) => /\.(md|markdown|txt)$/i.test(n)).sort()) {
     const rel = `${PR_TEMPLATE_DIR}/${name}`;
-    const text = await readSmallFile(path.join(root, rel));
+    const text = await readSmallFile(realRoot, path.join(root, rel));
     if (text !== null) return { path: rel, text };
   }
   return null;
@@ -86,7 +100,7 @@ async function resolveBase(root: string, given: string | undefined): Promise<Dra
   if (given !== undefined) {
     const commit = await commitOf(root, given);
     if (!commit) throw new QuiverError('INVALID_INPUT', `${given} is not a branch, tag or commit in this repository`, { reason: 'bad-base' });
-    const full = (await local.git(root, ['rev-parse', '--symbolic-full-name', given], { allowFailure: true })).stdout.split(/\r?\n/)[0]?.trim() ?? '';
+    const full = (await local.git(root, ['rev-parse', '--symbolic-full-name', given, '--'],{ allowFailure: true })).stdout.split(/\r?\n/)[0]?.trim() ?? '';
     let base = given;
     if (full.startsWith('refs/heads/')) base = full.slice('refs/heads/'.length);
     else {
@@ -103,8 +117,7 @@ async function resolveBase(root: string, given: string | undefined): Promise<Dra
       const name = ref.slice(`refs/remotes/${remote}/`.length);
       return { base: name, baseRef: `${remote}/${name}`, commit };
     }
-  }
-  for (const remote of remotes) {
+    // Remote by remote, so a fork's own origin/HEAD does not win over the upstream gh opens the pull request on.
     for (const name of ['main', 'master']) {
       const commit = await commitOf(root, `refs/remotes/${remote}/${name}`);
       if (commit) return { base: name, baseRef: `${remote}/${name}`, commit };
@@ -144,7 +157,7 @@ export async function draft(cwd: string, input: { base?: string; includePatch: b
 
   // Merges (of the base into the branch, mostly) say nothing a reviewer needs; they are neither listed nor counted.
   const range = `${mergeBase}..${headCommit}`;
-  const total = Number((await local.git(root, ['rev-list', '--count', '--no-merges', range])).stdout.trim() || 0);
+  const total = Number((await local.git(root, ['rev-list', '--count', '--no-merges', range, '--'])).stdout.trim() || 0);
   const logged = parseLog((await local.git(root, ['log', '--no-merges', `--format=${GIT_LOG_FORMAT}`, `--max-count=${PR_DRAFT_MAX_COMMITS}`, range, '--'])).stdout);
   const commits: GitPrDraftCommit[] = logged.reverse().map((c) => ({ hash: c.hash, subject: c.subject, body: c.body }));
   const files: GitPrDraftFile[] = (await local.diffFiles(root, [mergeBase, headCommit], undefined, true)).map((f) => ({

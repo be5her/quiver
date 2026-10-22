@@ -320,16 +320,19 @@ export class GitPrsTab implements TabComponent {
 
   /**
    * Fill the form from `git.pr.draft`. From the button (`asked`): the title, description, base and labels, after
-   * asking when that replaces a title or description the user typed. On opening: only the fields still empty, and
-   * only when the branch has commits against the base.
+   * asking when that replaces a title, description or labels the user typed, and nothing when the branch has no
+   * commits against the base. On opening: only the fields still empty, and only when the branch has commits against
+   * the base.
    */
   protected async fillFromDraft(asked: boolean): Promise<void> {
     if (this.drafting()) return;
     this.drafting.set(true);
-    const base = untracked(this.draft).base.trim();
+    // Only a base the user typed is passed: the one the form filled in is a bare name (`main`), which would compare
+    // with the local branch rather than the remote's default branch the draft found.
+    const base = asked && this.typed('base') ? untracked(this.draft).base.trim() : '';
     let result: GitPrDraft;
     try {
-      result = await this.host.invoke<GitPrDraft>('git.pr.draft', asked && base ? { base } : {});
+      result = await this.host.invoke<GitPrDraft>('git.pr.draft', base ? { base } : {});
     } catch (err) {
       this.drafting.set(false);
       this.summary.set(null);
@@ -350,11 +353,18 @@ export class GitPrsTab implements TabComponent {
       this.fill(values);
       return;
     }
+    if (!result.commits.length) {
+      this.toasts.notify(`Nothing to draft: the branch has no commits that ${result.baseRef} does not have`);
+      return;
+    }
     const current = untracked(this.draft);
-    const replaced = (['title', 'body'] as const).filter((f) => this.typed(f) && current[f] !== result[f]);
+    const next: Record<'title' | 'body' | 'labels', string> = { title: result.title, body: result.body, labels };
+    const names = { title: 'title', body: 'description', labels: 'labels' } as const;
+    // Labels are only replaced when the draft has some.
+    const replaced = (['title', 'body', 'labels'] as const).filter((f) => this.typed(f) && current[f] !== next[f] && (f !== 'labels' || labels)).map((f) => names[f]);
     if (replaced.length) {
-      const what = replaced.length === 2 ? 'title and description' : replaced[0] === 'title' ? 'title' : 'description';
-      const ok = await this.dialogs.confirm({ title: `Replace the ${what} you wrote?`, message: `The ${what} you wrote ${replaced.length === 2 ? 'are' : 'is'} replaced by the draft from the branch's commits and files.`, confirmLabel: 'Replace' });
+      const what = replaced.length === 1 ? replaced[0] : `${replaced.slice(0, -1).join(', ')} and ${replaced[replaced.length - 1]}`;
+      const ok = await this.dialogs.confirm({ title: `Replace the ${what} you wrote?`, message: `The ${what} you wrote ${replaced.length > 1 || replaced[0] === 'labels' ? 'are' : 'is'} replaced by the draft from the branch's commits and files.`, confirmLabel: 'Replace' });
       if (!ok) return;
     }
     this.fill({ title: result.title, body: result.body, base: result.base, ...(labels ? { labels } : {}) });

@@ -95,9 +95,14 @@ export function groupFilesByFolder(files: GitPrDraftFile[]): PrFileGroup[] {
 /** Trailers git and tools add to a message, which say nothing about the change. */
 const TRAILER = /^(co-authored-by|signed-off-by|reviewed-by|acked-by|tested-by|change-id):/i;
 
-/** The commits as a Markdown list: each subject, its body indented under it (without trailers). */
+/**
+ * The commits as a Markdown list: each subject, its body indented under it (without trailers). `commits` are the
+ * newest ones, oldest first, so the ones left out of `total` are older and are counted first.
+ */
 export function commitsMarkdown(commits: GitPrDraftCommit[], total = commits.length): string {
   const lines: string[] = [];
+  const left = total - commits.length;
+  if (left > 0) lines.push(`- … ${left} earlier commit${left === 1 ? '' : 's'} not listed`);
   for (const c of commits) {
     lines.push(`- ${c.subject.trim()}`);
     const body = c.body
@@ -107,7 +112,6 @@ export function commitsMarkdown(commits: GitPrDraftCommit[], total = commits.len
       .trim();
     if (body) for (const l of body.split('\n')) lines.push(l.trim() ? `  ${l.trimEnd()}` : '');
   }
-  if (total > commits.length) lines.push(`- … and ${total - commits.length} more commit${total - commits.length === 1 ? '' : 's'}`);
   return lines.join('\n');
 }
 
@@ -256,5 +260,5 @@ export function capText(text: string, maxBytes: number): { text: string; truncat
   const head = new TextDecoder().decode(bytes.subarray(0, maxBytes));
   const cut = head.lastIndexOf('\n');
   // A character split by the byte limit decodes as U+FFFD at the end; cutting at a line end drops it.
-  return { text: cut >= 0 ? head.slice(0, cut + 1) : head.replace(/�+$/, ''), truncated: true };
+  return { text: cut >= 0 ? head.slice(0, cut + 1) : head.replace(/\uFFFD+$/, ''), truncated: true };
 }

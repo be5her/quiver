@@ -319,7 +319,7 @@ export interface GitPrDraft {
   mergeBase: string;
   title: string;
   body: string;
-  /** Oldest first; at most 250, `stats.commits` counts them all. */
+  /** Oldest first; at most the newest 250, `stats.commits` counts them all. */
   commits: GitPrDraftCommit[];
   files: GitPrDraftFile[];
   stats: { commits: number; files: number; additions: number; deletions: number };
