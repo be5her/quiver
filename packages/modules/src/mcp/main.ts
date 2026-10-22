@@ -385,6 +385,7 @@ const logClear = defineCommand({
 
 export const mcpModule = defineModule({
   id: 'mcp',
+  collections: { [MCP_COLLECTION]: McpServerSchema },
   commands: [serverList, serverGet, serverSave, serverDelete, serverDiscover, serverImport, connect, disconnect, ping, toolList, toolCall, resourceList, resourceRead, promptList, promptGet, rawRequest, loggingLevel, logList, logClear],
   onWorkspaceOpen: async (workspace, host) => {
     for (const server of await listServers(workspace)) {

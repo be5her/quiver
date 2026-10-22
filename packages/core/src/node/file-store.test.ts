@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import { FileStore, collectionOf } from './file-store';
 
 const dirs: string[] = [];
@@ -125,6 +126,26 @@ describe('FileStore item files', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it('a save keeps the fields of the file that the collection schema does not know, and only for that collection', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-file-store-'));
+    dirs.push(root);
+    const schema = z.object({ id: z.string(), name: z.string(), tags: z.array(z.string()).optional() });
+    const store = new FileStore(root, () => {}, (collection) => (collection === 'known' ? schema : undefined));
+    await store.init();
+    for (const collection of ['known', 'other']) {
+      await fs.mkdir(path.join(root, collection));
+      // Written by a newer Quiver: `colour` is a field this version has never heard of.
+      await fs.writeFile(path.join(root, collection, 'a.json'), JSON.stringify({ id: 'a', name: 'old', tags: ['x'], colour: 'red' }));
+    }
+    // What a save hands over once its input went through the schema: unknown fields gone, `tags` cleared on purpose.
+    expect(await store.put('known', { id: 'a', name: 'new' })).toEqual({ id: 'a', name: 'new' });
+    await store.put('other', { id: 'a', name: 'new' });
+    const onDisk = async (collection: string) => JSON.parse(await fs.readFile(path.join(root, collection, 'a.json'), 'utf8'));
+    expect(await onDisk('known')).toEqual({ id: 'a', name: 'new', colour: 'red' });
+    expect(await onDisk('other')).toEqual({ id: 'a', name: 'new' });
+    expect(await store.get('known', 'a')).toEqual({ id: 'a', name: 'new', colour: 'red' });
   });
 });
 

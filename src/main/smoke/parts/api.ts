@@ -405,6 +405,24 @@ export default definePart({
     const mcpSchema = await rpc('tools/call', { name: 'api_graphql_schema', arguments: { requestId: gqlSaved.id } });
     check('mcp reads the cached graphql schema as SDL', (mcpSchema.result?.content?.[0]?.text ?? '').includes('type User'), mcpSchema.result?.content?.[0]?.text?.slice(0, 80));
 
+    // A request file a newer Quiver wrote keeps the fields this version does not know when this version saves it.
+    {
+      const newer = await run<ApiRequest>('api.request.create', { name: 'from a newer quiver', method: 'GET', url: '{{baseUrl}}/echo' }, ws.id);
+      const file = path.join(folder, '.quiver', 'requests', `${newer.id}.json`);
+      const written = JSON.parse(await fs.readFile(file, 'utf8')) as Record<string, unknown>;
+      await fs.writeFile(file, JSON.stringify({ ...written, retries: 3, auth: { type: 'bearer', token: 't', prefix: 'Token' } }, null, 2));
+      await host.workspaces.get(ws.id)!.store.reload('requests');
+      const loaded = await run<ApiRequest>('api.request.get', { id: newer.id }, ws.id);
+      await run('api.request.save', { request: { ...loaded, name: 'saved by this one' } }, ws.id);
+      const after = JSON.parse(await fs.readFile(file, 'utf8')) as Record<string, unknown>;
+      check(
+        'api.request.save: fields a newer Quiver wrote, at the top and inside the auth, survive a save by this one',
+        after['name'] === 'saved by this one' && after['retries'] === 3 && JSON.stringify(after['auth']) === JSON.stringify({ type: 'bearer', token: 't', prefix: 'Token' }),
+        after,
+      );
+      await run('api.request.delete', { id: newer.id }, ws.id);
+    }
+
     // Send options: the defaults, then the request's own, then the call's; only overrides are saved; curl says what the request does.
     {
       const probe = await run<ApiRequest>('api.request.create', { name: 'timeout probe', method: 'GET', url: '{{baseUrl}}/slow?ms=1500' }, ws.id);

@@ -240,6 +240,7 @@ const messageWait = defineCommand({
 
 export const realtimeModule = defineModule({
   id: 'realtime',
+  collections: { [REALTIME_COLLECTION]: RealtimeConnectionSchema },
   commands: [connectionList, connectionGet, connectionSave, connectionDelete, connect, disconnect, send, messageList, messageClear, messageWait],
   onWorkspaceOpen: async (workspace, host) => {
     for (const conn of await listConnections(workspace)) {

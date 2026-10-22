@@ -326,6 +326,7 @@ const requestReplay = defineCommand({
 
 export const mockModule = defineModule({
   id: 'mock',
+  collections: { [MOCK_COLLECTION]: MockServerSchema },
   commands: [serverList, serverGet, serverSave, serverDelete, serverStart, serverStop, routeSave, routeDelete, requestList, requestGet, requestClear, requestWait, requestReplay],
   onWorkspaceOpen: async (workspace, host) => {
     const servers = await listServers(workspace);
