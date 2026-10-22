@@ -3,7 +3,8 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { app } from 'electron';
-import { CLI_EXIT, CLI_TOKEN_HEADER, keyValue, newApiRequest, newCollection, newEnvironment, type ApiRun, type Check, type Environment, type TodoItem } from '@quiver/core';
+import { CLI_EXIT, CLI_TOKEN_HEADER, keyValue, newApiRequest, newCollection, newEnvironment, type ApiRun, type Check, type Environment, type GitStatus, type TodoItem, type WorkspaceInfo } from '@quiver/core';
+import { runToEnd } from '@quiver/core/node';
 import { CLI_ENDPOINT_FILE, CLI_TOKEN_FILE, type CliEndpointInfo } from '../../cli-files';
 import { definePart } from '../part';
 
@@ -116,9 +117,70 @@ export default definePart({
     const left = await run<TodoItem[]>('todo.list', {}, ws.id);
     check(
       'cli: fields become typed input, and a mutating command runs for the CLI where an agent is refused',
-      added.code === 0 && todo?.title === 'from the cli' && todo.notes === '42' && (host.config.get().mcp.allowMutating || (!agentRemove.ok && agentRemove.error.code === 'MUTATION_BLOCKED')) && removed.code === 0 && !left.some((i) => i.id === todo.id),
+      added.code === 0 && todo?.title === 'from the cli' && todo.notes === '42' && (host.config.get().mcp.permissions.mode === 'allow' || (!agentRemove.ok && agentRemove.error.code === 'MUTATION_BLOCKED')) && removed.code === 0 && !left.some((i) => i.id === todo.id),
       { added: added.code, todo, agentRemove: agentRemove.ok || agentRemove.error.code, removed: removed.code, stderr: removed.stderr },
     );
+
+    // The new git and kube commands are listed, and the CLI runs git as the user while the agent permissions refuse agents.
+    const gitRows = json<{ id: string; mutating: boolean }[]>((await connected(['list', 'git'])).stdout) ?? [];
+    const kubeRows = json<{ id: string; mutating: boolean }[]>((await connected(['list', 'teleport'])).stdout) ?? [];
+    const describedAction = json<{ id: string; input: { properties?: Record<string, unknown> } }>((await connected(['describe', 'teleport.kube.action'])).stdout);
+    check(
+      'cli: list shows the git branch, stash and tag commands and the kube actions, with whether they change data, and describe gives their schema',
+      ['git.branch.delete', 'git.merge', 'git.rebase', 'git.stash.push', 'git.reset', 'git.discard', 'git.tag.push'].every((id) => gitRows.find((r) => r.id === id)?.mutating === true) &&
+        ['git.stash.list', 'git.tag.list', 'git.file.show'].every((id) => gitRows.find((r) => r.id === id)?.mutating === false) &&
+        ['teleport.kube.action', 'teleport.kube.portForward.start'].every((id) => kubeRows.find((r) => r.id === id)?.mutating === true) &&
+        kubeRows.find((r) => r.id === 'teleport.kube.action.preview')?.mutating === false &&
+        Boolean(describedAction?.input.properties?.action) &&
+        Boolean(describedAction?.input.properties?.confirmCluster),
+      { git: gitRows.length, kube: kubeRows.map((r) => r.id), described: Boolean(describedAction) },
+    );
+    const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-smoke-cli-git-'));
+    const inRepo = (...args: string[]) => runToEnd('git', args, { cwd: repo });
+    await inRepo('init', '-q', '-b', 'main');
+    await inRepo('config', 'user.name', 'Smoke');
+    await inRepo('config', 'user.email', 'smoke@quiver.test');
+    await fs.writeFile(path.join(repo, '.gitignore'), '.quiver/\n');
+    await fs.writeFile(path.join(repo, 'a.txt'), 'base\n');
+    await inRepo('add', '.');
+    await inRepo('commit', '-q', '-m', 'Base');
+    const repoWs = await run<WorkspaceInfo>('workspace.open', { path: repo }, null);
+    const mcpBefore = host.config.get().mcp;
+    try {
+      // A strict agent setup: read-only, and a deny rule on every git tool.
+      await run('config.update', { patch: { mcp: { ...mcpBefore, permissions: { mode: 'read-only', rules: [{ match: 'git.*', action: 'deny' }] } } } }, null);
+      const cliStatus = await connected(['git.status', '--workspace', repo]);
+      const status = json<GitStatus>(cliStatus.stdout);
+      const cliBranch = await connected(['git.branch.create', '--name', 'from-cli', '--workspace', repo]);
+      const branchNow = (await inRepo('branch', '--show-current')).stdout.trim();
+      const agentStatus = await host.invoke('git.status', {}, { caller: 'mcp', workspaceId: repoWs.id });
+      const agentBranch = await host.invoke('git.branch.create', { name: 'from-agent' }, { caller: 'mcp', workspaceId: repoWs.id });
+      const reason = (r: typeof agentStatus) => (r.ok ? 'ok?' : `${r.error.code}:${(r.error.details as { reason?: string } | undefined)?.reason}`);
+      check(
+        'cli: git.status and a gated git write run for the CLI as the user, while a deny rule and read-only mode refuse them to agents',
+        cliStatus.code === 0 &&
+          status?.branch === 'main' &&
+          cliBranch.code === 0 &&
+          branchNow === 'from-cli' &&
+          reason(agentStatus) === 'MUTATION_BLOCKED:rule' &&
+          reason(agentBranch) === 'MUTATION_BLOCKED:rule' &&
+          !(await inRepo('branch', '--list', 'from-agent')).stdout.trim(),
+        { status: [cliStatus.code, status?.branch, cliStatus.stderr.slice(0, 200)], branch: [cliBranch.code, branchNow, cliBranch.stderr.slice(0, 200)], agent: [reason(agentStatus), reason(agentBranch)] },
+      );
+      // Pausing agents leaves the CLI alone.
+      await run('config.update', { patch: { mcp: { ...host.config.get().mcp, paused: true } } }, null);
+      const pausedStatus = await connected(['git.status', '--workspace', repo]);
+      const pausedAgent = await host.invoke('git.status', {}, { caller: 'mcp', workspaceId: repoWs.id });
+      check(
+        'cli: pausing agents does not pause the CLI',
+        pausedStatus.code === 0 && json<GitStatus>(pausedStatus.stdout)?.branch === 'from-cli' && reason(pausedAgent) === 'MUTATION_BLOCKED:paused',
+        { cli: [pausedStatus.code, pausedStatus.stderr.slice(0, 200)], agent: reason(pausedAgent) },
+      );
+    } finally {
+      await run('config.update', { patch: { mcp: { ...host.config.get().mcp, permissions: mcpBefore.permissions, paused: mcpBefore.paused } } }, null).catch(() => {});
+      await run('workspace.close', { id: repoWs.id }, null).catch(() => {});
+      await fs.rm(repo, { recursive: true, force: true }).catch(() => {});
+    }
 
     // Exit codes: bad input and unknown fields are 2, a failing command 1 with its error as JSON on stderr.
     const badType = await connected(['todo.add', '--input', '{"title": 5}', '--workspace', folder]);

@@ -60,7 +60,7 @@ When a call needs asking, Quiver shows the agent (named from the MCP handshake),
 
 **Pause agents**, in the status bar and in Settings, refuses every MCP call (those waiting for an answer included) until resumed, without changing the tool list. The status bar shows agent calls in the last minute and the approvals waiting; a click opens the **Agent activity** tab with the last 200 calls (agent, tool, workspace, decision, outcome, duration; never arguments or results). Permissions apply to MCP callers only: the window and the command line are the user.
 
-The same port serves the `quiver` command line at `/cli`, behind a per-start token; it runs commands as you, so the mutation switch and masking are for agents only ([docs/cli.md](docs/cli.md)).
+The same port serves the `quiver` command line at `/cli`, behind a per-start token; it runs commands as you, so the agent permissions, approvals, pause and masking are for agents only ([docs/cli.md](docs/cli.md)).
 
 To see what agents actually do, record their calls: the call recorder in the MCP inspector keeps every tool call that reaches this server between Start and End, with the agent that made it, its arguments and its result, and saves the recording to a file. See the [MCP inspector](packages/modules/src/mcp/README.md#call-recorder).
 

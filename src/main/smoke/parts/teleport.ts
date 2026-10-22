@@ -12,6 +12,7 @@ import type {
   KubePreview,
   KubeRunResult,
   KubeStreamRead,
+  PendingApproval,
   TeleportDatabase,
   TeleportKubeCluster,
   TeleportLoginResult,
@@ -351,7 +352,7 @@ export default definePart({
         { unconfirmed: unconfirmed.ok || unconfirmed.error, confirmed: confirmed.ok || confirmed.error },
       );
       const mcpBefore = host.config.get().mcp;
-      await run('config.update', { patch: { mcp: { ...mcpBefore, allowMutating: true } } }, null);
+      await run('config.update', { patch: { mcp: { ...mcpBefore, permissions: { ...mcpBefore.permissions, mode: 'allow' } } } }, null);
       const callsBeforeProtected = (await fakeTsh.kubectlCalls()).length;
       const agentOnProtected = await asAgent('teleport.kube.action', { ...target, action: samples[0].action, confirmCluster: 'prod-eks' });
       const agentRerunOnProtected = await asAgent('teleport.kube.history.rerun', { id: actionEntries[0].id, confirmCluster: 'prod-eks' });
@@ -379,6 +380,28 @@ export default definePart({
         { action: agentOnProtected.ok || agentOnProtected.error, unprotect: agentUnprotect.ok || agentUnprotect.error.code },
       );
       check('kube protected: agents with mutations allowed act on other clusters', agentOnOther.ok && (agentOnOther.result as KubeActionResult).exitCode === 0 && (agentOnOther.result as KubeActionResult).command.includes('--context=smoke.teleport.local-dev-eks'), agentOnOther.ok ? 'ok' : agentOnOther.error);
+      // Agent permissions cover the kube actions: under mode ask an agent's action waits for the user, and runs once allowed.
+      await run('config.update', { patch: { mcp: { ...host.config.get().mcp, permissions: { ...mcpBefore.permissions, mode: 'ask' } } } }, null);
+      const approvals = () => run<PendingApproval[]>('mcp.approval.list', {}, null);
+      const callsBeforeAsk = (await fakeTsh.kubectlCalls()).length;
+      const askedAction = asAgent('teleport.kube.action', { proxy: first, cluster: 'dev-eks', action: samples[0].action });
+      await until(async () => (await approvals()).some((p) => p.commandId === 'teleport.kube.action'), 5000);
+      const kubeApproval = (await approvals()).find((p) => p.commandId === 'teleport.kube.action');
+      const waitedForUser = (await fakeTsh.kubectlCalls()).length === callsBeforeAsk;
+      if (kubeApproval) await run('mcp.approval.respond', { id: kubeApproval.id, choice: 'once' }, null);
+      const askedResult = await askedAction;
+      check(
+        "kube actions: under permission mode ask an agent's action raises an approval, waits for it, and runs once allowed",
+        kubeApproval?.mutating === true &&
+          (kubeApproval.input as { cluster?: string } | undefined)?.cluster === 'dev-eks' &&
+          waitedForUser &&
+          askedResult.ok &&
+          (askedResult.result as KubeActionResult).exitCode === 0,
+        { approval: kubeApproval && { tool: kubeApproval.commandId, mutating: kubeApproval.mutating }, waitedForUser, result: askedResult.ok || askedResult.error },
+      );
+      const askedPreview = await asAgent('teleport.kube.action.preview', { proxy: first, cluster: 'dev-eks', action: samples[0].action });
+      check('kube actions: the action preview stays open to agents under mode ask', askedPreview.ok && (await approvals()).length === 0, askedPreview.ok || askedPreview.error);
+      await run('config.update', { patch: { mcp: { ...host.config.get().mcp, permissions: { ...mcpBefore.permissions, mode: 'allow' } } } }, null);
       await run('config.update', { patch: { teleport: { ...host.config.get().teleport, agentActionsOnProtected: true } } }, null);
       const agentAllowed = await asAgent('teleport.kube.action', { ...target, action: samples[0].action });
       check('kube protected: the Settings switch lets agents act on protected clusters', agentAllowed.ok && (agentAllowed.result as KubeActionResult).exitCode === 0, agentAllowed.ok ? 'ok' : agentAllowed.error);
