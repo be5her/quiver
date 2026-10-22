@@ -261,6 +261,12 @@ export interface CommandMeta {
 export interface ModuleMain {
   id: string;
   commands: CommandDefinition[];
+  /**
+   * The committed collections this module keeps in the workspace store, with the schema of their items. A save into
+   * one keeps the fields of the stored item that the schema does not know, so a file a newer Quiver wrote loses
+   * nothing when this version saves it.
+   */
+  collections?: Record<string, z.ZodType>;
   /** Called once when the host has loaded its config, before workspaces reopen. Use for app-wide pollers. */
   onStart?(host: HostApi): Promise<void> | void;
   /** Called once on shutdown, after workspaces closed. Kill child processes here. */

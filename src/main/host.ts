@@ -106,6 +106,7 @@ export class Host {
       onListChange: (workspaces) => this.emit('workspace.changed', { workspaces }),
       onStoreChange: (workspaceId, collection) => this.emit('store.changed', { workspaceId, collection }),
       onStateChange: (workspaceId, key) => this.emit('state.changed', { workspaceId, key }),
+      schemaOf: (collection) => this.registry.listModules().find((mod) => mod.collections?.[collection])?.collections?.[collection],
       onOpen: async (ws) => {
         for (const mod of this.registry.listModules()) await mod.onWorkspaceOpen?.(ws, this.api);
       },

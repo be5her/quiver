@@ -1,6 +1,8 @@
 import { promises as fs, watch, type FSWatcher } from 'node:fs';
 import path from 'node:path';
+import type { z } from 'zod';
 import type { Entity, StoreApi } from '../types';
+import { keepUnknownFields } from '../unknown-fields';
 
 const SAFE_NAME = /^[A-Za-z0-9._-]+$/;
 
@@ -41,6 +43,8 @@ export class FileStore implements StoreApi {
   constructor(
     readonly root: string,
     private readonly onChange: (collection: string) => void = () => {},
+    /** The schema of a collection's items, when known: a put keeps the fields of the stored item that it does not know. */
+    private readonly schemaOf: (collection: string) => z.ZodType | undefined = () => undefined,
   ) {}
 
   get localDir(): string {
@@ -186,10 +190,14 @@ export class FileStore implements StoreApi {
     assertSafe(item.id, 'id');
     const dir = this.collectionDir(collection);
     return this.write(collection, async () => {
+      const map = await this.load(collection);
+      const schema = this.schemaOf(collection);
+      const saved = schema ? keepUnknownFields(schema, map.get(item.id), item) : item;
       await fs.mkdir(dir, { recursive: true });
-      await writeAtomic(path.join(dir, `${item.id}.json`), JSON.stringify(item, null, 2) + '\n');
-      (await this.load(collection)).set(item.id, item);
+      await writeAtomic(path.join(dir, `${item.id}.json`), JSON.stringify(saved, null, 2) + '\n');
+      map.set(item.id, saved);
       this.onChange(collection);
+      // The caller gets back what it saved; the fields kept for a newer Quiver stay in the file and the cache.
       return item;
     });
   }
