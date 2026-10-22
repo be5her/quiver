@@ -1,6 +1,8 @@
 import type { NetworkConfig } from './network';
 import type { ActivityBarLayout } from './activity-bar';
-import type { McpRecordingStatus } from './models/mcp-recording';
+import type { McpAgent, McpRecordingStatus } from './models/mcp-recording';
+import type { AgentCallDecision, ApprovalOutcome, ApprovalRequest, PendingApproval } from './approvals';
+import type { AgentPermissions } from './permissions';
 import type { LogsSession } from './models/logs';
 import type { z } from 'zod';
 
@@ -32,8 +34,12 @@ export interface Variable {
 export interface McpConfig {
   enabled: boolean;
   port: number;
-  /** When false, commands flagged `mutating` are refused for MCP callers. */
+  /** Mirrors `permissions.mode === 'allow'` for older builds. Setting it alone switches the mode between `read-only` and `allow`. */
   allowMutating: boolean;
+  /** What agents may call: the mode for mutating calls no rule matches, and the rules. Workspace rules sit in `.quiver/local`. */
+  permissions: AgentPermissions;
+  /** Every MCP call is refused while true; the tool list stays as it is. */
+  paused: boolean;
 }
 
 /** A favourite Teleport resource, shown at the top of the Teleport sidebar. */
@@ -174,6 +180,10 @@ export interface HostApi {
   secrets: SecretsApi;
   /** Browser sessions for services that sign in through a web page. Present when the host has windows. */
   web?: WebSessionsApi;
+  /** Asks the user about an agent's call the permissions say to ask about. Absent in hosts without a UI, where such calls are refused. */
+  approvals?: {
+    request(request: ApprovalRequest): Promise<ApprovalOutcome>;
+  };
   /** Broadcast an event to every UI surface. */
   emit<E extends HostEventName>(event: E, payload: HostEvents[E]): void;
 }
@@ -182,6 +192,8 @@ export interface CommandContext {
   caller: Caller;
   workspace?: WorkspaceApi;
   host: HostApi;
+  /** The agent behind an `mcp` call, as the MCP layer identified it. */
+  agent?: McpAgent;
 }
 
 export type AnyZodObject = z.ZodObject<z.ZodRawShape>;
@@ -274,7 +286,11 @@ export interface HostEvents {
   'store.changed': { workspaceId: string; collection: string };
   'state.changed': { workspaceId: string; key: string };
   'mcp.status': { running: boolean; port: number; error?: string };
-  'mcp.call': { tool: string; workspaceId?: string; ok: boolean; durationMs: number; at: string };
+  'mcp.call': { tool: string; workspaceId?: string; ok: boolean; durationMs: number; at: string; agent?: string; decision?: AgentCallDecision | null };
+  /** An agent's call waits for the user to allow or deny it. */
+  'mcp.approval.requested': PendingApproval;
+  /** The agent activity feed got a call (`call`), or approvals were asked, answered or timed out (`approvals`). */
+  'mcp.activity': { reason: 'call' | 'approvals'; pending: number };
   /** The recording of agent calls started, paused, ended or was dropped, or a call was recorded. Bursts of calls arrive as one event. */
   'mcp.recording': McpRecordingStatus;
   /** Teleport session status, login progress, pins or tunnel list changed. Fetch teleport.status for details. */

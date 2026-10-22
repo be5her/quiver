@@ -1,6 +1,7 @@
 import { Component, inject } from '@angular/core';
 import { AppState, ContextMenuHost, DialogHost, ToastHost, VariableHoverCard } from '@quiver/ui';
 import { ActivityBar } from './activity-bar/activity-bar';
+import { ApprovalDialog } from './agents/approval-dialog';
 import { CommandPalette } from './command-palette/command-palette';
 import { ShellActions } from './shell-actions';
 import { Sidebar } from './sidebar/sidebar';
@@ -12,7 +13,7 @@ import { TitleBar } from './title-bar/title-bar';
 /** The frame around the modules: title bar, activity bar, sidebar, tabs, status bar, and the overlays. */
 @Component({
   selector: 'q-root',
-  imports: [ActivityBar, CommandPalette, ContextMenuHost, DialogHost, Sidebar, StatusBar, TabBar, TabContent, TitleBar, ToastHost, VariableHoverCard],
+  imports: [ActivityBar, ApprovalDialog, CommandPalette, ContextMenuHost, DialogHost, Sidebar, StatusBar, TabBar, TabContent, TitleBar, ToastHost, VariableHoverCard],
   templateUrl: './app.html',
   host: { '(window:keydown)': 'shortcut($event)' },
 })

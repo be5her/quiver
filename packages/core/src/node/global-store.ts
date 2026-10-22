@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { defaultGlobalConfig } from '../defaults';
 import { migrateTeleportConfig } from '../models/teleport';
+import { migrateMcpConfig } from '../permissions';
 import type { ActivityBarLayout } from '../activity-bar';
 import type { NetworkConfig } from '../network';
 import type { GlobalConfig, UpdatesConfig } from '../types';
@@ -11,7 +12,7 @@ function mergeConfig(base: GlobalConfig, patch: Partial<GlobalConfig>): GlobalCo
   return {
     ...base,
     ...patch,
-    mcp: { ...base.mcp, ...(patch.mcp ?? {}) },
+    mcp: migrateMcpConfig({ ...base.mcp, ...(patch.mcp ?? {}) }, base.mcp),
     teleport: migrateTeleportConfig({ ...base.teleport, ...(patch.teleport ?? {}) }),
     mock: { ...base.mock, ...(patch.mock ?? {}) },
     updates: normalizeUpdates({ ...base.updates, ...(patch.updates ?? {}) }),

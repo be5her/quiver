@@ -1,7 +1,22 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { toErrorPayload, type CommandRegistry, type HostApi, type McpAgent, type WorkspaceApi, type WorkspaceInfo } from '@quiver/core';
+import {
+  QuiverError,
+  decideAgentPermission,
+  readWorkspaceRules,
+  toErrorPayload,
+  type AgentCallDecision,
+  type AgentPermissionDecision,
+  type AgentPermissionRule,
+  type CommandMeta,
+  type CommandRegistry,
+  type ExecuteTrace,
+  type HostApi,
+  type McpAgent,
+  type WorkspaceApi,
+  type WorkspaceInfo,
+} from '@quiver/core';
 import { z } from 'zod';
 import { SESSION_HEADER, identifyAgent, rpcMessages, toolCallOutcome, type RpcMessage } from './agent';
 
@@ -19,9 +34,29 @@ export interface McpServerOptions {
   version: string;
   /** Map the `workspace` query parameter (a path or id) or the default choice to a session. */
   resolveWorkspace(hint: string | null): Promise<WorkspaceApi | undefined>;
-  onCall?(entry: { tool: string; workspaceId?: string; ok: boolean; durationMs: number; at: string }): void;
+  /** Every call that reached a command, with the agent and what the permissions decided. */
+  onCall?(entry: McpCallEntry): void;
   calls?: McpCallObserver;
 }
+
+export interface McpCallEntry {
+  tool: string;
+  workspaceId?: string;
+  ok: boolean;
+  durationMs: number;
+  at: string;
+  agent: McpAgent;
+  /** Null when the call failed before the permissions were looked at, e.g. on invalid arguments. */
+  decision: AgentCallDecision | null;
+}
+
+/** Who a server built for one request serves: the agent, and the rules of the workspace it is bound to. */
+export interface McpSession {
+  agent?: McpAgent;
+  workspaceRules?: AgentPermissionRule[];
+}
+
+const UNKNOWN_AGENT: McpAgent = { name: 'unknown', version: null, userAgent: null };
 
 export interface RunningMcpServer {
   port: number;
@@ -35,12 +70,28 @@ export function toolNameFor(commandId: string): string {
   return commandId.replace(/[^A-Za-z0-9_-]/g, '_');
 }
 
+/** What a tool's description says about its permissions, so an agent knows before it calls. */
+function permissionNote(meta: CommandMeta, read: AgentPermissionDecision, write: AgentPermissionDecision): string {
+  const writes = { deny: 'are refused until the user allows them in Quiver settings', ask: 'ask the user first', allow: 'are allowed' }[write.action];
+  if (meta.conditional) return `Read-only calls ${read.action === 'ask' ? 'ask the user first' : 'always work'}; calls that change data ${writes}.`;
+  if (meta.mutating) return { deny: 'Mutating: refused until the user allows it in Quiver settings.', ask: 'Mutating: asks the user first.', allow: 'Mutating.' }[write.action];
+  return read.action === 'ask' ? 'Asks the user first.' : '';
+}
+
+/** A tool a deny rule refuses for every call is left out of the list. A read-only mode does not hide anything. */
+function deniedByRule(decision: AgentPermissionDecision): boolean {
+  return decision.action === 'deny' && decision.source === 'rule';
+}
+
 /**
  * Build a fresh McpServer bound to one workspace. Servers are cheap, so the HTTP layer
  * creates one per request (stateless mode) which sidesteps session bookkeeping entirely.
  */
-export function buildMcpServer(opts: McpServerOptions, workspace: WorkspaceApi | undefined): McpServer {
+export function buildMcpServer(opts: McpServerOptions, workspace: WorkspaceApi | undefined, session: McpSession = {}): McpServer {
   const server = new McpServer({ name: 'quiver', version: opts.version });
+  const agent = session.agent ?? UNKNOWN_AGENT;
+  const permissions = opts.host.config.get().mcp.permissions;
+  const decide = (commandId: string, mutating: boolean) => decideAgentPermission({ commandId, mutating, permissions, workspaceRules: session.workspaceRules });
 
   server.registerTool(
     'workspace_current',
@@ -49,24 +100,20 @@ export function buildMcpServer(opts: McpServerOptions, workspace: WorkspaceApi |
       description: 'Returns the workspace this MCP session is bound to. Pass ?workspace=<path> on the MCP URL to choose one.',
       inputSchema: z.object({}),
     },
-    async () => text({ workspace: workspace ? { id: workspace.id, name: workspace.name, path: workspace.path } : null, open: opts.host.workspaces.list() }),
+    async () => {
+      if (opts.host.config.get().mcp.paused) return failure(new QuiverError('MUTATION_BLOCKED', 'Agents are paused in Quiver.', { reason: 'paused' }));
+      return text({ workspace: workspace ? { id: workspace.id, name: workspace.name, path: workspace.path } : null, open: opts.host.workspaces.list() });
+    },
   );
 
   for (const meta of opts.registry.list()) {
     if (meta.hidden) continue;
     const entry = opts.registry.get(meta.id);
     if (!entry) continue;
-    const description = [
-      meta.description,
-      meta.scope === 'workspace' ? 'Runs against the bound workspace.' : '',
-      meta.conditional
-        ? 'Read-only calls always work; calls that change data need "allow mutations" in Quiver settings.'
-        : meta.mutating
-          ? 'Mutating: requires "allow mutations" in Quiver settings.'
-          : '',
-    ]
-      .filter(Boolean)
-      .join(' ');
+    const read = decide(meta.id, false);
+    const write = decide(meta.id, true);
+    if (deniedByRule(meta.mutating && !meta.conditional ? write : read)) continue;
+    const description = [meta.description, meta.scope === 'workspace' ? 'Runs against the bound workspace.' : '', permissionNote(meta, read, write)].filter(Boolean).join(' ');
 
     server.registerTool(
       toolNameFor(meta.id),
@@ -79,14 +126,16 @@ export function buildMcpServer(opts: McpServerOptions, workspace: WorkspaceApi |
       async (args: unknown) => {
         const started = performance.now();
         const at = new Date().toISOString();
+        const trace: ExecuteTrace = {};
+        const report = (ok: boolean) =>
+          opts.onCall?.({ tool: meta.id, workspaceId: workspace?.id, ok, durationMs: performance.now() - started, at, agent, decision: trace.decision ?? null });
         try {
-          const result = await opts.registry.execute(meta.id, args, { caller: 'mcp', host: opts.host, workspace });
-          opts.onCall?.({ tool: meta.id, workspaceId: workspace?.id, ok: true, durationMs: performance.now() - started, at });
+          const result = await opts.registry.execute(meta.id, args, { caller: 'mcp', host: opts.host, workspace, agent }, trace);
+          report(true);
           return text(result);
         } catch (err) {
-          opts.onCall?.({ tool: meta.id, workspaceId: workspace?.id, ok: false, durationMs: performance.now() - started, at });
-          const payload = toErrorPayload(err);
-          return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }], isError: true };
+          report(false);
+          return failure(err);
         }
       },
     );
@@ -97,6 +146,10 @@ export function buildMcpServer(opts: McpServerOptions, workspace: WorkspaceApi |
 
 function text(value: unknown) {
   return { content: [{ type: 'text' as const, text: typeof value === 'string' ? value : JSON.stringify(value ?? null, null, 2) }] };
+}
+
+function failure(err: unknown) {
+  return { content: [{ type: 'text' as const, text: JSON.stringify(toErrorPayload(err), null, 2) }], isError: true };
 }
 
 /**
@@ -162,7 +215,7 @@ export async function startMcpServer(opts: McpServerOptions): Promise<RunningMcp
       // No session is kept: the id only tells later requests which client this is, for whoever observes the calls.
       const { agent, sessionId } = identifyAgent(req.headers, messages);
       if (sessionId) res.setHeader(SESSION_HEADER, sessionId);
-      const server = buildMcpServer(opts, workspace);
+      const server = buildMcpServer(opts, workspace, { agent, workspaceRules: await readWorkspaceRules(workspace) });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
       const closeCalls = opts.calls ? observeCalls(opts.calls, messages, agent, workspace, transport) : undefined;
       res.on('close', () => {

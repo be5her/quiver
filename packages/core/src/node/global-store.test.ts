@@ -41,3 +41,26 @@ describe('GlobalStore updates channel', () => {
     expect(next.updates.channel).toBe('beta');
   });
 });
+
+describe('GlobalStore agent permissions', () => {
+  it('turns the allowMutating of an older config into the mode', async () => {
+    expect((await new GlobalStore(await tempFile({ mcp: { enabled: true, port: 7411, allowMutating: true } })).load()).mcp).toMatchObject({
+      allowMutating: true,
+      paused: false,
+      permissions: { mode: 'allow', rules: [] },
+    });
+    expect((await new GlobalStore(await tempFile({ mcp: { enabled: true, port: 7411, allowMutating: false } })).load()).mcp.permissions.mode).toBe('read-only');
+    expect((await new GlobalStore(await tempFile()).load()).mcp.permissions).toEqual({ mode: 'read-only', rules: [] });
+  });
+
+  it('keeps an ask mode and its rules across a reload, and a patch flipping allowMutating switches the mode', async () => {
+    const file = await tempFile();
+    const store = new GlobalStore(file);
+    await store.load();
+    await store.update({ mcp: { ...store.get().mcp, permissions: { mode: 'ask', rules: [{ match: 'git.*', action: 'deny' }] } } });
+    const reloaded = await new GlobalStore(file).load();
+    expect(reloaded.mcp).toMatchObject({ allowMutating: false, permissions: { mode: 'ask', rules: [{ match: 'git.*', action: 'deny' }] } });
+    const flipped = await store.update({ mcp: { ...store.get().mcp, allowMutating: true } });
+    expect(flipped.mcp.permissions.mode).toBe('allow');
+  });
+});

@@ -47,7 +47,17 @@ Every command is a tool over Streamable HTTP on `http://127.0.0.1:7411/mcp`. Add
 claude mcp add --transport http quiver "http://127.0.0.1:7411/mcp"
 ```
 
-Append `?workspace=<absolute folder path>` to bind a client to a specific project. Commands flagged as mutating (deletes, database writes, anything that changes state your terminal shares) are refused for agents until "Allow mutating commands" is enabled in Settings; some tools decide per call, such as `db_query_run`, which lets `SELECT` through and gates writes. Secrets are always masked for agents. Each module's README lists which of its tools are allowed and which are gated. Of the app's own tools, `app_update_check` is allowed; `app_update_download`, `app_update_install` and `app_update_channel` are gated.
+Append `?workspace=<absolute folder path>` to bind a client to a specific project. Secrets are always masked for agents. Each module's README lists which of its tools are allowed and which are gated. Of the app's own tools, `app_update_check` is allowed; `app_update_download`, `app_update_install` and `app_update_channel` are gated.
+
+### Agent permissions
+
+Commands that only read are open to agents. Commands flagged as mutating (deletes, database writes, anything that changes state your terminal shares) get what the permission mode in Settings > MCP says: refused (read-only, the default), **ask** each time, or allowed. Some tools decide per call, such as `db_query_run`, which lets `SELECT` through and gates writes.
+
+Rules come before the mode, per tool: a command id (`db.query.run`), a module (`git.*`, or a narrower `git.branch.*`) or `*`, with allow, ask or deny. A rule can ask about or deny a read-only tool too. A deny wins over everything and leaves the tool out of `tools/list`; otherwise the most specific rule decides (an id beats a module, which beats `*`), and a workspace's own rules (kept per machine in `.quiver/local/agent-permissions.json`) come before the global ones. A config from before permissions keeps its meaning: "Allow mutating commands" on is mode allow, off is read-only. Tool descriptions tell agents which tools ask first.
+
+When a call needs asking, Quiver shows the agent (named from the MCP handshake), the tool, the workspace and the arguments with credentials masked, one call at a time, with a system notification when the window is in the background. Allow once, allow the tool for that agent until Quiver restarts, always allow it (which adds a rule), or deny. Unanswered after 120 seconds, the call is refused. Refusals come back as `MUTATION_BLOCKED` with `details.reason`: `read-only`, `rule`, `denied`, `approval-timeout` or `paused`.
+
+**Pause agents**, in the status bar and in Settings, refuses every MCP call (and denies those waiting) until resumed, without changing the tool list. The status bar shows agent calls in the last minute and the approvals waiting; a click opens the **Agent activity** tab with the last 200 calls (agent, tool, workspace, decision, outcome, duration; never arguments or results). Permissions apply to MCP callers only: the window and the command line are the user.
 
 To see what agents actually do, record their calls: the call recorder in the MCP inspector keeps every tool call that reaches this server between Start and End, with the agent that made it, its arguments and its result, and saves the recording to a file. See the [MCP inspector](packages/modules/src/mcp/README.md#call-recorder).
 

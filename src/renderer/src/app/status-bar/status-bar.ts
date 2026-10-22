@@ -5,6 +5,7 @@ import { AppState, Icon } from '@quiver/ui';
 import { Moon, Plug, Sun } from 'lucide';
 import { modules } from '../modules';
 import { ShellActions } from '../shell-actions';
+import { AgentsItem } from './agents-item';
 import { EnvironmentPicker } from './environment-picker';
 import { RecordingItem } from './recording-item';
 import { UpdateItem } from './update-item';
@@ -13,11 +14,11 @@ const moduleIds = modules.map((m) => m.id);
 
 /**
  * The workspace folder, the environment and the modules' own items (`ModuleUI.statusItems`) on the left; updates,
- * recording, MCP and the theme on the right.
+ * recording, agent activity, MCP and the theme on the right.
  */
 @Component({
   selector: 'footer[qStatusBar]',
-  imports: [EnvironmentPicker, Icon, NgComponentOutlet, RecordingItem, UpdateItem],
+  imports: [AgentsItem, EnvironmentPicker, Icon, NgComponentOutlet, RecordingItem, UpdateItem],
   templateUrl: './status-bar.html',
   host: { class: 'flex items-center h-6 px-2 gap-3 text-[11px] border-t border-edge bg-surface text-muted shrink-0 select-none' },
 })
