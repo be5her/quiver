@@ -1,6 +1,7 @@
 import { Component, Service, computed, effect, inject, input, linkedSignal, model, signal } from '@angular/core';
 import type { GitDiffFile, GitFileContent } from '@quiver/core';
-import { DiffEditor, EmptyState, HostBridge, Segment, Segmented, Spinner } from '@quiver/ui';
+import { Button, DiffEditor, EmptyState, HostBridge, Segment, Segmented, Spinner } from '@quiver/ui';
+import { GitActions } from './git-actions';
 import { applyPatch, codeClass, diffCode, languageForPath, parsePatch, splitPath, splitRows, type DiffBase, type PatchRow, type SplitCell } from './git-format';
 
 export type DiffMode = 'split' | 'inline';
@@ -27,7 +28,10 @@ const ROW_CLASS: Record<string, string> = {
   template: `
     @let f = file();
     @if (conflicted()) {
-      <p class="p-4 text-xs text-muted" data-testid="git-patch-note" data-conflict="true">This file has merge conflicts. Resolve the conflict markers in your editor, then mark it resolved (Stage) in the sidebar.</p>
+      <div class="p-4 flex flex-col items-start gap-2 text-xs text-muted" data-testid="git-patch-note" data-conflict="true">
+        <p>This file has merge conflicts.</p>
+        <button qButton size="sm" variant="secondary" data-testid="git-conflict-open" (click)="actions.openConflict(f.path)">Open conflict editor</button>
+      </div>
     } @else if (f.binary) {
       <p class="p-4 text-xs text-muted" data-testid="git-patch-note">Binary file; no text diff.</p>
     } @else if (f.patch === undefined) {
@@ -89,8 +93,10 @@ const ROW_CLASS: Record<string, string> = {
     }
   `,
   host: { class: 'block' },
+  imports: [Button],
 })
 export class GitPatch {
+  protected readonly actions = inject(GitActions);
   readonly file = input.required<GitDiffFile>();
   readonly mode = input<DiffMode>('split');
 

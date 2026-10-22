@@ -288,3 +288,49 @@ export const GitPrCreateInputSchema = z.object({
   labels: z.array(GitArgSchema.refine((s) => !/[,"]/.test(s), { message: 'must not contain a comma or a double quote' })).default([]),
 });
 export const GitPrCommentInputSchema = GitPrRefInputSchema.extend({ body: z.string().trim().min(1) });
+
+// ---------- Conflict resolution (git.conflict.*) ----------
+
+/**
+ * What a conflicted path is, from its status codes: both sides changed it (UU) or added it (AA), one side deleted it
+ * while the other changed it (DU, UD), one side added it where the other had nothing to merge with (AU, UA, from a
+ * rename or a folder conflict), or both deleted it (DD, after a rename on each side).
+ */
+export type GitConflictKind = 'both-modified' | 'both-added' | 'both-deleted' | 'deleted-by-us' | 'deleted-by-them' | 'added-by-us' | 'added-by-them';
+
+/** A conflicted file: the three index stages, the file on disk with its markers, and what ours and theirs stand for. */
+export interface GitConflict {
+  path: string;
+  kind: GitConflictKind;
+  /** The operation that stopped on it; absent after a stash apply, which leaves none. */
+  operation?: GitStatus['operation'];
+  /** Index stage 2, the side checked out when the operation stopped; null when that side has no file. */
+  ours: string | null;
+  /** Index stage 3, the side coming in; null when that side has no file. */
+  theirs: string | null;
+  /** Index stage 1, the common ancestor; null when there is none (both added it). */
+  base: string | null;
+  /** The file on disk, with git's conflict markers; null when it is not there. */
+  working: string | null;
+  /**
+   * What ours and theirs stand for. In a merge, cherry-pick or revert ours is the current branch; in a rebase they
+   * swap: ours is the branch being rebased onto and theirs the commit being replayed.
+   */
+  labels: { ours: string; theirs: string };
+  /** A side or the file on disk is binary (a NUL in its first 8000 bytes): no contents then, only a whole side can be taken. */
+  binary: boolean;
+  /** A side or the file on disk is over 2 MB: no contents then, only a whole side can be taken. */
+  tooLarge: boolean;
+}
+
+export const GitConflictGetInputSchema = z.object({ path: GitArgSchema.describe('A conflicted path, relative to the repository root, as git.status gives it') });
+
+export const GitConflictResolveInputSchema = z.object({
+  path: GitArgSchema.describe('A conflicted path, relative to the repository root, as git.status gives it'),
+  content: z.string().optional().describe('The resolved file, written as given and staged. Give this or take, not both'),
+  take: z
+    .enum(['ours', 'theirs', 'base', 'delete'])
+    .optional()
+    .describe('Resolve with one whole side and stage it: ours (index stage 2), theirs (stage 3), base (stage 1), or delete the file. Taking a side that has no file deletes it'),
+  allowMarkers: z.boolean().default(false).describe('Write content although it still holds conflict markers (refused otherwise, details.reason "markers")'),
+});
