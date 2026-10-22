@@ -1,4 +1,4 @@
-import type { McpConfig, WorkspaceApi } from './types';
+import type { McpConfig } from './types';
 
 /** What a mutating MCP call gets when no rule matches it: refused, asked about, or let through. */
 export type AgentPermissionMode = 'read-only' | 'ask' | 'allow';
@@ -17,15 +17,9 @@ export interface AgentPermissions {
   rules: AgentPermissionRule[];
 }
 
-/** Per-workspace rules, on this machine only: `.quiver/local/agent-permissions.json`. */
-export interface WorkspaceAgentPermissions {
-  rules: AgentPermissionRule[];
-}
 
 export const AGENT_PERMISSION_MODES: readonly AgentPermissionMode[] = ['read-only', 'ask', 'allow'];
 export const AGENT_RULE_ACTIONS: readonly AgentRuleAction[] = ['allow', 'ask', 'deny'];
-/** The `.quiver/local` document the workspace rules live in. */
-export const WORKSPACE_PERMISSIONS_DOC = 'agent-permissions';
 
 /** What one call gets, and why. */
 export interface AgentPermissionDecision {
@@ -121,19 +115,48 @@ export function upsertRule(rules: AgentPermissionRule[], rule: AgentPermissionRu
  * The MCP section after a load or an update, `before` being what it was. Older configs only have `allowMutating`:
  * when it differs from `before` while the mode stayed, it picks the mode (true is `allow`, false `read-only`), so a
  * config written by an older build, or a patch that only flips it, keeps its meaning. It is then kept in step with
- * the mode, so an older build reading the file refuses mutations unless the mode is `allow`.
+ * the mode, so an older build reading the file refuses mutations unless the mode is `allow`. On load (`loaded`), a
+ * file that says `allowMutating: false` beside mode `allow` was switched off by an older build, which only knows
+ * `allowMutating`, so it loads as `read-only`: the stricter of the two.
  */
-export function migrateMcpConfig(merged: McpConfig, before: McpConfig): McpConfig {
+export function migrateMcpConfig(merged: McpConfig, before: McpConfig, loaded = false): McpConfig {
   const given = merged.permissions as Partial<AgentPermissions> | undefined;
   let mode: AgentPermissionMode = AGENT_PERMISSION_MODES.includes(given?.mode as AgentPermissionMode) ? (given!.mode as AgentPermissionMode) : 'read-only';
   const flipped = Boolean(merged.allowMutating) !== Boolean(before.allowMutating);
   if (flipped && mode === before.permissions?.mode) mode = merged.allowMutating ? 'allow' : 'read-only';
-  return { ...merged, allowMutating: mode === 'allow', paused: merged.paused === true, permissions: { mode, rules: normalizeRules(given?.rules) } };
+  if (loaded && merged.allowMutating === false && mode === 'allow') mode = 'read-only';
+  return {
+    ...merged,
+    allowMutating: mode === 'allow',
+    paused: merged.paused === true,
+    permissions: { mode, rules: normalizeRules(given?.rules) },
+    workspaceRules: normalizeWorkspaceRules(merged.workspaceRules),
+  };
 }
 
-/** The workspace's own rules, from `.quiver/local`. */
-export async function readWorkspaceRules(workspace: WorkspaceApi | undefined): Promise<AgentPermissionRule[]> {
-  if (!workspace?.store) return [];
-  const doc = await workspace.store.readLocal<Partial<WorkspaceAgentPermissions>>(WORKSPACE_PERMISSIONS_DOC, { rules: [] });
-  return normalizeRules(doc?.rules);
+/** The per-workspace rules as a hand-edited file may hold them: invalid rules dropped, and workspaces left with none. */
+function normalizeWorkspaceRules(value: unknown): Record<string, AgentPermissionRule[]> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .map(([id, rules]) => [id, normalizeRules(rules)] as const)
+      .filter(([, rules]) => rules.length > 0),
+  );
+}
+
+/**
+ * A workspace's own rules. They live in the global config (`mcp.workspaceRules`, by workspace id), on this machine
+ * only, and never in the project: a file in the project could come from anyone who can commit to it, and these rules
+ * can allow more than the global ones.
+ */
+export function workspaceRulesFor(mcp: Pick<McpConfig, 'workspaceRules'>, workspaceId: string | undefined | null): AgentPermissionRule[] {
+  return (workspaceId && mcp.workspaceRules?.[workspaceId]) || [];
+}
+
+/** `mcp.workspaceRules` with one workspace's rules replaced; a workspace left with none is dropped. */
+export function withWorkspaceRules(mcp: Pick<McpConfig, 'workspaceRules'>, workspaceId: string, rules: AgentPermissionRule[]): Record<string, AgentPermissionRule[]> {
+  const next = { ...(mcp.workspaceRules ?? {}) };
+  if (rules.length) next[workspaceId] = rules;
+  else delete next[workspaceId];
+  return next;
 }

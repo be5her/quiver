@@ -1,6 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { defaultGlobalConfig } from './defaults';
-import { decideAgentPermission, isValidRuleMatch, migrateMcpConfig, normalizeRules, ruleSpecificity, upsertRule, type AgentPermissionRule, type AgentPermissions } from './permissions';
+import {
+  decideAgentPermission,
+  isValidRuleMatch,
+  migrateMcpConfig,
+  normalizeRules,
+  ruleSpecificity,
+  upsertRule,
+  withWorkspaceRules,
+  workspaceRulesFor,
+  type AgentPermissionRule,
+  type AgentPermissions,
+} from './permissions';
 
 const decide = (commandId: string, mutating: boolean, permissions: AgentPermissions, workspaceRules?: AgentPermissionRule[]) =>
   decideAgentPermission({ commandId, mutating, permissions, workspaceRules });
@@ -84,6 +95,19 @@ describe('rule matches', () => {
     expect(normalizeRules({})).toEqual([]);
     expect(upsertRule([{ match: 'a', action: 'ask' }], { match: 'a', action: 'allow' })).toEqual([{ match: 'a', action: 'allow' }]);
     expect(upsertRule([{ match: 'a', action: 'ask' }], { match: 'b', action: 'allow' })).toHaveLength(2);
+  });
+});
+
+describe('workspace rules in the config', () => {
+  it('reads and replaces one workspace’s rules, dropping a workspace left with none', () => {
+    const rules: AgentPermissionRule[] = [{ match: 'git.*', action: 'allow' }];
+    const mcp = { workspaceRules: { a: rules } };
+    expect(workspaceRulesFor(mcp, 'a')).toEqual(rules);
+    expect(workspaceRulesFor(mcp, 'b')).toEqual([]);
+    expect(workspaceRulesFor(mcp, undefined)).toEqual([]);
+    expect(withWorkspaceRules(mcp, 'b', rules)).toEqual({ a: rules, b: rules });
+    expect(withWorkspaceRules(mcp, 'a', [])).toEqual({});
+    expect(mcp.workspaceRules).toEqual({ a: rules });
   });
 });
 

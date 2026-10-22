@@ -20,7 +20,7 @@ function fakeHost(overrides: Partial<ReturnType<typeof defaultGlobalConfig>['mcp
   };
 }
 
-/** A workspace whose `.quiver/local/agent-permissions.json` holds these rules. */
+/** A workspace that holds these rules in its project folder (`.quiver/local`), where Quiver must not read them from. */
 function workspaceWithRules(rules: unknown): WorkspaceApi {
   return {
     id: 'w',
@@ -139,12 +139,39 @@ describe('CommandRegistry', () => {
     expect(asked.at(-1)?.input).toEqual({ password: REDACTED });
   });
 
-  it('applies workspace rules before global ones', async () => {
-    const host = fakeHost({ permissions: { mode: 'read-only', rules: [{ match: 'test.destroy', action: 'allow' }] } });
-    await expect(registry.execute('test.destroy', {}, { caller: 'mcp', host, workspace: workspaceWithRules([]) })).resolves.toBe('done');
-    await expect(registry.execute('test.destroy', {}, { caller: 'mcp', host, workspace: workspaceWithRules([{ match: 'test.*', action: 'deny' }]) })).rejects.toMatchObject({
+  it('applies workspace rules, from the config, before global ones', async () => {
+    const permissions = { mode: 'read-only' as const, rules: [{ match: 'test.destroy', action: 'allow' as const }] };
+    await expect(registry.execute('test.destroy', {}, { caller: 'mcp', host: fakeHost({ permissions }), workspace: workspaceWithRules([]) })).resolves.toBe('done');
+    const denying = fakeHost({ permissions, workspaceRules: { w: [{ match: 'test.*', action: 'deny' }], other: [] } });
+    await expect(registry.execute('test.destroy', {}, { caller: 'mcp', host: denying, workspace: workspaceWithRules([]) })).rejects.toMatchObject({
       details: { reason: 'rule', level: 'workspace' },
     });
+  });
+
+  it('ignores a rules file in the project folder, which anyone who can commit could have written', async () => {
+    const ws = workspaceWithRules([{ match: '*', action: 'allow' }]);
+    await expect(registry.execute('test.destroy', {}, { caller: 'mcp', host: fakeHost(), workspace: ws })).rejects.toMatchObject({ details: { reason: 'read-only' } });
+  });
+
+  it('passes the caller’s abort signal to the approval, and says when it was paused or cancelled', async () => {
+    const signals: (AbortSignal | undefined)[] = [];
+    const host = (reason: 'paused' | 'cancelled'): HostApi => ({
+      ...fakeHost({ permissions: { mode: 'ask', rules: [] } }),
+      approvals: {
+        request: async (_request, signal) => {
+          signals.push(signal);
+          return { approved: false, reason };
+        },
+      },
+    });
+    const signal = new AbortController().signal;
+    const trace: ExecuteTrace = {};
+    await expect(registry.execute('test.destroy', {}, { caller: 'mcp', host: host('cancelled'), workspace: workspaceWithRules([]), signal }, trace)).rejects.toMatchObject({
+      details: { reason: 'cancelled' },
+    });
+    expect(trace.decision).toBe('cancelled');
+    expect(signals[0]).toBe(signal);
+    await expect(registry.execute('test.destroy', {}, { caller: 'mcp', host: host('paused'), workspace: workspaceWithRules([]) })).rejects.toMatchObject({ details: { reason: 'paused' } });
   });
 
   it('never gates the UI or the CLI', async () => {

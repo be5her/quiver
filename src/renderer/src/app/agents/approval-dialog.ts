@@ -6,15 +6,21 @@ import { AgentsState } from './agents-state';
 /**
  * Asks the user about an agent's call the permissions say to ask about. One at a time, the oldest first;
  * the others wait their turn. Mount once in the shell.
+ *
+ * The dialog opens over whatever the user is doing, so it takes the focus itself rather than giving it to a button:
+ * an Enter or a Space typed for the editor underneath must not allow a call. Each approval is drawn afresh (tracked
+ * by id), so the focus also leaves the button that answered the previous one.
  */
 @Component({
   selector: 'q-agent-approval-dialog',
   imports: [Autofocus, Button, Icon],
   template: `
-    @if (agents.current(); as pending) {
+    @for (pending of shown(); track pending.id) {
       <div class="fixed inset-0 z-[60] flex items-start justify-center bg-black/40 pt-[14vh]">
         <div
-          class="w-[520px] max-w-[92vw] rounded-lg border border-warning/50 bg-canvas shadow-xl p-4 flex flex-col gap-3"
+          class="w-[520px] max-w-[92vw] rounded-lg border border-warning/50 bg-canvas shadow-xl p-4 flex flex-col gap-3 outline-none"
+          tabindex="-1"
+          qAutofocus
           role="alertdialog"
           aria-labelledby="agent-approval-title"
           data-testid="agent-approval"
@@ -60,7 +66,7 @@ import { AgentsState } from './agents-state';
             <button qButton data-testid="agent-approval-session" [disabled]="busy()" [title]="'Allows ' + pending.commandId + ' for ' + pending.agent.name + ' until Quiver restarts'" (click)="agents.respond(pending, 'session')">
               Allow until restart
             </button>
-            <button qButton variant="primary" qAutofocus data-testid="agent-approval-once" [disabled]="busy()" (click)="agents.respond(pending, 'once')">Allow once</button>
+            <button qButton variant="primary" data-testid="agent-approval-once" [disabled]="busy()" (click)="agents.respond(pending, 'once')">Allow once</button>
           </div>
         </div>
       </div>
@@ -73,6 +79,11 @@ export class ApprovalDialog {
   protected readonly icons = { ShieldAlert };
   private readonly now = signal(Date.now());
 
+  /** The approval on screen, as a list of at most one, so a new one is drawn afresh. */
+  protected readonly shown = computed(() => {
+    const current = this.agents.current();
+    return current ? [current] : [];
+  });
   protected readonly waiting = computed(() => Math.max(0, this.agents.pending().length - 1));
   protected readonly busy = computed(() => this.agents.answering() === this.agents.current()?.id);
   protected readonly secondsLeft = computed(() => {

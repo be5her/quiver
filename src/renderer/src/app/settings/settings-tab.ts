@@ -1,7 +1,7 @@
 import { NgTemplateOutlet } from '@angular/common';
-import { Component, computed, inject, input, linkedSignal, signal } from '@angular/core';
+import { Component, computed, inject, input, linkedSignal, signal, untracked } from '@angular/core';
 import { FormField, form } from '@angular/forms/signals';
-import { PALETTES, resolvePalette, type AgentPermissionMode, type AgentPermissionRule, type AgentRuleAction, type GlobalConfig, type TeleportStatus, type Variable } from '@quiver/core';
+import { PALETTES, resolvePalette, workspaceRulesFor, type AgentPermissionMode, type AgentPermissionRule, type AgentRuleAction, type GlobalConfig, type TeleportStatus, type Variable } from '@quiver/core';
 import {
   AppState,
   Button,
@@ -54,11 +54,8 @@ export class SettingsTab implements TabComponent {
   protected readonly config = this.app.config;
   protected readonly mcp = this.app.mcpStatus;
   protected readonly workspace = this.app.activeWorkspace;
-  /** The active workspace's own agent rules, on this machine. */
-  protected readonly workspaceRules = invokeResource<{ rules: AgentPermissionRule[] }>('mcp.permissions.workspace', () => ({}), {
-    enabled: () => this.app.hasWorkspace(),
-    refreshOn: ['agent-permissions'],
-  });
+  /** The active workspace's own agent rules, kept in the global config on this machine. */
+  protected readonly workspaceRules = computed<AgentPermissionRule[]>(() => workspaceRulesFor(this.config()?.mcp ?? { workspaceRules: {} }, this.workspace()?.id));
   protected readonly teleport = invokeResource<TeleportStatus>('teleport.status', () => ({}), { workspaceId: null, refreshOnEvents: ['teleport.changed'] });
 
   /** Fields saved when they lose focus; they follow the stored values whenever the config changes. */
@@ -125,8 +122,7 @@ export class SettingsTab implements TabComponent {
 
   protected setRule(level: 'global' | 'workspace', change: { match: string; action: AgentRuleAction | null }): void {
     this.host
-      .invoke('mcp.permissions.setRule', { level, ...change }, level === 'global' ? null : undefined)
-      .then(() => level === 'workspace' && this.workspaceRules.reload())
+      .invoke('mcp.permissions.setRule', { level, ...change }, level === 'global' ? null : (untracked(this.workspace)?.id ?? null))
       .catch((err) => this.toasts.error(err));
   }
 

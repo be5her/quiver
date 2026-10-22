@@ -77,8 +77,8 @@
         (changed)="setRule('global', $event)"
       />
       @if (workspace(); as ws) {
-        <label qLabel class="mt-3">Rules for {{ ws.name }} only <span class="font-normal text-muted">(on this machine, in .quiver/local)</span></label>
-        <q-agent-rules-editor testId="mcp-rules-workspace" emptyText="No rules for this workspace." [rules]="workspaceRules.current()?.rules ?? []" (changed)="setRule('workspace', $event)" />
+        <label qLabel class="mt-3">Rules for {{ ws.name }} only <span class="font-normal text-muted">(on this machine, never in the project)</span></label>
+        <q-agent-rules-editor testId="mcp-rules-workspace" emptyText="No rules for this workspace." [rules]="workspaceRules()" (changed)="setRule('workspace', $event)" />
       }
     </section>
 

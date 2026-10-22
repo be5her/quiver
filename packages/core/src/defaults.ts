@@ -12,7 +12,7 @@ export function defaultGlobalConfig(): GlobalConfig {
     recentWorkspaces: [],
     openWorkspaces: [],
     globalVariables: [],
-    mcp: { enabled: true, port: DEFAULT_MCP_PORT, allowMutating: false, permissions: { mode: 'read-only', rules: [] }, paused: false },
+    mcp: { enabled: true, port: DEFAULT_MCP_PORT, allowMutating: false, permissions: { mode: 'read-only', rules: [] }, workspaceRules: {}, paused: false },
     teleport: { proxies: [], pins: [], tshPath: '', loginOnLaunch: false },
     mock: { ports: [] },
     updates: { channel: 'stable' },

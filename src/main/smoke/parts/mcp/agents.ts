@@ -25,9 +25,10 @@ const agents: SmokeSection = async (t) => {
 
   /** A session id for an agent of this name, from the MCP handshake. */
   const session = async (name: string) => ({ 'mcp-session-id': (await agentRpc({}, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name, version: '1.0' } })) ?? '' });
-  const call = async (headers: Record<string, string>, name: string, args: unknown): Promise<CallResult> => {
+  const call = async (headers: Record<string, string>, name: string, args: unknown, signal?: AbortSignal): Promise<CallResult> => {
     const res = await fetch(mcpUrl, {
       method: 'POST',
+      signal,
       headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...headers },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }),
     });
@@ -213,6 +214,21 @@ const agents: SmokeSection = async (t) => {
     host.approvals.timeoutMs = APPROVAL_TIMEOUT_MS;
     check('agents: a call nobody answers is refused with reason approval-timeout', timedOut.isError && timedOut.reason === 'approval-timeout' && (await pending()).length === 0 && (await todoExists(sixth.id)), timedOut);
 
+    // ---------- an approval whose agent went away ----------
+    const gone = new AbortController();
+    const goneCall = call(approver, 'todo_remove', { id: sixth.id }, gone.signal).catch(() => null);
+    const gonePending = await nextPending('todo.remove');
+    gone.abort();
+    await goneCall;
+    await until(async () => (await pending()).length === 0, 3000);
+    const lateAnswer = gonePending ? await host.invoke('mcp.approval.respond', { id: gonePending.id, choice: 'once' }, { caller: 'ui', workspaceId: null }) : null;
+    const goneActivity = (await run<{ calls: AgentActivityEntry[] }>('mcp.activity.list', {}, null)).calls[0];
+    check(
+      'agents: a call whose agent closed the connection stops waiting, so a late Allow cannot run it',
+      Boolean(gonePending) && (await pending()).length === 0 && lateAnswer?.ok === false && (await todoExists(sixth.id)) && goneActivity?.decision === 'cancelled',
+      { lateAnswer, goneActivity },
+    );
+
     // ---------- pause ----------
     const waitingCall = call(approver, 'todo_remove', { id: sixth.id });
     await nextPending('todo.remove');
@@ -223,8 +239,8 @@ const agents: SmokeSection = async (t) => {
     const pausedRead = await call(approver, 'tools_base64_encode', { text: 'hi' });
     const pausedTools = await listTools();
     check(
-      'agents: pause refuses every call with reason paused, denies those waiting, and keeps the tool list',
-      host.config.get().mcp.paused && pausedRead.isError && pausedRead.reason === 'paused' && pausedWaiting.isError && pausedWaiting.reason === 'denied' && pausedTools.length === toolsBefore.length,
+      'agents: pause refuses every call with reason paused, those waiting included, and keeps the tool list',
+      host.config.get().mcp.paused && pausedRead.isError && pausedRead.reason === 'paused' && pausedWaiting.isError && pausedWaiting.reason === 'paused' && pausedTools.length === toolsBefore.length,
       { pausedRead, pausedWaiting: pausedWaiting.reason, tools: [pausedTools.length, toolsBefore.length] },
     );
     await run('mcp.pause', { paused: false }, null);
@@ -235,25 +251,54 @@ const agents: SmokeSection = async (t) => {
     const badRule = await host.invoke('mcp.permissions.setWorkspace', { rules: [{ match: 'not a match', action: 'allow' }] }, { caller: 'ui', workspaceId: ws.id });
     check('agents: a workspace rule with an invalid match is refused', !badRule.ok && badRule.error.code === 'INVALID_INPUT');
     await run('mcp.permissions.setWorkspace', { rules: [{ match: 'todo.list', action: 'allow' }, { match: 'tools.*', action: 'deny' }] }, ws.id);
-    const onDisk = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'local', 'agent-permissions.json'), 'utf8')) as { rules: AgentPermissionRule[] };
+    const stored = host.config.get().mcp.workspaceRules[ws.id] ?? [];
     const listed = await call(approver, 'todo_list', {});
     const noAsk = (await pending()).length === 0;
     const wsDenied = await host.invoke('tools.base64.encode', { text: 'hi' }, { caller: 'mcp', workspaceId: ws.id });
     const wsTools = await listTools();
     check(
       'agents: a workspace rule beats a global one: an allow over a global ask, a deny over a global allow (and hides the tool)',
-      onDisk.rules.length === 2 &&
+      stored.length === 2 &&
         !listed.isError &&
         noAsk &&
         !wsDenied.ok &&
         (wsDenied.error.details as { reason?: string; level?: string }).level === 'workspace' &&
         !wsTools.some((x) => x.name === 'tools_base64_encode'),
-      { listed: listed.isError, noAsk, wsDenied, onDisk },
+      { listed: listed.isError, noAsk, wsDenied, stored },
     );
     const agentRules = await host.invoke('mcp.permissions.setWorkspace', { rules: [] }, { caller: 'mcp', workspaceId: ws.id });
     check('agents: an agent cannot change the workspace rules', !agentRules.ok && (await run<{ rules: AgentPermissionRule[] }>('mcp.permissions.workspace', {}, ws.id)).rules.length === 2);
+
+    // Always allow, when a workspace rule asked: the allow goes into the workspace rules, where it beats that rule.
+    await run('mcp.permissions.setWorkspace', { rules: [{ match: 'todo.*', action: 'ask' }] }, ws.id);
+    await setMcp({ permissions: { mode: 'allow', rules: [] } });
+    const wsAlwaysTodo = await addTodo('agent approval always in the workspace');
+    const wsAlwaysCall = call(approver, 'todo_remove', { id: wsAlwaysTodo.id });
+    const wsAlwaysPending = await nextPending('todo.remove');
+    const wsAlwaysAnswer = wsAlwaysPending ? await run<{ level?: string }>('mcp.approval.respond', { id: wsAlwaysPending.id, choice: 'always' }, null) : null;
+    await wsAlwaysCall;
+    const wsAfterTodo = await addTodo('agent approval after always in the workspace');
+    const wsAfter = await call(approver, 'todo_remove', { id: wsAfterTodo.id });
+    check(
+      'agents: always allow after a workspace rule asked writes the allow into the workspace rules, and the next call does not ask',
+      wsAlwaysAnswer?.level === 'workspace' &&
+        (host.config.get().mcp.workspaceRules[ws.id] ?? []).some((r) => r.match === 'todo.remove' && r.action === 'allow') &&
+        !host.config.get().mcp.permissions.rules.some((r) => r.match === 'todo.remove') &&
+        !wsAfter.isError &&
+        !(await todoExists(wsAfterTodo.id)),
+      { wsAlwaysAnswer, workspaceRules: host.config.get().mcp.workspaceRules[ws.id], wsAfter },
+    );
     await run('mcp.permissions.setWorkspace', { rules: [] }, ws.id);
     await setMcp({ permissions: { mode: 'read-only', rules: [] } });
+
+    // A rules file in the project, as a repository could ship one, is not read: only rules made on this machine count.
+    const planted = path.join(folder, '.quiver', 'local', 'agent-permissions.json');
+    await fs.mkdir(path.dirname(planted), { recursive: true });
+    await fs.writeFile(planted, JSON.stringify({ rules: [{ match: '*', action: 'allow' }] }), 'utf8');
+    const plantedCall = await call(approver, 'todo_remove', { id: sixth.id });
+    await fs.rm(planted, { force: true });
+    check('agents: a rules file planted in the project allows nothing', plantedCall.isError && plantedCall.reason === 'read-only' && (await todoExists(sixth.id)), plantedCall);
+
     const readOnly = await call(approver, 'todo_remove', { id: sixth.id });
     check('agents: back in read-only mode a mutating call is refused at once with reason read-only', readOnly.isError && readOnly.reason === 'read-only' && (await pending()).length === 0, readOnly);
 
@@ -264,7 +309,7 @@ const agents: SmokeSection = async (t) => {
     check(
       'agents: the activity feed lists the calls newest first with the agent, tool, workspace and decision, and no arguments',
       mine.length >= 10 &&
-        ['approved', 'denied', 'approval-timeout', 'paused', 'refused', 'allowed'].every((d) => decisions.has(d as AgentActivityEntry['decision'])) &&
+        ['approved', 'denied', 'approval-timeout', 'paused', 'refused', 'allowed', 'cancelled'].every((d) => decisions.has(d as AgentActivityEntry['decision'])) &&
         mine.every((c) => !('arguments' in c) && !('result' in c)) &&
         mine.some((c) => c.tool === 'todo.remove' && c.workspace?.name === ws.name && c.ok) &&
         Date.parse(activity.calls[0].at) >= Date.parse(activity.calls[activity.calls.length - 1].at),
@@ -283,8 +328,8 @@ const agents: SmokeSection = async (t) => {
       const { js, wait, shot } = u;
       const approval = () =>
         js(
-          `(() => { const d = document.querySelector('[data-testid=agent-approval]'); if (!d) return null; const q = (id) => d.querySelector('[data-testid=' + id + ']')?.textContent.trim() ?? ''; return { tool: d.getAttribute('data-tool'), agent: q('agent-approval-agent'), toolText: q('agent-approval-tool'), input: q('agent-approval-input'), queue: q('agent-approval-queue'), text: d.textContent }; })()`,
-        ) as Promise<{ tool: string; agent: string; toolText: string; input: string; queue: string; text: string } | null>;
+          `(() => { const d = document.querySelector('[data-testid=agent-approval]'); if (!d) return null; const q = (id) => d.querySelector('[data-testid=' + id + ']')?.textContent.trim() ?? ''; return { tool: d.getAttribute('data-tool'), agent: q('agent-approval-agent'), toolText: q('agent-approval-tool'), input: q('agent-approval-input'), queue: q('agent-approval-queue'), text: d.textContent, focused: document.activeElement === d }; })()`,
+        ) as Promise<{ tool: string; agent: string; toolText: string; input: string; queue: string; text: string; focused: boolean } | null>;
       const statusItem = () =>
         js(`(() => { const b = document.querySelector('[data-testid=agent-activity-status]'); return b ? { pending: b.getAttribute('data-pending'), calls: Number(b.getAttribute('data-calls')), paused: b.getAttribute('data-paused'), text: b.textContent.trim() } : null; })()`) as Promise<{
           pending: string;
@@ -311,6 +356,7 @@ const agents: SmokeSection = async (t) => {
           shown,
         );
         check('ui: the status bar shows the approvals waiting', item?.pending === '2' && item.text.includes('2 waiting'), item);
+        check('ui: the dialog takes the focus itself, not a button, so a key typed for the page underneath answers nothing', shown?.focused === true, shown?.focused);
         // The config changes above make the theme follow the system again; the light shot wants light.
         await js(`document.documentElement.classList.remove('dark')`);
         await wait(200);
@@ -323,7 +369,11 @@ const agents: SmokeSection = async (t) => {
         const firstResult = await firstCall;
         await until(async () => (await approval())?.input.includes(second.id) ?? false, 3000);
         const next = await approval();
-        check('ui: Allow once runs the call and the dialog moves on to the next one', !firstResult.isError && !(await todoExists(first.id)) && Boolean(next?.input.includes(second.id)) && next?.queue === '', { firstResult, next });
+        check(
+          'ui: Allow once runs the call and the dialog moves on to the next one, drawn afresh with the focus on the dialog',
+          !firstResult.isError && !(await todoExists(first.id)) && Boolean(next?.input.includes(second.id)) && next?.queue === '' && next?.focused === true,
+          { firstResult, next },
+        );
         await js(`document.querySelector('[data-testid=agent-approval-deny]')?.click()`);
         const secondResult = await secondCall;
         await wait(400);

@@ -63,4 +63,23 @@ describe('GlobalStore agent permissions', () => {
     const flipped = await store.update({ mcp: { ...store.get().mcp, allowMutating: true } });
     expect(flipped.mcp.permissions.mode).toBe('allow');
   });
+
+  it('loads mode allow as read-only when an older build switched allowMutating off, and keeps it when the file agrees', async () => {
+    const off = { mcp: { enabled: true, port: 7411, allowMutating: false, permissions: { mode: 'allow', rules: [] } } };
+    expect((await new GlobalStore(await tempFile(off)).load()).mcp).toMatchObject({ allowMutating: false, permissions: { mode: 'read-only' } });
+    const on = { mcp: { enabled: true, port: 7411, allowMutating: true, permissions: { mode: 'allow', rules: [] } } };
+    expect((await new GlobalStore(await tempFile(on)).load()).mcp).toMatchObject({ allowMutating: true, permissions: { mode: 'allow' } });
+    // An update from the settings, which picks allow while allowMutating is still false, is not a downgrade.
+    const store = new GlobalStore(await tempFile());
+    await store.load();
+    expect((await store.update({ mcp: { ...store.get().mcp, permissions: { mode: 'allow', rules: [] } } })).mcp).toMatchObject({ allowMutating: true, permissions: { mode: 'allow' } });
+  });
+
+  it('keeps the workspace rules, by workspace id, and drops what is not a rule', async () => {
+    const file = await tempFile({
+      mcp: { enabled: true, port: 7411, allowMutating: false, workspaceRules: { abc: [{ match: 'git.*', action: 'deny' }, { match: 'bad match', action: 'allow' }], empty: [], odd: 'x' } },
+    });
+    expect((await new GlobalStore(file).load()).mcp.workspaceRules).toEqual({ abc: [{ match: 'git.*', action: 'deny' }] });
+    expect((await new GlobalStore(await tempFile()).load()).mcp.workspaceRules).toEqual({});
+  });
 });

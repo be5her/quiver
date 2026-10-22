@@ -50,8 +50,11 @@ export class AgentsState {
     if (untracked(this.answering) === pending.id) return;
     this.answering.set(pending.id);
     try {
-      await this.host.invoke('mcp.approval.respond', { id: pending.id, choice }, null);
-      if (choice === 'always') this.toasts.notify(`${pending.commandId} is now always allowed for agents. Change it in Settings > MCP.`, 'success');
+      const { level } = await this.host.invoke<{ level?: 'workspace' | 'global' }>('mcp.approval.respond', { id: pending.id, choice }, null);
+      if (choice === 'always') {
+        const where = level === 'workspace' && pending.workspace ? ` in ${pending.workspace.name}` : '';
+        this.toasts.notify(`${pending.commandId} is now always allowed for agents${where}. Change it in Settings > MCP.`, 'success');
+      }
     } catch (err) {
       this.toasts.error(err);
     } finally {
@@ -85,4 +88,5 @@ export const DECISION_LABEL: Record<NonNullable<AgentActivityEntry['decision']>,
   denied: { label: 'denied', color: 'text-danger' },
   'approval-timeout': { label: 'timed out', color: 'text-warning' },
   paused: { label: 'paused', color: 'text-warning' },
+  cancelled: { label: 'cancelled', color: 'text-muted' },
 };

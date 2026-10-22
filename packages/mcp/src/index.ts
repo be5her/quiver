@@ -4,8 +4,8 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import {
   QuiverError,
   decideAgentPermission,
-  readWorkspaceRules,
   toErrorPayload,
+  workspaceRulesFor,
   type AgentCallDecision,
   type AgentPermissionDecision,
   type AgentPermissionRule,
@@ -50,7 +50,7 @@ export interface McpCallEntry {
   decision: AgentCallDecision | null;
 }
 
-/** Who a server built for one request serves: the agent, and the rules of the workspace it is bound to. */
+/** Who a server built for one request serves: the agent, and the rules of the workspace it is bound to (by default the workspace's rules in the config). */
 export interface McpSession {
   agent?: McpAgent;
   workspaceRules?: AgentPermissionRule[];
@@ -90,8 +90,9 @@ function deniedByRule(decision: AgentPermissionDecision): boolean {
 export function buildMcpServer(opts: McpServerOptions, workspace: WorkspaceApi | undefined, session: McpSession = {}): McpServer {
   const server = new McpServer({ name: 'quiver', version: opts.version });
   const agent = session.agent ?? UNKNOWN_AGENT;
-  const permissions = opts.host.config.get().mcp.permissions;
-  const decide = (commandId: string, mutating: boolean) => decideAgentPermission({ commandId, mutating, permissions, workspaceRules: session.workspaceRules });
+  const mcp = opts.host.config.get().mcp;
+  const workspaceRules = session.workspaceRules ?? workspaceRulesFor(mcp, workspace?.id);
+  const decide = (commandId: string, mutating: boolean) => decideAgentPermission({ commandId, mutating, permissions: mcp.permissions, workspaceRules });
 
   server.registerTool(
     'workspace_current',
@@ -123,14 +124,14 @@ export function buildMcpServer(opts: McpServerOptions, workspace: WorkspaceApi |
         inputSchema: entry.command.input,
         annotations: { readOnlyHint: !meta.mutating, destructiveHint: meta.mutating && !meta.conditional, openWorldHint: meta.id.startsWith('api.request.send') },
       },
-      async (args: unknown) => {
+      async (args: unknown, extra: { signal?: AbortSignal }) => {
         const started = performance.now();
         const at = new Date().toISOString();
         const trace: ExecuteTrace = {};
         const report = (ok: boolean) =>
           opts.onCall?.({ tool: meta.id, workspaceId: workspace?.id, ok, durationMs: performance.now() - started, at, agent, decision: trace.decision ?? null });
         try {
-          const result = await opts.registry.execute(meta.id, args, { caller: 'mcp', host: opts.host, workspace, agent }, trace);
+          const result = await opts.registry.execute(meta.id, args, { caller: 'mcp', host: opts.host, workspace, agent, signal: extra?.signal }, trace);
           report(true);
           return text(result);
         } catch (err) {
@@ -215,7 +216,7 @@ export async function startMcpServer(opts: McpServerOptions): Promise<RunningMcp
       // No session is kept: the id only tells later requests which client this is, for whoever observes the calls.
       const { agent, sessionId } = identifyAgent(req.headers, messages);
       if (sessionId) res.setHeader(SESSION_HEADER, sessionId);
-      const server = buildMcpServer(opts, workspace, { agent, workspaceRules: await readWorkspaceRules(workspace) });
+      const server = buildMcpServer(opts, workspace, { agent });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
       const closeCalls = opts.calls ? observeCalls(opts.calls, messages, agent, workspace, transport) : undefined;
       res.on('close', () => {

@@ -79,6 +79,58 @@ describe('AgentApprovals', () => {
   });
 });
 
+describe('AgentApprovals scope', () => {
+  it('lets an allow for good that holds in one workspace through only the calls waiting there', async () => {
+    const inWorkspace = (agent: string, workspace: string): ApprovalRequest => ({ ...request(agent, 'todo.remove'), workspace: { id: workspace, name: workspace, path: `/${workspace}` } });
+    const approvals = new AgentApprovals();
+    const first = approvals.request(inWorkspace('claude', 'a'));
+    const sameWorkspace = approvals.request(inWorkspace('cursor', 'a'));
+    const otherWorkspace = approvals.request(inWorkspace('cursor', 'b'));
+    approvals.respond(approvals.list()[0].id, 'always', { workspaceId: 'a' });
+    await expect(first).resolves.toEqual({ approved: true, how: 'always' });
+    await expect(sameWorkspace).resolves.toEqual({ approved: true, how: 'always' });
+    expect(approvals.list().map((p) => p.workspace?.id)).toEqual(['b']);
+    approvals.respond(approvals.list()[0].id, 'deny');
+    await expect(otherWorkspace).resolves.toEqual({ approved: false, reason: 'denied' });
+  });
+});
+
+describe('AgentApprovals cancellation and pause', () => {
+  it('stops waiting when the caller’s signal aborts, so a later answer finds nothing', async () => {
+    const changes: number[] = [];
+    const approvals = new AgentApprovals({ onChange: (p) => changes.push(p.length) });
+    const controller = new AbortController();
+    const call = approvals.request(request('claude', 'todo.remove'), controller.signal);
+    const [waiting] = approvals.list();
+    controller.abort();
+    await expect(call).resolves.toEqual({ approved: false, reason: 'cancelled' });
+    expect(approvals.list()).toEqual([]);
+    expect(changes).toEqual([1, 0]);
+    expect(() => approvals.respond(waiting.id, 'once')).toThrow(/No approval/);
+  });
+
+  it('refuses at once a call whose signal already aborted', async () => {
+    const approvals = new AgentApprovals();
+    const controller = new AbortController();
+    controller.abort();
+    await expect(approvals.request(request('claude', 'todo.remove'), controller.signal)).resolves.toEqual({ approved: false, reason: 'cancelled' });
+    expect(approvals.list()).toEqual([]);
+  });
+
+  it('refuses every waiting call with the reason given', async () => {
+    const changes: number[] = [];
+    const approvals = new AgentApprovals({ onChange: (p) => changes.push(p.length) });
+    const a = approvals.request(request('claude', 'todo.remove'));
+    const b = approvals.request(request('cursor', 'git.push'));
+    approvals.refuseAll('paused');
+    await expect(a).resolves.toEqual({ approved: false, reason: 'paused' });
+    await expect(b).resolves.toEqual({ approved: false, reason: 'paused' });
+    expect(changes).toEqual([1, 2, 0]);
+    approvals.refuseAll('paused');
+    expect(changes).toEqual([1, 2, 0]);
+  });
+});
+
 describe('maskArguments', () => {
   it('masks credentials by name, in rows and in URLs, and leaves the rest', () => {
     const masked = maskArguments({

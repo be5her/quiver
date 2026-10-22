@@ -24,7 +24,10 @@ export interface PendingApproval extends ApprovalRequest {
 /** Allow this call, allow the tool for this agent until Quiver restarts, allow the tool for good (a rule), or refuse. */
 export type ApprovalChoice = 'once' | 'session' | 'always' | 'deny';
 
-export type ApprovalOutcome = { approved: true; how: 'once' | 'session' | 'always' | 'granted' } | { approved: false; reason: 'denied' | 'approval-timeout' };
+/** Why a waiting call was refused: the user denied it, nobody answered in time, agents were paused, or the agent went away (`cancelled`). */
+export type ApprovalRefusal = 'denied' | 'approval-timeout' | 'paused' | 'cancelled';
+
+export type ApprovalOutcome = { approved: true; how: 'once' | 'session' | 'always' | 'granted' } | { approved: false; reason: ApprovalRefusal };
 
 /** An agent and a tool the user allowed until Quiver restarts. */
 export interface ApprovalGrant {
@@ -48,6 +51,8 @@ interface Waiting {
   pending: PendingApproval;
   resolve(outcome: ApprovalOutcome): void;
   timer: ReturnType<typeof setTimeout>;
+  /** Stops listening to the caller's abort signal. */
+  release(): void;
 }
 
 /**
@@ -67,16 +72,23 @@ export class AgentApprovals {
     this.now = options.now ?? Date.now;
   }
 
-  /** Waits for the user's answer, or answers at once when the user already allowed the tool for this agent. */
-  request(request: ApprovalRequest): Promise<ApprovalOutcome> {
+  /**
+   * Waits for the user's answer, or answers at once when the user already allowed the tool for this agent. When
+   * `signal` aborts (the agent's connection closed or it cancelled the call) the call stops waiting and is refused, so
+   * an answer given later cannot run a call nobody waits for.
+   */
+  request(request: ApprovalRequest, signal?: AbortSignal): Promise<ApprovalOutcome> {
     if (this.isGranted(request.agent.name, request.commandId)) return Promise.resolve({ approved: true, how: 'granted' });
+    if (signal?.aborted) return Promise.resolve({ approved: false, reason: 'cancelled' });
     const id = String(++this.seq);
     const at = this.now();
     const pending: PendingApproval = { ...request, id, at: new Date(at).toISOString(), expiresAt: new Date(at + this.timeoutMs).toISOString() };
     return new Promise<ApprovalOutcome>((resolve) => {
       const timer = setTimeout(() => this.settle(id, { approved: false, reason: 'approval-timeout' }), this.timeoutMs);
       (timer as { unref?(): void }).unref?.();
-      this.waiting.set(id, { pending, resolve, timer });
+      const onAbort = () => this.settle(id, { approved: false, reason: 'cancelled' });
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.waiting.set(id, { pending, resolve, timer, release: () => signal?.removeEventListener('abort', onAbort) });
       this.options.onRequest?.(pending);
       this.changed();
     });
@@ -84,9 +96,10 @@ export class AgentApprovals {
 
   /**
    * Answers a waiting call. Allowing for the session also lets through the agent's other calls to the tool that wait,
-   * and allowing for good every agent's.
+   * and allowing for good every agent's; with `workspaceId` (an allow for good that only holds in one workspace), only
+   * those waiting in that workspace.
    */
-  respond(id: string, choice: ApprovalChoice): PendingApproval {
+  respond(id: string, choice: ApprovalChoice, scope: { workspaceId?: string | null } = {}): PendingApproval {
     const entry = this.waiting.get(id);
     if (!entry) throw new QuiverError('NOT_FOUND', `No approval ${id} is waiting; it may have been answered or timed out`);
     const { pending } = entry;
@@ -98,12 +111,20 @@ export class AgentApprovals {
     this.settle(id, { approved: true, how: choice }, false);
     if (choice !== 'once') {
       for (const other of [...this.waiting.values()]) {
-        const same = other.pending.commandId === pending.commandId && (choice === 'always' || other.pending.agent.name === pending.agent.name);
+        const inScope = scope.workspaceId === undefined || (other.pending.workspace?.id ?? null) === scope.workspaceId;
+        const same = other.pending.commandId === pending.commandId && inScope && (choice === 'always' || other.pending.agent.name === pending.agent.name);
         if (same) this.settle(other.pending.id, { approved: true, how: choice }, false);
       }
     }
     this.changed();
     return pending;
+  }
+
+  /** Refuses every waiting call, e.g. when agents are paused. */
+  refuseAll(reason: ApprovalRefusal): void {
+    if (!this.waiting.size) return;
+    for (const id of [...this.waiting.keys()]) this.settle(id, { approved: false, reason }, false);
+    this.changed();
   }
 
   list(): PendingApproval[] {
@@ -130,6 +151,7 @@ export class AgentApprovals {
     const entry = this.waiting.get(id);
     if (!entry) return;
     clearTimeout(entry.timer);
+    entry.release();
     this.waiting.delete(id);
     entry.resolve(outcome);
     if (notify) this.changed();
@@ -173,7 +195,7 @@ export function maskArguments(value: unknown, name = ''): unknown {
 }
 
 /** How an agent's call got past the permissions, or why it did not. */
-export type AgentCallDecision = 'allowed' | 'approved' | 'refused' | 'denied' | 'approval-timeout' | 'paused';
+export type AgentCallDecision = 'allowed' | 'approved' | 'refused' | 'denied' | 'approval-timeout' | 'paused' | 'cancelled';
 
 /** One MCP call in the activity feed. No arguments or results, so nothing sensitive is kept. */
 export interface AgentActivityEntry {

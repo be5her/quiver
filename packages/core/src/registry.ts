@@ -1,6 +1,6 @@
 import { maskArguments, type AgentCallDecision } from './approvals';
 import { QuiverError } from './errors';
-import { decideAgentPermission, readWorkspaceRules } from './permissions';
+import { decideAgentPermission, workspaceRulesFor } from './permissions';
 import type { AnyZodObject, CommandContext, CommandDefinition, CommandMeta, ModuleMain } from './types';
 
 /** Filled in by `execute` for an `mcp` call: how the call got past the permissions, or why it did not. */
@@ -86,7 +86,7 @@ export class CommandRegistry {
 
     const mutates = typeof command.mutating === 'function' ? await command.mutating(input as never, ctx) : Boolean(command.mutating);
     const permissions = mcp.permissions ?? { mode: mcp.allowMutating ? 'allow' : 'read-only', rules: [] };
-    const decision = decideAgentPermission({ commandId: id, mutating: mutates, permissions, workspaceRules: await readWorkspaceRules(ctx.workspace) });
+    const decision = decideAgentPermission({ commandId: id, mutating: mutates, permissions, workspaceRules: workspaceRulesFor(mcp, ctx.workspace?.id) });
     if (decision.action === 'allow') {
       trace.decision = 'allowed';
       return;
@@ -101,12 +101,14 @@ export class CommandRegistry {
     if (!ctx.host.approvals) refuse('refused', 'no-approver', `Command "${id}" needs the user's approval, and this Quiver has no window to ask in.`);
     const workspace = ctx.workspace ? { id: ctx.workspace.id, name: ctx.workspace.name, path: ctx.workspace.path } : null;
     const agent = ctx.agent ?? { name: 'unknown', version: null, userAgent: null };
-    const outcome = await ctx.host.approvals!.request({ agent, workspace, commandId: id, title: command.title, input: maskArguments(input), mutating: mutates });
+    const outcome = await ctx.host.approvals!.request({ agent, workspace, commandId: id, title: command.title, input: maskArguments(input), mutating: mutates }, ctx.signal);
     if (outcome.approved) {
       trace.decision = 'approved';
       return;
     }
     if (outcome.reason === 'approval-timeout') refuse('approval-timeout', 'approval-timeout', `Command "${id}" waited for the user's approval and got no answer in time.`);
+    if (outcome.reason === 'paused') refuse('paused', 'paused', `Command "${id}" was waiting for the user's approval when agents were paused.`);
+    if (outcome.reason === 'cancelled') refuse('cancelled', 'cancelled', `Command "${id}" stopped waiting for the user's approval because the call was cancelled.`);
     refuse('denied', 'denied', `The user denied "${id}".`);
   }
 }

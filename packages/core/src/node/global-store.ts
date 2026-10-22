@@ -8,11 +8,11 @@ import type { NetworkConfig } from '../network';
 import type { GlobalConfig, UpdatesConfig } from '../types';
 
 /** Shallow merge with the nested sections merged one level deeper, so a partial `mcp`, `teleport`, `mock`, `updates`, `activityBar` or `network` patch keeps the other keys. */
-function mergeConfig(base: GlobalConfig, patch: Partial<GlobalConfig>): GlobalConfig {
+function mergeConfig(base: GlobalConfig, patch: Partial<GlobalConfig>, loaded = false): GlobalConfig {
   return {
     ...base,
     ...patch,
-    mcp: migrateMcpConfig({ ...base.mcp, ...(patch.mcp ?? {}) }, base.mcp),
+    mcp: migrateMcpConfig({ ...base.mcp, ...(patch.mcp ?? {}) }, base.mcp, loaded),
     teleport: migrateTeleportConfig({ ...base.teleport, ...(patch.teleport ?? {}) }),
     mock: { ...base.mock, ...(patch.mock ?? {}) },
     updates: normalizeUpdates({ ...base.updates, ...(patch.updates ?? {}) }),
@@ -56,7 +56,7 @@ export class GlobalStore {
   async load(): Promise<GlobalConfig> {
     try {
       const raw = JSON.parse(await fs.readFile(this.file, 'utf8')) as Partial<GlobalConfig>;
-      this.config = mergeConfig(defaultGlobalConfig(), raw);
+      this.config = mergeConfig(defaultGlobalConfig(), raw, true);
     } catch {
       this.config = defaultGlobalConfig();
     }

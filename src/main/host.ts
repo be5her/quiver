@@ -7,13 +7,14 @@ import {
   McpRecorder,
   QuiverError,
   RingBuffer,
-  WORKSPACE_PERMISSIONS_DOC,
   defineCommand,
   isValidRuleMatch,
   mcpRecordingFileName,
-  readWorkspaceRules,
+  ruleSpecificity,
   toErrorPayload,
   upsertRule,
+  withWorkspaceRules,
+  workspaceRulesFor,
   type AgentActivityEntry,
   type AgentPermissionRule,
   type Caller,
@@ -120,7 +121,7 @@ export class Host {
       web: opts.web,
       emit: (event, payload) => this.emit(event, payload),
       dialogs: opts.pickFile ? { pickFile: opts.pickFile } : undefined,
-      approvals: { request: (request) => this.approvals.request(request) },
+      approvals: { request: (request, signal) => this.approvals.request(request, signal) },
     };
 
     this.registry.registerModule({ id: 'host', commands: this.hostCommands() });
@@ -281,16 +282,37 @@ export class Host {
     this.activityTimer.unref();
   }
 
-  private async writeWorkspaceRules(ws: WorkspaceApi, rules: AgentPermissionRule[]): Promise<{ rules: AgentPermissionRule[] }> {
-    await ws.store.writeLocal(WORKSPACE_PERMISSIONS_DOC, { rules });
-    this.emit('store.changed', { workspaceId: ws.id, collection: WORKSPACE_PERMISSIONS_DOC });
-    return { rules };
+  /** A workspace's rules live in the global config, per machine: never in the project, where anyone who can commit could plant an allow. */
+  private async writeWorkspaceRules(workspaceId: string, rules: AgentPermissionRule[]): Promise<{ rules: AgentPermissionRule[] }> {
+    const mcp = this.config.get().mcp;
+    const saved = await this.config.update({ mcp: { ...mcp, workspaceRules: withWorkspaceRules(mcp, workspaceId, rules) } });
+    return { rules: workspaceRulesFor(saved.mcp, workspaceId) };
+  }
+
+  /**
+   * Where "Always allow" puts its rule for a waiting call: the workspace's rules when one of them matches the tool (it
+   * would beat a global allow), otherwise the global rules.
+   */
+  private allowLevel(pending: PendingApproval): 'workspace' | 'global' {
+    const wsRules = workspaceRulesFor(this.config.get().mcp, pending.workspace?.id);
+    return pending.workspace && wsRules.some((r) => ruleSpecificity(r.match, pending.commandId) >= 0) ? 'workspace' : 'global';
+  }
+
+  /** Adds the allow rule for a waiting call's tool at that level. */
+  private async allowForGood(pending: PendingApproval, level: 'workspace' | 'global'): Promise<void> {
+    const mcp = this.config.get().mcp;
+    const rule = { match: pending.commandId, action: 'allow' as const };
+    if (level === 'workspace' && pending.workspace) {
+      await this.writeWorkspaceRules(pending.workspace.id, upsertRule(workspaceRulesFor(mcp, pending.workspace.id), rule));
+      return;
+    }
+    await this.config.update({ mcp: { ...mcp, permissions: { ...mcp.permissions, rules: upsertRule(mcp.permissions.rules, rule) } } });
   }
 
   /** Pauses or resumes every agent; pausing also refuses the calls that wait for an answer. */
   private async setPaused(paused: boolean): Promise<{ paused: boolean }> {
     await this.config.update({ mcp: { ...this.config.get().mcp, paused } });
-    if (paused) for (const pending of this.approvals.list()) this.approvals.respond(pending.id, 'deny');
+    if (paused) this.approvals.refuseAll('paused');
     return { paused };
   }
 
@@ -595,7 +617,7 @@ export class Host {
         id: 'mcp.approval.respond',
         title: 'Answer an agent call waiting for approval',
         description:
-          'Allows the call once, allows the tool for this agent until Quiver restarts (session), allows the tool for good by adding a global rule (always), or denies the call. Only the UI answers.',
+          'Allows the call once, allows the tool for this agent until Quiver restarts (session), allows the tool for good by adding an allow rule (always: in the workspace rules when one of them matches the tool, otherwise the global ones), or denies the call. Only the UI answers.',
         scope: 'global',
         hidden: true,
         input: z.object({ id: z.string(), choice: z.enum(['once', 'session', 'always', 'deny']) }),
@@ -603,11 +625,12 @@ export class Host {
           if (ctx.caller !== 'ui') throw new QuiverError('INVALID_INPUT', 'Only the Quiver window answers approvals');
           const pending = this.approvals.list().find((p) => p.id === id);
           if (!pending) throw new QuiverError('NOT_FOUND', `No approval ${id} is waiting; it may have been answered or timed out`);
-          if (choice === 'always') {
-            const mcp = this.config.get().mcp;
-            await this.config.update({ mcp: { ...mcp, permissions: { ...mcp.permissions, rules: upsertRule(mcp.permissions.rules, { match: pending.commandId, action: 'allow' }) } } });
-          }
-          return { answered: this.approvals.respond(id, choice), choice };
+          // Answer first, so the call cannot time out while the rule is written. A workspace rule lets through only
+          // the calls waiting in that workspace.
+          const level = choice === 'always' ? this.allowLevel(pending) : undefined;
+          const answered = this.approvals.respond(id, choice, level === 'workspace' ? { workspaceId: pending.workspace?.id ?? null } : {});
+          if (level) await this.allowForGood(pending, level);
+          return { answered, choice, level };
         },
       }),
       defineCommand({
@@ -663,17 +686,17 @@ export class Host {
             return { rules: (await this.config.update({ mcp: { ...mcp, permissions: { ...mcp.permissions, rules: apply(mcp.permissions.rules) } } })).mcp.permissions.rules };
           }
           if (!ctx.workspace) throw new QuiverError('NO_WORKSPACE', 'Workspace rules need an open workspace');
-          return this.writeWorkspaceRules(ctx.workspace, apply(await readWorkspaceRules(ctx.workspace)));
+          return this.writeWorkspaceRules(ctx.workspace.id, apply(workspaceRulesFor(this.config.get().mcp, ctx.workspace.id)));
         },
       }),
       defineCommand({
         id: 'mcp.permissions.workspace',
         title: 'Workspace agent rules',
-        description: 'The rules for agents of this workspace, kept on this machine in .quiver/local. They come before the global rules.',
+        description: 'The rules for agents of this workspace, kept on this machine in the global config, never in the project. They come before the global rules.',
         scope: 'workspace',
         hidden: true,
         input: z.object({}),
-        handler: async (_input, ctx) => ({ rules: await readWorkspaceRules(ctx.workspace) }),
+        handler: async (_input, ctx) => ({ rules: workspaceRulesFor(this.config.get().mcp, ctx.workspace!.id) }),
       }),
       defineCommand({
         id: 'mcp.permissions.setWorkspace',
@@ -684,7 +707,7 @@ export class Host {
         input: z.object({ rules: z.array(ruleSchema) }),
         handler: async ({ rules }, ctx) => {
           if (ctx.caller === 'mcp') throw new QuiverError('INVALID_INPUT', 'Agents cannot change their own permissions');
-          return this.writeWorkspaceRules(ctx.workspace!, rules);
+          return this.writeWorkspaceRules(ctx.workspace!.id, rules);
         },
       }),
       // The recording is the user's view of what agents do, so none of it is a tool agents can call.

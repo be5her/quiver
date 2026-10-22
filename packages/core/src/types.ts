@@ -2,7 +2,7 @@ import type { NetworkConfig } from './network';
 import type { ActivityBarLayout } from './activity-bar';
 import type { McpAgent, McpRecordingStatus } from './models/mcp-recording';
 import type { AgentCallDecision, ApprovalOutcome, ApprovalRequest, PendingApproval } from './approvals';
-import type { AgentPermissions } from './permissions';
+import type { AgentPermissionRule, AgentPermissions } from './permissions';
 import type { LogsSession } from './models/logs';
 import type { z } from 'zod';
 
@@ -36,8 +36,10 @@ export interface McpConfig {
   port: number;
   /** Mirrors `permissions.mode === 'allow'` for older builds. Setting it alone switches the mode between `read-only` and `allow`. */
   allowMutating: boolean;
-  /** What agents may call: the mode for mutating calls no rule matches, and the rules. Workspace rules sit in `.quiver/local`. */
+  /** What agents may call: the mode for mutating calls no rule matches, and the rules for every workspace. */
   permissions: AgentPermissions;
+  /** Each workspace's own rules, by workspace id, which come before `permissions.rules`. Per machine, never in the project. */
+  workspaceRules: Record<string, AgentPermissionRule[]>;
   /** Every MCP call is refused while true; the tool list stays as it is. */
   paused: boolean;
 }
@@ -182,7 +184,8 @@ export interface HostApi {
   web?: WebSessionsApi;
   /** Asks the user about an agent's call the permissions say to ask about. Absent in hosts without a UI, where such calls are refused. */
   approvals?: {
-    request(request: ApprovalRequest): Promise<ApprovalOutcome>;
+    /** `signal` aborts when the agent goes away, which refuses the call instead of leaving it waiting. */
+    request(request: ApprovalRequest, signal?: AbortSignal): Promise<ApprovalOutcome>;
   };
   /** Broadcast an event to every UI surface. */
   emit<E extends HostEventName>(event: E, payload: HostEvents[E]): void;
@@ -194,6 +197,8 @@ export interface CommandContext {
   host: HostApi;
   /** The agent behind an `mcp` call, as the MCP layer identified it. */
   agent?: McpAgent;
+  /** Aborts when the caller goes away: an MCP client's connection closed or it cancelled the call. */
+  signal?: AbortSignal;
 }
 
 export type AnyZodObject = z.ZodObject<z.ZodRawShape>;
