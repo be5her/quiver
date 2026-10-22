@@ -145,11 +145,25 @@ async function labels(root: string, status: GitStatus): Promise<GitConflict['lab
   return conflictLabels(info);
 }
 
+/** The operation's commit that brings the incoming side; a revert's and a stash apply's side has none of its own. */
+const INCOMING_HEAD: Partial<Record<NonNullable<GitStatus['operation']>, string>> = { merge: 'MERGE_HEAD', 'cherry-pick': 'CHERRY_PICK_HEAD', rebase: 'REBASE_HEAD' };
+
+/** The commits ours and theirs come from (HEAD and the operation's incoming commit), for blaming a side. */
+async function sideCommits(root: string, status: GitStatus): Promise<GitConflict['commits']> {
+  const hash = async (ref: string) => {
+    const r = await local.git(root, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { allowFailure: true });
+    return r.code === 0 ? r.stdout.trim() || undefined : undefined;
+  };
+  const incoming = status.operation ? INCOMING_HEAD[status.operation] : undefined;
+  const [ours, theirs] = await Promise.all([hash('HEAD'), incoming ? hash(incoming) : undefined]);
+  return { ...(ours ? { ours } : {}), ...(theirs ? { theirs } : {}) };
+}
+
 const get = defineCommand({
   id: 'git.conflict.get',
   title: 'Get git conflict',
   description:
-    'One conflicted file: kind (both-modified, both-added, both-deleted, deleted-by-us, deleted-by-them, added-by-us, added-by-them, from git.status), the three index stages as ours (stage 2), theirs (stage 3) and base (stage 1, the common ancestor), each null when that side has no file, the working file with its conflict markers, and labels naming what ours and theirs are. In a merge, cherry-pick or revert ours is the current branch; in a rebase they swap: ours is the branch being rebased onto, theirs the commit being replayed. A binary file or one over 2 MB comes back without contents (binary, tooLarge). markerSize is the length of its conflict markers (the conflict-marker-size attribute, 7 by default). Refused for a path with no conflict (details.reason "not-unmerged").',
+    'One conflicted file: kind (both-modified, both-added, both-deleted, deleted-by-us, deleted-by-them, added-by-us, added-by-them, from git.status), the three index stages as ours (stage 2), theirs (stage 3) and base (stage 1, the common ancestor), each null when that side has no file, the working file with its conflict markers, and labels naming what ours and theirs are. In a merge, cherry-pick or revert ours is the current branch; in a rebase they swap: ours is the branch being rebased onto, theirs the commit being replayed. commits gives the full hashes the sides come from, to blame a side at (git.blame with ref): ours is HEAD, theirs the incoming commit (MERGE_HEAD, CHERRY_PICK_HEAD or REBASE_HEAD; absent in a revert or after a stash apply). A binary file or one over 2 MB comes back without contents (binary, tooLarge). markerSize is the length of its conflict markers (the conflict-marker-size attribute, 7 by default). Refused for a path with no conflict (details.reason "not-unmerged").',
   scope: 'workspace',
   input: GitConflictGetInputSchema,
   handler: async ({ path: input }, ctx): Promise<GitConflict> => {
@@ -177,6 +191,7 @@ const get = defineCommand({
       base: text(base),
       working: text(file),
       labels: await labels(root, status),
+      commits: await sideCommits(root, status),
       binary,
       tooLarge,
       markerSize: size,

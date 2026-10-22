@@ -368,6 +368,12 @@ export interface GitConflict {
    * swap: ours is the branch being rebased onto and theirs the commit being replayed.
    */
   labels: { ours: string; theirs: string };
+  /**
+   * The commits the sides come from, as full hashes, so a side can be blamed: ours is HEAD, theirs the commit coming
+   * in (MERGE_HEAD, CHERRY_PICK_HEAD or REBASE_HEAD). Theirs is absent in a revert (its incoming side is the reverted
+   * commit's parent, not a commit of its own) and after a stash apply.
+   */
+  commits: { ours?: string; theirs?: string };
   /** A side or the file on disk is binary (a NUL in its first 8000 bytes): no contents then, only a whole side can be taken. */
   binary: boolean;
   /** A side or the file on disk is over 2 MB: no contents then, only a whole side can be taken. */

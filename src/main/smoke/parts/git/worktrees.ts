@@ -1,15 +1,16 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { GitBranch, GitCommit, GitFileContent, GitStash, GitStatus, GitWorktree, HostEvents, WorkspaceInfo } from '@quiver/core';
+import type { GitBlame, GitBranch, GitCommit, GitConflict, GitFileContent, GitPrDraft, GitStash, GitStatus, GitWorktree, HostEvents, WorkspaceInfo } from '@quiver/core';
 import { runToEnd } from '@quiver/core/node';
 import { until, type RpcResult, type SmokeSection } from '../../part';
 
 // Git worktrees, in a repository of its own in a temporary folder whose worktrees go beside it (the default
 // `<repo>.worktrees/<branch>`, and folders named by hand): add with a new and an existing branch, the list, the branch
 // list's worktreePath, checkout and delete refused with the worktree named, lock and unlock, remove refused for the
-// main, the current, an open, a locked and a dirty worktree, prune; then status, stage, commit, stash, a file at the
-// index, an operation in progress and the watcher inside a linked worktree opened as a workspace; agents gated. The UI
+// main, the current, an open, a locked and a dirty worktree, prune; then status, stage, commit, blame, a pull request
+// draft, stash, a file at the index, an operation in progress with its conflict read and resolved, and the watcher
+// inside a linked worktree opened as a workspace; agents gated. The UI
 // check shows the Worktrees section, the New worktree dialog, the Branches tab badge and the status bar marker.
 
 /** Folders compare as git and Windows do: either slash, and case on a drive path. */
@@ -190,6 +191,19 @@ const section: SmokeSection = async (t) => {
       staged.files.some((f) => f.path === 'feature.txt' && f.index === 'A') && indexed.content === 'feature\n' && fromMain?.head === commit.hash && !mainClean.files.some((f) => f.path === 'feature.txt'),
       { staged: staged.files, indexed, fromMain, main: mainClean.files },
     );
+    // Blame and the pull request draft read the linked worktree's own HEAD and files, with the refs shared.
+    const linkedBlame = await run<GitBlame>('git.blame', { path: 'feature.txt' }, linked.id);
+    check(
+      'git worktrees: blame in a linked worktree gives its lines to the commit made there',
+      linkedBlame.lines.length === 1 && linkedBlame.lines[0].commit === commit.hash && linkedBlame.commits[commit.hash]?.summary === 'Feature in a worktree',
+      linkedBlame,
+    );
+    const linkedDraft = await run<GitPrDraft>('git.pr.draft', {}, linked.id);
+    check(
+      "git worktrees: a pull request draft in a linked worktree is of its branch against the shared main, with the worktree's commit and file",
+      linkedDraft.head === 'feat/wt' && linkedDraft.base === 'main' && linkedDraft.commits.map((c) => c.subject).join() === 'Feature in a worktree' && linkedDraft.files.map((f) => f.path).join() === 'feature.txt',
+      { head: linkedDraft.head, base: linkedDraft.base, baseRef: linkedDraft.baseRef, commits: linkedDraft.commits, files: linkedDraft.files },
+    );
     await fs.writeFile(path.join(wt1Path, 'feature.txt'), 'feature, changed\n');
     await run('git.stash.push', { message: 'linked stash' }, linked.id);
     const stashesLinked = await run<GitStash[]>('git.stash.list', {}, linked.id);
@@ -213,6 +227,20 @@ const section: SmokeSection = async (t) => {
     await sh(wt1Path, 'commit', '-q', '-am', 'Feature app');
     const merge = await run<{ conflicts: string[]; status: GitStatus }>('git.merge', { ref: 'side' }, linked.id);
     const mainDuring = await run<GitStatus>('git.status', {}, ws.id);
+    // The conflict editor's commands there: the stages, and labels read from the linked worktree's own MERGE_MSG.
+    const linkedConflict = await run<GitConflict>('git.conflict.get', { path: 'app.txt' }, linked.id);
+    check(
+      'git worktrees: conflict get in a linked worktree gives its stages and labels its branch and the one merged',
+      linkedConflict.kind === 'both-modified' && linkedConflict.operation === 'merge' && linkedConflict.ours === 'feature app\n' && linkedConflict.theirs === 'side\n' && linkedConflict.base === 'one\n' && linkedConflict.labels.ours === 'feat/wt' && linkedConflict.labels.theirs === 'side',
+      linkedConflict,
+    );
+    const linkedResolved = await run<GitStatus>('git.conflict.resolve', { path: 'app.txt', content: 'feature and side app\n' }, linked.id);
+    const mainUntouched = await fs.readFile(path.join(repo, 'app.txt'), 'utf8');
+    check(
+      "git worktrees: conflict resolve in a linked worktree writes and stages its file, leaving the main worktree's alone",
+      linkedResolved.operation === 'merge' && !linkedResolved.files.some((f) => f.path === 'app.txt' && f.index === 'U') && (await fs.readFile(path.join(wt1Path, 'app.txt'), 'utf8')) === 'feature and side app\n' && mainUntouched === 'one\n',
+      { files: linkedResolved.files, mainUntouched },
+    );
     await run('git.operation.abort', {}, linked.id);
     const linkedAfter = await run<GitStatus>('git.status', {}, linked.id);
     check(
@@ -350,7 +378,7 @@ const section: SmokeSection = async (t) => {
         check('git worktrees ui: the status bar has no worktree marker in the main worktree', marker === false);
         await js(`document.querySelector('[data-testid=git-worktrees]')?.scrollIntoView()`);
         await wait(150);
-        await shot('33a-git-worktrees-section-light');
+        await shot('32wa-git-worktrees-section-light');
 
         // New worktree: the folder follows the branch name.
         await click('[data-testid=git-worktree-new]');
@@ -359,10 +387,10 @@ const section: SmokeSection = async (t) => {
         const expected = path.join(folder, 'quiver.worktrees', 'ui-side');
         const filled = await until(async () => same(String(await js(`document.querySelector('[data-testid=git-worktree-path]')?.value ?? ''`)), expected), 3000);
         check('git worktrees ui: New worktree opens a dialog whose folder follows the new branch name', dialogShown && filled, await js(`document.querySelector('[data-testid=git-worktree-path]')?.value ?? null`));
-        await shot('33b-git-worktree-dialog-light');
+        await shot('32wb-git-worktree-dialog-light');
         await js(`document.documentElement.classList.add('dark')`);
         await wait(150);
-        await shot('33c-git-worktree-dialog-dark');
+        await shot('32wc-git-worktree-dialog-dark');
         await js(`document.documentElement.classList.remove('dark')`);
         await click('[data-testid=git-worktree-create]');
         const created = await until(async () => (await rowsOf()).includes('ui/side::') && (await exists(path.join(expected, 'app.txt'))), 8000);
@@ -385,7 +413,7 @@ const section: SmokeSection = async (t) => {
         await js(`(() => { const el = ${visible('[data-testid=git-branches-row][data-name="ui/side"]')}; const r = el.getBoundingClientRect(); el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 40, clientY: r.top + r.height / 2 })); })()`);
         const menu = await waitFor(`Boolean(document.querySelector('[data-testid=context-menu] [data-testid=git-menu-open-worktree]')) && Boolean(document.querySelector('[data-testid=context-menu] [data-testid=git-menu-new-worktree]'))`, 2000);
         check('git worktrees ui: a branch in another worktree has Open worktree in its menu, beside New worktree from branch', menu);
-        await shot('33d-git-branches-worktree-light');
+        await shot('32wd-git-branches-worktree-light');
         await js(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
         await js(`document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))`);
         await wait(150);
@@ -406,7 +434,7 @@ const section: SmokeSection = async (t) => {
         const currentBranches = () => js(`[...document.querySelectorAll('[data-testid=git-branch][data-current=true]')].map((r) => r.getAttribute('data-name'))`) as Promise<string[]>;
         const sidebarCurrent = await until(async () => JSON.stringify(await currentBranches()) === '["ui/side"]', 4000);
         check('git worktrees ui: in the linked worktree the sidebar marks its own branch current, not the main worktree\'s', sidebarCurrent, await currentBranches());
-        await shot('33e-git-worktree-linked-light');
+        await shot('32we-git-worktree-linked-light');
 
         // Back on the main worktree: close the linked workspace, then remove it from its row after asking.
         await click(`[data-testid=workspace-tab][data-drag-id="${ws.id}"]`);

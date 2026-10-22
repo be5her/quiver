@@ -1,7 +1,7 @@
 import { Component, computed, effect, inject, input, linkedSignal, signal, untracked, viewChild } from '@angular/core';
 import { DEFAULT_MARKER_SIZE, conflictMarkerLines, conflictedPaths, dropAddedFinalNewline, type GitConflict, type GitConflictKind, type GitStatus } from '@quiver/core';
 import { AppState, Badge, Button, CodeEditor, ConflictEditor, Dialogs, EmptyState, HostBridge, Icon, IconButton, Spinner, TabsState, Toasts, invokeResource, type Tab, type TabComponent } from '@quiver/ui';
-import { Check, ChevronDown, ChevronUp, GitMerge, RefreshCw } from 'lucide';
+import { Check, ChevronDown, ChevronUp, FileUser, GitMerge, RefreshCw } from 'lucide';
 import { GitActions } from './git-actions';
 import { injectGitChanged, injectReloadWhenShown, tabVisible } from './git-events';
 import { errorReason, languageForPath } from './git-format';
@@ -46,6 +46,14 @@ const KIND_TEXT: Record<GitConflictKind, string> = {
           </span>
         }
         <span class="flex-1"></span>
+        @if (c && view() !== 'resolved') {
+          @if (blameRef(c, 'ours'); as ref) {
+            <button qButton size="sm" variant="ghost" [icon]="icons.FileUser" data-testid="git-conflict-blame-ours" [attr.data-ref]="ref" [title]="'Blame the file at ' + c.labels.ours" (click)="actions.openBlame(path(), ref)">Blame current</button>
+          }
+          @if (blameRef(c, 'theirs'); as ref) {
+            <button qButton size="sm" variant="ghost" [icon]="icons.FileUser" data-testid="git-conflict-blame-theirs" [attr.data-ref]="ref" [title]="'Blame the file at ' + c.labels.theirs" (click)="actions.openBlame(path(), ref)">Blame incoming</button>
+          }
+        }
         <button qButton size="sm" variant="ghost" [icon]="icons.RefreshCw" [loading]="conflict.isLoading()" (click)="reload()">Refresh</button>
       </div>
       @switch (view()) {
@@ -156,7 +164,13 @@ export class GitConflictTab implements TabComponent {
   readonly tab = input.required<Tab>();
   readonly scope = input.required<string>();
 
-  protected readonly icons = { Check, ChevronDown, ChevronUp, GitMerge, RefreshCw };
+  protected readonly icons = { Check, ChevronDown, ChevronUp, FileUser, GitMerge, RefreshCw };
+
+  /** The commit to blame a side at, when that side has the file: who wrote the current or the incoming lines. */
+  protected blameRef(c: GitConflict, side: 'ours' | 'theirs'): string | null {
+    const without: GitConflictKind[] = side === 'ours' ? ['deleted-by-us', 'added-by-them', 'both-deleted'] : ['deleted-by-them', 'added-by-us', 'both-deleted'];
+    return without.includes(c.kind) ? null : (c.commits?.[side] ?? null);
+  }
   protected readonly path = computed(() => String(this.tab().data?.['path'] ?? ''));
   protected readonly name = computed(() => this.path().split('/').pop() ?? this.path());
   protected readonly language = computed(() => languageForPath(this.path()));

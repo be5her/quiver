@@ -83,6 +83,12 @@ const section: SmokeSection = async (t) => {
         !text.tooLarge,
       text,
     );
+    const hashOf = async (ref: string) => (await sh('rev-parse', ref)).stdout.trim();
+    check(
+      'git conflict: get gives the commits the sides come from, to blame them at: HEAD and the branch merged',
+      text.commits.ours === (await hashOf('main')) && text.commits.theirs === (await hashOf('side')),
+      text.commits,
+    );
     const deleted = await get('b.txt');
     check('git conflict: a file the other side deleted is deleted-by-them, with no theirs', deleted.kind === 'deleted-by-them' && deleted.ours === 'b main\n' && deleted.theirs === null && deleted.base === 'b\n' && deleted.working === 'b main\n', deleted);
     const binary = await get('bin.dat');
@@ -138,7 +144,9 @@ const section: SmokeSection = async (t) => {
       rebased.operation === 'rebase' &&
         rebased.ours === 'one\ntwo main and side\nthree\n' &&
         rebased.theirs === 'one\ntwo topic\nthree\n' &&
-        JSON.stringify(rebased.labels) === JSON.stringify({ ours: 'main', theirs: `${topicLine} (from topic)` }),
+        JSON.stringify(rebased.labels) === JSON.stringify({ ours: 'main', theirs: `${topicLine} (from topic)` }) &&
+        rebased.commits.ours === (await hashOf('main')) &&
+        rebased.commits.theirs === topic,
       rebased,
     );
 
@@ -209,9 +217,9 @@ const section: SmokeSection = async (t) => {
     await sh('revert', '--no-edit', 'HEAD~1');
     const reverting = await get('a.txt');
     check(
-      'git conflict: a revert labels ours the current branch and theirs the revert of the commit',
-      reverting.operation === 'revert' && JSON.stringify(reverting.labels) === JSON.stringify({ ours: 'pick', theirs: `revert of ${await short('HEAD~1')}` }),
-      reverting.labels,
+      'git conflict: a revert labels ours the current branch and theirs the revert of the commit, with no incoming commit to blame',
+      reverting.operation === 'revert' && JSON.stringify(reverting.labels) === JSON.stringify({ ours: 'pick', theirs: `revert of ${await short('HEAD~1')}` }) && reverting.commits.theirs === undefined && reverting.commits.ours === (await hashOf('HEAD')),
+      { labels: reverting.labels, commits: reverting.commits },
     );
     await run('git.conflict.resolve', { path: 'a.txt', take: 'base' }, id);
     check('git conflict: take base writes the common ancestor (in a revert, the reverted commit) and stages it', (await read('a.txt')) === 'one\ntwo pick\nthree\n' && !(await unmerged('a.txt')));
@@ -333,15 +341,29 @@ const section: SmokeSection = async (t) => {
           opened && JSON.stringify(first) === JSON.stringify({ counter: 'Conflict 1 of 2', ours: 'main', theirs: 'side', bars: 2, oursLines: ['first ours', 'second ours'], theirsLines: ['first theirs', 'second theirs'], resolvable: false }),
           first,
         );
-        await shot('33a-git-conflict-editor-light');
+        await shot('32ca-git-conflict-editor-light');
         await js(`document.documentElement.classList.add('dark')`);
         await wait(150);
-        await shot('33b-git-conflict-editor-dark');
+        await shot('32cb-git-conflict-editor-dark');
         await js(`document.documentElement.classList.remove('dark')`);
         await click('[data-testid=git-conflict-next]');
         await wait(100);
         const stepped = ((await state()) as { counter: string } | null)?.counter;
         check('git conflict ui: Next moves the counter to the second conflict', stepped === 'Conflict 2 of 2', stepped);
+
+        // Blame incoming opens the file's blame at the commit merged in; the conflict tab is left as it was.
+        const sideHash = (await git('rev-parse', 'side')).stdout.trim();
+        const blameButtons = await js(`(() => { const t = ${tab}; return { ours: t?.querySelector('[data-testid=git-conflict-blame-ours]')?.getAttribute('data-ref') ?? null, theirs: t?.querySelector('[data-testid=git-conflict-blame-theirs]')?.getAttribute('data-ref') ?? null }; })()`);
+        await click('[data-testid=git-conflict-tab][data-path="conf.txt"] [data-testid=git-conflict-blame-theirs]');
+        const blameTab = visible(`[data-testid=git-blame-tab][data-path="conf.txt"][data-ref="${sideHash}"]`);
+        const blamed = await waitFor(`${blameTab}?.getAttribute('data-loaded') === 'true' && Boolean(${blameTab}?.querySelector('.cm-content')?.textContent.includes('second theirs'))`, 6000);
+        await click('[data-testid=tab][data-title="conf.txt (conflict)"]');
+        const backOnConflict = await waitFor(`${tab}?.getAttribute('data-view') === 'text'`, 3000);
+        check(
+          'git conflict ui: Blame incoming opens the blame of the file at the commit merged in, and the conflict tab stays as it was',
+          (blameButtons as { theirs: string | null }).theirs === sideHash && Boolean((blameButtons as { ours: string | null }).ours) && blamed && backOnConflict,
+          { blameButtons, sideHash, blamed, backOnConflict },
+        );
 
         // Edits made here survive a reload of the same file and mark the tab unsaved; a change on disk is pointed out
         // rather than dropping them, and Use the file on disk takes it.
@@ -356,7 +378,7 @@ const section: SmokeSection = async (t) => {
         await js(`[...${tab}?.querySelectorAll('button') ?? []].find((b) => b.textContent.trim() === 'Refresh')?.click()`);
         const noted = await waitFor(`Boolean(${tab}?.querySelector('[data-testid=git-conflict-changed-on-disk]'))`, 3000);
         const stillKept = await state();
-        await shot('33e-git-conflict-changed-on-disk-light');
+        await shot('32cc-git-conflict-changed-on-disk-light');
         await click('[data-testid=git-conflict-tab][data-path="conf.txt"] [data-testid=git-conflict-use-disk]');
         const tookDisk = await waitFor(`${tab}?.querySelectorAll('[data-testid=conflict-actions]').length === 2 && !${tab}?.querySelector('[data-testid=git-conflict-changed-on-disk]')`, 3000);
         await fs.writeFile(path.join(ui, 'conf.txt'), original);
@@ -375,7 +397,7 @@ const section: SmokeSection = async (t) => {
         await js(`${tab}?.querySelector('[data-testid=conflict-actions][data-index="0"] [data-choice=theirs]')?.click()`);
         const ready = await waitFor(`${tab}?.querySelector('[data-testid=git-conflict-mark-resolved]')?.disabled === false`, 3000);
         const afterAccept = await state();
-        await shot('33c-git-conflict-accepted-light');
+        await shot('32cd-git-conflict-accepted-light');
         await click('[data-testid=git-conflict-tab][data-path="conf.txt"] [data-testid=git-conflict-mark-resolved]');
         const resolvedView = await waitFor(`${tab}?.getAttribute('data-view') === 'resolved' && Boolean(${tab}?.querySelector('[data-testid=git-conflict-continue]'))`, 6000);
         const onDisk = await fs.readFile(path.join(ui, 'conf.txt'), 'utf8');
@@ -385,7 +407,7 @@ const section: SmokeSection = async (t) => {
           ready && resolvedView && onDisk === 'head\nfirst theirs\nm1\nm2\nm3\nm4\nsecond theirs\ntail\n' && status.files.every((f) => f.index !== 'U' && f.worktree !== 'U') && status.operation === 'merge',
           { afterAccept, onDisk, files: status.files },
         );
-        await shot('33d-git-conflict-resolved-light');
+        await shot('32ce-git-conflict-resolved-light');
         await click('[data-testid=git-conflict-tab][data-path="conf.txt"] [data-testid=git-conflict-continue]');
         const continued = await until(async () => (await run<GitStatus>('git.status', {}, uiWs!.id)).operation === undefined, 6000);
         check('git conflict ui: Continue from the tab finishes the merge', continued);
