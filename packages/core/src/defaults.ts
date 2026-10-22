@@ -13,7 +13,7 @@ export function defaultGlobalConfig(): GlobalConfig {
     openWorkspaces: [],
     globalVariables: [],
     mcp: { enabled: true, port: DEFAULT_MCP_PORT, allowMutating: false },
-    teleport: { proxies: [], pins: [], tshPath: '', loginOnLaunch: false },
+    teleport: { proxies: [], pins: [], tshPath: '', loginOnLaunch: false, protectedKubes: [], agentActionsOnProtected: false },
     mock: { ports: [] },
     updates: { channel: 'stable' },
     activityBar: defaultActivityBarLayout(),

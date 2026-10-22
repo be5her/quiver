@@ -70,7 +70,7 @@ export class TeleportActions {
     await this.host.invoke('teleport.db.disconnect', { tunnelId: tunnel.id }, null);
   }
 
-  /** Open the read-only query view of a Kubernetes cluster. */
+  /** Open the query view of a Kubernetes cluster. */
   openKubeQuery(proxy: string, name: string): void {
     this.tabs.openTab(untracked(this.app.scope), { type: 'teleport.kube', title: name, data: { id: `${proxy}|${name}`, proxy, cluster: name } }, { singletonKey: `teleport.kube:${proxy}|${name}` });
   }
@@ -79,6 +79,12 @@ export class TeleportActions {
   async setTerminalKubeContext(proxy: string, name: string): Promise<void> {
     await this.host.invoke('teleport.kube.login', { proxy, cluster: name }, null);
     this.toasts.notify(`kubectl in your terminals now points at ${name}`, 'success');
+  }
+
+  /** Protected clusters ask for their name before an action, and refuse agents. */
+  async setKubeProtected(proxy: string, name: string, on: boolean): Promise<void> {
+    await this.host.invoke('teleport.kube.protect', { proxy, cluster: name, protected: on }, null);
+    this.toasts.notify(on ? `${name} is protected: actions need its name typed, agents may not run them` : `${name} is no longer protected`, on ? 'success' : 'info');
   }
 
   async setPin(pin: TeleportPin, pinned: boolean): Promise<void> {

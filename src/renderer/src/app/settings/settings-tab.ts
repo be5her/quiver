@@ -124,6 +124,10 @@ export class SettingsTab implements TabComponent {
     void this.update({ teleport: { ...config.teleport, loginOnLaunch: (event.target as HTMLInputElement).checked } });
   }
 
+  protected toggleAgentsOnProtected(config: GlobalConfig, event: Event): void {
+    void this.update({ teleport: { ...config.teleport, agentActionsOnProtected: (event.target as HTMLInputElement).checked } });
+  }
+
   protected async addCluster(): Promise<void> {
     const proxy = this.cluster().proxy.trim();
     if (!proxy) return;

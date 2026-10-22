@@ -1,5 +1,5 @@
 import { Component, computed, effect, input, output, untracked } from '@angular/core';
-import { KUBE_CAN_I_VERBS, KUBE_OUTPUTS, KUBE_RESOURCE_TYPES, KUBE_TAIL_MAX, closestName, type KubeField } from '@quiver/core';
+import { KUBE_CAN_I_VERBS, KUBE_OUTPUTS, KUBE_RESOURCE_TYPES, KUBE_TAIL_MAX, closestName, type KubeActionField, type KubeField } from '@quiver/core';
 import { Checkbox, Input, Select, cn } from '@quiver/ui';
 import { KubeFieldBox } from './kube-field-box';
 import type { KubeLookups } from './kube-lookups';
@@ -7,7 +7,10 @@ import type { KubeValues } from './kube-query-model';
 
 type FieldValue = KubeValues[string];
 
-/** One typed field of a Kubernetes operation, with pickers filled from the cluster where they help. */
+/** Number fields of actions, edited like the tail count. */
+const COUNTS: Record<string, string> = { replicas: '0-1000', revision: 'previous', grace: 'default' };
+
+/** One typed field of a Kubernetes operation or action, with pickers filled from the cluster where they help. */
 @Component({
   selector: 'q-kube-field-editor',
   imports: [Checkbox, Input, KubeFieldBox, Select],
@@ -15,8 +18,10 @@ type FieldValue = KubeValues[string];
   host: { class: 'contents' },
 })
 export class KubeFieldEditor {
-  readonly field = input.required<KubeField>();
+  readonly field = input.required<KubeField | KubeActionField>();
   readonly values = input.required<KubeValues>();
+  /** Actions: the resource type a `name` field names, e.g. `deployments`; reads take it from the `resource` field. */
+  readonly nameKind = input<string | null>(null);
   readonly error = input<string>();
   readonly lookups = input.required<KubeLookups>();
   /** The namespace the pickers look in. */
@@ -27,11 +32,16 @@ export class KubeFieldEditor {
   protected readonly verbs = KUBE_CAN_I_VERBS;
   protected readonly outputs = KUBE_OUTPUTS;
   protected readonly tailPlaceholder = `1-${KUBE_TAIL_MAX}`;
-  /** Pods, names and deployments share one layout: a text field with the matching names as suggestions. */
+  /** Pods, names, deployments and nodes share one layout: a text field with the matching names as suggestions. */
   protected readonly layout = computed(() => {
     const kind = this.field().kind;
-    return kind === 'pod' || kind === 'name' || kind === 'deployment' ? 'names' : kind;
+    if (kind === 'pod' || kind === 'name' || kind === 'deployment' || kind === 'node') return 'names';
+    if (kind in COUNTS) return 'count';
+    if (kind === 'containerName' || kind === 'jobName') return 'text';
+    return kind;
   });
+  protected readonly countPlaceholder = computed(() => COUNTS[this.field().kind] ?? '');
+  protected readonly options = computed(() => ('options' in this.field() ? (this.field() as KubeActionField).options : undefined) ?? []);
   protected readonly value = computed(() => this.values()[this.field().key]);
   protected readonly text = computed(() => {
     const value = this.value();
@@ -45,7 +55,8 @@ export class KubeFieldEditor {
     const kind = this.field().kind;
     if (kind === 'pod') return 'pods';
     if (kind === 'deployment') return 'deployments';
-    if (kind === 'name') return String(this.values()['resource'] ?? '');
+    if (kind === 'node') return 'nodes';
+    if (kind === 'name') return this.nameKind() ?? String(this.values()['resource'] ?? '');
     return '';
   });
   protected readonly names = computed(() => {

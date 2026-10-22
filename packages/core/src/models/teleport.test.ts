@@ -6,6 +6,7 @@ import {
   dbKindForProtocol,
   findCluster,
   formatRemaining,
+  isKubeProtected,
   isLoginRequiredMessage,
   isPinned,
   migrateTeleportConfig,
@@ -16,6 +17,7 @@ import {
   proxiesToAutoLogin,
   proxyAddress,
   sameProxy,
+  setKubeProtected,
   togglePin,
   tshSettingToArgv,
 } from './teleport';
@@ -110,14 +112,43 @@ describe('pins and config', () => {
   });
 
   it('migrates the old single proxy setting', () => {
-    expect(migrateTeleportConfig({ proxy: 'a.example.com:443', tshPath: '', loginOnLaunch: true })).toEqual({ proxies: ['a.example.com:443'], pins: [], tshPath: '', loginOnLaunch: true });
+    expect(migrateTeleportConfig({ proxy: 'a.example.com:443', tshPath: '', loginOnLaunch: true })).toEqual({
+      proxies: ['a.example.com:443'],
+      pins: [],
+      tshPath: '',
+      loginOnLaunch: true,
+      protectedKubes: [],
+      agentActionsOnProtected: false,
+    });
     expect(migrateTeleportConfig({ proxies: ['a.example.com:443'], proxy: 'A.example.com', pins: [{ proxy: 'x', kind: 'db', name: 'y' }] })).toEqual({
       proxies: ['a.example.com:443'],
       pins: [{ proxy: 'x', kind: 'db', name: 'y' }],
       tshPath: '',
       loginOnLaunch: false,
+      protectedKubes: [],
+      agentActionsOnProtected: false,
     });
-    expect(migrateTeleportConfig({})).toEqual({ proxies: [], pins: [], tshPath: '', loginOnLaunch: false });
+    expect(migrateTeleportConfig({})).toEqual({ proxies: [], pins: [], tshPath: '', loginOnLaunch: false, protectedKubes: [], agentActionsOnProtected: false });
+  });
+
+  it('keeps protected Kubernetes clusters and drops malformed ones', () => {
+    const raw = { protectedKubes: [{ proxy: 'a.example.com:443', name: 'prod' }, { proxy: 'a.example.com:443', name: '' }, { name: 'x' }, null], agentActionsOnProtected: 'yes' };
+    const migrated = migrateTeleportConfig(raw as unknown as Parameters<typeof migrateTeleportConfig>[0]);
+    expect(migrated.protectedKubes).toEqual([{ proxy: 'a.example.com:443', name: 'prod' }]);
+    // Only a real true lets agents act on protected clusters.
+    expect(migrated.agentActionsOnProtected).toBe(false);
+  });
+
+  it('marks and unmarks protected clusters per Teleport cluster', () => {
+    let list = setKubeProtected([], { proxy: 'A.example.com', name: 'prod' }, true);
+    list = setKubeProtected(list, { proxy: 'a.example.com:443', name: 'prod' }, true);
+    list = setKubeProtected(list, { proxy: 'b.example.com', name: 'prod' }, true);
+    expect(list).toHaveLength(2);
+    expect(isKubeProtected(list, 'a.example.com:443', 'prod')).toBe(true);
+    expect(isKubeProtected(list, 'a.example.com', 'dev')).toBe(false);
+    list = setKubeProtected(list, { proxy: 'a.example.com', name: 'prod' }, false);
+    expect(isKubeProtected(list, 'a.example.com', 'prod')).toBe(false);
+    expect(isKubeProtected(list, 'b.example.com:443', 'prod')).toBe(true);
   });
 });
 

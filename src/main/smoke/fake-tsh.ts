@@ -35,7 +35,9 @@ export interface FakeTsh {
  * Teleport cluster. `--proxy` selects the profile like the real tsh; the tunnel is a plain
  * TCP forwarder to the in-process fake Redis. `kube login` writes the kubeconfig KUBECONFIG
  * names, and `kubectl` answers the read-only operations from canned data, logs every argv it
- * gets and refuses to run without a context from that kubeconfig.
+ * gets and refuses to run without a context from that kubeconfig. It also answers the write
+ * actions Quiver's action catalogue can produce (and refuses every other write verb), and
+ * `port-forward` opens a real listener that greets each connection with its target.
  */
 export async function writeFakeTsh(dir: string, redisPort: number): Promise<FakeTsh> {
   const stateFile = path.join(dir, 'fake-tsh-state.json');
@@ -179,8 +181,11 @@ const K_PODS = {
   'kube-system': [{ name: 'coredns-5d78-aaaaa', containers: ['coredns'], ready: '1/1', labels: { k8s: 'dns' } }],
 };
 const K_DEPLOYMENTS = { payments: ['api', 'worker'], default: ['hello'], 'kube-system': ['coredns'] };
-const K_WRITES = ['apply', 'create', 'delete', 'edit', 'patch', 'replace', 'scale', 'set', 'label', 'annotate', 'exec', 'cp', 'port-forward', 'proxy', 'run', 'drain', 'cordon', 'taint', 'debug', 'attach'];
-const K_VALUE_FLAGS = ['--namespace', '--selector', '--output', '--container', '--tail', '--since', '--sort-by'];
+const K_NODES = ['ip-10-0-0-1'];
+// Answered below only in the shapes the action catalogue produces; anything else that writes is refused.
+const K_WRITES = ['apply', 'edit', 'patch', 'replace', 'label', 'annotate', 'exec', 'cp', 'proxy', 'run', 'drain', 'taint', 'debug', 'attach', 'autoscale', 'expose'];
+const K_VALUE_FLAGS = ['--namespace', '--selector', '--output', '--container', '--tail', '--since', '--sort-by', '--replicas', '--to-revision', '--grace-period', '--address'];
+const K_KINDS = { deployments: 'deployment.apps', statefulsets: 'statefulset.apps', replicasets: 'replicaset.apps', daemonsets: 'daemonset.apps', pods: 'pod', jobs: 'job.batch' };
 const pad = (cells, widths) => cells.map((c, i) => String(c).padEnd(widths[i])).join(' ').trimEnd();
 function table(header, rows) {
   const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => String(r[i]).length)) + 2);
@@ -301,10 +306,50 @@ function kubectl(argv) {
       if (pos[1] === 'nodes') return out(table(['NAME', 'CPU(cores)', 'CPU%', 'MEMORY(bytes)', 'MEMORY%'], [['ip-10-0-0-1', '412m', '10%', '3120Mi', '41%']]));
       return out(table(['NAME', 'CPU(cores)', 'MEMORY(bytes)'], podsIn(opt).map((pod) => [pod.name, '12m', '96Mi'])));
     case 'rollout': {
+      const verbs = { restart: 'restarted', undo: 'rolled back', pause: 'paused', resume: 'resumed' };
+      if (verbs[pos[1]]) {
+        if (!K_KINDS[pos[2]] || !pos[3]) break;
+        if (pos[2] === 'deployments' && !(K_DEPLOYMENTS[ns] || []).includes(pos[3])) notFound('deployments.apps', pos[3]);
+        return out(K_KINDS[pos[2]] + '/' + pos[3] + ' ' + verbs[pos[1]]);
+      }
       const name = pos[3];
       if (!(K_DEPLOYMENTS[ns] || []).includes(name)) notFound('deployments.apps', name);
       if (pos[1] === 'status') return out('deployment "' + name + '" successfully rolled out');
       return out('deployment.apps/' + name + '\nREVISION  CHANGE-CAUSE\n1         <none>\n2         <none>');
+    }
+    case 'scale': {
+      if (!K_KINDS[pos[1]] || pos[1] === 'pods' || !pos[2] || opt.replicas === undefined || !/^\d+$/.test(opt.replicas)) break;
+      if (pos[1] === 'deployments' && !(K_DEPLOYMENTS[ns] || []).includes(pos[2])) notFound('deployments.apps', pos[2]);
+      return out(K_KINDS[pos[1]] + '/' + pos[2] + ' scaled');
+    }
+    case 'delete': {
+      if (!['pods', 'jobs'].includes(pos[1]) || !pos[2] || pos.length > 3 || opt.all || opt.selector) break;
+      if (pos[1] === 'pods' && !findPod(pos[2])) notFound('pods', pos[2]);
+      return out(K_KINDS[pos[1]] + ' "' + pos[2] + '" deleted');
+    }
+    case 'cordon':
+    case 'uncordon':
+      if (!K_NODES.includes(pos[1])) notFound('nodes', pos[1]);
+      return out('node/' + pos[1] + ' ' + pos[0] + 'ed');
+    case 'set': {
+      if (pos[1] !== 'image' || !K_KINDS[pos[2]] || !pos[3] || !/^[a-z0-9-]+=\S+$/.test(pos[4] || '')) break;
+      return out(K_KINDS[pos[2]] + '/' + pos[3] + ' image updated');
+    }
+    case 'create': {
+      const from = opt.from || '';
+      if (pos[1] !== 'job' || !pos[2] || !from.startsWith('cronjob/')) break;
+      return out('job.batch/' + pos[2] + ' created');
+    }
+    case 'port-forward': {
+      const target = /^(pods|services|deployments)\/([a-z0-9.-]+)$/.exec(pos[1] || '');
+      const ports = /^(\d+):(\d+)$/.exec(pos[2] || '');
+      if (!target || !ports) break;
+      if (opt.address !== '127.0.0.1') { err('error: --address must be 127.0.0.1 for the fake'); process.exit(1); }
+      if (target[1] === 'pods' && !findPod(target[2])) notFound('pods', target[2]);
+      const server = net.createServer((sock) => sock.end('fake port-forward ' + target[1] + '/' + target[2] + ':' + ports[2] + ' in ' + ns + '\n'));
+      server.on('error', (e) => { err('error: unable to listen on any of the requested ports: ' + e.message); process.exit(1); });
+      server.listen(Number(ports[1]), '127.0.0.1', () => out('Forwarding from 127.0.0.1:' + ports[1] + ' -> ' + ports[2]));
+      return;
     }
     case 'api-resources':
       return out(table(['NAME', 'SHORTNAMES', 'APIVERSION', 'NAMESPACED', 'KIND'], [['pods', 'po', 'v1', 'true', 'Pod'], ['deployments', 'deploy', 'apps/v1', 'true', 'Deployment'], ['nodes', 'no', 'v1', 'false', 'Node']]));

@@ -18,6 +18,7 @@ export * from './models/api-inherit';
 export * from './models/db';
 export * from './models/teleport';
 export * from './models/kube';
+export * from './models/kube-actions';
 export * from './models/mock';
 export * from './models/realtime';
 export * from './models/mcp';
