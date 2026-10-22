@@ -401,6 +401,25 @@ export default definePart({
       );
       const askedPreview = await asAgent('teleport.kube.action.preview', { proxy: first, cluster: 'dev-eks', action: samples[0].action });
       check('kube actions: the action preview stays open to agents under mode ask', askedPreview.ok && (await approvals()).length === 0, askedPreview.ok || askedPreview.error);
+      // A protected cluster refuses agents whatever the user answers, so under mode ask nobody is asked first.
+      const callsBeforeAskProtected = (await fakeTsh.kubectlCalls()).length;
+      const askedProtected = await asAgent('teleport.kube.action', { ...target, action: samples[0].action });
+      const askedProtectedRerun = await asAgent('teleport.kube.history.rerun', { id: actionEntries[0].id });
+      const askedProtectedForward = await asAgent('teleport.kube.portForward.start', { ...target, kind: 'services', name: 'web', namespace: 'payments', remotePort: 80 });
+      check(
+        'kube protected: under mode ask an agent is refused on a protected cluster without an approval being raised',
+        blocked(askedProtected, 'protected-cluster') &&
+          blocked(askedProtectedRerun, 'protected-cluster') &&
+          blocked(askedProtectedForward, 'protected-cluster') &&
+          (await approvals()).length === 0 &&
+          (await fakeTsh.kubectlCalls()).length === callsBeforeAskProtected,
+        {
+          action: askedProtected.ok || askedProtected.error,
+          rerun: askedProtectedRerun.ok || askedProtectedRerun.error.code,
+          forward: askedProtectedForward.ok || askedProtectedForward.error.code,
+          pending: (await approvals()).map((p) => p.commandId),
+        },
+      );
       await run('config.update', { patch: { mcp: { ...host.config.get().mcp, permissions: { ...mcpBefore.permissions, mode: 'allow' } } } }, null);
       await run('config.update', { patch: { teleport: { ...host.config.get().teleport, agentActionsOnProtected: true } } }, null);
       const agentAllowed = await asAgent('teleport.kube.action', { ...target, action: samples[0].action });

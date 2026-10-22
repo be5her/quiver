@@ -213,6 +213,22 @@ export default definePart({
       wrongToken.status === 401 && noToken.status === 401 && fromBrowser.status === 403 && right.status === 200 && rightBody.ok,
       { wrongToken: wrongToken.status, noToken: noToken.status, fromBrowser: fromBrowser.status, right: right.status },
     );
+    // An agent that read the token file must not reach the endpoint through the API client, an open tool.
+    const viaApiClient = (headerName: string, caller: 'mcp' | 'ui') =>
+      host.invoke(
+        'api.request.send',
+        { request: newApiRequest({ method: 'POST', url: cliUrl, headers: [keyValue(headerName, token)], body: { type: 'json', content: JSON.stringify({ command: 'todo.list', input: {}, workspace: folder }) } }) },
+        { caller, workspaceId: ws.id },
+      );
+    const agentRelay = await viaApiClient(CLI_TOKEN_HEADER, 'mcp');
+    const agentRelayUpper = await viaApiClient(CLI_TOKEN_HEADER.toUpperCase(), 'mcp');
+    const userRelay = await viaApiClient(CLI_TOKEN_HEADER, 'ui');
+    const relayRefused = (r: Awaited<ReturnType<typeof viaApiClient>>) => !r.ok && r.error.code === 'INVALID_INPUT' && r.error.message.includes(CLI_TOKEN_HEADER);
+    check(
+      'cli: the API client never sends the command line token, so an agent cannot relay calls to the endpoint through api.request.send',
+      relayRefused(agentRelay) && relayRefused(agentRelayUpper) && relayRefused(userRelay),
+      { agent: agentRelay.ok || agentRelay.error, agentUpper: agentRelayUpper.ok || agentRelayUpper.error.code, user: userRelay.ok || userRelay.error.code },
+    );
 
     // No app: exit 3, unless --headless=auto runs it in-process instead.
     const nowhere = await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-smoke-cli-nowhere-'));

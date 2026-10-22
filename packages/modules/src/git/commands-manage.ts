@@ -78,7 +78,8 @@ const branchDelete = defineCommand({
       // Git's -d only looks at the upstream and HEAD. A branch git.branch.list calls merged has its commits in the
       // default branch, so nothing is lost when it goes from another branch.
       const base = await local.defaultBranch(root);
-      const inDefault = base && (await local.git(root, ['merge-base', '--is-ancestor', `refs/heads/${name}`, base.ref], { allowFailure: true })).code === 0;
+      // Never the default branch itself, whose commits would trivially be "in" it.
+      const inDefault = base && base.ref !== `refs/heads/${name}` && (await local.git(root, ['merge-base', '--is-ancestor', `refs/heads/${name}`, base.ref], { allowFailure: true })).code === 0;
       if (!inDefault) throw new QuiverError('INVALID_INPUT', `${name} has commits that are not merged; delete it with force to drop them`, { reason: 'not-merged' });
       await local.git(root, ['branch', '-D', name]);
     }

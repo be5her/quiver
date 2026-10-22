@@ -99,6 +99,14 @@ export class CommandRegistry {
     }
 
     if (!ctx.host.approvals) refuse('refused', 'no-approver', `Command "${id}" needs the user's approval, and this Quiver has no window to ask in.`);
+    if (command.beforeApproval) {
+      try {
+        await command.beforeApproval(input as never, ctx);
+      } catch (err) {
+        trace.decision = 'refused';
+        throw err;
+      }
+    }
     const workspace = ctx.workspace ? { id: ctx.workspace.id, name: ctx.workspace.name, path: ctx.workspace.path } : null;
     const agent = ctx.agent ?? { name: 'unknown', version: null, userAgent: null };
     const outcome = await ctx.host.approvals!.request({ agent, workspace, commandId: id, title: command.title, input: maskArguments(input), mutating: mutates }, ctx.signal);

@@ -1,6 +1,7 @@
 import { createReadStream, promises as fs } from 'node:fs';
 import path from 'node:path';
 import {
+  CLI_TOKEN_HEADER,
   QuiverError,
   REDIRECT_STATUSES,
   baseName,
@@ -284,6 +285,11 @@ export interface BodyHooks {
  * covers the whole download, or, for a streamed body, the wait for the response's head.
  */
 export async function sendPrepared(prepared: PreparedRequest, options: SendOptions, signal?: AbortSignal, cookies?: CookieHooks, body?: BodyHooks, network?: NetworkContext): Promise<ApiResponse> {
+  // The `quiver` command line's token opens Quiver's own /cli endpoint, which runs any command as the user. An agent
+  // that read the token file must not get that through api.request.send, an open tool, so no send carries it.
+  if (hasHeader(prepared.headers, CLI_TOKEN_HEADER)) {
+    throw new QuiverError('INVALID_INPUT', `The ${CLI_TOKEN_HEADER} header is the quiver command line's own and is never sent from the API client`, { header: CLI_TOKEN_HEADER });
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error(`Timed out after ${options.timeoutMs} ms`)), options.timeoutMs);
   const onCancel = () => controller.abort(new Error('Cancelled'));

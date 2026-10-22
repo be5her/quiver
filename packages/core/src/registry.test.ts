@@ -69,9 +69,23 @@ const secret = defineCommand({
   handler: async () => 'stored',
 });
 
+/** Refuses calls to a "locked" target whatever the user would answer, so they must never be asked about. */
+const guarded = defineCommand({
+  id: 'test.guarded',
+  title: 'Guarded',
+  description: 'refuses locked targets',
+  scope: 'global',
+  mutating: true,
+  input: z.object({ target: z.string() }),
+  beforeApproval: async ({ target }) => {
+    if (target === 'locked') throw new QuiverError('MUTATION_BLOCKED', 'locked', { reason: 'locked' });
+  },
+  handler: async ({ target }) => target,
+});
+
 describe('CommandRegistry', () => {
   const registry = new CommandRegistry();
-  registry.registerModule({ id: 'test', commands: [echo, destroy, maybe, secret] });
+  registry.registerModule({ id: 'test', commands: [echo, destroy, maybe, secret, guarded] });
 
   it('validates input and runs handlers', async () => {
     const ctx: CommandContext = { caller: 'ui', host: fakeHost() };
@@ -139,6 +153,25 @@ describe('CommandRegistry', () => {
     expect(asked.at(-1)?.input).toEqual({ password: REDACTED });
   });
 
+  it('runs a command’s beforeApproval check before asking, and refuses without asking when it throws', async () => {
+    const asked: ApprovalRequest[] = [];
+    const host = (rules: { match: string; action: 'allow' | 'ask' | 'deny' }[] = []) =>
+      fakeHost({ permissions: { mode: 'ask', rules } }, (request) => {
+        asked.push(request);
+        return { approved: true, how: 'once' };
+      });
+    const trace: ExecuteTrace = {};
+    await expect(registry.execute('test.guarded', { target: 'locked' }, { caller: 'mcp', host: host() }, trace)).rejects.toMatchObject({ code: 'MUTATION_BLOCKED', details: { reason: 'locked' } });
+    expect(trace.decision).toBe('refused');
+    expect(asked).toHaveLength(0);
+    await expect(registry.execute('test.guarded', { target: 'open' }, { caller: 'mcp', host: host() })).resolves.toBe('open');
+    expect(asked).toHaveLength(1);
+    // Only before asking: an allowed call goes straight to the handler, which makes its own checks.
+    await expect(registry.execute('test.guarded', { target: 'locked' }, { caller: 'mcp', host: host([{ match: 'test.guarded', action: 'allow' }]) })).resolves.toBe('locked');
+    await expect(registry.execute('test.guarded', { target: 'locked' }, { caller: 'ui', host: host() })).resolves.toBe('locked');
+    expect(asked).toHaveLength(1);
+  });
+
   it('applies workspace rules, from the config, before global ones', async () => {
     const permissions = { mode: 'read-only' as const, rules: [{ match: 'test.destroy', action: 'allow' as const }] };
     await expect(registry.execute('test.destroy', {}, { caller: 'mcp', host: fakeHost({ permissions }), workspace: workspaceWithRules([]) })).resolves.toBe('done');
@@ -189,7 +222,7 @@ describe('CommandRegistry', () => {
   });
 
   it('lists metadata and rejects duplicates', () => {
-    expect(registry.list().map((c) => c.id)).toEqual(['test.echo', 'test.destroy', 'test.maybe', 'test.secret']);
+    expect(registry.list().map((c) => c.id)).toEqual(['test.echo', 'test.destroy', 'test.maybe', 'test.secret', 'test.guarded']);
     expect(() => registry.register('test', echo)).toThrow(/twice/);
   });
 });

@@ -42,6 +42,8 @@ export class KubeForwards {
   private readonly live = new Map<string, LiveForward>();
   /** Starts still waiting for kubectl, by target: a second identical start waits for the first instead of racing it. */
   private readonly pending = new Map<string, Promise<KubePortForward>>();
+  /** Starts past the cap check that have not settled yet, so concurrent starts to different targets cannot pass the cap together. */
+  private starting = 0;
 
   constructor(private readonly opts: KubeForwardsOptions) {}
 
@@ -78,9 +80,20 @@ export class KubeForwards {
         (spec.localPort === undefined || l.info.localPort === spec.localPort),
     );
     if (existing) return { ...existing.info };
-    if ([...this.live.values()].filter((l) => l.info.state !== 'exited').length >= MAX_FORWARDS) {
+    // Running ones, plus every start still under way (its entry, once listed, is `starting` and counted here instead).
+    if ([...this.live.values()].filter((l) => l.info.state === 'running').length + this.starting >= MAX_FORWARDS) {
       throw new QuiverError('INVALID_INPUT', `${MAX_FORWARDS} port forwards are running already; stop one first`);
     }
+    this.starting++;
+    try {
+      return await this.spawnForward(req);
+    } finally {
+      this.starting--;
+    }
+  }
+
+  private async spawnForward(req: KubeForwardRequest): Promise<KubePortForward> {
+    const { spec } = req;
     const localPort = spec.localPort ?? (await freePort());
     const args = buildPortForwardArgs({ ...spec, localPort });
     const { tsh, argv, proxy } = await this.opts.runner.commandFor(req.proxy, req.cluster, args);

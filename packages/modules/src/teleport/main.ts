@@ -519,6 +519,8 @@ const kubeAction = defineCommand({
     timeoutSeconds: z.number().int().min(1).max(600).optional().describe('Stop the action after this long (default 60)'),
     confirmCluster: ConfirmClusterInput,
   }),
+  // An agent is refused on a protected cluster whatever the user answers, so it is never asked about one.
+  beforeApproval: async ({ proxy, cluster }, ctx) => guardProtected(ctx.host, ctx.caller, await resolveKubeProxy(ctx.host, proxy, cluster), cluster, undefined, 'action'),
   handler: async ({ proxy: proxyArg, cluster, action, runId, timeoutSeconds, confirmCluster }, ctx): Promise<KubeActionResult> => {
     const proxy = await resolveKubeProxy(ctx.host, proxyArg, cluster);
     await guardProtected(ctx.host, ctx.caller, proxy, cluster, confirmCluster, 'action');
@@ -577,6 +579,7 @@ const portForwardStart = defineCommand({
   scope: 'global',
   mutating: true,
   input: z.object({ proxy: ProxyInput, cluster: KubeClusterInput, ...KubePortForwardSpecSchema.shape }),
+  beforeApproval: async ({ proxy, cluster }, ctx) => guardProtected(ctx.host, ctx.caller, await resolveKubeProxy(ctx.host, proxy, cluster), cluster, undefined, 'port forward'),
   handler: async ({ proxy: proxyArg, cluster, kind, name, namespace, remotePort, localPort }, ctx): Promise<KubePortForward> => {
     const proxy = await resolveKubeProxy(ctx.host, proxyArg, cluster);
     await guardProtected(ctx.host, ctx.caller, proxy, cluster, undefined, 'port forward');
@@ -627,8 +630,21 @@ const kubeHistoryList = defineCommand({
   },
 });
 
-async function historyEntry(host: HostApi, id: string): Promise<KubeHistoryEntry | undefined> {
-  return (await getTeleport(host).kube.loadHistory()).find((e) => e.id === id);
+/**
+ * The history entry a rerun names, read once per call: the registry hands the same input object to `mutating`,
+ * `beforeApproval` and the handler, so the entry the gate saw (a query or an action) is the one that runs.
+ */
+const rerunEntries = new WeakMap<object, Promise<KubeHistoryEntry | undefined>>();
+
+function historyEntry(host: HostApi, input: { id: string }): Promise<KubeHistoryEntry | undefined> {
+  let entry = rerunEntries.get(input);
+  if (!entry) {
+    entry = getTeleport(host)
+      .kube.loadHistory()
+      .then((entries) => entries.find((e) => e.id === input.id));
+    rerunEntries.set(input, entry);
+  }
+  return entry;
 }
 
 const kubeHistoryRerun = defineCommand({
@@ -637,11 +653,16 @@ const kubeHistoryRerun = defineCommand({
   description:
     'Runs a history entry again on the same cluster, through the same validation as teleport.kube.query or teleport.kube.action. Running a query again is read-only; running an action again changes the cluster, so it is gated like teleport.kube.action, protected clusters included. A CronJob trigger gets a new job name.',
   scope: 'global',
-  mutating: async ({ id }, ctx) => (await historyEntry(ctx.host, id))?.kind === 'action',
+  mutating: async (input, ctx) => (await historyEntry(ctx.host, input))?.kind === 'action',
   input: z.object({ id: z.string(), runId: RunIdInput.optional(), confirmCluster: ConfirmClusterInput }),
-  handler: async ({ id, runId, confirmCluster }, ctx): Promise<KubeRunResult | KubeActionResult> => {
+  beforeApproval: async (input, ctx) => {
+    const entry = await historyEntry(ctx.host, input);
+    if (entry?.kind === 'action') await guardProtected(ctx.host, ctx.caller, entry.proxy, entry.cluster, undefined, 'action');
+  },
+  handler: async (input, ctx): Promise<KubeRunResult | KubeActionResult> => {
+    const { id, runId, confirmCluster } = input;
     const kube = getTeleport(ctx.host).kube;
-    const entry = await historyEntry(ctx.host, id);
+    const entry = await historyEntry(ctx.host, input);
     if (!entry) throw new QuiverError('NOT_FOUND', `No Kubernetes history entry ${id}`);
     if (entry.kind === 'query') return kube.run({ proxy: entry.proxy, cluster: entry.cluster, query: entry.query, runId, caller: ctx.caller, timeoutMs: 60_000, record: true });
     await guardProtected(ctx.host, ctx.caller, entry.proxy, entry.cluster, confirmCluster, 'action');

@@ -77,6 +77,16 @@ const section: SmokeSection = async (t) => {
     await run('git.branch.delete', { name: 'merged-one' }, id);
     const afterDelete = (await list()).map((b) => b.name);
     check('git manage: delete with force drops the unmerged branch, and a merged one goes without', !afterDelete.includes('unmerged') && !afterDelete.includes('merged-one'), afterDelete);
+    // The default branch is no proof for itself: a local main with commits nothing else holds is never deleted without force.
+    await sh('checkout', '-q', '-b', 'side');
+    await sh('checkout', '-q', 'main');
+    const mainOnly = await commit('m.txt', 'main only\n', 'Main only');
+    await sh('checkout', '-q', 'side');
+    const defaultItself = await failure('git.branch.delete', { name: 'main' });
+    const mainKept = (await sh('rev-parse', '--verify', '--quiet', 'refs/heads/main')).stdout.trim() === mainOnly;
+    await sh('checkout', '-q', 'main');
+    await sh('branch', '-q', '-D', 'side');
+    check('git manage: delete refuses the default branch itself when its commits are nowhere else, and keeps it', defaultItself.reason === 'not-merged' && mainKept, { defaultItself, mainKept });
 
     // ---- Rename and upstream, against a bare clone as origin ----
     await inBare('init', '-q', '--bare', '-b', 'main');

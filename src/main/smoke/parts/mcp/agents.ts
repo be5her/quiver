@@ -58,7 +58,17 @@ const agents: SmokeSection = async (t) => {
     await until(async () => Boolean((found = (await pending()).find((p) => p.commandId === commandId))), 4000);
     return found;
   };
-  const addTodo = (title: string) => run<TodoItem>('todo.add', { title }, ws.id);
+  /** Todos this section adds to the shared smoke workspace, removed again at the end so the todo part finds only its own. */
+  const added: string[] = [];
+  const addTodo = async (title: string) => {
+    const item = await run<TodoItem>('todo.add', { title }, ws.id);
+    added.push(item.id);
+    return item;
+  };
+  const removeAdded = async () => {
+    const left = new Set((await run<TodoItem[]>('todo.list', {}, ws.id)).map((i) => i.id));
+    for (const id of added.splice(0)) if (left.has(id)) await run('todo.remove', { id }, ws.id).catch(() => {});
+  };
   const todoExists = async (id: string) => (await run<TodoItem[]>('todo.list', {}, ws.id)).some((i) => i.id === id);
   // Watch what the host broadcasts, to see the approval event go out.
   const emitted: { event: HostEventName; payload: unknown }[] = [];
@@ -321,6 +331,7 @@ const agents: SmokeSection = async (t) => {
     host.emit = emit;
     await run('mcp.permissions.setWorkspace', { rules: [] }, ws.id).catch(() => {});
     await run('config.update', { patch: { mcp: { ...host.config.get().mcp, permissions: initial.permissions, paused: false, allowMutating: initial.allowMutating } } }, null);
+    await removeAdded();
   }
 
   return {
@@ -414,6 +425,7 @@ const agents: SmokeSection = async (t) => {
       } finally {
         await run('config.update', { patch: { mcp: { ...host.config.get().mcp, permissions: initial.permissions, paused: false, allowMutating: initial.allowMutating } } }, null);
         for (const p of await pending()) await run('mcp.approval.respond', { id: p.id, choice: 'deny' }, null).catch(() => {});
+        await removeAdded();
       }
     },
   };

@@ -231,6 +231,12 @@ export interface CommandDefinition<S extends AnyZodObject = AnyZodObject, O = un
    * A function decides per call (after input validation), e.g. a query runner that lets reads through.
    */
   mutating?: boolean | ((input: z.infer<S>, ctx: CommandContext) => boolean | Promise<boolean>);
+  /**
+   * For an agent's call the permissions say to ask about: the refusals the handler would make whatever the user
+   * answers (a protected cluster), checked first, so the user is never asked about a call that is refused anyway.
+   * Throws to refuse the call without asking.
+   */
+  beforeApproval?(input: z.infer<S>, ctx: CommandContext): Promise<void>;
   /** Hidden commands are plumbing: not listed in the palette or exposed over MCP. */
   hidden?: boolean;
   input: S;

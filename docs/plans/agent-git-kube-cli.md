@@ -1,6 +1,6 @@
 # Plan: Git branch management, Kubernetes actions, agent permissions, CLI
 
-**Status: combined, in final review.** The four lanes are built, reviewed and merged into `feat/agent-git-kube-cli` with the cross-lane work below (lane pull requests #50, #47, #48 and #49, left open for the owner); the combined pull request, #51, waits for the final review and the whole smoke. What was built, the deviations and what is left are under [Done / follow-ups](#done--follow-ups).
+**Status: combined and reviewed.** The four lanes are built, reviewed and merged into `feat/agent-git-kube-cli` with the cross-lane work below (lane pull requests #50, #47, #48 and #49, left open for the owner); the combined pull request, #51, has had its final review (its fixes are under Done / follow-ups) and the whole smoke. What was built, the deviations and what is left are under [Done / follow-ups](#done--follow-ups).
 
 ## How the work runs
 
@@ -234,12 +234,23 @@ Deviations from this plan, all in the lane pull requests:
 - Lane C: a deny at either level wins, so a workspace allow cannot lift a global deny; only deny rules hide tools; every refusal is `MUTATION_BLOCKED` with a reason; pause lives in the global config and survives a restart; workspace rules live in the global config on this machine rather than in `.quiver/local`.
 - Lane D: headless secrets use a new optional `SecretsApi.lookup(name)` (API environment variables only); headless runs store new secrets as `plain:`; connected mode depends on the MCP server being on; with no `--workspace` and no `.quiver` folder found, connected mode uses the app's active workspace; the field `secrets` clashes with the option and goes in `--input`.
 
+Final review:
+
+- **An agent could relay calls to `/cli` through the API client.** `api_request_send` is open to agents in every mode, so one that had read `<userData>/cli-token` could post to the CLI endpoint and run any command as the user, read-only mode and deny rules notwithstanding. No send of the API client carries the `x-quiver-cli-token` header any more, for any caller (smoke: `cli`).
+- **Asked for nothing on protected clusters.** Commands get an optional `beforeApproval` check the registry runs before asking; `teleport.kube.action`, `teleport.kube.history.rerun` (for an action) and `teleport.kube.portForward.start` use it, so under mode `ask` an agent on a protected cluster is refused at once instead of after the user allowed it (unit test in `registry.test.ts`, smoke: `teleport`).
+- **`git.branch.delete` could delete the default branch with unique commits.** Its fallback to `-D` when a branch's commits are in the default branch also accepted the default branch itself (a local `main` with no `origin/HEAD`), whose commits are trivially "in" it. It now refuses that with `not-merged` (smoke: `git`).
+- **The cap of 16 port forwards** counts starts still under way, so concurrent starts to different targets cannot pass it together.
+- **A history rerun reads its entry once**, so the entry `mutating` saw (query or action) is the one the handler runs.
+- **The whole smoke failed in the todo part**: the agent-permissions section left the todos it adds (one that timed out, one denied in the dialog) in the shared smoke workspace, which the todo part expects empty. The section now removes what it added. The combine step had run only the touched parts, which is why it did not show.
+- **CLI flags** never resolve to `__proto__`, `constructor` or `prototype`, so `--headers.__proto__.x` cannot write into `Object.prototype` (unit test in `cli-args.test.ts`).
+
 Follow-ups, none of them blocking:
 
-- **Ask before refuse on protected clusters.** Under mode `ask`, an agent's action on a protected cluster raises an approval first and is refused by the handler after the user allows it. The protected check could move into the command's `mutating` decision, or the registry could ask the command whether it would refuse, so the user is not asked for nothing.
-- **What the CLI may call.** The CLI is the user and reaches hidden commands such as `config.update` and `mcp.permissions.setMode` (only `mcp.approval.respond` is window-only). An agent with shell access can use the CLI instead of MCP, and one that can read `<userData>/cli-token` could post to `/cli`.
+- **What the CLI may call.** The CLI is the user and reaches hidden commands such as `config.update` and `mcp.permissions.setMode` (only `mcp.approval.respond` is window-only). An agent with shell access can use the CLI instead of MCP; one that can read `<userData>/cli-token` and make its own HTTP requests to 127.0.0.1 can post to `/cli` (Quiver's API client no longer carries the token). On Windows the token file is protected by the profile folder's permissions, not a file mode.
+- **The MCP endpoint itself** (`/mcp`) checks neither `Origin` nor `Host`. A browser's simple request is stopped by the SDK's content-type and accept checks, but an explicit `Origin` refusal (as `/cli` has) would be a cheap defence against DNS rebinding; browser-based MCP clients would need an allow list.
+- **Headless environments** with any secret variable the app encrypted fail as a whole with `SECRET_UNAVAILABLE` when listed or used, even when the request needs only other variables.
 - **Agent identity.** Grants until restart are keyed by the agent name from the MCP handshake, which a client chooses.
 - **Headless secrets** for DB passwords, client certificate passphrases, Metabase and queue connections have no by-name lookup yet; DB and certificates fail with `SECRET_UNAVAILABLE`, Metabase and queues fall back to empty.
 - **Git:** interactive rebase; annotated tags from the history ("Tag here" makes lightweight ones); smoke coverage of cherry-pick and revert conflicts with skip; an operation stopped by something other than conflicts stays in progress with git's error; `rebase-apply` from `git am` shows as a rebase; `applyPatch` may fall back to the hunk view on unusual patches; the CodeMirror merge view follows the app theme, so it is dark in the smoke's light screenshots.
-- **Kubernetes:** a few concurrent starts to different targets can pass the cap of 16 forwards; the Settings checkbox for agents on protected clusters is not screenshotted; a port forward is reachable by any local process while it runs, as with kubectl.
+- **Kubernetes:** the Settings checkbox for agents on protected clusters is not screenshotted; a port forward is reachable by any local process while it runs, as with kubectl.
 - **CLI:** the macOS and Linux shims were not run on those platforms; an AppImage's shim folder changes on every launch; `--timeout` cancels only collection runs; shell completion.

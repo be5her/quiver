@@ -261,6 +261,9 @@ function kebabToCamel(name: string): string {
   return name.replace(/-([a-z0-9])/g, (_m, c: string) => c.toUpperCase());
 }
 
+/** Keys every object inherits, which no flag may name. */
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
 /**
  * The property a flag names in an object schema: the exact name, its kebab-case spelled in camelCase
  * (`--environment-id`), or the name with `Id` left off (`--collection` for `collectionId`). `no-<name>`
@@ -271,10 +274,12 @@ export function resolveFieldName(name: string, schema: JsonSchema | undefined): 
   const props = object?.properties ?? {};
   // An object with listed properties takes no others (zod drops unknown keys); a record, or a schema that says nothing, takes any.
   const open = !object?.properties || (object.additionalProperties !== undefined && object.additionalProperties !== false);
+  // Never a name an object inherits: `--__proto__.x` would otherwise write into Object.prototype.
+  if (UNSAFE_KEYS.has(name)) return null;
   const candidates = (n: string) => [n, kebabToCamel(n), `${kebabToCamel(n)}Id`];
-  for (const key of candidates(name)) if (key in props) return { key, negate: false };
+  for (const key of candidates(name)) if (Object.hasOwn(props, key)) return { key, negate: false };
   if (name.startsWith('no-')) {
-    for (const key of candidates(name.slice(3))) if (key in props && schemaTypes(props[key]).has('boolean')) return { key, negate: true };
+    for (const key of candidates(name.slice(3))) if (Object.hasOwn(props, key) && schemaTypes(props[key]).has('boolean')) return { key, negate: true };
   }
   return open ? { key: name, negate: false } : null;
 }

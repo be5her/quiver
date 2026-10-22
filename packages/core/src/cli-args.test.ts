@@ -169,6 +169,13 @@ describe('fieldsToInput', () => {
     expect(() => fieldsToInput([{ name: 'colection', value: 'x' }], runInput, {}, 'api.collection.run')).toThrow(/Unknown field --colection for api.collection.run/);
     expect(() => fieldsToInput([{ name: 'collection', value: 'a' }, { name: 'collection', value: 'b' }], runInput)).toThrow(/given twice/);
     expect(() => fieldsToInput([{ name: 'collection.x', value: 'a' }], runInput)).toThrow(CliUsageError);
+    // Inherited names never resolve, also in a record that takes any key, so nothing reaches Object.prototype.
+    const record = { type: 'object', properties: { headers: { type: 'object', additionalProperties: { type: 'string' } } } } as const;
+    expect(() => fieldsToInput([{ name: '__proto__.polluted', value: 'x' }], record)).toThrow(CliUsageError);
+    expect(() => fieldsToInput([{ name: 'headers.__proto__.polluted', value: 'x' }], record)).toThrow(CliUsageError);
+    expect(() => fieldsToInput([{ name: 'constructor', value: 'x' }], runInput)).toThrow(CliUsageError);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    expect(fieldsToInput([{ name: 'headers.x-trace', value: '1' }], record)).toEqual({ headers: { 'x-trace': '1' } });
     expect(() => fieldsToInput([{ name: 'x', value: 'a' }], schemaOf(z.object({})))).toThrow(/Unknown field/);
   });
 
