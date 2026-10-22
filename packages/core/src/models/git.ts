@@ -288,3 +288,52 @@ export const GitPrCreateInputSchema = z.object({
   labels: z.array(GitArgSchema.refine((s) => !/[,"]/.test(s), { message: 'must not contain a comma or a double quote' })).default([]),
 });
 export const GitPrCommentInputSchema = GitPrRefInputSchema.extend({ body: z.string().trim().min(1) });
+
+// ---------- pull request draft (git.pr.draft) ----------
+
+/** A commit of the branch a pull request draft is made from. */
+export interface GitPrDraftCommit {
+  hash: string;
+  subject: string;
+  body: string;
+}
+
+/** A file the branch changed against its merge base with the base branch. */
+export interface GitPrDraftFile {
+  path: string;
+  origPath?: string;
+  status: GitDiffFile['status'];
+  additions: number;
+  deletions: number;
+  binary: boolean;
+}
+
+/** A title, description and labels for a pull request, made from git alone (`git.pr.draft`). */
+export interface GitPrDraft {
+  /** The current branch, or the short hash of a detached HEAD. */
+  head: string;
+  /** The base as a pull request names it: a branch name without its remote (`main`), or the ref given. */
+  base: string;
+  /** The ref the branch was compared against (`origin/main`, `main`, or the ref given). */
+  baseRef: string;
+  mergeBase: string;
+  title: string;
+  body: string;
+  /** Oldest first; at most 250, `stats.commits` counts them all. */
+  commits: GitPrDraftCommit[];
+  files: GitPrDraftFile[];
+  stats: { commits: number; files: number; additions: number; deletions: number };
+  /** The repository's pull request template the body was filled from, as found; null when it has none. */
+  template: string | null;
+  /** Where the template was found, relative to the repository root. */
+  templatePath?: string;
+  /** Suggested from the branch prefix, kept only when gh can list the repository's labels and has them. */
+  labels: string[];
+  /** The `base...HEAD` diff with `includePatch`, cut to 200 KB at a line end (`truncated`). */
+  patch?: { text: string; truncated: boolean };
+}
+
+export const GitPrDraftInputSchema = z.object({
+  base: GitArgSchema.optional().describe("The branch (or ref) the pull request goes into. Default: the remote's default branch (origin/<default>), else a local main or master"),
+  includePatch: z.boolean().default(false).describe('Add the base...HEAD diff as patch.text, cut at 200 KB (patch.truncated)'),
+});
