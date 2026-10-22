@@ -29,7 +29,7 @@ import type { DiffBase, DiffSource, GitShowResult, GitStashShowResult } from './
         @if (error(); as e) {
           <p class="p-4 text-sm text-danger" data-testid="git-diff-error">{{ e.message }}</p>
         } @else if (files(); as list) {
-          <q-git-diff-view [files]="list" [base]="base()" [emptyTitle]="emptyTitle()" [emptyHint]="emptyHint()" [(selected)]="selected" />
+          <q-git-diff-view [files]="list" [base]="base()" [blameAt]="blameAt()" [emptyTitle]="emptyTitle()" [emptyHint]="emptyHint()" [(selected)]="selected" />
         } @else {
           <div class="flex items-center justify-center h-full"><svg qSpinner></svg></div>
         }
@@ -104,6 +104,14 @@ export class GitDiffTab implements TabComponent {
         return parent ? { ref: parent } : this.commit.value() ? { ref: s.ref } : null;
       }
     }
+  });
+
+  /** Where Blame opens a file: the working tree for local changes, the commit shown, the ref compared to; a stash has none. */
+  protected readonly blameAt = computed<string | null | undefined>(() => {
+    const s = this.source();
+    if (s.kind === 'commit') return s.ref;
+    if (s.kind === 'compare') return s.to;
+    return s.kind === 'stash' ? undefined : null;
   });
 
   /** A working file with nothing to diff may be one git does not track yet. */

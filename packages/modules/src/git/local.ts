@@ -40,7 +40,7 @@ const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 /** A single file's patch over this is left out and the file marked truncated. */
 const MAX_PATCH_BYTES = 512 * 1024;
 /** A file read at a ref (`git.file.show`) over this comes back without its content. */
-const MAX_FILE_BYTES = 2 * 1024 * 1024;
+export const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const WATCH_DEBOUNCE_MS = 250;
 
 /** Settings for every call: no colour, paths unquoted, no optional locks so a status never fights the user's own git. */

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { attachPatches, conflictedPaths, detectOperation, operationArgs, parseBranches, parseDecorations, parseDiffSummary, parseLog, parseStashes, parseStatusV2, parseTags, planDiscard, splitPatch } from './git-parse';
+import { parseBlamePorcelain, unquoteGitPath } from './git-parse';
 
 // The fixtures are what git 2.43 printed for a small repository, with the hashes shortened.
 
@@ -268,5 +269,112 @@ describe('detectOperation', () => {
     expect(operationArgs('rebase', 'skip')).toEqual(['rebase', '--skip']);
     expect(operationArgs('cherry-pick', 'continue')).toEqual(['cherry-pick', '--continue']);
     expect(operationArgs('revert', 'abort')).toEqual(['revert', '--abort']);
+  });
+});
+
+describe('parseBlamePorcelain', () => {
+  const first = 'fbf88dfc3acc7145a37307233ad04db364795d4d';
+  const second = 'c4672daa5c3e57b4483fbcdc13ac741ddab055e1';
+  const details = (author: string, time: number, summary: string) => [
+    `author ${author}`,
+    `author-mail <${author.toLowerCase()}@x.test>`,
+    `author-time ${time}`,
+    'author-tz +0000',
+    `committer ${author}`,
+    `committer-mail <${author.toLowerCase()}@x.test>`,
+    `committer-time ${time}`,
+    'committer-tz +0000',
+    `summary ${summary}`,
+  ];
+  // What git 2.47 printed for a file renamed from "my file.txt", with a line added in the working tree.
+  const out = [
+    `${first} 1 1 1`,
+    ...details('Ann', 1767225600, 'First'),
+    'boundary',
+    'filename my file.txt',
+    '\tone',
+    `${second} 2 2 3`,
+    ...details('Bob', 1769904000, 'Second'),
+    `previous ${first} my file.txt`,
+    'filename my file.txt',
+    '\tTWO',
+    `${second} 3 3`,
+    '\tthree\r',
+    `${second} 4 4`,
+    '\tfour',
+    `0000000000000000000000000000000000000000 5 5 1`,
+    ...details('Not Committed Yet', 1792676215, 'Version of renamed file.txt from renamed file.txt'),
+    `previous ${second} renamed file.txt`,
+    'filename renamed file.txt',
+    '\tfive',
+    // The first commit again, further down: only its header, no details.
+    `${first} 2 6 1`,
+    '\ttwo again',
+    '',
+  ].join('\n');
+
+  it('lists each commit once, however many lines it has, and every line by hash', () => {
+    const blame = parseBlamePorcelain(out, { path: 'renamed file.txt', ref: 'HEAD' });
+    expect(blame.path).toBe('renamed file.txt');
+    expect(blame.ref).toBe('HEAD');
+    expect(Object.keys(blame.commits).sort()).toEqual([second, first].sort());
+    expect(blame.lines.map((l) => [l.line, l.commit, l.originalLine])).toEqual([
+      [1, first, 1],
+      [2, second, 2],
+      [3, second, 3],
+      [4, second, 4],
+      [5, null, 5],
+      [6, first, 2],
+    ]);
+    expect(blame.commits[second]).toEqual({
+      hash: second,
+      author: 'Bob',
+      authorEmail: 'bob@x.test',
+      authorTime: '2026-02-01T00:00:00.000Z',
+      summary: 'Second',
+      path: 'my file.txt',
+      previous: { commit: first, path: 'my file.txt' },
+      boundary: false,
+    });
+  });
+
+  it('marks the boundary, gives uncommitted lines no commit, and keeps spaces in file names', () => {
+    const blame = parseBlamePorcelain(out, { path: 'renamed file.txt' });
+    expect(blame.ref).toBeUndefined();
+    expect(blame.commits[first].boundary).toBe(true);
+    expect(blame.commits[first].previous).toBeUndefined();
+    expect(blame.commits[first].path).toBe('my file.txt');
+    expect(blame.lines[4]).toEqual({ line: 5, commit: null, originalLine: 5, text: 'five' });
+    expect(Object.values(blame.commits).some((c) => c.author === 'Not Committed Yet')).toBe(false);
+  });
+
+  it('drops the CR of a CRLF line and keeps tabs and leading spaces in the text', () => {
+    const crlf = [`${first} 1 1 2`, ...details('Ann', 1767225600, 'First'), 'filename a.txt', '\t\tindented\r', `${first} 2 2`, '\t  spaced  \r', ''].join('\n');
+    expect(parseBlamePorcelain(crlf, { path: 'a.txt' }).lines.map((l) => l.text)).toEqual(['\tindented', '  spaced  ']);
+  });
+
+  it('keeps a lone CR inside a line, and reads a last line without a newline (git adds one)', () => {
+    // What git 2.47 printed for "one\rtwo\nthree", the file ending without a newline.
+    const out = [`${first} 1 1 2`, ...details('Ann', 1767225600, 'First'), 'filename cr.txt', '\tone\rtwo', `${first} 2 2`, '\tthree', ''].join('\n');
+    expect(parseBlamePorcelain(out, { path: 'cr.txt' }).lines.map((l) => [l.line, l.text])).toEqual([
+      [1, 'one\rtwo'],
+      [2, 'three'],
+    ]);
+  });
+
+  it('unquotes C-quoted file names in filename and previous', () => {
+    const quoted = [`${second} 1 1 1`, ...details('Bob', 1769904000, 'Second'), `previous ${first} "old\\tname \\"q\\".txt"`, 'filename "caf\\303\\251 \\\\ x.txt"', '\tx', ''].join('\n');
+    const c = parseBlamePorcelain(quoted, { path: 'café \\ x.txt' }).commits[second];
+    expect(c.path).toBe('café \\ x.txt');
+    expect(c.previous).toEqual({ commit: first, path: 'old\tname "q".txt' });
+    expect(unquoteGitPath('plain name.txt')).toBe('plain name.txt');
+  });
+
+  it('reads SHA-256 hashes, and an empty file as no lines', () => {
+    const long = 'a'.repeat(64);
+    const blame = parseBlamePorcelain([`${long} 1 1 1`, ...details('Ann', 0, 'x'), 'filename f', '\tline', ''].join('\n'), { path: 'f' });
+    expect(blame.lines).toEqual([{ line: 1, commit: long, originalLine: 1, text: 'line' }]);
+    expect(blame.commits[long].authorTime).toBe('1970-01-01T00:00:00.000Z');
+    expect(parseBlamePorcelain('', { path: 'empty' })).toEqual({ path: 'empty', lines: [], commits: {} });
   });
 });

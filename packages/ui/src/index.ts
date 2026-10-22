@@ -33,6 +33,7 @@ export * from './variables/variable-input';
 export * from './code-editor/code-editor';
 export * from './code-editor/code-editor-extensions';
 export * from './code-editor/diff-editor';
+export * from './code-editor/line-markers';
 export * from './key-value-editor/key-value-editor';
 export * from './drag/drag-reorder';
 export * from './drag/drop-marker';
