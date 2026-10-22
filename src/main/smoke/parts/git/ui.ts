@@ -9,7 +9,7 @@ import { until, type SmokeSection } from '../../part';
 // The Git panel, on a repository of its own in a temporary folder opened as a second workspace: a file changed on disk
 // shows in the sidebar, its diff opens side by side and inline, it is staged and committed from the commit box, the
 // commit shows in the history, a branch is made from a dialog and another switched to from the list, the status bar
-// follows the branch with its ahead count, a merge conflict gets a note rather than a diff, a merge started here shows
+// follows the branch with its ahead count, a merge conflict opens the conflict editor rather than a diff, a merge started here shows
 // the operation banner until it is continued, a change is stashed, popped and discarded, and the Branches tab lists,
 // filters, renames and cleans up branches; then the pull requests
 // against the fake gh of parts/git/pr.ts, with their check badges, a detail tab with the failed log on demand and a
@@ -241,8 +241,8 @@ const section: SmokeSection = async ({ check, run, ws: mainWs }) => ({
       const created = await waitFor(`document.querySelector('[data-testid=git-current-branch]')?.textContent.trim() === 'ui/new-branch'`);
       check('git ui: New branch asks for a name, creates the branch and switches to it', dialogTitle === 'New branch' && created, dialogTitle);
 
-      // A merge conflict: the file is listed once, under Merge conflicts, and its tab says to resolve it rather than
-      // drawing the combined diff. The host pairs it with its own patch, so another changed file still has its diff.
+      // A merge conflict: the file is listed once, under Merge conflicts, and its row opens the conflict editor rather
+      // than the combined diff. The host pairs it with its own patch, so another changed file still has its diff.
       await sh('checkout', '-q', '-b', 'ui/conflict');
       await fs.writeFile(path.join(folder, 'app.txt'), 'one\nother\n');
       await sh('commit', '-q', '-am', 'Other app');
@@ -251,11 +251,11 @@ const section: SmokeSection = async ({ check, run, ws: mainWs }) => ({
       await click('[data-testid=git-refresh]');
       const conflictRow = await waitFor(`document.querySelectorAll('[data-testid=git-file][data-path="app.txt"]').length === 1 && Boolean(document.querySelector('[data-testid=git-file][data-group=conflicts][data-path="app.txt"]'))`);
       await click('[data-testid=git-file][data-group=conflicts][data-path="app.txt"]');
-      const conflictNote = await waitFor(`${visible('[data-testid=git-diff-tab][data-path="app.txt"]')}?.querySelector('[data-testid=git-patch-note]')?.getAttribute('data-conflict') === 'true'`);
+      const conflictNote = await waitFor(`${visible('[data-testid=git-conflict-tab][data-path="app.txt"]')}?.getAttribute('data-view') === 'text'`);
       const working = await run<GitDiffFile[]>('git.diff', { staged: false }, id);
       const pairs = working.map((d) => ({ path: d.path, patch: d.patch?.slice(0, 10) ?? null, truncated: Boolean(d.truncated) }));
       check(
-        'git ui: a conflicted file is listed once and its tab says to resolve it; the other files keep their diffs',
+        'git ui: a conflicted file is listed once and its row opens the conflict editor; the other files keep their diffs',
         conflictRow && conflictNote && JSON.stringify(pairs) === JSON.stringify([{ path: 'app.txt', patch: 'diff --cc ', truncated: false }, { path: 'readme.md', patch: 'diff --git', truncated: false }]),
         { conflictRow, conflictNote, pairs },
       );

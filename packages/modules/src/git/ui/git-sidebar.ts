@@ -123,7 +123,7 @@ export class GitChangeGroup {
   }
 
   protected tooltip(f: GitFileChange): string {
-    const what = this.group() === 'staged' ? codeWord(f.index) : this.group() === 'conflicts' ? 'Conflict' : codeWord(f.worktree);
+    const what = this.group() === 'staged' ? codeWord(f.index) : this.group() === 'conflicts' ? 'Conflict: click to resolve it' : codeWord(f.worktree);
     return `${f.origPath ? `${f.origPath} → ` : ''}${f.path} · ${what}`;
   }
 
@@ -270,7 +270,7 @@ function withOrigin(files: GitFileChange[]): string[] {
       </q-section-header>
       @let g = groups();
       @if (g.conflicts.length) {
-        <q-git-change-group group="conflicts" [files]="g.conflicts" (opened)="openFile($event, 'working')" />
+        <q-git-change-group group="conflicts" [files]="g.conflicts" (opened)="actions.openConflict($event.path)" />
       }
       @if (g.staged.length) {
         <q-git-change-group group="staged" [files]="g.staged" (opened)="openFile($event, 'staged')" />

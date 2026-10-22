@@ -79,6 +79,11 @@ export class GitActions {
     this.tabs.openTab(this.scope(), { type: 'git.pr', title: `#${pr.number} ${pr.title}`, data: { id: pr.number } }, { singletonKey: `git.pr:${pr.number}` });
   }
 
+  /** The conflict editor of one conflicted file. */
+  openConflict(path: string): void {
+    this.tabs.openTab(this.scope(), { type: 'git.conflict', title: `${splitPath(path).name} (conflict)`, data: { id: path, path } }, { singletonKey: `git.conflict:${path}` });
+  }
+
   // ---- Index and commits ----
 
   async stage(paths: string[]): Promise<void> {

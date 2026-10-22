@@ -3,6 +3,7 @@ import { AppState, defineModuleUI } from '@quiver/ui';
 import { GitBranch } from 'lucide';
 import { GitBlameTab } from './blame-tab';
 import { GitBranchesTab } from './branches-tab';
+import { GitConflictTab } from './conflict-tab';
 import { GitDiffTab } from './diff-tab';
 import { GitActions } from './git-actions';
 import { GitSidebar } from './git-sidebar';
@@ -26,6 +27,7 @@ export const gitModuleUI = defineModuleUI({
     'git.prs': GitPrsTab,
     'git.pr': GitPrTab,
     'git.blame': GitBlameTab,
+    'git.conflict': GitConflictTab,
   },
   actions: () => {
     const git = inject(GitActions);
