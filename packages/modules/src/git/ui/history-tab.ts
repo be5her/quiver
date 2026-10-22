@@ -1,11 +1,11 @@
 import { Component, computed, inject, input, linkedSignal, signal } from '@angular/core';
 import type { GitCommit } from '@quiver/core';
-import { Badge, Button, EmptyState, HostBridge, Icon, Spinner, Toasts, invokeResource, type Tab, type TabComponent } from '@quiver/ui';
+import { Badge, Button, ContextMenu, EmptyState, HostBridge, Icon, Spinner, Toasts, invokeResource, type Tab, type TabComponent } from '@quiver/ui';
 import { Copy, History, RefreshCw } from 'lucide';
 import { GitDiffView } from './diff-view';
 import { GitActions } from './git-actions';
 import { injectGitChanged } from './git-events';
-import { ago, type GitLogPage, type GitShowResult } from './git-format';
+import { ago, type DiffBase, type GitLogPage, type GitShowResult } from './git-format';
 
 /** Commits per page of the list. */
 const PAGE = 100;
@@ -36,6 +36,7 @@ const PAGE = 100;
               [attr.data-hash]="c.hash"
               [title]="c.subject"
               (click)="picked.set(c.hash)"
+              (contextmenu)="menu($event, c)"
             >
               <span class="flex items-center gap-1.5 min-w-0">
                 <span class="truncate text-[13px] flex-1">{{ c.subject }}</span>
@@ -81,7 +82,7 @@ const PAGE = 100;
             </div>
           </div>
           <div class="flex-1 min-h-0">
-            <q-git-diff-view [files]="d.files" emptyTitle="No file changes" />
+            <q-git-diff-view [files]="d.files" [base]="base()" emptyTitle="No file changes" />
           </div>
         } @else if (detail.error(); as error) {
           <p class="p-4 text-sm text-danger">{{ error.message }}</p>
@@ -99,6 +100,7 @@ export class GitHistoryTab implements TabComponent {
   private readonly host = inject(HostBridge);
   protected readonly toasts = inject(Toasts);
   protected readonly actions = inject(GitActions);
+  private readonly contextMenu = inject(ContextMenu);
 
   readonly tab = input.required<Tab>();
   readonly scope = input.required<string>();
@@ -121,10 +123,20 @@ export class GitHistoryTab implements TabComponent {
   });
   protected readonly detail = invokeResource<GitShowResult>('git.show', () => ({ ref: this.current() }), { enabled: () => Boolean(this.current()) });
   protected readonly ago = ago;
+  /** The old side of the commit's files: its first parent; a root commit only adds files. */
+  protected readonly base = computed<DiffBase | null>(() => {
+    const c = this.detail.value()?.commit;
+    return c ? { ref: c.parents[0] ?? c.hash } : null;
+  });
 
   constructor() {
     // A commit, checkout, pull or reset in or out of Quiver moves HEAD.
     injectGitChanged((p) => p.reason === 'branches' && this.first.reload());
+  }
+
+  /** Right-click on a commit: cherry-pick, revert, reset to it, a branch or tag there, checkout. */
+  protected menu(event: MouseEvent, c: GitCommit): void {
+    this.contextMenu.open(event, this.actions.commitMenu(c));
   }
 
   protected when(iso: string): string {

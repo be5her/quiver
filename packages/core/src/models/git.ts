@@ -35,6 +35,64 @@ export interface GitBranch {
   head: string;
   subject: string;
   date: string;
+  /**
+   * Its commits are all in the default branch (`origin/HEAD`, else a local `main` or `master`), or in the current
+   * branch when there is no default. Never true of the default branch itself, the current branch or a remote branch
+   * of the default's name.
+   */
+  merged: boolean;
+  /** It has an upstream that no longer exists on the remote (a fetch pruned it). */
+  gone: boolean;
+}
+
+export interface GitTag {
+  name: string;
+  /** The commit it points at (for an annotated tag, the commit its tag object points at). */
+  commit: string;
+  annotated: boolean;
+  /** The tag message's first line, or the commit's subject for a lightweight tag. */
+  subject: string;
+  /** When it was tagged, or the commit's date for a lightweight tag. */
+  date: string;
+}
+
+export interface GitStash {
+  /** The N of `stash@{N}`; 0 is the newest. */
+  index: number;
+  hash: string;
+  /** The message given, or git's "WIP" line (the commit it was made on) when none was. */
+  message: string;
+  /** The branch it was made on; absent on a detached HEAD. */
+  branch?: string;
+  /** ISO 8601. */
+  date: string;
+}
+
+/** What a merge, rebase, cherry-pick, revert, stash apply or a continue gives back. */
+export interface GitOperationResult {
+  /** What git printed. */
+  output: string;
+  /**
+   * Paths left with conflicts. Not an error: the operation waits for them to be resolved and staged, then for
+   * `git.operation.continue` (or abort). Empty when it went through.
+   */
+  conflicts: string[];
+  status: GitStatus;
+}
+
+/** A file's content at a ref or in the index (`git.file.show`). */
+export interface GitFileContent {
+  path: string;
+  /** The ref it was read at; absent when read from the index. */
+  ref?: string;
+  /** In bytes. */
+  size: number;
+  /** A NUL byte in its first 8000 bytes, as git decides; no content then. */
+  binary: boolean;
+  /** Over the 2 MB limit; no content then. */
+  tooLarge: boolean;
+  /** UTF-8 text, when it is neither binary nor too large. */
+  content?: string;
 }
 
 export interface GitCommit {
@@ -93,6 +151,67 @@ export const GitCheckoutInputSchema = z.object({ ref: GitArgSchema });
 export const GitBranchCreateInputSchema = z.object({ name: GitArgSchema, from: GitArgSchema.optional(), checkout: z.boolean().default(true) });
 export const GitRemoteInputSchema = z.object({ remote: GitArgSchema.optional(), branch: GitArgSchema.optional() });
 export const GitPushInputSchema = GitRemoteInputSchema.extend({ setUpstream: z.boolean().default(false), forceWithLease: z.boolean().default(false) });
+
+export const GitBranchDeleteInputSchema = z.object({
+  name: GitArgSchema,
+  force: z.boolean().default(false).describe('Delete it even when its commits are not merged anywhere (git branch -D); they are then only in the reflog.'),
+});
+export const GitBranchDeleteRemoteInputSchema = z.object({ remote: GitArgSchema, name: GitArgSchema.describe('The branch on the remote, without the remote: "feature", not "origin/feature"') });
+export const GitBranchRenameInputSchema = z.object({ from: GitArgSchema.optional().describe('Default: the current branch'), to: GitArgSchema });
+export const GitBranchSetUpstreamInputSchema = z.object({
+  branch: GitArgSchema.optional().describe('Default: the current branch'),
+  upstream: GitArgSchema.nullable().describe('A remote-tracking branch such as "origin/main" (or a local branch); null unsets it'),
+});
+
+export const GitMergeInputSchema = z.object({
+  ref: GitArgSchema.describe('The branch, tag or commit to merge into the current branch'),
+  mode: z
+    .enum(['ff', 'no-ff', 'ff-only', 'squash'])
+    .optional()
+    .describe("ff: fast-forward when possible; no-ff: always a merge commit; ff-only: fail unless it fast-forwards; squash: stage the changes as one, without committing. Default: the repository's merge.ff setting"),
+  message: z.string().trim().min(1).optional().describe("The merge commit's message; default: git's \"Merge branch …\""),
+});
+export const GitRebaseInputSchema = z.object({ onto: GitArgSchema.describe('The branch or commit to replay the current branch on') });
+export const GitCherryPickInputSchema = z.object({ commits: z.array(GitArgSchema).min(1).max(100).describe('Applied in the order given') });
+export const GitRevertInputSchema = z.object({ commit: GitArgSchema });
+export const GitResetInputSchema = z.object({
+  ref: GitArgSchema.describe('The commit to move the current branch to'),
+  mode: z.enum(['soft', 'mixed', 'hard']).describe('soft keeps the index and files; mixed keeps the files and empties the index; hard discards every uncommitted change'),
+});
+
+export const GitStashIndexInputSchema = z.object({
+  index: z.number().int().min(0).describe('The N of stash@{N}, as git.stash.list gives it; 0 is the newest'),
+  hash: z
+    .string()
+    .regex(/^[0-9a-fA-F]{4,64}$/, 'must be a commit hash')
+    .optional()
+    .describe('The stash\'s hash from git.stash.list: the call is refused (details.reason "stash-moved") when stash@{index} is another stash by now'),
+});
+export const GitStashPushInputSchema = z.object({
+  message: z.string().trim().min(1).optional(),
+  includeUntracked: z.boolean().default(false),
+  /** Only these paths; every change by default. */
+  paths: z.array(GitArgSchema).min(1).optional(),
+});
+export const GitStashApplyInputSchema = GitStashIndexInputSchema.extend({ pop: z.boolean().default(false).describe('Drop the stash once it applied without conflicts') });
+
+export const GitDiscardInputSchema = GitPathsInputSchema.extend({
+  staged: z.boolean().default(false).describe('Discard what is staged too, back to HEAD. Default: only the working changes, back to the index'),
+});
+
+export const GitTagCreateInputSchema = z.object({
+  name: GitArgSchema,
+  ref: GitArgSchema.optional().describe('Default: HEAD'),
+  message: z.string().trim().min(1).optional().describe('Makes an annotated tag with this message; without it the tag is lightweight'),
+});
+export const GitTagNameInputSchema = z.object({ name: GitArgSchema });
+export const GitTagPushInputSchema = z.object({ remote: GitArgSchema, name: GitArgSchema });
+
+export const GitFileShowInputSchema = z.object({
+  path: GitArgSchema.describe('Relative to the repository root'),
+  ref: GitArgSchema.optional().describe('A commit, branch or tag; give this or index'),
+  index: z.boolean().default(false).describe('Read the staged version instead of one at a ref'),
+});
 
 /** Whether `gh` can be used here: installed, signed in, and the workspace is a GitHub repository. */
 export interface GhStatus {

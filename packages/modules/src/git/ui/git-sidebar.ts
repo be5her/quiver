@@ -1,11 +1,31 @@
 import { Component, DestroyRef, computed, effect, inject, input, output, signal, untracked } from '@angular/core';
 import { FormField, form } from '@angular/forms/signals';
-import type { GitBranch, GitFileChange, GitStatus } from '@quiver/core';
+import type { GitBranch, GitFileChange, GitStash, GitStatus } from '@quiver/core';
 import { AppState, Button, Checkbox, ContextMenu, EmptyState, HostBridge, Icon, IconButton, SectionHeader, Spinner, TextArea, TreeState, invokeResource } from '@quiver/ui';
-import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Check, CloudUpload, Download, GitBranch as GitBranchIcon, GitPullRequest, History, Minus, Plus, RefreshCw } from 'lucide';
+import {
+  Archive,
+  ArchiveRestore,
+  ArrowDown,
+  ArrowUp,
+  ChevronDown,
+  ChevronRight,
+  Check,
+  CloudUpload,
+  Download,
+  GitBranch as GitBranchIcon,
+  GitPullRequest,
+  History,
+  ListTree,
+  Minus,
+  PackageOpen,
+  Plus,
+  RefreshCw,
+  Trash2,
+  Undo2,
+} from 'lucide';
 import { GitActions } from './git-actions';
 import { injectGitChanged } from './git-events';
-import { codeClass, codeWord, errorReason, groupChanges, splitPath } from './git-format';
+import { ago, codeClass, codeWord, errorReason, groupChanges, splitPath } from './git-format';
 
 /** How often the status is read while the sidebar is open: edits to working files are not watched by the host. */
 const STATUS_EVERY_MS = 5000;
@@ -31,6 +51,9 @@ const GROUP_TITLE: Record<Group, string> = { conflicts: 'Merge conflicts', stage
       <svg [qIcon]="open() ? icons.ChevronDown : icons.ChevronRight" class="size-3.5 text-muted shrink-0"></svg>
       <span class="text-[11px] font-semibold uppercase tracking-wide text-muted flex-1 truncate">{{ title() }}</span>
       <span class="hidden group-hover:flex items-center">
+        @if (discardable()) {
+          <button qIconButton [label]="group() === 'untracked' ? 'Delete all' : 'Discard all'" size="sm" data-testid="git-discard-all" (click)="discardAll($event)"><svg [qIcon]="icons.Undo2" class="size-3.5"></svg></button>
+        }
         @if (group() === 'staged') {
           <button qIconButton label="Unstage all" size="sm" data-testid="git-unstage-all" (click)="all($event)"><svg [qIcon]="icons.Minus" class="size-3.5"></svg></button>
         } @else {
@@ -55,6 +78,9 @@ const GROUP_TITLE: Record<Group, string> = { conflicts: 'Merge conflicts', stage
           <span class="truncate text-[13px]">{{ name(f.path) }}</span>
           <span class="truncate text-[11px] text-muted flex-1 min-w-0">{{ dir(f.path) }}</span>
           <span class="hidden group-hover:flex items-center">
+            @if (discardable()) {
+              <button qIconButton [label]="group() === 'untracked' ? 'Delete' : 'Discard changes'" size="sm" data-testid="git-discard" (click)="discardOne($event, f)"><svg [qIcon]="icons.Undo2" class="size-3.5"></svg></button>
+            }
             @if (group() === 'staged') {
               <button qIconButton label="Unstage" size="sm" data-testid="git-unstage" (click)="one($event, f)"><svg [qIcon]="icons.Minus" class="size-3.5"></svg></button>
             } @else {
@@ -76,8 +102,10 @@ export class GitChangeGroup {
   readonly files = input.required<GitFileChange[]>();
   readonly opened = output<GitFileChange>();
 
-  protected readonly icons = { ChevronDown, ChevronRight, Minus, Plus };
+  protected readonly icons = { ChevronDown, ChevronRight, Minus, Plus, Undo2 };
   protected readonly title = computed(() => GROUP_TITLE[this.group()]);
+  /** Working changes go back to the index and untracked files are deleted; staged changes are unstaged instead, and conflicts resolved. */
+  protected readonly discardable = computed(() => this.group() === 'unstaged' || this.group() === 'untracked');
   protected readonly open = computed(() => this.tree.isExpanded(`git/changes/${this.group()}`, true));
   protected readonly codeClass = codeClass;
 
@@ -114,6 +142,16 @@ export class GitChangeGroup {
     event.stopPropagation();
     void (this.group() === 'staged' ? this.actions.unstage(withOrigin(this.files())) : this.actions.stage(this.files().map((f) => f.path)));
   }
+
+  protected discardOne(event: Event, f: GitFileChange): void {
+    event.stopPropagation();
+    void this.actions.discard([f.path], this.group() === 'untracked');
+  }
+
+  protected discardAll(event: Event): void {
+    event.stopPropagation();
+    void this.actions.discard(this.files().map((f) => f.path), this.group() === 'untracked');
+  }
 }
 
 /** The paths to unstage: a staged rename's old path too, or its deletion would stay staged. */
@@ -121,7 +159,7 @@ function withOrigin(files: GitFileChange[]): string[] {
   return files.flatMap((f) => (f.origPath ? [f.path, f.origPath] : [f.path]));
 }
 
-/** The workspace repository: branch and remote, the changed files, the commit box and the branches. */
+/** The workspace repository: branch and remote, the operation in progress, the commit box, the changed files, the stashes and the branches. */
 @Component({
   selector: 'q-git-sidebar',
   imports: [Button, Checkbox, EmptyState, FormField, GitChangeGroup, Icon, IconButton, SectionHeader, Spinner, TextArea],
@@ -176,8 +214,20 @@ function withOrigin(files: GitFileChange[]): string[] {
           }
         </button>
       </div>
-      @if (s.operation) {
-        <p class="mx-3 mt-2 px-2 py-1 rounded bg-warning/10 text-warning text-xs" data-testid="git-operation">A {{ s.operation }} is in progress. Resolve the conflicts, stage them and commit, or finish it in a terminal.</p>
+      @if (s.operation; as op) {
+        <div class="mx-3 mt-2 px-2 py-1.5 rounded bg-warning/10 text-warning text-xs flex flex-col gap-1.5" data-testid="git-operation" [attr.data-operation]="op">
+          <span>{{ operationText() }}</span>
+          <div class="flex items-center gap-1.5">
+            <button qButton size="sm" variant="secondary" [disabled]="groups().conflicts.length > 0" [title]="groups().conflicts.length ? 'Resolve and stage the conflicts first' : ''" data-testid="git-operation-continue" (click)="actions.operation('continue', op)">
+              Continue
+            </button>
+            @if (op === 'rebase') {
+              <button qButton size="sm" variant="ghost" data-testid="git-operation-skip" (click)="actions.operation('skip', op)">Skip commit</button>
+            }
+            <span class="flex-1"></span>
+            <button qButton size="sm" variant="ghost" data-testid="git-operation-abort" (click)="actions.operation('abort', op)">Abort</button>
+          </div>
+        </div>
       }
 
       <!-- Commit box -->
@@ -224,8 +274,48 @@ function withOrigin(files: GitFileChange[]): string[] {
         <p class="px-3 py-1 text-xs text-muted" data-testid="git-clean">Nothing to commit; the working tree is clean.</p>
       }
 
+      <!-- Stashes -->
+      <q-section-header title="Stashes" class="mt-2">
+        <button qIconButton label="Stash changes" size="sm" data-testid="git-stash-push" [disabled]="!s.files.length" (click)="actions.stashChanges()"><svg [qIcon]="icons.Archive" class="size-3.5"></svg></button>
+        <button qIconButton [label]="stashesOpen() ? 'Hide stashes' : 'Show stashes'" size="sm" (click)="tree.toggle('git/stashes', true)">
+          <svg [qIcon]="stashesOpen() ? icons.ChevronDown : icons.ChevronRight" class="size-3.5"></svg>
+        </button>
+      </q-section-header>
+      @if (stashesOpen()) {
+        @if (stashes.error(); as error) {
+          <p class="px-3 py-1 text-xs text-danger">{{ error.message }}</p>
+        }
+        <!-- Only the workspace on screen's stashes, as with the status. -->
+        @for (st of stashes.current() ?? []; track st.hash) {
+          <div
+            class="group flex items-center gap-1.5 pl-3 pr-1 h-6 cursor-pointer hover:bg-elevated min-w-0"
+            role="button"
+            tabindex="0"
+            data-testid="git-stash"
+            [attr.data-index]="st.index"
+            [attr.data-message]="st.message"
+            [title]="st.message + (st.branch ? '\nOn ' + st.branch : '') + '\nClick to see its changes'"
+            (click)="actions.openStash(st)"
+            (keydown.enter)="actions.openStash(st)"
+            (contextmenu)="stashMenu($event, st)"
+          >
+            <svg [qIcon]="icons.Archive" class="size-3.5 shrink-0 text-muted"></svg>
+            <span class="truncate text-[13px] flex-1">{{ st.message }}</span>
+            <span class="text-[10px] text-muted shrink-0 group-hover:hidden">{{ ago(st.date) }}</span>
+            <span class="hidden group-hover:flex items-center">
+              <button qIconButton label="Apply" size="sm" data-testid="git-stash-apply" (click)="stashAction($event, st, 'apply')"><svg [qIcon]="icons.ArchiveRestore" class="size-3.5"></svg></button>
+              <button qIconButton label="Pop (apply and drop)" size="sm" data-testid="git-stash-pop" (click)="stashAction($event, st, 'pop')"><svg [qIcon]="icons.PackageOpen" class="size-3.5"></svg></button>
+              <button qIconButton label="Drop" size="sm" data-testid="git-stash-drop" (click)="stashAction($event, st, 'drop')"><svg [qIcon]="icons.Trash2" class="size-3.5"></svg></button>
+            </span>
+          </div>
+        } @empty {
+          <p class="px-3 py-1 text-xs text-muted" data-testid="git-stashes-empty">No stashes. Stash changes to set them aside without committing.</p>
+        }
+      }
+
       <!-- Branches -->
       <q-section-header title="Branches" class="mt-2">
+        <button qIconButton label="All branches and tags" size="sm" data-testid="git-branches-open" (click)="actions.openBranches()"><svg [qIcon]="icons.ListTree" class="size-3.5"></svg></button>
         <button qIconButton label="New branch" size="sm" data-testid="git-new-branch" (click)="actions.newBranch()"><svg [qIcon]="icons.Plus" class="size-3.5"></svg></button>
         <button qIconButton [label]="branchesOpen() ? 'Hide branches' : 'Show branches'" size="sm" (click)="tree.toggle('git/branches', true)">
           <svg [qIcon]="branchesOpen() ? icons.ChevronDown : icons.ChevronRight" class="size-3.5"></svg>
@@ -265,6 +355,9 @@ function withOrigin(files: GitFileChange[]): string[] {
 
       <!-- Views -->
       <q-section-header title="Views" class="mt-2" />
+      <button type="button" class="flex items-center gap-2 px-3 h-7 text-[13px] hover:bg-elevated text-left" data-testid="git-open-branches" (click)="actions.openBranches()">
+        <svg [qIcon]="icons.ListTree" class="size-3.5 text-muted"></svg> Branches and tags
+      </button>
       <button type="button" class="flex items-center gap-2 px-3 h-7 text-[13px] hover:bg-elevated text-left" data-testid="git-open-history" (click)="actions.openHistory()">
         <svg [qIcon]="icons.History" class="size-3.5 text-muted"></svg> History
       </button>
@@ -283,7 +376,7 @@ export class GitSidebar {
   private readonly app = inject(AppState);
   protected readonly modKey = inject(HostBridge).modKey;
 
-  protected readonly icons = { ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, CloudUpload, Download, GitBranchIcon, GitPullRequest, History, RefreshCw, Plus };
+  protected readonly icons = { Archive, ArchiveRestore, ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, CloudUpload, Download, GitBranchIcon, GitPullRequest, History, ListTree, PackageOpen, RefreshCw, Plus, Trash2 };
   protected readonly status = invokeResource<GitStatus>('git.status');
   // The same sidebar serves every workspace with Git on screen, so another repository's files never show here.
   /** The status of the workspace on screen, once read. */
@@ -292,6 +385,16 @@ export class GitSidebar {
   protected readonly branchesOpen = computed(() => this.tree.isExpanded('git/branches', true));
   protected readonly branches = invokeResource<GitBranch[]>('git.branch.list', () => ({}), { enabled: () => this.branchesOpen() && Boolean(this.current()) });
   protected readonly busy = this.actions.busy;
+  protected readonly stashesOpen = computed(() => this.tree.isExpanded('git/stashes', true));
+  protected readonly stashes = invokeResource<GitStash[]>('git.stash.list', () => ({}), { enabled: () => this.stashesOpen() && Boolean(this.current()) });
+  protected readonly ago = ago;
+  /** What the operation banner says: what is in progress and what is left to do. */
+  protected readonly operationText = computed(() => {
+    const op = this.current()?.operation;
+    const n = this.groups().conflicts.length;
+    if (!op) return '';
+    return n ? `A ${op} is in progress, with conflicts in ${n} file${n === 1 ? '' : 's'}. Resolve and stage them, then Continue, or Abort.` : `A ${op} is in progress and nothing is left in conflict. Continue to go on, or Abort.`;
+  });
 
   protected readonly groups = computed(() => groupChanges(this.current()?.files ?? []));
   protected readonly localBranches = computed(() => (this.branches.value() ?? []).filter((b) => !b.remote));
@@ -330,6 +433,7 @@ export class GitSidebar {
         this.status.reload();
         this.branches.reload();
       }
+      if (p.reason === 'stashes') this.stashes.reload();
     });
     // Amend starts from the last commit's message, as an editor would show it: once, when it is ticked.
     const amend = computed(() => this.draft().amend);
@@ -354,6 +458,7 @@ export class GitSidebar {
   protected reloadAll(): void {
     this.status.reload();
     this.branches.reload();
+    this.stashes.reload();
   }
 
   protected openFile(f: GitFileChange, where: 'working' | 'staged' | 'untracked'): void {
@@ -376,5 +481,20 @@ export class GitSidebar {
 
   protected branchMenu(event: MouseEvent, b: GitBranch): void {
     this.contextMenu.open(event, this.actions.branchMenu(b));
+  }
+
+  protected stashAction(event: Event, st: GitStash, action: 'apply' | 'pop' | 'drop'): void {
+    event.stopPropagation();
+    void (action === 'drop' ? this.actions.dropStash(st) : this.actions.applyStash(st, action === 'pop'));
+  }
+
+  protected stashMenu(event: MouseEvent, st: GitStash): void {
+    this.contextMenu.open(event, [
+      { label: 'Show changes', testId: 'git-menu-show', select: () => this.actions.openStash(st) },
+      { label: 'Apply', testId: 'git-menu-apply', select: () => void this.actions.applyStash(st, false) },
+      { label: 'Pop (apply and drop)', testId: 'git-menu-pop', select: () => void this.actions.applyStash(st, true) },
+      'separator',
+      { label: 'Drop…', testId: 'git-menu-drop', danger: true, select: () => void this.actions.dropStash(st) },
+    ]);
   }
 }
