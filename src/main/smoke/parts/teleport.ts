@@ -1,11 +1,53 @@
 import { promises as fs } from 'node:fs';
+import { connect } from 'node:net';
 import path from 'node:path';
-import type { DbConnectionSummary, DbConnectionTest, DbQueryResult, KubeHistoryEntry, KubePreview, KubeRunResult, KubeStreamRead, TeleportDatabase, TeleportKubeCluster, TeleportLoginResult, TeleportPin, TeleportStatus, TeleportTunnel } from '@quiver/core';
+import type {
+  DbConnectionSummary,
+  DbConnectionTest,
+  DbQueryResult,
+  KubeActionPreview,
+  KubeActionResult,
+  KubeHistoryEntry,
+  KubePortForward,
+  KubePreview,
+  KubeRunResult,
+  KubeStreamRead,
+  TeleportDatabase,
+  TeleportKubeCluster,
+  TeleportLoginResult,
+  TeleportPin,
+  TeleportStatus,
+  TeleportTunnel,
+} from '@quiver/core';
 import { definePart, until, processAlive } from '../part';
+
+/** The operation or action of a history entry. */
+const opOf = (e: KubeHistoryEntry) => (e.kind === 'action' ? e.action.action : e.query.operation);
+
+/** The first line a TCP server sends, or null when nothing answers. */
+function readBanner(port: number): Promise<string | null> {
+  return new Promise((resolve) => {
+    const sock = connect(port, '127.0.0.1');
+    let data = '';
+    const done = (value: string | null) => {
+      sock.destroy();
+      resolve(value);
+    };
+    sock.setTimeout(2000, () => done(null));
+    sock.on('data', (chunk) => {
+      data += chunk.toString();
+      if (data.includes('\n')) done(data.trim());
+    });
+    sock.on('error', () => done(null));
+    sock.on('end', () => done(data.trim() || null));
+  });
+}
+
+const isKubeStillProtected = (list: { proxy: string; name: string }[]) => list.some((k) => k.name === 'prod-eks');
 
 export default definePart({
   name: 'teleport',
-  summary: 'Teleport: the fake tsh, clusters, pins, tunnels, kube queries, agents over MCP, the sidebar and query view',
+  summary: 'Teleport: the fake tsh, clusters, pins, tunnels, kube queries, actions, protected clusters and port forwards, agents over MCP, the sidebar and query view',
   async run(t) {
     const { host, check, run, ws, rpc, toolNames: names } = t;
     const { fakeRedis, fakeTsh } = t.fixtures;
@@ -158,7 +200,7 @@ export default definePart({
       // History: recorded as operation and parameters, replayed through the same validation.
       await kq({ operation: 'namespaces', params: {} }, { record: false });
       const hist = await run<{ entries: KubeHistoryEntry[]; lastNamespace: string | null }>('teleport.kube.history.list', { proxy: first, cluster: 'prod-eks' }, null);
-      const ops = hist.entries.map((e) => e.query.operation);
+      const ops = hist.entries.map(opOf);
       check(
         'kube: history records each run with its params, not a command line',
         ops.length === 8 && ops[0] === 'logs-follow' && ops.at(-1) === 'list' && !ops.includes('namespaces') && hist.lastNamespace === 'payments' && !JSON.stringify(hist.entries).includes('kubectl') && hist.entries.every((e) => typeof e.durationMs === 'number' && e.at),
@@ -190,11 +232,179 @@ export default definePart({
       check(
         'kube: pin, delete and clear keep the favourite',
         pinnedEntry.pinned && cleared.deleted === 7 && histAfterClear.entries.length === 1 && histAfterClear.entries[0].id === listEntry.id && histAfterClear.entries[0].pinned,
-        { deleted: cleared.deleted, left: histAfterClear.entries.map((e) => [e.query.operation, e.pinned]) },
+        { deleted: cleared.deleted, left: histAfterClear.entries.map((e) => [opOf(e), e.pinned]) },
       );
       await kq({ operation: 'list', params: { resource: 'pods', namespace: 'payments' } });
       await kq({ operation: 'logs', params: { pod: 'api-7d9f-abc12', namespace: 'payments', tail: 20 } });
       check('kube: the terminal kubeconfig is still untouched', (await fs.readFile(fakeTsh.homeKubeconfig, 'utf8')) === homeBefore);
+    }
+
+    // ---------- teleport: Kubernetes actions from their own catalogue, protected clusters and port forwards ----------
+    {
+      const target = { proxy: first, cluster: 'prod-eks' };
+      const preview = (action: unknown) => run<KubeActionPreview>('teleport.kube.action.preview', { ...target, action }, null);
+      const lastArgv = async () => (await fakeTsh.kubectlCalls()).at(-1)?.argv.slice(0, -2) ?? [];
+      const ns = { namespace: 'payments' };
+      // Every action in the catalogue, previewed and then run with the action the preview gave back.
+      const samples: { action: { action: string; params: Record<string, unknown> }; argv: (p: KubeActionPreview) => string[]; out: string }[] = [
+        { action: { action: 'scale', params: { kind: 'deployments', name: 'api', ...ns, replicas: 3 } }, argv: () => ['scale', 'deployments', 'api', '--namespace', 'payments', '--replicas', '3'], out: 'deployment.apps/api scaled' },
+        { action: { action: 'rollout-restart', params: { kind: 'deployments', name: 'api', ...ns } }, argv: () => ['rollout', 'restart', 'deployments', 'api', '--namespace', 'payments'], out: 'deployment.apps/api restarted' },
+        { action: { action: 'rollout-undo', params: { kind: 'deployments', name: 'api', ...ns, toRevision: 1 } }, argv: () => ['rollout', 'undo', 'deployments', 'api', '--namespace', 'payments', '--to-revision', '1'], out: 'rolled back' },
+        { action: { action: 'rollout-pause', params: { name: 'worker', ...ns } }, argv: () => ['rollout', 'pause', 'deployments', 'worker', '--namespace', 'payments'], out: 'deployment.apps/worker paused' },
+        { action: { action: 'rollout-resume', params: { name: 'worker', ...ns } }, argv: () => ['rollout', 'resume', 'deployments', 'worker', '--namespace', 'payments'], out: 'deployment.apps/worker resumed' },
+        { action: { action: 'delete', params: { kind: 'pods', name: 'worker-5c8b-xyz34', ...ns, gracePeriodSeconds: 5 } }, argv: () => ['delete', 'pods', 'worker-5c8b-xyz34', '--namespace', 'payments', '--grace-period', '5'], out: 'pod "worker-5c8b-xyz34" deleted' },
+        { action: { action: 'cordon', params: { node: 'ip-10-0-0-1' } }, argv: () => ['cordon', 'ip-10-0-0-1'], out: 'node/ip-10-0-0-1 cordoned' },
+        { action: { action: 'uncordon', params: { node: 'ip-10-0-0-1' } }, argv: () => ['uncordon', 'ip-10-0-0-1'], out: 'node/ip-10-0-0-1 uncordoned' },
+        { action: { action: 'set-image', params: { kind: 'deployments', name: 'api', ...ns, container: 'api', image: 'ghcr.io/acme/api:1.4.2' } }, argv: () => ['set', 'image', 'deployments', 'api', 'api=ghcr.io/acme/api:1.4.2', '--namespace', 'payments'], out: 'image updated' },
+        {
+          action: { action: 'cronjob-trigger', params: { name: 'nightly-report', ...ns } },
+          argv: (p) => ['create', 'job', String((p.action.params as { jobName?: string }).jobName), '--from=cronjob/nightly-report', '--namespace', 'payments'],
+          out: 'created',
+        },
+      ];
+      const argvWrong: unknown[] = [];
+      const previewWrong: unknown[] = [];
+      for (const sample of samples) {
+        const p = await preview(sample.action);
+        const result = await run<KubeActionResult>('teleport.kube.action', { ...target, action: p.action }, null);
+        const received = await lastArgv();
+        if (JSON.stringify(received) !== JSON.stringify(sample.argv(p)) || result.exitCode !== 0 || !result.stdout.includes(sample.out)) argvWrong.push({ action: sample.action.action, received, exit: result.exitCode, stdout: result.stdout, stderr: result.stderr });
+        if (p.command !== result.command || JSON.stringify(p.argv) !== JSON.stringify(result.argv) || JSON.stringify(result.argv.slice(-received.length - 2, -2)) !== JSON.stringify(received)) previewWrong.push({ action: sample.action.action, preview: p.command, ran: result.command });
+      }
+      check('kube actions: each action reaches kubectl as exactly its template', argvWrong.length === 0, argvWrong);
+      check('kube actions: the preview is exactly what ran, the CronJob job name included', previewWrong.length === 0, previewWrong);
+      const destructivePreview = await preview({ action: 'scale', params: { kind: 'deployments', name: 'api', ...ns, replicas: 0 } });
+      const plainPreview = await preview(samples[0].action);
+      check(
+        'kube actions: the preview names the object and says what is destructive',
+        destructivePreview.destructive && !plainPreview.destructive && plainPreview.target.kind === 'deployments' && plainPreview.target.name === 'api' && !plainPreview.protected,
+        { destructive: destructivePreview.destructive, plain: plainPreview.destructive, target: plainPreview.target },
+      );
+      const actionHist = await run<{ entries: KubeHistoryEntry[] }>('teleport.kube.history.list', target, null);
+      const actionEntries = actionHist.entries.filter((e) => e.kind === 'action');
+      check(
+        'kube actions: every action goes into the history as an action, with its params and not a command line',
+        actionEntries.length === samples.length && opOf(actionEntries[0]) === 'cronjob-trigger' && !JSON.stringify(actionEntries).includes('kubectl') && actionEntries.every((e) => e.exitCode === 0),
+        actionEntries.map((e) => opOf(e)),
+      );
+
+      // Rejected before anything runs: unknown actions and fields, secrets, flag-shaped values, no namespace.
+      const callsBeforeBad = (await fakeTsh.kubectlCalls()).length;
+      const badActions = [
+        { action: 'exec', params: { pod: 'api-7d9f-abc12', ...ns, command: ['sh'] } },
+        { action: 'delete', params: { kind: 'pods', name: 'api-7d9f-abc12', ...ns, selector: 'app=api' } },
+        { action: 'delete', params: { kind: 'secrets', name: 'db-password', ...ns } },
+        { action: 'delete', params: { kind: 'pods', name: '--all', ...ns } },
+        { action: 'scale', params: { kind: 'deployments', name: 'api', replicas: 2 } },
+        { action: 'set-image', params: { kind: 'deployments', name: 'api', ...ns, container: 'api', image: 'nginx; rm -rf /' } },
+      ];
+      const badResults = [];
+      for (const action of badActions) badResults.push(await host.invoke('teleport.kube.action', { ...target, action }, { caller: 'ui', workspaceId: null }));
+      check(
+        'kube actions: anything outside the catalogue is rejected and never reaches kubectl',
+        badResults.every((r) => !r.ok && r.error.code === 'INVALID_INPUT') && (await fakeTsh.kubectlCalls()).length === callsBeforeBad,
+        badResults.map((r) => (r.ok ? 'ok?' : r.error.message.slice(0, 80))),
+      );
+
+      // Agents: actions are gated, the preview is not; rerunning an action from history is gated, a query is not.
+      const asAgent = (id: string, input: unknown) => host.invoke(id, input, { caller: 'mcp', workspaceId: null });
+      const blocked = (r: Awaited<ReturnType<typeof asAgent>>, reason?: string) => !r.ok && r.error.code === 'MUTATION_BLOCKED' && (!reason || (r.error.details as { reason?: string } | undefined)?.reason === reason);
+      const callsBeforeAgent = (await fakeTsh.kubectlCalls()).length;
+      const agentAction = await asAgent('teleport.kube.action', { ...target, action: samples[0].action });
+      const agentPreview = await asAgent('teleport.kube.action.preview', { ...target, action: samples[0].action });
+      const agentRerunAction = await asAgent('teleport.kube.history.rerun', { id: actionEntries[0].id });
+      const agentForward = await asAgent('teleport.kube.portForward.start', { ...target, kind: 'services', name: 'api', ...ns, remotePort: 80 });
+      check(
+        'mcp: kube actions, port forwards and rerunning an action are gated; the preview is allowed',
+        blocked(agentAction) && blocked(agentRerunAction) && blocked(agentForward) && agentPreview.ok && (await fakeTsh.kubectlCalls()).length === callsBeforeAgent,
+        { action: agentAction.ok || agentAction.error.code, rerun: agentRerunAction.ok || agentRerunAction.error.code, forward: agentForward.ok || agentForward.error.code },
+      );
+      const queryEntry = actionHist.entries.find((e) => e.kind === 'query');
+      const agentRerunQuery = queryEntry ? await asAgent('teleport.kube.history.rerun', { id: queryEntry.id }) : null;
+      check('mcp: rerunning a query from history stays allowed', Boolean(agentRerunQuery?.ok), agentRerunQuery && !agentRerunQuery.ok ? agentRerunQuery.error : queryEntry);
+      check(
+        'mcp lists the kube action tools',
+        ['teleport_kube_action', 'teleport_kube_action_preview', 'teleport_kube_protect', 'teleport_kube_portForward_start', 'teleport_kube_portForward_list', 'teleport_kube_portForward_stop'].every((n) => names.includes(n)),
+        names.filter((n) => n.startsWith('teleport_kube')),
+      );
+
+      // Protected cluster: Quiver needs the cluster name typed; agents are refused even with mutations allowed, unless Settings allow them.
+      await run('teleport.kube.protect', { ...target, protected: true }, null);
+      const kubesProtected = await run<TeleportKubeCluster[]>('teleport.kube.list', { proxy: first }, null);
+      const protectedPreview = await preview(samples[0].action);
+      const unconfirmed = await host.invoke('teleport.kube.action', { ...target, action: samples[0].action }, { caller: 'ui', workspaceId: null });
+      const mistyped = await host.invoke('teleport.kube.action', { ...target, action: samples[0].action, confirmCluster: 'prod' }, { caller: 'ui', workspaceId: null });
+      const confirmed = await host.invoke('teleport.kube.action', { ...target, action: samples[0].action, confirmCluster: 'prod-eks' }, { caller: 'ui', workspaceId: null });
+      const needsConfirm = (r: typeof unconfirmed) => !r.ok && r.error.code === 'INVALID_INPUT' && (r.error.details as { needs?: string } | undefined)?.needs === 'confirmCluster';
+      check(
+        'kube protected: listed and previewed as protected; an action needs the cluster name typed',
+        kubesProtected.find((k) => k.name === 'prod-eks')?.protected === true &&
+          kubesProtected.find((k) => k.name === 'dev-eks')?.protected === false &&
+          protectedPreview.protected &&
+          needsConfirm(unconfirmed) &&
+          needsConfirm(mistyped) &&
+          confirmed.ok,
+        { unconfirmed: unconfirmed.ok || unconfirmed.error, confirmed: confirmed.ok || confirmed.error },
+      );
+      const mcpBefore = host.config.get().mcp;
+      await run('config.update', { patch: { mcp: { ...mcpBefore, allowMutating: true } } }, null);
+      const callsBeforeProtected = (await fakeTsh.kubectlCalls()).length;
+      const agentOnProtected = await asAgent('teleport.kube.action', { ...target, action: samples[0].action, confirmCluster: 'prod-eks' });
+      const agentRerunOnProtected = await asAgent('teleport.kube.history.rerun', { id: actionEntries[0].id, confirmCluster: 'prod-eks' });
+      const agentForwardOnProtected = await asAgent('teleport.kube.portForward.start', { ...target, kind: 'services', name: 'api', ...ns, remotePort: 80 });
+      const agentUnprotect = await asAgent('teleport.kube.protect', { ...target, protected: false });
+      const refusedOnProtected = (await fakeTsh.kubectlCalls()).length === callsBeforeProtected;
+      const agentOnOther = await asAgent('teleport.kube.action', { proxy: first, cluster: 'dev-eks', action: samples[0].action });
+      check(
+        'kube protected: agents are refused actions, reruns and port forwards there even with mutations allowed, and cannot unprotect it',
+        blocked(agentOnProtected, 'protected-cluster') &&
+          blocked(agentRerunOnProtected, 'protected-cluster') &&
+          blocked(agentForwardOnProtected, 'protected-cluster') &&
+          blocked(agentUnprotect, 'protected-cluster') &&
+          refusedOnProtected &&
+          isKubeStillProtected(host.config.get().teleport.protectedKubes),
+        { action: agentOnProtected.ok || agentOnProtected.error, unprotect: agentUnprotect.ok || agentUnprotect.error.code },
+      );
+      check('kube protected: agents with mutations allowed act on other clusters', agentOnOther.ok && (agentOnOther.result as KubeActionResult).exitCode === 0 && (agentOnOther.result as KubeActionResult).command.includes('--context=smoke.teleport.local-dev-eks'), agentOnOther.ok ? 'ok' : agentOnOther.error);
+      await run('config.update', { patch: { teleport: { ...host.config.get().teleport, agentActionsOnProtected: true } } }, null);
+      const agentAllowed = await asAgent('teleport.kube.action', { ...target, action: samples[0].action });
+      check('kube protected: the Settings switch lets agents act on protected clusters', agentAllowed.ok && (agentAllowed.result as KubeActionResult).exitCode === 0, agentAllowed.ok ? 'ok' : agentAllowed.error);
+      await run('config.update', { patch: { teleport: { ...host.config.get().teleport, agentActionsOnProtected: false }, mcp: mcpBefore } }, null);
+      await run('teleport.kube.protect', { ...target, protected: false }, null);
+      const lastEntry = (await run<{ entries: KubeHistoryEntry[] }>('teleport.kube.history.list', target, null)).entries[0];
+      check('kube actions: history records who ran an action', lastEntry?.kind === 'action' && lastEntry.caller === 'mcp', lastEntry && [lastEntry.kind, lastEntry.caller]);
+
+      // Port forwards: a real listener through the fake, listed, reused, and gone as a process tree when stopped.
+      const forward = await run<KubePortForward>('teleport.kube.portForward.start', { ...target, kind: 'services', name: 'api', ...ns, remotePort: 80 }, null);
+      const forwardCall = (await fakeTsh.kubectlCalls()).findLast((c) => c.argv[0] === 'port-forward');
+      const banner = await readBanner(forward.localPort);
+      const again = await run<KubePortForward>('teleport.kube.portForward.start', { ...target, kind: 'services', name: 'api', ...ns, remotePort: 80 }, null);
+      const listed = await run<KubePortForward[]>('teleport.kube.portForward.list', { proxy: first }, null);
+      check(
+        'kube port forward: starts on 127.0.0.1 with the exact argv, and a TCP connection reaches the target',
+        forward.state === 'running' &&
+          forward.url === `http://127.0.0.1:${forward.localPort}` &&
+          JSON.stringify(forwardCall?.argv.slice(0, -2)) === JSON.stringify(['port-forward', 'services/api', `${forward.localPort}:80`, '--address', '127.0.0.1', '--namespace', 'payments']) &&
+          forward.command.includes(' kubectl port-forward services/api ') &&
+          banner === 'fake port-forward services/api:80 in payments',
+        { forward, argv: forwardCall?.argv, banner },
+      );
+      check('kube port forward: listed, and the same target is reused', again.id === forward.id && listed.length === 1 && listed[0].id === forward.id && listed[0].state === 'running', listed);
+      check('kube port forward: runs in a second process, like tsh kubectl', processAlive(forwardCall?.pid), forwardCall?.pid);
+      const forwardStopped = await run<{ stopped: boolean }>('teleport.kube.portForward.stop', { id: forward.id }, null);
+      const listedAfter = await run<KubePortForward[]>('teleport.kube.portForward.list', {}, null);
+      check(
+        'kube port forward: stop ends the process tree and frees the port',
+        forwardStopped.stopped && listedAfter.length === 0 && (await until(() => !processAlive(forwardCall?.pid), 2000)) && (await readBanner(forward.localPort)) === null,
+        { stopped: forwardStopped.stopped, left: listedAfter.length, alive: processAlive(forwardCall?.pid) },
+      );
+      const badForward = await host.invoke('teleport.kube.portForward.start', { ...target, kind: 'pods', name: 'no-such-pod', ...ns, remotePort: 80 }, { caller: 'ui', workspaceId: null });
+      const flagForward = await host.invoke('teleport.kube.portForward.start', { ...target, kind: 'pods', name: '--address=0.0.0.0', ...ns, remotePort: 80 }, { caller: 'ui', workspaceId: null });
+      check(
+        'kube port forward: a failing forward reports kubectl\'s error, a flag-shaped name is rejected',
+        !badForward.ok && badForward.error.code === 'REQUEST_FAILED' && /not found/.test(badForward.error.message) && !flagForward.ok && flagForward.error.code === 'INVALID_INPUT' && (await run<KubePortForward[]>('teleport.kube.portForward.list', {}, null)).length === 0,
+        { bad: badForward.ok || badForward.error.message, flag: flagForward.ok || flagForward.error.code },
+      );
     }
     const pins1 = await run<TeleportPin[]>('teleport.pin', { proxy: first, kind: 'db', name: 'smoke-redis' }, null);
     const pins2 = await run<TeleportPin[]>('teleport.pin', { proxy: second, kind: 'kube', name: 'eu-eks', pinned: true }, null);
@@ -557,6 +767,151 @@ export default definePart({
           await shot('11c-kube-logs-dark');
           await js(`document.documentElement.classList.remove('dark')`);
           check('ui: the query view left the terminal kubeconfig alone', (await fs.readFile(fakeTsh.homeKubeconfig, 'utf8')) === homeBeforeUi);
+
+          // Actions: their own group in the picker, styled apart, and every run through a confirmation with the exact command.
+          {
+            const groups = await js(`[...document.querySelectorAll('[data-testid=kube-operation] optgroup')].map((g) => [g.label, g.querySelectorAll('option').length])`);
+            check('ui: the operation picker has a separate Actions group', Array.isArray(groups) && groups.length === 2 && groups[0][0] === 'Read' && String(groups[1][0]).startsWith('Actions') && groups[1][1] === 10, groups);
+            await setField('kube-operation', 'scale');
+            await wait(300);
+            await setField('kube-field-name', 'api');
+            await setField('kube-field-replicas', '0');
+            await wait(500);
+            const actionPreview = await text('kube-preview');
+            const actionStyled = await js(`Boolean(document.querySelector('[data-testid=kube-action-banner]')) && document.querySelector('[data-testid=kube-run]')?.textContent.trim() === 'Run action…'`);
+            check('ui: an action is styled apart and previews its kubectl line', actionStyled === true && actionPreview === 'kubectl scale deployments api --namespace payments --replicas 0', { actionStyled, actionPreview });
+            const confirmState = () =>
+              js(`(() => {
+                const d = document.querySelector('[data-testid=kube-action-confirm]');
+                if (!d) return null;
+                return {
+                  destructive: d.getAttribute('data-destructive'),
+                  protected: d.getAttribute('data-protected'),
+                  command: d.querySelector('[data-testid=kube-confirm-command]')?.textContent ?? '',
+                  disabled: d.querySelector('[data-testid=kube-confirm-run]')?.disabled ?? null,
+                  name: Boolean(d.querySelector('[data-testid=kube-confirm-name]')),
+                  cluster: Boolean(d.querySelector('[data-testid=kube-confirm-cluster]')),
+                };
+              })()`) as Promise<{ destructive: string; protected: string; command: string; disabled: boolean; name: boolean; cluster: boolean } | null>;
+            await js(`document.querySelector('[data-testid=kube-run]').click()`);
+            await until(async () => (await confirmState()) !== null, 2000);
+            const scaleDialog = await confirmState();
+            check(
+              'ui: Run opens a confirmation with the exact command, and scale to 0 needs the name typed',
+              scaleDialog?.destructive === 'true' &&
+                scaleDialog.command.includes(' kubectl scale deployments api --namespace payments --replicas 0 --kubeconfig=') &&
+                scaleDialog.command.endsWith(' --context=smoke.teleport.local-prod-eks') &&
+                scaleDialog.disabled === true &&
+                scaleDialog.name &&
+                !scaleDialog.cluster,
+              scaleDialog,
+            );
+            await js(`document.documentElement.classList.add('dark')`);
+            await wait(300);
+            await shot('11d-kube-action-confirm-dark');
+            await setField('kube-confirm-name', 'ap');
+            await wait(100);
+            const mistypedDisabled = (await confirmState())?.disabled;
+            await setField('kube-confirm-name', 'api');
+            await wait(100);
+            const typedEnabled = (await confirmState())?.disabled === false;
+            const callsBeforeUiAction = (await fakeTsh.kubectlCalls()).length;
+            await js(`document.querySelector('[data-testid=kube-confirm-run]').click()`);
+            await until(async () => String(await text('kube-output')).includes('scaled'), 3000);
+            const uiActionCalls = await fakeTsh.kubectlCalls();
+            check(
+              'ui: typing the name enables Run; the action runs once and shows its output like a query',
+              mistypedDisabled === true &&
+                typedEnabled &&
+                String(await text('kube-output')).includes('deployment.apps/api scaled') &&
+                (await js(`document.querySelector('[data-testid=kube-status]')?.getAttribute('data-exit') ?? null`)) === '0' &&
+                uiActionCalls.length === callsBeforeUiAction + 1 &&
+                JSON.stringify(uiActionCalls.at(-1)?.argv.slice(0, -2)) === JSON.stringify(['scale', 'deployments', 'api', '--namespace', 'payments', '--replicas', '0']) &&
+                (await confirmState()) === null,
+              { mistypedDisabled, typedEnabled, calls: uiActionCalls.length - callsBeforeUiAction, argv: uiActionCalls.at(-1)?.argv },
+            );
+            await wait(500);
+            const actionRow = await js(`document.querySelector('[data-testid=kube-history-entry][data-kind=action]')?.textContent ?? null`);
+            check('ui: the action shows in the history, marked as an action', typeof actionRow === 'string' && actionRow.includes('Scale') && actionRow.includes('action') && actionRow.includes('deployments/api'), actionRow);
+
+            // Protect the cluster from its context menu: the next action also needs the cluster's name typed.
+            const openKubeMenu = () =>
+              js(`(() => {
+                const row = [...document.querySelectorAll('[data-testid=teleport-kube]')].find((r) => r.textContent.includes('prod-eks'));
+                if (!row) return false;
+                const box = row.getBoundingClientRect();
+                row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: box.left + 20, clientY: box.top + 5 }));
+                return true;
+              })()`);
+            const menuOpened = await openKubeMenu();
+            await wait(300);
+            const menuChecked = await js(`document.querySelector('[data-testid=kube-menu-protect]')?.getAttribute('aria-checked') ?? null`);
+            await js(`document.querySelector('[data-testid=kube-menu-protect]')?.click()`);
+            const protectedNow = await until(async () => (await js(`Boolean(document.querySelector('[data-testid=kube-protected]'))`)) === true, 2500);
+            const rowProtected = await js(`[...document.querySelectorAll('[data-testid=teleport-kube]')].find((r) => r.textContent.includes('prod-eks'))?.getAttribute('data-protected') ?? null`);
+            check(
+              'ui: the protected toggle sits in the cluster\'s context menu and marks the row and the view',
+              menuOpened === true && menuChecked === 'false' && protectedNow && rowProtected === 'true' && host.config.get().teleport.protectedKubes.some((k) => k.name === 'prod-eks'),
+              { menuOpened, menuChecked, protectedNow, rowProtected },
+            );
+            await setField('kube-operation', 'rollout-restart');
+            await wait(400);
+            await js(`document.querySelector('[data-testid=kube-run]').click()`);
+            await until(async () => (await confirmState()) !== null, 2000);
+            const protectedDialog = await confirmState();
+            await js(`document.documentElement.classList.remove('dark')`);
+            await wait(300);
+            await shot('11e-kube-protected-confirm-light');
+            await setField('kube-confirm-cluster', 'prod-eks');
+            await wait(100);
+            const clusterEnabled = (await confirmState())?.disabled === false;
+            await js(`document.querySelector('[data-testid=kube-confirm-run]').click()`);
+            await until(async () => String(await text('kube-output')).includes('restarted'), 3000);
+            check(
+              'ui: on a protected cluster the confirmation asks for the cluster name, then the action runs',
+              protectedDialog?.protected === 'true' && protectedDialog.cluster && !protectedDialog.name && protectedDialog.disabled === true && clusterEnabled && String(await text('kube-output')).includes('deployment.apps/api restarted'),
+              { protectedDialog, clusterEnabled },
+            );
+            await openKubeMenu();
+            await wait(300);
+            await js(`document.querySelector('[data-testid=kube-menu-protect]')?.click()`);
+            await wait(300);
+            await js(`[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Stop protecting')?.click()`);
+            const unprotected = await until(async () => (await js(`Boolean(document.querySelector('[data-testid=kube-protected]'))`)) === false, 2500);
+            check('ui: unprotecting asks first, then clears the mark', unprotected && !host.config.get().teleport.protectedKubes.some((k) => k.name === 'prod-eks'), host.config.get().teleport.protectedKubes);
+
+            // Port forwards panel: start one, see its local port, reach it, stop it.
+            await js(`document.querySelector('[data-testid=kube-forward-new]').click()`);
+            await wait(300);
+            await setField('kube-forward-kind', 'services');
+            await setField('kube-forward-name', 'api');
+            await setField('kube-forward-remote', '80');
+            await wait(200);
+            await js(`document.querySelector('[data-testid=kube-forward-start]').click()`);
+            const forwardShown = await until(async () => (await js(`document.querySelector('[data-testid=kube-forward]')?.getAttribute('data-state') ?? null`)) === 'running', 5000);
+            const uiForwards = await run<KubePortForward[]>('teleport.kube.portForward.list', {}, null);
+            const forwardRowText = await text('kube-forward');
+            const uiBanner = uiForwards[0] ? await readBanner(uiForwards[0].localPort) : null;
+            await js(`document.documentElement.classList.add('dark')`);
+            await wait(300);
+            await shot('11f-kube-forwards-dark');
+            check(
+              'ui: the Port forwards panel starts a forward and lists it with its local port',
+              forwardShown && uiForwards.length === 1 && String(forwardRowText).includes('services/api:80') && String(forwardRowText).includes(`:${uiForwards[0].localPort}`) && uiBanner === 'fake port-forward services/api:80 in payments',
+              { forwardShown, forwardRowText, uiBanner },
+            );
+            const uiForwardPid = (await fakeTsh.kubectlCalls()).findLast((c) => c.argv[0] === 'port-forward')?.pid;
+            const stopClicked = await js(`(() => { const b = document.querySelector('[data-testid=kube-forward-stop]'); b?.click(); return Boolean(b); })()`);
+            const forwardGone = await until(async () => (await js(`document.querySelectorAll('[data-testid=kube-forward]').length`)) === 0, 3000);
+            check(
+              'ui: Stop on a forward removes it and ends its process tree',
+              stopClicked === true && forwardGone && (await run<KubePortForward[]>('teleport.kube.portForward.list', {}, null)).length === 0 && (await until(() => !processAlive(uiForwardPid), 5000)),
+              { stopClicked, forwardGone, alive: processAlive(uiForwardPid) },
+            );
+            await js(`document.documentElement.classList.remove('dark')`);
+            await setField('kube-operation', 'logs');
+            await wait(300);
+          }
 
           // Follow logs, then Stop: the form comes back and the process doing the work is gone.
           const followState = () => js(`document.querySelector('[data-testid=kube-status]')?.getAttribute('data-state') ?? null`);

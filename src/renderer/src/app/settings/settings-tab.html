@@ -86,6 +86,10 @@
         ><input qCheckbox [checked]="config.teleport.loginOnLaunch" (change)="toggleLoginOnLaunch(config, $event)" />Log in on launch to every cluster whose certificate has
         expired (opens the browser, one cluster at a time)</label
       >
+      <label class="flex items-center gap-2 text-sm mt-2" data-testid="settings-kube-agents-protected"
+        ><input qCheckbox [checked]="config.teleport.agentActionsOnProtected" (change)="toggleAgentsOnProtected(config, $event)" />Let agents run Kubernetes actions and port
+        forwards on protected clusters (mark a cluster protected from its context menu in the Teleport module)</label
+      >
     </section>
 
     <section data-testid="settings-network">

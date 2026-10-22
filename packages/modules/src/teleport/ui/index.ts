@@ -7,9 +7,10 @@ import { TeleportSidebar } from './teleport-sidebar';
 
 /**
  * App-wide Teleport access: one section per cluster (a tsh profile), pinned resources on top,
- * databases behind `tsh proxy db` tunnels and Kubernetes clusters with a read-only query view.
- * Nothing here is stored in `.quiver/`; clusters and pins live in global config, the Kubernetes
- * query history in the app data folder.
+ * databases behind `tsh proxy db` tunnels and Kubernetes clusters with a query view (read-only
+ * queries, typed actions behind a confirmation, port forwards). Nothing here is stored in
+ * `.quiver/`; clusters, pins and protected clusters live in global config, the Kubernetes history
+ * in the app data folder.
  */
 export const teleportModuleUI = defineModuleUI({
   id: 'teleport',

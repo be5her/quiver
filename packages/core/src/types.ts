@@ -53,6 +53,17 @@ export interface TeleportConfig {
   tshPath: string;
   /** Start `tsh login` on launch for every cluster whose certificate has expired. */
   loginOnLaunch: boolean;
+  /** Kubernetes clusters marked protected: actions need the cluster name typed, and agents are refused. */
+  protectedKubes: TeleportKubeRef[];
+  /** Let agents run Kubernetes actions and port forwards on protected clusters too. Off by default. */
+  agentActionsOnProtected: boolean;
+}
+
+/** A Kubernetes cluster of a Teleport cluster. */
+export interface TeleportKubeRef {
+  /** Proxy address of the Teleport cluster. */
+  proxy: string;
+  name: string;
 }
 
 /** A port Quiver handed to a mock server on this machine. New servers in any project avoid every recorded port. */
@@ -278,9 +289,9 @@ export interface HostEvents {
   /** The recording of agent calls started, paused, ended or was dropped, or a call was recorded. Bursts of calls arrive as one event. */
   'mcp.recording': McpRecordingStatus;
   /** Teleport session status, login progress, pins or tunnel list changed. Fetch teleport.status for details. */
-  'teleport.changed': { reason: 'status' | 'tunnels' | 'login' | 'pins' };
-  /** Kubernetes queries: the local history changed, or a followed log stream has new lines or ended. */
-  'teleport.kube.changed': { reason: 'history' | 'stream'; runId?: string };
+  'teleport.changed': { reason: 'status' | 'tunnels' | 'login' | 'pins' | 'protected' };
+  /** Kubernetes: the local history changed, a followed log stream has new lines or ended, or a port forward started, stopped or exited. */
+  'teleport.kube.changed': { reason: 'history' | 'stream' | 'forwards'; runId?: string };
   /**
    * API client: a collection run started, moved on or finished (`runId`; fetch api.run.get), a streamed response got items or
    * ended (`streamId`; read api.request.stream.read), or a download of a send given a `sendId` got further (`received` bytes).
