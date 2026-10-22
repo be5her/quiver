@@ -191,14 +191,16 @@ const section: SmokeSection = async (t) => {
     await fs.writeFile(path.join(folder, '.git', 'info', 'attributes'), 'a.txt conflict-marker-size=10\n');
     await sh('cherry-pick', 'topic');
     const picked = await get('a.txt');
+    const pickedCommits = picked.commits.ours === (await hashOf('pick')) && picked.commits.theirs === (await hashOf('topic'));
     const pickedMarkers = await failure('git.conflict.resolve', { path: 'a.txt', content: picked.working });
     const leftover = await failure('git.conflict.resolve', { path: 'a.txt', content: 'one\ntwo pick\n>>>>>>>>>> topic\nthree\n' });
     const sevenWide = 'one\n<<<<<<< not a marker at this size\nthree\n';
     await run('git.conflict.resolve', { path: 'a.txt', content: sevenWide }, id);
     check(
-      'git conflict: a cherry-pick labels ours the current branch and theirs the picked commit, and markers are as long as conflict-marker-size says',
+      'git conflict: a cherry-pick labels ours the current branch and theirs the picked commit (CHERRY_PICK_HEAD, to blame), and markers are as long as conflict-marker-size says',
       picked.operation === 'cherry-pick' &&
         JSON.stringify(picked.labels) === JSON.stringify({ ours: 'pick', theirs: await short('topic') }) &&
+        pickedCommits &&
         picked.markerSize === 10 &&
         Boolean(picked.working?.includes('<<<<<<<<<< HEAD\n')) &&
         pickedMarkers.reason === 'markers' &&
@@ -206,7 +208,7 @@ const section: SmokeSection = async (t) => {
         leftover.message.includes('line 3') &&
         (await read('a.txt')) === sevenWide &&
         !(await unmerged('a.txt')),
-      { labels: picked.labels, markerSize: picked.markerSize, pickedMarkers, leftover },
+      { labels: picked.labels, commits: picked.commits, markerSize: picked.markerSize, pickedMarkers, leftover },
     );
     await sh('cherry-pick', '--abort');
     await fs.rm(path.join(folder, '.git', 'info', 'attributes'), { force: true });
@@ -234,9 +236,14 @@ const section: SmokeSection = async (t) => {
     const stashed = await get('a.txt');
     await run('git.conflict.resolve', { path: 'a.txt', take: 'theirs' }, id);
     check(
-      'git conflict: a stash apply conflict has no operation, and take theirs resolves it with the stash\'s side',
-      stashed.operation === undefined && JSON.stringify(stashed.labels) === JSON.stringify({ ours: 'pick', theirs: 'the incoming changes' }) && (await read('a.txt')) === 'one\ntwo stashed\nthree\n' && !(await unmerged('a.txt')),
-      { operation: stashed.operation, labels: stashed.labels },
+      'git conflict: a stash apply conflict has no operation and no incoming commit to blame, and take theirs resolves it with the stash\'s side',
+      stashed.operation === undefined &&
+        JSON.stringify(stashed.labels) === JSON.stringify({ ours: 'pick', theirs: 'the incoming changes' }) &&
+        stashed.commits.ours === (await hashOf('HEAD')) &&
+        stashed.commits.theirs === undefined &&
+        (await read('a.txt')) === 'one\ntwo stashed\nthree\n' &&
+        !(await unmerged('a.txt')),
+      { operation: stashed.operation, labels: stashed.labels, commits: stashed.commits },
     );
     await sh('reset', '-q', '--hard');
     await sh('stash', 'drop', '-q');

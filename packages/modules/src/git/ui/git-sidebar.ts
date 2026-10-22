@@ -160,7 +160,8 @@ export class GitChangeGroup {
   protected fileMenu(event: MouseEvent, f: GitFileChange): void {
     const deleted = (this.group() === 'staged' ? f.index : f.worktree) === 'D';
     this.contextMenu.open(event, [
-      { label: 'Open changes', testId: 'git-menu-open', select: () => this.opened.emit(f) },
+      // A conflicted row opens the conflict editor, as its click does.
+      { label: this.group() === 'conflicts' ? 'Open conflict editor' : 'Open changes', testId: 'git-menu-open', select: () => this.opened.emit(f) },
       { label: 'Blame', testId: 'git-menu-blame', disabled: this.group() === 'untracked', select: () => this.actions.openBlame(f.path, deleted ? 'HEAD' : undefined) },
     ]);
   }

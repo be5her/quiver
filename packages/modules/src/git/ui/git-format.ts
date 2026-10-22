@@ -1,7 +1,5 @@
-import { isUnmerged, shortRelativeTime, type GitBranch, type GitCommit, type GitDiffFile, type GitFileChange, type GitPrCheckState, type GitPullRequest, type GitStash, type GitStatus, type GitTag } from '@quiver/core';
-import type { CodeLanguage } from '@quiver/ui';
-import type { GitBlame, GitBlameCommit } from '@quiver/core';
-import type { LineMarker } from '@quiver/ui';
+import { isUnmerged, shortRelativeTime, type GitBlame, type GitBlameCommit, type GitBranch, type GitCommit, type GitDiffFile, type GitFileChange, type GitPrCheckState, type GitPullRequest, type GitStash, type GitStatus, type GitTag } from '@quiver/core';
+import type { CodeLanguage, LineMarker } from '@quiver/ui';
 
 // What the Git panel shows, worked out from what the host commands give back. No Angular here.
 

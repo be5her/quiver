@@ -27,7 +27,7 @@ import * as local from './local';
 // resolving writes the file and the index, so it is mutating.
 
 /** A side or the file on disk over this comes back without contents, as `git.file.show` does. */
-const MAX_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_FILE_BYTES = local.MAX_FILE_BYTES;
 
 interface Contents {
   text: string | null;

@@ -29,7 +29,9 @@ const exists = (p: string) => fs.stat(p).then(
 
 const section: SmokeSection = async (t) => {
   const { check, run, mcpPort } = t;
-  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-smoke-git-wt-'));
+  // By its real path: git lists worktrees with long names, while the temp folder can be an 8.3 one
+  // (`C:\Users\RUNNER~1` on the CI runner), which the checks below would not find in what git gives back.
+  const base = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-smoke-git-wt-')));
   const repo = path.join(base, 'repo');
   const sh = (cwd: string, ...args: string[]) => runToEnd('git', args, { cwd });
   const failure = (fn: () => Promise<unknown>) =>
@@ -342,7 +344,7 @@ const section: SmokeSection = async (t) => {
 
   return {
     ui: async ({ js, wait, shot }) => {
-      const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-smoke-git-wt-ui-'));
+      const folder = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-smoke-git-wt-ui-')));
       const uiRepo = path.join(folder, 'quiver');
       const setInput = `(el, value) => { const proto = el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, value); el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }`;
       const visible = (selector: string) => `[...document.querySelectorAll(${JSON.stringify(selector)})].find((e) => e.offsetParent !== null)`;
@@ -436,9 +438,15 @@ const section: SmokeSection = async (t) => {
         check('git worktrees ui: in the linked worktree the sidebar marks its own branch current, not the main worktree\'s', sidebarCurrent, await currentBranches());
         await shot('32we-git-worktree-linked-light');
 
+        // The New worktree dialog belongs to the workspace it was opened in: after a switch to another repository it
+        // is not shown there, where it would make the worktree in the wrong one.
+        await click('[data-testid=git-worktree-new]');
+        const dialogUp = await waitFor(`Boolean(document.querySelector('[data-testid=git-worktree-dialog]'))`);
         // Back on the main worktree: close the linked workspace, then remove it from its row after asking.
         await click(`[data-testid=workspace-tab][data-drag-id="${ws.id}"]`);
         await wait(300);
+        const dialogGone = await waitFor(`!document.querySelector('[data-testid=git-worktree-dialog]') && document.querySelector('[data-testid=git-status-item]')?.getAttribute('data-branch') === 'main'`);
+        check('git worktrees ui: a New worktree dialog left open stays with its workspace, not shown after a switch to another', dialogUp && dialogGone, { dialogUp, dialogGone });
         const linked = ui.find((w) => w.id !== ws.id);
         if (linked) await run('workspace.close', { id: linked.id }, null);
         await waitFor(`Boolean(document.querySelector('[data-testid=git-worktree][data-branch="ui/side"] [data-testid=git-worktree-remove]'))`, 4000);

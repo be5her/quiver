@@ -1,4 +1,4 @@
-import { Service, inject, signal, untracked } from '@angular/core';
+import { Service, computed, inject, signal, untracked } from '@angular/core';
 import { defaultWorktreePath, toErrorPayload, type GitBranch, type GitStatus, type GitWorktree, type WorkspaceInfo } from '@quiver/core';
 import { AppState, Dialogs, HostBridge, Toasts, type ContextMenuItem } from '@quiver/ui';
 import { errorReason } from './git-format';
@@ -11,8 +11,24 @@ export class GitWorktreeActions {
   private readonly dialogs = inject(Dialogs);
   private readonly toasts = inject(Toasts);
 
+  /**
+   * The workspace the New worktree dialog was opened for. The sidebar serves every workspace, so the dialog shows
+   * only while that one is on screen: after a switch it would otherwise work on the other workspace's repository.
+   */
+  private readonly dialogWorkspace = signal<string | null>(null);
   /** The New worktree dialog, which the sidebar's Worktrees section draws. */
-  readonly dialogOpen = signal(false);
+  readonly dialogOpen = computed(() => {
+    const id = this.dialogWorkspace();
+    return id !== null && id === this.app.activeWorkspaceId();
+  });
+
+  openDialog(): void {
+    this.dialogWorkspace.set(untracked(this.app.activeWorkspaceId));
+  }
+
+  closeDialog(): void {
+    this.dialogWorkspace.set(null);
+  }
 
   /**
    * The palette's New worktree: the Git sidebar, with the dialog over it. Outside a repository it says so instead:
@@ -26,7 +42,7 @@ export class GitWorktreeActions {
       return;
     }
     this.app.setActiveModule('git');
-    this.dialogOpen.set(true);
+    this.openDialog();
   }
 
   /** Open a worktree's folder as a workspace of its own and show it, on Git unless it already shows a module. */

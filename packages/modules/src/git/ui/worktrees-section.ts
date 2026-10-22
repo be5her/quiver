@@ -16,7 +16,7 @@ import { GitWorktreeActions, label } from './worktree-actions';
   imports: [GitWorktreeDialog, Icon, IconButton, SectionHeader],
   template: `
     <q-section-header title="Worktrees" class="mt-2" data-testid="git-worktrees">
-      <button qIconButton label="New worktree…" size="sm" data-testid="git-worktree-new" (click)="actions.dialogOpen.set(true)"><svg [qIcon]="icons.Plus" class="size-3.5"></svg></button>
+      <button qIconButton label="New worktree…" size="sm" data-testid="git-worktree-new" (click)="actions.openDialog()"><svg [qIcon]="icons.Plus" class="size-3.5"></svg></button>
       <button qIconButton label="Prune worktrees whose folder is gone" size="sm" data-testid="git-worktree-prune" [disabled]="!prunable()" (click)="actions.prune()"><svg [qIcon]="icons.Eraser" class="size-3.5"></svg></button>
       <button qIconButton [label]="open() ? 'Hide worktrees' : 'Show worktrees'" size="sm" (click)="tree.toggle('git/worktrees', true)">
         <svg [qIcon]="open() ? icons.ChevronDown : icons.ChevronRight" class="size-3.5"></svg>
@@ -74,7 +74,7 @@ import { GitWorktreeActions, label } from './worktree-actions';
       }
     }
     @if (actions.dialogOpen() && mainPath(); as main) {
-      <q-git-worktree-dialog [mainPath]="main" (created)="actions.dialogOpen.set(false)" (cancelled)="actions.dialogOpen.set(false)" />
+      <q-git-worktree-dialog [mainPath]="main" (created)="actions.closeDialog()" (cancelled)="actions.closeDialog()" />
     }
   `,
   host: { class: 'contents' },
