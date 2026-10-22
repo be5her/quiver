@@ -1,0 +1,14 @@
+#!/bin/sh
+# quiver: Quiver's command line (docs/cli.md). Runs the app's own Node on the CLI script inside app.asar.
+# Lives in the app's resources/cli folder; a symlink to it from a folder on PATH works too.
+self=$0
+if command -v realpath >/dev/null 2>&1; then self=$(realpath "$0"); elif command -v readlink >/dev/null 2>&1; then self=$(readlink -f "$0" 2>/dev/null || echo "$0"); fi
+resources=$(CDPATH= cd -- "$(dirname -- "$self")/.." && pwd)
+if [ -x "$resources/../MacOS/Quiver" ]; then
+  app="$resources/../MacOS/Quiver"
+elif [ -x "$resources/../quiver" ]; then
+  app="$resources/../quiver"
+else
+  app="$resources/../Quiver"
+fi
+ELECTRON_RUN_AS_NODE=1 exec "$app" "$resources/app.asar/out/main/cli.js" "$@"

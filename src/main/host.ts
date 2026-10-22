@@ -35,6 +35,7 @@ import { GlobalStore, WorkspaceManager, workspaceIdFor, type WorkspaceSession } 
 import { startMcpServer, type McpCallEntry, type RunningMcpServer } from '@quiver/mcp';
 import { mainModules } from '@quiver/modules/main';
 import { z } from 'zod';
+import { CliAccess, cliCommands } from './cli-access';
 
 export interface HostOptions {
   userDataDir: string;
@@ -53,6 +54,10 @@ export interface HostOptions {
   web?: WebSessionsApi;
   /** An agent's call waits for the user: tell them when the window is not in front. Absent in smoke runs. */
   notifyApproval?(pending: PendingApproval): void;
+  /** Serve MCP and the command line endpoint when the config enables them; false for the headless CLI, which runs commands in-process. */
+  serve?: boolean;
+  /** The folder of the packaged `quiver` shims, for Settings; absent in development. */
+  cliShims?: string;
 }
 
 const ruleSchema = z.object({ match: z.string().trim().refine(isValidRuleMatch, 'a command id, a glob like git.* or *'), action: z.enum(['allow', 'ask', 'deny']) });
@@ -87,8 +92,11 @@ export class Host {
   private readonly activity = new RingBuffer<AgentActivityEntry>(AGENT_ACTIVITY_SIZE);
   private activityTimer: NodeJS.Timeout | null = null;
   private activityDirty = false;
+  /** The token and endpoint file the `quiver` command line connects with. */
+  readonly cli: CliAccess;
 
   constructor(private readonly opts: HostOptions) {
+    this.cli = new CliAccess(opts.userDataDir, opts.version);
     this.config = new GlobalStore(path.join(opts.userDataDir, 'config.json'), (config) => this.emit('config.changed', { config }));
 
     this.workspaces = new WorkspaceManager({
@@ -125,6 +133,7 @@ export class Host {
     };
 
     this.registry.registerModule({ id: 'host', commands: this.hostCommands() });
+    this.registry.registerModule({ id: 'cli', commands: cliCommands(this, this.cli, opts.cliShims) });
     for (const mod of mainModules) this.registry.registerModule(mod);
   }
 
@@ -217,6 +226,8 @@ export class Host {
   // ---------- MCP ----------
 
   async startMcp(): Promise<void> {
+    // The headless CLI never serves, also when a command it runs (mcp.restart, config.update) asks for it.
+    if (this.opts.serve === false) return;
     await this.stopMcp();
     const { port } = this.config.get().mcp;
     try {
@@ -228,7 +239,9 @@ export class Host {
         resolveWorkspace: (hint) => this.resolveWorkspace(hint),
         onCall: (entry) => this.recordActivity(entry),
         calls: this.recorder,
+        cli: this.cli.endpoint(this),
       });
+      await this.cli.publish(port);
       this.emit('mcp.status', { running: true, port });
       console.log(`[quiver] MCP server listening on ${this.mcp.url}`);
     } catch (err) {
@@ -242,6 +255,7 @@ export class Host {
     if (!this.mcp) return;
     await this.mcp.close();
     this.mcp = null;
+    await this.cli.withdraw();
     this.emit('mcp.status', { running: false, port: this.config.get().mcp.port });
   }
 

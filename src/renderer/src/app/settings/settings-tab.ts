@@ -20,6 +20,7 @@ import {
 import { Copy, X } from 'lucide';
 import { AgentRulesEditor } from '../agents/rules-editor';
 import { AboutPanel } from './about-panel';
+import { CliPanel } from './cli-panel';
 
 type ThemePreference = GlobalConfig['theme'];
 
@@ -32,10 +33,10 @@ interface NetworkView {
   hasPassword: boolean;
 }
 
-/** Settings: appearance, the MCP server and agent permissions, Teleport, the network, global variables and About. Saved in the global config. */
+/** Settings: appearance, the MCP server and agent permissions, the command line, Teleport, the network, global variables and About. Saved in the global config. */
 @Component({
   selector: 'q-settings-tab',
-  imports: [AboutPanel, AgentRulesEditor, Button, Checkbox, FormField, Input, KeyValueEditor, Label, NgTemplateOutlet, Select],
+  imports: [AboutPanel, AgentRulesEditor, Button, CliPanel, Checkbox, FormField, Input, KeyValueEditor, Label, NgTemplateOutlet, Select],
   templateUrl: './settings-tab.html',
   host: { class: 'flex-1 overflow-auto p-6' },
 })

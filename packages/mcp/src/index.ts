@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
+  CLI_PATH,
   QuiverError,
   decideAgentPermission,
   toErrorPayload,
@@ -19,6 +20,9 @@ import {
 } from '@quiver/core';
 import { z } from 'zod';
 import { SESSION_HEADER, identifyAgent, rpcMessages, toolCallOutcome, type RpcMessage } from './agent';
+import { handleCliRequest, type CliEndpoint } from './cli-endpoint';
+
+export { handleCliRequest, type CliEndpoint, type CliOutcome, type CliRequest } from './cli-endpoint';
 
 /** Sees every tools/call request that reaches the server and what it answered, e.g. a recorder. */
 export interface McpCallObserver {
@@ -37,6 +41,8 @@ export interface McpServerOptions {
   /** Every call that reached a command, with the agent and what the permissions decided. */
   onCall?(entry: McpCallEntry): void;
   calls?: McpCallObserver;
+  /** The `quiver` command line's endpoint on the same port (`/cli`); left out, it answers 404. */
+  cli?: CliEndpoint;
 }
 
 export interface McpCallEntry {
@@ -201,6 +207,7 @@ export async function startMcpServer(opts: McpServerOptions): Promise<RunningMcp
       res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ ok: true, name: 'quiver', version: opts.version }));
       return;
     }
+    if (url.pathname === CLI_PATH) return handleCliRequest(req, res, opts.cli);
     if (url.pathname !== MCP_PATH) {
       res.writeHead(404).end('Not found');
       return;

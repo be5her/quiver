@@ -1,3 +1,4 @@
+import { resolve } from 'node:path';
 import { defineConfig } from 'electron-vite';
 
 /**
@@ -9,13 +10,15 @@ const externalRuntimeDeps = ['undici', 'zod', 'mysql2', /^mysql2\//, 'ioredis', 
 const externalDevDeps = ['ws'];
 
 /**
- * Builds the main process and the preload script. The renderer is an Angular application with its
+ * Builds the main process, the `quiver` command line (out/main/cli.js, which must never load Electron) and the
+ * preload script. The renderer is an Angular application with its
  * own build (src/renderer, `ng build` into out/renderer); `npm run dev` points Electron at its dev server.
  */
 export default defineConfig({
   main: {
     build: {
       rollupOptions: {
+        input: { index: resolve(__dirname, 'src/main/index.ts'), cli: resolve(__dirname, 'src/cli/index.ts') },
         external: [...externalRuntimeDeps, ...externalDevDeps],
       },
     },

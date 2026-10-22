@@ -27,6 +27,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && npm run typecheck -w @quiver/renderer",
     "test": "vitest run",
     "smoke": "node scripts/smoke.mjs",
+    "cli": "node scripts/cli.mjs",
     "package": "npm run build && electron-builder --publish never",
     "icon": "electron scripts/render-icon.cjs",
     "release:plan": "node scripts/release/plan.mjs stable"

@@ -167,6 +167,11 @@ export interface SecretsApi {
   readonly available: boolean;
   encrypt(plain: string): string;
   decrypt(cipher: string): string;
+  /**
+   * A secret the host hands in by name, which wins over what this machine stores: the headless CLI reads
+   * `QUIVER_SECRET_<NAME>` variables and its `--secrets` file. Absent in the app. Such a value is never written down.
+   */
+  lookup?(name: string): string | undefined;
 }
 
 /** What the host (Electron main process, or a CLI) gives to commands. */

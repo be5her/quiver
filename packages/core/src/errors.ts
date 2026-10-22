@@ -22,6 +22,8 @@ export type QuiverErrorCode =
   | 'CONFLICT'
   /** The target cannot do this, e.g. a queue broker with no purge, or a driver not built yet. */
   | 'NOT_SUPPORTED'
+  /** A stored secret is encrypted for the Quiver app on this machine, and this host cannot read it (the headless CLI). */
+  | 'SECRET_UNAVAILABLE'
   | 'INTERNAL';
 
 export interface ErrorPayload {

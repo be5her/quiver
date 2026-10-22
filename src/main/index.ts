@@ -115,6 +115,8 @@ async function main(): Promise<void> {
     // The smoke signs in against a local fake that needs no hands, so its window stays hidden.
     web: new ElectronWebSessions({ show: !process.env.QUIVER_SMOKE }),
     notifyApproval: process.env.QUIVER_SMOKE ? undefined : notifyApproval,
+    // The `quiver` shims electron-builder puts beside app.asar (resources/cli in this repository).
+    cliShims: app.isPackaged ? path.join(process.resourcesPath, 'cli') : undefined,
   });
   registerIpc(host);
   await host.start();

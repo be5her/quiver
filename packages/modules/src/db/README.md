@@ -55,7 +55,7 @@ The key browser scans by pattern a page at a time and shows the server's vitals 
 
 ## Storage
 
-Connections are committed under `.quiver/db-connections/` and saved queries under `.quiver/db-queries/`; passwords are encrypted per machine in `.quiver/local` and never committed. SQLite files referenced by a relative path resolve against the project folder, so a committed connection works for every teammate. The query history is per machine, under `.quiver/local`; applied grid edits are recorded there as one entry.
+Connections are committed under `.quiver/db-connections/` and saved queries under `.quiver/db-queries/`; passwords are encrypted per machine in `.quiver/local` and never committed (a headless [`quiver`](../../../../docs/cli.md) run cannot decrypt them and says so with `SECRET_UNAVAILABLE` rather than connecting without one). SQLite files referenced by a relative path resolve against the project folder, so a committed connection works for every teammate. The query history is per machine, under `.quiver/local`; applied grid edits are recorded there as one entry.
 
 A connection can reach its server through a tunnel: a Teleport database, or any command with a `{port}` placeholder (ssh and friends). A Redis connection through Grafana stores only the Grafana address and the data source's uid and name. Its Grafana session is per machine, in the app data folder, and shared with the Logs module. A query that fails because the Teleport cluster's certificate expired comes back as `TELEPORT_LOGIN_REQUIRED` naming the cluster, with a "Log in again" button.
 

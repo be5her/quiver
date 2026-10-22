@@ -7,6 +7,7 @@ import type { Host } from '../host';
 import { startFixtures } from './fixtures';
 import { freePort, type PartHooks, type RpcResult, type SmokeContext, type SmokePart, type UiContext } from './part';
 import api from './parts/api';
+import cli from './parts/cli';
 import db from './parts/db';
 import env from './parts/env';
 import git from './parts/git';
@@ -23,7 +24,7 @@ import todo from './parts/todo';
 import tools from './parts/tools';
 
 /** Every part, in the order they run. A full run is all of them; `npm run smoke -- db mock` picks some. */
-export const PARTS: SmokePart[] = [api, tools, db, teleport, mock, realtime, mcp, env, todo, logs, metabase, git, runner, queues, shell];
+export const PARTS: SmokePart[] = [api, tools, db, teleport, mock, realtime, mcp, env, todo, logs, metabase, git, runner, queues, cli, shell];
 
 type Phase = 'host' | 'renderer' | 'ui' | 'after';
 

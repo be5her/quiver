@@ -34,6 +34,7 @@ Each feature is a module with its own README that goes into the details: what it
 | Env files | Every `.env` of the project in one place: masked secrets, edits that keep the file's formatting, compare with the example, profiles, history. | [packages/modules/src/env](packages/modules/src/env/README.md) |
 | Todo | A plain list for the day, per workspace and per machine. | [packages/modules/src/todo](packages/modules/src/todo/README.md) |
 | Tools | JSON format, JWT decode and signature check, base64, URL encode, hash, UUID, timestamp. | [packages/modules/src/tools](packages/modules/src/tools/README.md) |
+| Command line | `quiver`: any command from a terminal or CI, connected to the running app or headless without it, with typed `--field` flags, exit codes and a JUnit reporter for collection runs. | [docs/cli.md](docs/cli.md) |
 
 Around the modules, the shell gives you a workspace model (several folders open at once, per-workspace tabs restored on return and after a restart, tabs, workspaces and the activity bar arranged by dragging), a command palette (`Ctrl+K`), light and dark themes in six brand palettes, and the MCP server below. [src/renderer/README.md](src/renderer/README.md) describes the shell, [packages/core/README.md](packages/core/README.md) the engine and where everything is stored.
 
@@ -59,6 +60,8 @@ When a call needs asking, Quiver shows the agent (named from the MCP handshake),
 
 **Pause agents**, in the status bar and in Settings, refuses every MCP call (those waiting for an answer included) until resumed, without changing the tool list. The status bar shows agent calls in the last minute and the approvals waiting; a click opens the **Agent activity** tab with the last 200 calls (agent, tool, workspace, decision, outcome, duration; never arguments or results). Permissions apply to MCP callers only: the window and the command line are the user.
 
+The same port serves the `quiver` command line at `/cli`, behind a per-start token; it runs commands as you, so the mutation switch and masking are for agents only ([docs/cli.md](docs/cli.md)).
+
 To see what agents actually do, record their calls: the call recorder in the MCP inspector keeps every tool call that reaches this server between Start and End, with the agent that made it, its arguments and its result, and saves the recording to a file. See the [MCP inspector](packages/modules/src/mcp/README.md#call-recorder).
 
 ## Run
@@ -74,7 +77,8 @@ Node 22.22.3 or later is needed (on Node 24, 24.15 or later), the minimum of the
 | ---------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `npm test`             | Unit tests for the core engine (vitest).                                                                          |
 | `npm run typecheck`    | Type-checks the main process and the renderer separately.                                                         |
-| `npm run smoke`        | Builds, then runs a headless end-to-end check of every module against local fakes and exits. `npm run smoke -- db teleport` runs only those parts (one per module, plus `shell`; `--list` names them), for quick runs while working on a change; the whole smoke runs before committing. `--shots` (or `QUIVER_SMOKE_SHOTS=<dir>`) adds the UI checks and captures screenshots; `QUIVER_SMOKE_MYSQL=mysql://user:pass@host:3306/db` or `QUIVER_SMOKE_POSTGRES=postgres://user:pass@host:5432/db` also exercises a live server. It uses a private MCP port, so a Quiver you have open is left alone. Each module's README says what its part of the smoke covers; [src/main/smoke/README.md](src/main/smoke/README.md) explains the rest. |
+| `npm run smoke`        | Builds, then runs a headless end-to-end check of every module against local fakes and exits. `npm run smoke -- db teleport` runs only those parts (one per module, plus `shell` and `cli`; `--list` names them), for quick runs while working on a change; the whole smoke runs before committing. `--shots` (or `QUIVER_SMOKE_SHOTS=<dir>`) adds the UI checks and captures screenshots; `QUIVER_SMOKE_MYSQL=mysql://user:pass@host:3306/db` or `QUIVER_SMOKE_POSTGRES=postgres://user:pass@host:5432/db` also exercises a live server. It uses a private MCP port, so a Quiver you have open is left alone. Each module's README says what its part of the smoke covers; [src/main/smoke/README.md](src/main/smoke/README.md) explains the rest. |
+| `npm run cli -- <args>` | Runs the `quiver` command line from this checkout, rebuilding it first when a source changed: `npm run cli -- list`, `npm run cli -- --headless todo.list`. Installed builds ship it as a shim to put on PATH (Settings → Command line). See [docs/cli.md](docs/cli.md). |
 | `npm run package`      | Builds the installer for this platform into `release/` with electron-builder, without publishing.                |
 | `npm run icon`         | Renders `resources/icon.svg` to `resources/icon.png`, the source of every platform icon.                          |
 | `npm run release:plan` | Previews the next stable release from the current checkout. Needs the GitHub CLI signed in; see [docs/releasing.md](docs/releasing.md). |
@@ -87,11 +91,12 @@ packages/ui        Host contract for the renderer: state services, IPC client, s
 packages/modules   One folder per feature. `main.ts` (Node side), `ui/` (Angular side) and `README.md` per module.
 packages/mcp       Adapts the command registry to an MCP server.
 src/main           Electron main process: host wiring, IPC, window, and the smoke test in src/main/smoke.
+src/cli            The `quiver` command line: connected to the app, or the host in plain Node (headless).
 src/preload        The only bridge between renderer and main (three functions).
 src/renderer       The Angular app and the shell: title bar, activity bar, sidebar, tabs, status bar, palette, settings.
 ```
 
-A feature is a set of commands (`defineCommand` with a zod input schema, validated on every call and turned into the MCP tool schema for free) plus UI. Commands are the only way the UI talks to the host, so anything you add is reachable from the palette, from MCP and from a future CLI without extra work. [CLAUDE.md](CLAUDE.md) walks through adding a module and the conventions.
+A feature is a set of commands (`defineCommand` with a zod input schema, validated on every call and turned into the MCP tool schema for free) plus UI. Commands are the only way the UI talks to the host, so anything you add is reachable from the palette, from MCP and from the `quiver` command line without extra work. [CLAUDE.md](CLAUDE.md) walks through adding a module and the conventions.
 
 ## Development workflow
 

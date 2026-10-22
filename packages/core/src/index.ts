@@ -60,3 +60,5 @@ export * from './queues-kafka';
 export * from './queues-rabbit';
 export * from './queues-messages';
 export * from './queues-sqs';
+export * from './cli-args';
+export * from './junit';

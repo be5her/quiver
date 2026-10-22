@@ -39,7 +39,9 @@ export async function readPassword(ws: WorkspaceApi, host: HostApi, connectionId
   if (!cipher) return '';
   try {
     return host.secrets.decrypt(cipher);
-  } catch {
+  } catch (err) {
+    // A host that cannot read this machine's secrets (the headless CLI) says so, rather than connecting without one.
+    if (err instanceof QuiverError && err.code === 'SECRET_UNAVAILABLE') throw err;
     return '';
   }
 }
