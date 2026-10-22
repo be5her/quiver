@@ -26,6 +26,7 @@ import {
 import { GitActions } from './git-actions';
 import { injectGitChanged } from './git-events';
 import { ago, codeClass, codeWord, errorReason, groupChanges, splitPath } from './git-format';
+import { GitWorktreesSection } from './worktrees-section';
 
 /** How often the status is read while the sidebar is open: edits to working files are not watched by the host. */
 const STATUS_EVERY_MS = 5000;
@@ -162,7 +163,7 @@ function withOrigin(files: GitFileChange[]): string[] {
 /** The workspace repository: branch and remote, the operation in progress, the commit box, the changed files, the stashes and the branches. */
 @Component({
   selector: 'q-git-sidebar',
-  imports: [Button, Checkbox, EmptyState, FormField, GitChangeGroup, Icon, IconButton, SectionHeader, Spinner, TextArea],
+  imports: [Button, Checkbox, EmptyState, FormField, GitChangeGroup, GitWorktreesSection, Icon, IconButton, SectionHeader, Spinner, TextArea],
   template: `
     @if (statusError(); as error) {
       @if (!current()) {
@@ -352,6 +353,8 @@ function withOrigin(files: GitFileChange[]): string[] {
           </p>
         }
       }
+
+      <q-git-worktrees-section />
 
       <!-- Views -->
       <q-section-header title="Views" class="mt-2" />

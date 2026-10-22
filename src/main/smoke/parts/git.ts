@@ -3,9 +3,10 @@ import local from './git/local';
 import manage from './git/manage';
 import pr from './git/pr';
 import ui from './git/ui';
+import worktrees from './git/worktrees';
 
 export default definePart({
   name: 'git',
-  summary: 'Git: local repository, branch management and pull requests through gh',
-  run: (t) => runSections(t, [local, manage, pr, ui]),
+  summary: 'Git: local repository, branch management, pull requests through gh and worktrees',
+  run: (t) => runSections(t, [local, manage, pr, ui, worktrees]),
 });

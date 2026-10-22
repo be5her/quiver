@@ -2,8 +2,9 @@ import { Component, computed, inject, input, linkedSignal, signal } from '@angul
 import { FormField, form } from '@angular/forms/signals';
 import type { GitBranch, GitTag } from '@quiver/core';
 import { Badge, Button, Checkbox, ContextMenu, EmptyState, Icon, IconButton, Input, Spinner, invokeResource, type Tab, type TabComponent } from '@quiver/ui';
-import { ArrowDown, ArrowUp, Brush, Check, Cloud, Ellipsis, GitBranch as GitBranchIcon, RefreshCw, Tag } from 'lucide';
+import { ArrowDown, ArrowUp, Brush, Check, Cloud, Ellipsis, FolderGit2, GitBranch as GitBranchIcon, RefreshCw, Tag } from 'lucide';
 import { GitActions } from './git-actions';
+import { GitWorktreeActions } from './worktree-actions';
 import { injectGitChanged } from './git-events';
 import { ago, cleanupCandidates, refMatches } from './git-format';
 
@@ -91,6 +92,7 @@ import { ago, cleanupCandidates, refMatches } from './git-format';
               [attr.data-current]="b.current"
               [attr.data-merged]="b.merged"
               [attr.data-gone]="b.gone"
+              [attr.data-worktree]="b.worktreePath ?? null"
               (contextmenu)="branchMenu($event, b)"
               (dblclick)="b.current || actions.checkout(b.name)"
             >
@@ -104,6 +106,11 @@ import { ago, cleanupCandidates, refMatches } from './git-format';
               }
               @if (b.gone) {
                 <span qBadge class="text-warning shrink-0" title="Its upstream was deleted on the remote">gone</span>
+              }
+              @if (b.worktreePath; as wtPath) {
+                <span qBadge class="shrink-0 gap-1 cursor-pointer hover:text-fg" [title]="'Checked out in the worktree at ' + wtPath + '\nClick to open it as a workspace'" data-testid="git-branches-worktree" (click)="worktrees.open(wtPath)">
+                  <svg [qIcon]="icons.FolderGit2" class="size-3"></svg>in worktree
+                </span>
               }
               @if (b.upstream) {
                 <span class="text-[11px] text-muted shrink-0 flex items-center gap-0.5" [title]="'Tracks ' + b.upstream" data-testid="git-branches-upstream">
@@ -173,7 +180,8 @@ export class GitBranchesTab implements TabComponent {
   readonly tab = input.required<Tab>();
   readonly scope = input.required<string>();
 
-  protected readonly icons = { ArrowDown, ArrowUp, Brush, Check, Cloud, Ellipsis, GitBranchIcon, RefreshCw, Tag };
+  protected readonly worktrees = inject(GitWorktreeActions);
+  protected readonly icons = { ArrowDown, ArrowUp, Brush, Check, Cloud, Ellipsis, FolderGit2, GitBranchIcon, RefreshCw, Tag };
   protected readonly branches = invokeResource<GitBranch[]>('git.branch.list');
   protected readonly tags = invokeResource<GitTag[]>('git.tag.list');
   protected readonly ago = ago;
@@ -199,7 +207,8 @@ export class GitBranchesTab implements TabComponent {
   constructor() {
     // Commits, checkouts, fetches and tags all move refs.
     injectGitChanged((p) => {
-      if (p.reason === 'branches') this.reload();
+      // Worktrees added, removed or switched change which branches are checked out elsewhere.
+      if (p.reason === 'branches' || p.reason === 'worktrees') this.reload();
     });
   }
 

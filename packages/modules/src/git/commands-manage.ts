@@ -74,7 +74,7 @@ const branchDelete = defineCommand({
   id: 'git.branch.delete',
   title: 'Delete git branch',
   description:
-    'Deletes a local branch. Refuses the current branch, and a branch whose commits are in none of its upstream, HEAD and the default branch (details.reason "not-merged") unless force is true; a forced delete leaves those commits only in the reflog. The remote branch is untouched; see git.branch.deleteRemote.',
+    'Deletes a local branch. Refuses the current branch, a branch checked out in another worktree (details.reason "checked-out-elsewhere", details.path that worktree), and a branch whose commits are in none of its upstream, HEAD and the default branch (details.reason "not-merged") unless force is true; a forced delete leaves those commits only in the reflog. The remote branch is untouched; see git.branch.deleteRemote.',
   scope: 'workspace',
   mutating: true,
   input: GitBranchDeleteInputSchema,
@@ -86,7 +86,7 @@ const branchDelete = defineCommand({
     const result = await local.git(root, args, { allowFailure: true });
     if (result.code !== 0) {
       const err = local.gitFailure(args, result);
-      if (!/not fully merged/i.test(err.message)) throw err;
+      if (!/not fully merged/i.test(err.message)) throw local.inOtherWorktree(err, 'remove that worktree, or switch it to another branch first');
       // Git's -d only looks at the upstream and HEAD. A branch git.branch.list calls merged has its commits in the
       // default branch, so nothing is lost when it goes from another branch.
       const base = await local.defaultBranch(root);

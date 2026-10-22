@@ -141,6 +141,8 @@ describe('branches', () => {
     expect(refMatches(branch('x'), 'y')).toBe(false);
     const list = [branch('main', { current: true, merged: true }), branch('done', { merged: true }), branch('pruned', { gone: true }), branch('open'), branch('origin/done', { remote: true, merged: true })];
     expect(cleanupCandidates(list).map((b) => b.name)).toEqual(['done', 'pruned']);
+    // Checked out in another worktree: git would refuse to delete it.
+    expect(cleanupCandidates([branch('elsewhere', { merged: true, worktreePath: '/tmp/repo.worktrees/elsewhere' })])).toEqual([]);
   });
 
   it('splits a remote branch into its remote and name, and lists the remotes', () => {

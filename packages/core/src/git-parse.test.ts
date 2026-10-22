@@ -1,5 +1,25 @@
 import { describe, expect, it } from 'vitest';
-import { attachPatches, conflictedPaths, detectOperation, operationArgs, parseBranches, parseDecorations, parseDiffSummary, parseLog, parseStashes, parseStatusV2, parseTags, planDiscard, splitPatch } from './git-parse';
+import {
+  attachPatches,
+  conflictedPaths,
+  defaultWorktreePath,
+  detectOperation,
+  isSameOrInside,
+  operationArgs,
+  parseBranches,
+  parseDecorations,
+  parseDiffSummary,
+  parseLog,
+  parseStashes,
+  parseStatusV2,
+  parseTags,
+  parseWorktreeList,
+  planDiscard,
+  sameWorktreePath,
+  splitPatch,
+  worktreeFolderName,
+  worktreeRefusal,
+} from './git-parse';
 
 // The fixtures are what git 2.43 printed for a small repository, with the hashes shortened.
 
@@ -268,5 +288,101 @@ describe('detectOperation', () => {
     expect(operationArgs('rebase', 'skip')).toEqual(['rebase', '--skip']);
     expect(operationArgs('cherry-pick', 'continue')).toEqual(['cherry-pick', '--continue']);
     expect(operationArgs('revert', 'abort')).toEqual(['revert', '--abort']);
+  });
+});
+
+describe('worktrees', () => {
+  // git 2.43 on Windows, which prints forward slashes; the folders were made with git worktree add, lock, and one deleted.
+  const W = 'C:/Users/me/AppData/Local/Temp/wtl';
+  const listed = [
+    `worktree ${W}/repo`,
+    'HEAD b3fcf89',
+    'branch refs/heads/main',
+    '',
+    `worktree ${W}/det`,
+    'HEAD b3fcf89',
+    'detached',
+    '',
+    `worktree ${W}/gone`,
+    'HEAD b3fcf89',
+    'branch refs/heads/gone',
+    'prunable gitdir file points to non-existent location',
+    '',
+    `worktree ${W}/lk`,
+    'HEAD b3fcf89',
+    'branch refs/heads/locked',
+    'locked on a usb disk',
+    '',
+    `worktree ${W}/lk2`,
+    'HEAD b3fcf89',
+    'branch refs/heads/lk2',
+    'locked',
+    '',
+    `worktree ${W}/with space`,
+    'HEAD b3fcf89',
+    'branch refs/heads/feat/x',
+    '',
+    '',
+  ].join('\0');
+
+  it('reads the main, linked, detached, locked and prunable worktrees, keeping spaces in paths', () => {
+    const base = { head: 'b3fcf89', detached: false, bare: false, locked: false, prunable: false, main: false, current: false };
+    expect(parseWorktreeList(listed, 'C:\\Users\\me\\AppData\\Local\\Temp\\wtl\\with space\\')).toEqual([
+      { ...base, path: `${W}/repo`, branch: 'main', main: true },
+      { ...base, path: `${W}/det`, branch: null, detached: true },
+      { ...base, path: `${W}/gone`, branch: 'gone', prunable: true, prunableReason: 'gitdir file points to non-existent location' },
+      { ...base, path: `${W}/lk`, branch: 'locked', locked: true, lockReason: 'on a usb disk' },
+      { ...base, path: `${W}/lk2`, branch: 'lk2', locked: true },
+      { ...base, path: `${W}/with space`, branch: 'feat/x', current: true },
+    ]);
+  });
+
+  it('reads a bare main repository and a repository with no commits yet', () => {
+    const bare = [`worktree ${W}/bare.git`, 'bare', '', `worktree ${W}/fromBare`, 'HEAD b3fcf89', 'branch refs/heads/main', '', ''].join('\0');
+    expect(parseWorktreeList(bare, `${W}/fromBare`).map((w) => [w.path, w.bare, w.head, w.branch, w.main, w.current])).toEqual([
+      [`${W}/bare.git`, true, null, null, true, false],
+      [`${W}/fromBare`, false, 'b3fcf89', 'main', false, true],
+    ]);
+    const fresh = `worktree /home/me/repo\0HEAD 0000000000000000000000000000000000000000\0branch refs/heads/main\0\0`;
+    expect(parseWorktreeList(fresh, '/home/me/repo')).toEqual([{ path: '/home/me/repo', head: null, branch: 'main', detached: false, bare: false, locked: false, prunable: false, main: true, current: true }]);
+    expect(parseWorktreeList('')).toEqual([]);
+  });
+
+  it('compares folders across slashes, trailing separators and, on Windows, case', () => {
+    expect(sameWorktreePath('C:/Repo/', 'c:\\repo')).toBe(true);
+    expect(sameWorktreePath('/home/me/Repo', '/home/me/repo')).toBe(false);
+    expect(isSameOrInside('C:\\repo\\sub\\x', 'c:/Repo')).toBe(true);
+    expect(isSameOrInside('/home/me/repo', '/home/me/repo/')).toBe(true);
+    expect(isSameOrInside('/home/me/repo-other', '/home/me/repo')).toBe(false);
+    expect(isSameOrInside('/anything', '/')).toBe(true);
+  });
+
+  it('puts a new worktree beside the repository, in <name>.worktrees, one folder per branch', () => {
+    expect(defaultWorktreePath('C:\\code\\quiver', 'feat/git-blame')).toBe('C:\\code\\quiver.worktrees\\feat-git-blame');
+    expect(defaultWorktreePath('/home/me/quiver/', 'fix/a|b')).toBe('/home/me/quiver.worktrees/fix-a-b');
+    expect(defaultWorktreePath('/quiver', 'main')).toBe('/quiver.worktrees/main');
+    expect(worktreeFolderName('//')).toBe('worktree');
+  });
+
+  it("reads the branch and folder from git's refusals about a branch checked out elsewhere", () => {
+    expect(worktreeRefusal("'main' is already used by worktree at 'C:/tmp/repo'")).toEqual({ branch: 'main', path: 'C:/tmp/repo' });
+    expect(worktreeRefusal("fatal: 'feat/x' is already checked out at '/home/me/x y'")).toEqual({ branch: 'feat/x', path: '/home/me/x y' });
+    expect(worktreeRefusal("cannot delete branch 'main' used by worktree at 'C:/tmp/repo'")).toEqual({ branch: 'main', path: 'C:/tmp/repo' });
+    expect(worktreeRefusal("error: Cannot delete branch 'b' checked out at '/r'")).toEqual({ branch: 'b', path: '/r' });
+    expect(worktreeRefusal('pathspec did not match')).toBeNull();
+  });
+
+  it('names the worktree of a branch checked out in another one, but not the current branch', () => {
+    const line = (f: string[]) => f.join('\0');
+    const out = [
+      line(['refs/heads/feat/x', 'feat/x', '*', '', '', 'h1', 'a', '', `${W}/with space`]),
+      line(['refs/heads/main', 'main', ' ', '', '', 'h2', 'm', '', `${W}/repo`]),
+      line(['refs/heads/free', 'free', ' ', '', '', 'h3', 'f', '', '']),
+    ].join('\n');
+    expect(parseBranches(out).map((b) => [b.name, b.worktreePath])).toEqual([
+      ['feat/x', undefined],
+      ['main', `${W}/repo`],
+      ['free', undefined],
+    ]);
   });
 });
