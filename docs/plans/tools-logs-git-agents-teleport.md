@@ -1,6 +1,6 @@
 # Plan: QR and DNS tools, VictoriaLogs direct, git changes as a tree, agent rules per action, Teleport certificate renewal
 
-**Status: combined; waiting for the final review.** Six open items of the workspace todo list, built as six lanes in parallel, each its own pull request, reviewed one by one, then combined into one pull request that gets the whole test suite, the whole smoke and a final review, and is merged by the owner's instruction.
+**Status: through the final review; merged by the owner's instruction.** Six open items of the workspace todo list, built as six lanes in parallel, each its own pull request, reviewed one by one, then combined into one pull request that gets the whole test suite, the whole smoke and a final review, and is merged by the owner's instruction.
 
 ## How the work runs
 
@@ -206,9 +206,30 @@ Done on `feat/tools-logs-git-agents-teleport`, merging E, F, C, D, A, B in that 
 
 - Checks on the combined branch: `npm run typecheck` clean; `npm test` 75 files, 1015 tests passed; `npm run smoke -- --shots` SMOKE PASSED, 1427 checks (the first whole run failed on the three checks above, the second, after the two fixes, passed).
 
+### Final review
+
+Fixed, each in its own commit:
+- **`db.connection.save` and `db.connection.test` (a0748e7).** The known hole: an agent could repoint a connection whose password is stored (kind, host, port, TLS or access) and the stored password went to the new place. `db.connection.test` had the same hole and needed no save: an inline connection with a saved `id` and no password reused the stored one. Both are now conditionally mutating, and so is a tunnel command (`access.type: command`) that is not the one already saved, since saving or testing one let an agent start any process without mutations. A rename, or a test of the connection as it is, stays allowed. Smoke check in `parts/db.ts`, db README's Agents and Verified by.
+- **`metabase.connection.save` (1dc7fe2).** The same pattern: the API key is stored per connection and was sent to a new `url` an agent gave. Now mutating for that case only. Smoke check in `parts/metabase.ts`, metabase README.
+- **`FileStore` (cc506ac).** eb5bae1 queued reloads and writes, but a `get`/`list` that found the cache dropped by a reload still read the folder a second time; the put queued behind the reload cached its item in the reload's map, and the get's read, finishing last, replaced it, so the saved item was missing until the next reload. A load now joins the read under way, and a read a reload or invalidate superseded caches nothing. A unit test that failed before.
+- **Smoke robustness (04bbde6).** The Teleport check that an expired certificate's renewal waits for the window read the status after a fixed 1.5 s; it now waits for the hold. The DNS timeout check's bound went from 1000 ms to 1400 ms (still below the 1500 ms two doubling tries would take).
+- **Docs (8fbed2d, e7bd2f3).** README's Agent permissions and the db README say an action rule covers its own tool only (`db_export` runs SQL and `db_transaction` commits under their own rules); the smoke README lists the fake DNS responder.
+
+Secret-per-connection modules checked: logs (fixed by lane C's review), db (fixed here), metabase (fixed here), queues (`queues.connection.save` is always mutating and `queues.connection.test` with an id and a draft is mutating: already right), realtime (no secret stored per connection), api environments (secrets are variables an agent's sends may use by design; masked in results).
+
+Looked at and left:
+- Lane E's registry with lane C's and these conditional saves: the `mutating` function is evaluated after the action, the approval payload is masked, a function that throws refuses the call. Lane F's `teleport.cluster.autoRenew` is plain `mutating`; `teleport.window.focus` refuses every caller but the window. `teleport.kube.history.rerun` cannot get round a `teleport.kube.action#delete` rule: agents may not rerun actions at all.
+- `git.discard`'s action is worked out from `git status` and the paths given, the same plan the handler uses, so lane D's folder actions get the right one. The status is read again by the handler, so a file whose state changes while an approval waits may be discarded as the other kind; left.
+- `FileStore` queue: no deadlock (loads never queue, `onChange` is synchronous), a failed job does not stall the next (`catch` before `then`), a `put` then a `get` sees the item.
+- Security pass: DNS names and resolvers are validated (an IP for the resolver), VictoriaLogs requests are a form POST with secrets refused when they hold control characters and scrubbed from errors, `tsh login --proxy=<addr>` is one argv element, the QR tab draws from `modules` without injecting markup, `mcp.approval.respond`, `mcp.permissions.*` and `teleport.window.focus` refuse agents.
+- Smoke: the many fixed `wait()`s in the lanes are in UI checks (not run on Windows CI) or before negative checks; config is restored in `finally` in the permission, kube and force-push checks. `QUIVER_TELEPORT_POLL_MS` and the Teleport autoRenew settings are restored at the end of their block, not in a `finally`.
+- An agent can still change a `{{variable}}` in the active environment that a db connection's host or tunnel command uses (`api_variables_set` is allowed for the active environment); the gate compares the saved fields, not their resolved values.
+
+Checks after the fixes: `npm run typecheck` clean; `npm test` 75 files, 1016 tests, twice; `npm run smoke -- --shots` SMOKE PASSED, 1429 checks in 675 s.
+
 ### Follow-ups
 
-- `db.connection.save` has the hole lane C's review fixed for logs: an agent can repoint a db connection at another host and the stored password is sent there. Left for the final review.
+- Agent changes to a `{{variable}}` a db connection resolves (its host or tunnel command) are not gated like a change of the field itself.
 - Real `tsh login` with a still-valid certificate is untested against a real cluster. It most likely prints the profile and keeps the certificate, so renewal before expiry would fail ("tsh kept…", retried every 10 minutes) and the real renewal would happen after expiry through the browser. Consider a quieter result than `failed` for that case.
 - Agent-scoped ask rules and Always allow: the rule Always allow writes has no `agent`, even when the ask that triggered it was for one agent, so it allows every agent.
 - Lane E: when `actions.of` throws, `id#action` deny and ask rules do not apply (only whole-tool rules, then the mode). Applying them would be stricter.
