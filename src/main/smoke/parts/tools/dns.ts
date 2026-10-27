@@ -77,6 +77,17 @@ const section: SmokeSection = async ({ host, check, run, rpc, toolNames }) => {
       reverse,
     );
 
+    // An IPv6 address is looked up under ip6.arpa, its 32 nibbles reversed.
+    const reverse6 = await lookup('[2001:DB8::10]');
+    check(
+      'dns: an IPv6 address runs a PTR lookup on its ip6.arpa name',
+      reverse6.name === '2001:db8::10' &&
+        reverse6.asciiName === '0.1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa' &&
+        JSON.stringify(reverse6.reverse) === JSON.stringify({ address: '2001:db8::10', names: ['v6.quiver.test'] }) &&
+        reverse6.errors.length === 0,
+      reverse6,
+    );
+
     // No records of a type is an empty answer; so is NXDOMAIN, per type. SRV sorts by priority, then weight.
     const srv = await lookup('_sip._tcp.quiver.test', { types: ['SRV', 'A'] });
     const missing = await lookup('missing.quiver.test');
@@ -158,8 +169,8 @@ const section: SmokeSection = async ({ host, check, run, rpc, toolNames }) => {
             s.dataset.testid.slice('dns-group-'.length),
             { rows: [...s.querySelectorAll('[data-testid=dns-row]')].map((r) => [...r.cells].map((c) => c.textContent.trim())), note: s.querySelector('[data-testid=dns-group-empty],[data-testid=dns-group-error]')?.textContent.trim() ?? null },
           ]));
-          return { chain: out.querySelector('[data-testid=dns-chain]')?.textContent.trim() ?? null, meta: out.querySelector('[data-testid=dns-meta]')?.textContent.trim() ?? null, error: out.querySelector('[data-testid=dns-error]')?.textContent.trim() ?? null, groups };
-        })()`) as Promise<{ chain: string | null; meta: string | null; error: string | null; groups: Record<string, { rows: string[][]; note: string | null }> } | null>;
+          return { chain: out.querySelector('[data-testid=dns-chain]')?.textContent.trim() ?? null, meta: out.querySelector('[data-testid=dns-meta]')?.textContent.trim() ?? null, error: out.querySelector('[data-testid=dns-error]')?.textContent.trim() ?? null, overflow: out.scrollWidth > out.clientWidth, wraps: [...out.querySelectorAll('[data-testid=dns-row]')].some((r) => { const s = r.cells[0].querySelectorAll('span'); return s.length > 1 && s[s.length - 1].offsetTop !== s[0].offsetTop; }), groups };
+        })()`) as Promise<{ chain: string | null; meta: string | null; error: string | null; overflow: boolean; wraps: boolean; groups: Record<string, { rows: string[][]; note: string | null }> } | null>;
 
       // The alias, with SRV ticked on top of the defaults, through Enter in the name field.
       const typed = (await setInput('dns-name', 'www.quiver.test')) && (await setInput('dns-server', fake.server));
@@ -173,8 +184,9 @@ const section: SmokeSection = async ({ host, check, run, rpc, toolNames }) => {
       await wait(200);
       await shot('08d-dns-lookup-light');
       check(
-        'ui: the DNS lookup tab shows the CNAME chain, the resolver and time, and a table per type',
+        'ui: the DNS lookup tab shows the CNAME chain, the resolver and time, and a table per type, names on one line',
         opened === true &&
+          out?.wraps === false &&
           typed === true &&
           out?.chain === 'www.quiver.test → edge.quiver.test → quiver.test' &&
           new RegExp(`^Resolver 127\\.0\\.0\\.1:${fake.port} · \\d+ ms$`).test(out?.meta ?? '') &&
@@ -211,6 +223,34 @@ const section: SmokeSection = async ({ host, check, run, rpc, toolNames }) => {
           Object.values(missingOut?.groups ?? {}).every((g) => g.note === 'No such name (NXDOMAIN)') &&
           /must be an IP address/.test(refusedOut?.error ?? ''),
         { zoneOut, missingOut, refusedOut },
+      );
+
+      // Long names wrap between labels: the IPv6 reverse lookup (a 73-character ip6.arpa name) and the SOA table in a
+      // narrow tab stay inside it, with no horizontal scroll.
+      await js(`(() => { const t = ${pane}?.querySelector('[data-testid=dns-lookup-tool]'); if (t) t.style.maxWidth = '560px'; })()`);
+      await setInput('dns-server', fake.server);
+      await setInput('dns-name', '2001:db8::10');
+      await js(`${pane}?.querySelector('[data-testid=dns-lookup]')?.click()`);
+      await wait(600);
+      const narrowReverse = await readOutput();
+      await shot('08f-dns-lookup-narrow-dark');
+      await setInput('dns-name', 'quiver.test');
+      await js(`${pane}?.querySelector('[data-testid=dns-lookup]')?.click()`);
+      await wait(600);
+      const narrowZone = await readOutput();
+      await shot('08g-dns-lookup-narrow-soa');
+      await js(`(() => { const t = ${pane}?.querySelector('[data-testid=dns-lookup-tool]'); if (t) t.style.maxWidth = ''; })()`);
+      check(
+        'ui: in a narrow DNS lookup tab the ip6.arpa name and the SOA table wrap instead of scrolling sideways',
+        zoneOut?.overflow === false &&
+          zoneOut?.wraps === false &&
+          narrowReverse?.overflow === false &&
+          narrowReverse?.wraps === true &&
+          narrowReverse?.groups['PTR']?.rows[0]?.[0] === '0.1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa' &&
+          narrowReverse?.groups['PTR']?.rows[0]?.[2] === 'v6.quiver.test' &&
+          narrowZone?.overflow === false &&
+          narrowZone?.groups['SOA']?.rows.length === 1,
+        { narrowReverse, narrowZone: narrowZone && { overflow: narrowZone.overflow, soa: narrowZone.groups['SOA'] } },
       );
       await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
       await wait(200);

@@ -94,13 +94,13 @@ const COLUMNS: Record<string, Column[]> = {
         }
       </div>
     </div>
-    <div class="flex-1 min-h-0 overflow-auto p-3 flex flex-col gap-4" data-testid="dns-output">
+    <div class="@container flex-1 min-h-0 overflow-auto p-3 flex flex-col gap-4" data-testid="dns-output">
       @if (error(); as error) {
         <p class="text-xs text-danger" data-testid="dns-error">{{ error }}</p>
       } @else if (result(); as r) {
         <div class="flex flex-col gap-1 text-xs">
           @if (r.reverse; as rev) {
-            <div data-testid="dns-reverse">
+            <div class="break-all" data-testid="dns-reverse">
               Reverse lookup of <span class="font-mono">{{ rev.address }}</span> ({{ r.asciiName }}):
               <span class="font-mono">{{ rev.names.length ? rev.names.join(', ') : 'no names' }}</span>
             </div>
@@ -128,20 +128,26 @@ const COLUMNS: Record<string, Column[]> = {
               <table class="w-full text-xs">
                 <thead class="text-muted text-left">
                   <tr class="border-b border-edge">
-                    <th class="py-1 pr-4 font-medium w-px whitespace-nowrap">Name</th>
-                    <th class="py-1 pr-4 font-medium w-px text-right">TTL</th>
+                    <th class="py-1 pr-4 @max-2xl:pr-2 font-medium w-px whitespace-nowrap">Name</th>
+                    <th class="py-1 pr-4 @max-2xl:pr-2 font-medium w-px text-right">TTL</th>
                     @for (c of group.columns; track c.label) {
-                      <th class="py-1 pr-4 font-medium whitespace-nowrap" [class.text-right]="c.numeric" [class.w-px]="!$last">{{ c.label }}</th>
+                      <th class="py-1 pr-4 @max-2xl:pr-2 font-medium" [class.text-right]="c.numeric" [class.w-px]="!$last" [class]="$last ? 'whitespace-nowrap' : 'whitespace-nowrap @max-2xl:whitespace-normal'">{{ c.label }}</th>
                     }
                   </tr>
                 </thead>
                 <tbody class="font-mono">
                   @for (rec of group.records; track $index) {
                     <tr class="border-b border-edge/60 align-top" data-testid="dns-row">
-                      <td class="py-1 pr-4 whitespace-nowrap">{{ rec.name }}</td>
-                      <td class="py-1 pr-4 text-right text-muted whitespace-nowrap" [title]="rec.ttl === null ? 'Node reports the TTL for A and AAAA only' : ''">{{ rec.ttl ?? '—' }}</td>
+                      <td class="py-1 pr-4 @max-2xl:pr-2 whitespace-nowrap @max-2xl:whitespace-normal">@for (part of labels(rec.name); track $index) {<span>{{ part }}</span><wbr class="hidden @max-2xl:inline" />}</td>
+                      <td class="py-1 pr-4 @max-2xl:pr-2 text-right text-muted whitespace-nowrap" [title]="rec.ttl === null ? 'Node reports the TTL for A and AAAA only' : ''">{{ rec.ttl ?? '—' }}</td>
                       @for (c of group.columns; track c.label) {
-                        <td class="py-1 pr-4" [class.text-right]="c.numeric" [class.whitespace-nowrap]="!$last" [class.break-all]="$last">{{ c.value(rec) }}</td>
+                        @if ($last) {
+                          <td class="py-1 pr-4 @max-2xl:pr-2 break-all" [class.text-right]="c.numeric">{{ c.value(rec) }}</td>
+                        } @else if (c.numeric) {
+                          <td class="py-1 pr-4 @max-2xl:pr-2 text-right whitespace-nowrap">{{ c.value(rec) }}</td>
+                        } @else {
+                          <td class="py-1 pr-4 @max-2xl:pr-2 whitespace-nowrap @max-2xl:whitespace-normal">@for (part of labels(c.value(rec)); track $index) {<span>{{ part }}</span><wbr class="hidden @max-2xl:inline" />}</td>
+                        }
                       }
                     </tr>
                   }
@@ -189,6 +195,11 @@ export class DnsLookup {
       empty: r.empty.find((e) => e.type === g.type)?.code ?? null,
     }));
   });
+
+  /** A name split after each dot, so that in a narrow tab (under 42rem) a long name wraps between labels instead of overflowing. */
+  protected labels(text: string): string[] {
+    return text.split(/(?<=\.)/);
+  }
 
   protected toggle(type: DnsRecordType): void {
     this.picked.update((set) => {

@@ -15,7 +15,7 @@ const TYPE_NAMES = Object.fromEntries(Object.entries(TYPE_CODES).map(([k, v]) =>
 
 /**
  * The zone the fake answers, as the smoke checks expect it: `quiver.test` with every common type (MX and SRV listed
- * out of order, so the tool's sorting shows), `www.quiver.test` an alias of an alias of it, a PTR for 192.0.2.10,
+ * out of order, so the tool's sorting shows), `www.quiver.test` an alias of an alias of it, a PTR for 192.0.2.10 and one for 2001:db8::10,
  * NXDOMAIN for anything else, `refused.quiver.test` answered with REFUSED and `slow.quiver.test` never answered.
  */
 export const FAKE_DNS_ZONE: Record<string, Rr[]> = {
@@ -41,6 +41,7 @@ export const FAKE_DNS_ZONE: Record<string, Rr[]> = {
     { type: 'SRV', ttl: 300, priority: 5, weight: 0, port: 5061, target: 'sip3.quiver.test' },
   ],
   '10.2.0.192.in-addr.arpa': [{ type: 'PTR', ttl: 300, target: 'quiver.test' }],
+  '0.1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa': [{ type: 'PTR', ttl: 300, target: 'v6.quiver.test' }],
 };
 
 function encodeName(name: string): Buffer {
