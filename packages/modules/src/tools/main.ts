@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { QuiverError, defineCommand, defineModule, relativeTime } from '@quiver/core';
+import { QR_MAX_BYTES, QuiverError, defineCommand, defineModule, encodeQr, relativeTime, renderQrSvg } from '@quiver/core';
 import { JWT_ALGORITHMS, jwtParts, verifyJwt } from '@quiver/core/node';
 import { z } from 'zod';
 
@@ -186,7 +186,24 @@ const timestampConvert = defineCommand({
   },
 });
 
+const qrEncode = defineCommand({
+  id: 'tools.qr.encode',
+  title: 'Encode QR code',
+  description: `Encodes text as a QR code at the smallest version that holds it. Returns the SVG (dark modules in currentColor), the matrix as rows of '1' (dark) and '0' (light) without the quiet zone, the version, size in modules, level and mode (numeric, alphanumeric or byte as UTF-8). Text up to ${QR_MAX_BYTES} bytes at level L; higher levels hold less.`,
+  scope: 'global',
+  input: z.object({
+    text: z.string(),
+    errorCorrection: z.enum(['L', 'M', 'Q', 'H']).default('M').describe('L 7 %, M 15 %, Q 25 %, H 30 % of the symbol can be restored'),
+    margin: z.number().int().min(0).max(8).default(4).describe('Quiet zone in modules around the symbol in the SVG'),
+    moduleSize: z.number().int().min(1).max(32).default(8).describe('Pixels per module for the SVG width and height'),
+  }),
+  handler: async ({ text, errorCorrection, margin, moduleSize }) => {
+    const code = encodeQr(text, { errorCorrection });
+    return { svg: renderQrSvg(code.modules, { margin, moduleSize }), modules: code.modules, version: code.version, size: code.size, errorCorrection: code.errorCorrection, mode: code.mode };
+  },
+});
+
 export const toolsModule = defineModule({
   id: 'tools',
-  commands: [jsonFormat, jsonMinify, base64Encode, base64Decode, urlEncode, urlDecode, jwtDecode, jwtVerify, uuidGenerate, hashDigest, timestampConvert],
+  commands: [jsonFormat, jsonMinify, base64Encode, base64Decode, urlEncode, urlDecode, jwtDecode, jwtVerify, uuidGenerate, hashDigest, timestampConvert, qrEncode],
 });
