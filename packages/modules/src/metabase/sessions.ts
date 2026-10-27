@@ -3,6 +3,15 @@ import { QuiverError, metabasePartition, normalizeMetabaseUrl, nowIso, type Host
 const SIGNED_OUT: MetabaseSession = { state: 'signed-out', user: null, error: null, checkedAt: null };
 const UNKNOWN: MetabaseSession = { state: 'unknown', user: null, error: null, checkedAt: null };
 
+const SESSION_COOKIE = 'metabase.SESSION';
+/**
+ * How long this machine keeps the session cookie: Metabase's default MAX_SESSION_AGE, 14 days. Metabase
+ * only gives the cookie an expiry when "Remember me" is ticked on its password form, never after a
+ * Google sign-in, and a cookie without one is gone when Quiver quits. A server that ends the session
+ * sooner answers 401, which asks for a sign-in as before.
+ */
+const KEEP_SESSION_S = 14 * 24 * 60 * 60;
+
 export function hostOf(base: string): string {
   return new URL(base).host;
 }
@@ -82,6 +91,7 @@ export class MetabaseSessions {
       throw new QuiverError('REQUEST_FAILED', (err as Error).message);
     }
     const user = ok ? await this.whoami(host, base).catch(() => null) : null;
+    if (user) await web.keepCookie(metabasePartition(base), base, SESSION_COOKIE, KEEP_SESSION_S).catch(() => false);
     return this.set(host, base, user ? { state: 'signed-in', user, error: null, checkedAt: nowIso() } : { ...SIGNED_OUT, error: ok ? 'Metabase did not keep the session' : null, checkedAt: nowIso() });
   }
 

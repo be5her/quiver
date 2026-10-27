@@ -154,6 +154,27 @@ export class ElectronWebSessions implements WebSessionsApi {
     return found?.value ?? null;
   }
 
+  async keepCookie(partition: string, url: string, name: string, maxAgeS: number): Promise<boolean> {
+    const cookies = this.get(partition).cookies;
+    const [found] = await cookies.get({ url, name });
+    if (!found) return false;
+    if (!found.session) return true;
+    // Set again with an expiry, which is what makes Chromium write it to disk; a host-only cookie stays host-only.
+    await cookies.set({
+      url,
+      name: found.name,
+      value: found.value,
+      domain: found.hostOnly ? undefined : found.domain,
+      path: found.path,
+      secure: found.secure,
+      httpOnly: found.httpOnly,
+      sameSite: found.sameSite,
+      expirationDate: Date.now() / 1000 + maxAgeS,
+    });
+    await cookies.flushStore();
+    return true;
+  }
+
   async clear(partition: string): Promise<void> {
     const open = this.pending.get(partition);
     if (open && !open.win.isDestroyed()) open.win.close();

@@ -1,5 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { session } from 'electron';
+import { metabasePartition } from '@quiver/core';
 import type {
   DbQueryResult,
   MetabaseCard,
@@ -71,6 +73,14 @@ export default definePart({
       'metabase: sign-in opens the login page, follows the identity provider back and knows the user',
       signedIn.state === 'signed-in' && signedIn.user?.email === 'smoke@example.com' && signedIn.user.id === 1 && fakeMetabase.seen.logins === logins0 + 1,
       { signedIn, logins: fakeMetabase.seen.logins },
+    );
+    // The fake, like Metabase after a Google sign-in, sets the cookie for the browser session only; kept as is, it would be gone after a restart.
+    const [sessionCookie] = await session.fromPartition(metabasePartition(fakeMetabase.url)).cookies.get({ url: fakeMetabase.url, name: 'metabase.SESSION' });
+    const keptDays = sessionCookie?.expirationDate ? (sessionCookie.expirationDate - Date.now() / 1000) / 86_400 : 0;
+    check(
+      'metabase: the session cookie is kept across restarts for 14 days, host-only and http-only as Metabase set it',
+      sessionCookie?.session === false && keptDays > 13.9 && keptDays <= 14 && sessionCookie.hostOnly === true && sessionCookie.httpOnly === true,
+      { session: sessionCookie?.session, days: keptDays, hostOnly: sessionCookie?.hostOnly, httpOnly: sessionCookie?.httpOnly },
     );
     const again = await run<MetabaseSession>('metabase.signin', { connectionId: browser.id }, ws.id);
     check('metabase: signing in again with a live session opens no window', again.state === 'signed-in' && fakeMetabase.seen.logins === logins0 + 1, { again: again.state, logins: fakeMetabase.seen.logins });
