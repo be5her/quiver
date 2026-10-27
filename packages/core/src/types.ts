@@ -59,12 +59,27 @@ export interface TeleportConfig {
   pins: TeleportPin[];
   /** Optional explicit tsh binary (or wrapper command). Empty means discover it. */
   tshPath: string;
-  /** Start `tsh login` on launch for every cluster whose certificate has expired. */
+  /** Start `tsh login` on launch for every cluster whose certificate has expired: the startup half of `autoRenew`. */
   loginOnLaunch: boolean;
+  /** Keep me logged in: proxies whose certificate is renewed with `tsh login` when it is about to expire or has expired. */
+  autoRenew: string[];
   /** Kubernetes clusters marked protected: actions need the cluster name typed, and agents are refused. */
   protectedKubes: TeleportKubeRef[];
   /** Let agents run Kubernetes actions and port forwards on protected clusters too. Off by default. */
   agentActionsOnProtected: boolean;
+}
+
+/** A certificate renewal (Keep me logged in) started, opened the browser, or ended. Sent with `teleport.changed` reason `renewal`. */
+export interface TeleportRenewalEvent {
+  proxy: string;
+  /** Short name of the cluster, for messages. */
+  label: string;
+  phase: 'start' | 'browser' | 'ok' | 'failed' | 'cancelled';
+  /** The attempt opens (or opened) a browser window for SSO. */
+  browser: boolean;
+  /** No Quiver window was in front when this happened: the window shows a system notification as well as a toast. */
+  background: boolean;
+  message?: string;
 }
 
 /** A Kubernetes cluster of a Teleport cluster. */
@@ -354,7 +369,7 @@ export interface HostEvents {
   /** The recording of agent calls started, paused, ended or was dropped, or a call was recorded. Bursts of calls arrive as one event. */
   'mcp.recording': McpRecordingStatus;
   /** Teleport session status, login progress, pins or tunnel list changed. Fetch teleport.status for details. */
-  'teleport.changed': { reason: 'status' | 'tunnels' | 'login' | 'pins' | 'protected' };
+  'teleport.changed': { reason: 'status' | 'tunnels' | 'login' | 'pins' | 'protected' | 'renewal'; renewal?: TeleportRenewalEvent };
   /** Kubernetes: the local history changed, a followed log stream has new lines or ended, or a port forward started, stopped or exited. */
   'teleport.kube.changed': { reason: 'history' | 'stream' | 'forwards'; runId?: string };
   /**
