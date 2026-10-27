@@ -388,6 +388,16 @@ export default definePart({
         !getKeyed.error && (JSON.parse(getKeyed.text) as { hasApiKey?: boolean }).hasApiKey === true && !getKeyed.text.includes(fakeMetabase.apiKey),
         getKeyed.text.slice(0, 300),
       );
+      // The stored key stays with its address: moving the connection elsewhere is gated, a rename is not.
+      const move = await tool('metabase_connection_save', { connection: { id: scratch.id, url: 'http://127.0.0.1:9' } });
+      const rename = await tool('metabase_connection_save', { connection: { id: scratch.id, name: 'Scratch renamed' } });
+      const sameUrl = await tool('metabase_connection_save', { connection: { id: scratch.id, url: fakeMetabase.url } });
+      const afterMove = await run<MetabaseConnectionSummary>('metabase.connection.get', { id: scratch.id }, ws.id);
+      check(
+        'metabase: an agent may not move a connection with a stored key to another address, but may rename it',
+        blocked(move) && !rename.error && !sameUrl.error && afterMove.url === scratch.url && afterMove.name === 'Scratch renamed',
+        { move, rename: rename.error, sameUrl: sameUrl.error, url: afterMove.url },
+      );
       const stillSignedIn = await run<MetabaseSession>('metabase.session', { connectionId: browser.id }, ws.id);
       check('metabase: the blocked sign-out left the session alone', stillSignedIn.state === 'signed-in' && fakeMetabase.seen.logouts === logouts0, { state: stillSignedIn.state, logouts: fakeMetabase.seen.logouts });
 
