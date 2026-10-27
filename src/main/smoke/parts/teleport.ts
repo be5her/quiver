@@ -764,7 +764,8 @@ export default definePart({
       await run('teleport.window.focus', { focused: false }, null);
       await fakeTsh.expire(second);
       await run<TeleportStatus>('teleport.status', { refresh: true }, null);
-      await settle();
+      // Waits for the poll to pick the renewal and hold it, rather than a fixed time a slow machine could overrun.
+      await until(async () => (await renewalOf(second))?.waitingForFocus === true, 5000);
       const waiting = clusterOf(await status(), second);
       check(
         'teleport renew: an expired certificate (a browser login) waits while Quiver is in the background',

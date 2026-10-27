@@ -109,11 +109,12 @@ const section: SmokeSection = async ({ host, check, run, rpc, toolNames }) => {
 
     // A refusal and a timeout are errors of their type.
     const refused = await lookup('refused.quiver.test', { types: ['A'] });
-    // The timeout bounds the whole lookup, retries included.
+    // The timeout bounds the whole lookup, retries included (two tries with c-ares doubling the wait would take 1500 ms;
+    // the bound leaves a slow machine's timer lag room).
     const slow = await lookup('slow.quiver.test', { types: ['A'], timeoutMs: 500 });
     check(
       'dns: a refused query and a timeout are reported as errors of their type, the timeout within timeoutMs',
-      refused.errors.map((e) => `${e.type}:${e.code}`).join() === 'A:EREFUSED' && slow.errors.map((e) => `${e.type}:${e.code}`).join() === 'A:ETIMEOUT' && slow.durationMs < 1000,
+      refused.errors.map((e) => `${e.type}:${e.code}`).join() === 'A:EREFUSED' && slow.errors.map((e) => `${e.type}:${e.code}`).join() === 'A:ETIMEOUT' && slow.durationMs < 1400,
       { refused: refused.errors, slow: slow.errors, ms: slow.durationMs },
     );
 
