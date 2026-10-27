@@ -268,22 +268,28 @@ function anyData(r: AnyRecord): DnsRecordData {
   }
 }
 
-/** The CNAME links from `name`, one alias at a time until a name is not one (at most 16 hops). */
-async function followCnames(resolver: Resolver, name: string): Promise<DnsAnswer[]> {
+/**
+ * The CNAME links from `name`, one alias at a time until a name is not one (at most 16 hops, stopping at a loop).
+ * `missing` is how the first question ended when `name` is not an alias: ENODATA (it exists) or ENOTFOUND (NXDOMAIN).
+ */
+async function followCnames(resolver: Resolver, name: string): Promise<{ answers: DnsAnswer[]; missing?: 'ENODATA' | 'ENOTFOUND' }> {
   const answers: DnsAnswer[] = [];
-  for (let current = name; answers.length < 16 && !answers.some((a) => a.name === current); ) {
+  const seen = new Set<string>();
+  for (let current = name; answers.length < 16 && !seen.has(current.toLowerCase().replace(/\.$/, '')); ) {
+    seen.add(current.toLowerCase().replace(/\.$/, ''));
     let targets: string[];
     try {
       targets = await resolver.resolveCname(current);
     } catch (err) {
-      if (classifyDnsError(err).kind === 'empty') break;
+      const c = classifyDnsError(err);
+      if (c.kind === 'empty') return { answers, ...(answers.length ? {} : { missing: c.code }) };
       throw err;
     }
     if (!targets.length) break;
     answers.push({ name: current, target: targets[0] });
     current = targets[0];
   }
-  return answers;
+  return { answers, ...(answers.length ? {} : { missing: 'ENODATA' as const }) };
 }
 
 /** A system resolver as `getServers()` lists it (`1.1.1.1`, `1.1.1.1:5353`, `::1`, `[::1]:5353`). */
@@ -340,9 +346,13 @@ const dnsLookup = defineCommand({
       } else {
         // Every type runs at once; the resolver follows an alias for them, so their records belong to the chain's end.
         const wantsCname = asked.includes('CNAME');
+        let cnameMissing: 'ENODATA' | 'ENOTFOUND' | undefined;
         const [followed, ...found] = await Promise.all([
           followCnames(resolver, asciiName).then(
-            (answers) => cnameChain(asciiName, answers),
+            ({ answers, missing }) => {
+              cnameMissing = missing;
+              return cnameChain(asciiName, answers);
+            },
             (err) => {
               if (wantsCname) fail('CNAME', err);
               return [];
@@ -367,10 +377,8 @@ const dnsLookup = defineCommand({
         const owner = chain.length ? chain[chain.length - 1].target : asciiName;
         if (wantsCname) {
           records.push(...chain.map((link): DnsRecord => ({ query: 'CNAME', type: 'CNAME', name: link.name, ttl: null, data: { target: link.target } })));
-          if (!chain.length && !errors.some((e) => e.type === 'CNAME')) {
-            // Not an alias: say whether the name exists at all, as the other types found out.
-            empty.push({ type: 'CNAME', code: empty.length && empty.every((e) => e.code === 'ENOTFOUND') ? 'ENOTFOUND' : 'ENODATA' });
-          }
+          // Not an alias: say whether the name exists at all, as the CNAME question found out.
+          if (!chain.length && !errors.some((e) => e.type === 'CNAME')) empty.push({ type: 'CNAME', code: cnameMissing ?? 'ENODATA' });
         }
         for (const r of found.flat()) records.push({ ...r, name: r.type === 'PTR' || r.query === 'ANY' ? asciiName : owner });
       }

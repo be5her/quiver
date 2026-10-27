@@ -80,6 +80,7 @@ const section: SmokeSection = async ({ host, check, run, rpc, toolNames }) => {
     // No records of a type is an empty answer; so is NXDOMAIN, per type. SRV sorts by priority, then weight.
     const srv = await lookup('_sip._tcp.quiver.test', { types: ['SRV', 'A'] });
     const missing = await lookup('missing.quiver.test');
+    const missingCname = await lookup('missing.quiver.test', { types: ['CNAME'] });
     check(
       'dns: ENODATA and NXDOMAIN come back as empty per type, not as errors, and SRV is sorted',
       rows(srv, 'SRV').map((rec) => (rec.data as { target: string }).target).join() === 'sip3.quiver.test,sip2.quiver.test,sip1.quiver.test' &&
@@ -88,8 +89,11 @@ const section: SmokeSection = async ({ host, check, run, rpc, toolNames }) => {
         missing.records.length === 0 &&
         missing.errors.length === 0 &&
         missing.empty.length === 8 &&
-        missing.empty.every((e) => e.code === 'ENOTFOUND'),
-      { srv, missing },
+        missing.empty.every((e) => e.code === 'ENOTFOUND') &&
+        // Asked for CNAME alone, NXDOMAIN still reads as no such name, not as no records.
+        missingCname.empty.map((e) => `${e.type}:${e.code}`).join() === 'CNAME:ENOTFOUND' &&
+        missingCname.errors.length === 0,
+      { srv, missing, missingCname },
     );
 
     // A refusal and a timeout are errors of their type.
