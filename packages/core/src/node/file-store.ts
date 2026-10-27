@@ -39,8 +39,8 @@ export class FileStore implements StoreApi {
   private readonly pending = new Map<string, ReturnType<typeof setTimeout>>();
   /** This store's own writes in flight, per collection. */
   private readonly writing = new Map<string, number>();
-  /** The reload of each collection under way, so the next waits for it. */
-  private readonly reloading = new Map<string, Promise<boolean>>();
+  /** The last reload or write of each collection, queued or under way, so the next waits for it. */
+  private readonly busy = new Map<string, Promise<unknown>>();
 
   constructor(
     readonly root: string,
@@ -164,17 +164,26 @@ export class FileStore implements StoreApi {
     );
   }
 
+  /**
+   * Run reloads and this store's own writes of one collection one at a time. A second reload started while the first
+   * has dropped the cache would find nothing cached and report a change that is not there (the watcher can fire twice
+   * that close together). A save landing while a reload reads the folder would be cached in a map the reload then
+   * replaces with what it read before the save's file was there, so the saved item would be missing until the next
+   * reload.
+   */
+  private async serial<T>(collection: string, run: () => Promise<T>): Promise<T> {
+    const next = (this.busy.get(collection) ?? Promise.resolve()).catch(() => {}).then(run);
+    this.busy.set(collection, next);
+    try {
+      return await next;
+    } finally {
+      if (this.busy.get(collection) === next) this.busy.delete(collection);
+    }
+  }
+
   /** Re-read a collection from disk; reports a change when it differs from what was cached. */
   async reload(collection: string): Promise<boolean> {
-    // One at a time per collection: a second reload started while the first has dropped the cache would find nothing
-    // cached and report a change that is not there (the watcher can fire twice that close together).
-    const run = (this.reloading.get(collection) ?? Promise.resolve(false)).catch(() => false).then(() => this.reloadNow(collection));
-    this.reloading.set(collection, run);
-    try {
-      return await run;
-    } finally {
-      if (this.reloading.get(collection) === run) this.reloading.delete(collection);
-    }
+    return this.serial(collection, () => this.reloadNow(collection));
   }
 
   private async reloadNow(collection: string): Promise<boolean> {
@@ -232,7 +241,7 @@ export class FileStore implements StoreApi {
   private async write<T>(collection: string, run: () => Promise<T>): Promise<T> {
     this.writing.set(collection, (this.writing.get(collection) ?? 0) + 1);
     try {
-      return await run();
+      return await this.serial(collection, run);
     } finally {
       const left = (this.writing.get(collection) ?? 1) - 1;
       if (left) this.writing.set(collection, left);
