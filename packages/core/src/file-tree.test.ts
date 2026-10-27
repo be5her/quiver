@@ -77,6 +77,26 @@ describe('buildFileTree', () => {
     expect(all.some((r) => r.name.includes('\\') || r.path.includes('\\'))).toBe(false);
   });
 
+  it('keeps a file and a folder of the same name apart', () => {
+    // A staged `git rm a` beside an added `a/b`: one folder row and one file row, both with the path `a`.
+    const tree = buildFileTree(items('a', 'a/b'), { compact: true });
+    expect(outline(tree)).toEqual(['a/@0 (1)', 'b@1', 'a@0']);
+    expect(tree.map((n) => `${n.kind}:${n.path}`)).toEqual(['folder:a', 'file:a']);
+    expect(fileTreeItems(tree[0]).map((i) => i.path)).toEqual(['a/b']);
+  });
+
+  it('reads a leading ./ as the folder it is in, and keeps the item path', () => {
+    const tree = buildFileTree(items('./src/x.ts', 'src/y.ts'), { compact: true });
+    expect(outline(tree)).toEqual(['src/@0 (2)', 'x.ts@1', 'y.ts@1']);
+    expect(fileTreeItems(tree[0]).map((i) => i.path)).toEqual(['./src/x.ts', 'src/y.ts']);
+  });
+
+  it('compacts a deep chain only down to the first folder with a file or a fork', () => {
+    const tree = buildFileTree(items('a/b/c/d/e/f.txt', 'a/b/c/g.txt', 'a/b/c/d/e/h/i/j.txt'), { compact: true });
+    expect(outline(tree)).toEqual(['a/b/c/@0 (3)', 'd/e/@1 (2)', 'h/i/@2 (1)', 'j.txt@3', 'f.txt@2', 'g.txt@1']);
+    expect(flattenTree(tree, new Set()).filter((r) => r.kind === 'folder').map((r) => r.path)).toEqual(['a/b/c', 'a/b/c/d/e', 'a/b/c/d/e/h/i']);
+  });
+
   it('is empty for no items', () => {
     expect(buildFileTree([], { compact: true })).toEqual([]);
   });
