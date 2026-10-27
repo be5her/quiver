@@ -121,7 +121,7 @@ export function parseDnsServer(input: string): DnsServer {
     if (ipVersion(address) !== 6) refuse();
   } else if ((raw.match(/:/g) ?? []).length === 1) {
     [address, port] = raw.split(':');
-    if (ipVersion(address) !== 4) refuse();
+    if (ipVersion(address) !== 4 || !port) refuse();
   } else if (!ipVersion(raw)) refuse();
   let portNumber = 53;
   if (port) {

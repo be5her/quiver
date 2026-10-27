@@ -63,7 +63,7 @@ describe('parseDnsServer', () => {
     expect(parseDnsServer('2001:db8::53')).toEqual({ address: '2001:db8::53', port: 53 });
   });
   it('refuses host names, bad ports and malformed addresses', () => {
-    for (const bad of ['dns.google', 'dns.google:53', '1.1.1.1:0', '1.1.1.1:70000', '1.1.1.1:x', '[1.1.1.1]:53', '[::1]:', '[::1', '', '-1.1.1.1']) {
+    for (const bad of ['dns.google', 'dns.google:53', '1.1.1.1:0', '1.1.1.1:70000', '1.1.1.1:x', '1.1.1.1:', '[1.1.1.1]:53', '[::1]:', '[::1', '', '-1.1.1.1']) {
       expect(refused(() => parseDnsServer(bad)), bad).toMatch(/must be an IP address/);
     }
   });
