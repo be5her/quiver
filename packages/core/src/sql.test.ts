@@ -42,7 +42,6 @@ describe('classifyStatement', () => {
     expect(ro('EXPLAIN SELECT 1')).toBe(true);
     expect(ro('PRAGMA table_info(t)')).toBe(false);
     expect(ro('PRAGMA foreign_keys')).toBe(true);
-    expect(ro('WITH x AS (INSERT INTO a VALUES (1)) SELECT * FROM x')).toBe(true);
     expect(ro('USE db')).toBe(true);
   });
   it('recognises writes', () => {
@@ -55,6 +54,8 @@ describe('classifyStatement', () => {
     expect(ro("SELECT * FROM t INTO OUTFILE '/tmp/x'")).toBe(false);
     expect(ro('CALL proc()')).toBe(false);
     expect(ro('SET @a = 1')).toBe(false);
+    // A PostgreSQL data-modifying CTE runs its INSERT even though the statement ends in a SELECT.
+    expect(ro('WITH x AS (INSERT INTO a VALUES (1) RETURNING *) SELECT * FROM x')).toBe(false);
   });
   it('reports the verb', () => {
     expect(classifyStatement('WITH a AS (SELECT 1) UPDATE t SET x = 1').verb).toBe('UPDATE');
@@ -200,6 +201,56 @@ describe('actions for agent rules', () => {
       expect(scriptAction(sql) === 'select').toBe(scriptIsReadOnly(sql));
     }
     expect(SQL_ACTIONS).toEqual(['select', 'insert', 'update', 'delete', 'ddl', 'other']);
+  });
+
+  it('finds the writes a read-looking statement makes', () => {
+    const cases: [string, string][] = [
+      // Data-modifying CTEs (PostgreSQL), upserts and MERGE branches take their most severe change.
+      ['WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d', 'delete'],
+      ['WITH u AS (UPDATE t SET a = 1 RETURNING *) SELECT * FROM u', 'update'],
+      ['INSERT INTO t VALUES (1) ON DUPLICATE KEY UPDATE a = 1', 'update'],
+      ['INSERT INTO t VALUES (1) ON CONFLICT (id) DO UPDATE SET a = 1', 'update'],
+      ['MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE', 'delete'],
+      // SELECT INTO a table creates it; INTO OUTFILE or a variable writes elsewhere.
+      ['SELECT * INTO t2 FROM t', 'ddl'],
+      ['WITH x AS (SELECT 1) SELECT * INTO TEMP t2 FROM x', 'ddl'],
+      ['SELECT 1 INTO @a', 'other'],
+      // EXPLAIN ANALYZE runs the statement, however it is spelled.
+      ['EXPLAIN (ANALYZE) DELETE FROM t', 'delete'],
+      ['EXPLAIN (ANALYZE, BUFFERS) WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d', 'delete'],
+      ['EXPLAIN ANALYSE UPDATE t SET a = 1', 'update'],
+      // Built-in functions that write.
+      ["SELECT nextval('s')", 'other'],
+      ['SELECT pg_terminate_backend(42)', 'other'],
+      ["SELECT * FROM dblink('db', 'DELETE FROM t') AS x(a int)", 'other'],
+      // Text that one engine reads as a comment or a string and another runs.
+      ['SELECT 1 # 2; DROP TABLE t', 'ddl'],
+      ["SELECT '\\'; DROP TABLE t; --'", 'ddl'],
+      ["SELECT $$'$$; DROP TABLE t; -- '", 'ddl'],
+      ['SELECT $$; DROP TABLE t; $$', 'ddl'],
+      ["/* /* */ ' */ DROP TABLE t; -- '", 'ddl'],
+      ["SELECT E'\\'', '\\'; DROP TABLE t; --'", 'ddl'],
+      ["WITH a AS (SELECT '\\'') DELETE FROM t WHERE c = ') SELECT '", 'delete'],
+      ['SELECT $$; SELECT 1 # 1; DROP TABLE t; -- $$', 'ddl'],
+    ];
+    expect(cases.map(([sql]) => [sql, scriptAction(sql)])).toEqual(cases);
+  });
+
+  it('keeps ordinary reads select', () => {
+    for (const sql of [
+      "SELECT 'it''s; fine', \"col\" FROM t WHERE a = 'x;y' -- trailing; comment",
+      'SELECT * FROM t WHERE id = 1 FOR UPDATE',
+      'SELECT * FROM t FOR NO KEY UPDATE',
+      "SELECT replace(name, 'a', 'b') FROM t",
+      'SELECT `a`, [b] FROM t',
+      'SELECT $1::int',
+      'WITH x AS (SELECT 1) SELECT * FROM x',
+      'EXPLAIN SELECT * FROM t',
+      'EXPLAIN DELETE FROM t',
+      'SELECT deleted_at, updated_by FROM t',
+    ]) {
+      expect([sql, scriptAction(sql)]).toEqual([sql, 'select']);
+    }
   });
 
   it('names the action of Redis commands: admin beats write beats read', () => {
