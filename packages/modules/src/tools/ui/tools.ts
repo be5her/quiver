@@ -42,6 +42,8 @@ export interface ToolDescriptor {
   summary?: (result: Record<string, unknown>) => ToolSummary | null;
   /** Run on every keystroke instead of on demand. */
   live?: boolean;
+  /** A tool with a view of its own in place of the input and output editors: `dns` is the DNS lookup's tables. */
+  render?: 'dns';
 }
 
 /** The JWT tab's verdict once a key is given: valid and when it expires, or what is wrong. */
@@ -142,6 +144,7 @@ export const TOOLS: ToolDescriptor[] = [
     ],
   },
   { id: 'timestamp', title: 'Timestamp', description: 'Convert between unix and ISO.', commandId: 'tools.timestamp.convert', inputKey: 'value', outputLanguage: 'json', placeholder: 'now, 1700000000, or 2026-01-01T00:00:00Z', live: true },
+  { id: 'dns', title: 'DNS lookup', description: 'Every record type, the CNAME chain, any resolver.', commandId: 'tools.dns.lookup', render: 'dns' },
 ];
 
 /** The option values as the command takes them. */

@@ -1,6 +1,7 @@
 import { Component, computed, effect, inject, input, linkedSignal, signal, untracked } from '@angular/core';
 import { toErrorPayload } from '@quiver/core';
 import { Button, Checkbox, CodeEditor, HostBridge, Select, type Tab, type TabComponent } from '@quiver/ui';
+import { DnsLookup } from './dns-lookup';
 import { TOOLS, coerce, type ToolOption, type ToolSummary } from './tools';
 
 type OptionValue = string | boolean | number;
@@ -8,7 +9,7 @@ type OptionValue = string | boolean | number;
 /** One converter: the input on the left, the output on the right, options in the header. */
 @Component({
   selector: 'q-tool-tab',
-  imports: [Button, Checkbox, CodeEditor, Select],
+  imports: [Button, Checkbox, CodeEditor, Select, DnsLookup],
   templateUrl: './tool-tab.html',
   host: { class: 'flex flex-col h-full min-h-0' },
 })
