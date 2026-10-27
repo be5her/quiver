@@ -139,6 +139,14 @@ function chooseVersion(mode: QrMode, dataBits: number, level: QrErrorCorrection)
   return null;
 }
 
+/** Table 7: the most characters (digits, alphanumeric characters or bytes) one segment of the mode holds at version 40. */
+function maxCharacters(mode: QrMode, level: QrErrorCorrection): number {
+  const bits = dataCodewords(40, level) * 8 - 4 - charCountBits(mode, 40);
+  if (mode === 'numeric') return Math.floor(bits / 10) * 3 + (bits % 10 >= 7 ? 2 : bits % 10 >= 4 ? 1 : 0);
+  if (mode === 'alphanumeric') return Math.floor(bits / 11) * 2 + (bits % 11 >= 6 ? 1 : 0);
+  return Math.floor(bits / 8);
+}
+
 /** 7.4.9 and 7.4.10: mode, count and data, then the terminator, padding to a byte and the 0xEC 0x11 pad codewords. */
 function dataCodewordBytes(mode: QrMode, segment: { bits: BitBuffer; count: number }, version: number, level: QrErrorCorrection): number[] {
   const capacity = dataCodewords(version, level) * 8;
@@ -434,7 +442,12 @@ export function encodeQr(text: string, options: QrEncodeOptions = {}): QrCode {
   const segment = segmentBits(mode, text, bytes);
   const version = chooseVersion(mode, segment.bits.bits.length, level);
   if (version === null) {
-    throw new QuiverError('INVALID_INPUT', `The text is ${bytes.length} bytes and does not fit a QR code at level ${level}; a lower level holds more, up to ${QR_MAX_BYTES} bytes at L`);
+    const unit = { numeric: 'digits', alphanumeric: 'characters', byte: 'bytes' }[mode];
+    const length = mode === 'byte' ? bytes.length : text.length;
+    throw new QuiverError(
+      'INVALID_INPUT',
+      `The text is ${length} ${unit} in ${mode} mode; at level ${level} a QR code holds at most ${maxCharacters(mode, level)} ${unit} in that mode. A lower level holds more, up to ${QR_MAX_BYTES} bytes at L`,
+    );
   }
   const size = version * 4 + 17;
   const grid: Grid = { size, dark: Array.from({ length: size }, () => new Array<boolean>(size).fill(false)), reserved: Array.from({ length: size }, () => new Array<boolean>(size).fill(false)) };

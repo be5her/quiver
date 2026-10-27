@@ -101,7 +101,14 @@ describe('encodeQr', () => {
   it('holds 2953 bytes at 40-L and refuses more, or empty text', () => {
     expect(encodeQr('a'.repeat(QR_MAX_BYTES), { errorCorrection: 'L' }).version).toBe(40);
     expect(() => encodeQr('a'.repeat(QR_MAX_BYTES + 1), { errorCorrection: 'L' })).toThrow(/at most 2953 bytes/);
-    expect(() => encodeQr('a'.repeat(QR_MAX_BYTES), { errorCorrection: 'H' })).toThrow(/does not fit a QR code at level H/);
+    // Too long for the level: the refusal names that level's limit in the text's mode (Table 7, version 40).
+    expect(encodeQr('a'.repeat(1273), { errorCorrection: 'H' }).version).toBe(40);
+    expect(() => encodeQr('a'.repeat(1274), { errorCorrection: 'H' })).toThrow(/at level H a QR code holds at most 1273 bytes/);
+    expect(encodeQr('A'.repeat(1852), { errorCorrection: 'H' }).version).toBe(40);
+    expect(() => encodeQr('A'.repeat(1853), { errorCorrection: 'H' })).toThrow(/1853 characters in alphanumeric mode; at level H a QR code holds at most 1852 characters/);
+    expect(encodeQr('1'.repeat(2953), { errorCorrection: 'H' }).version).toBe(40);
+    expect(() => encodeQr('A'.repeat(2421), { errorCorrection: 'Q' })).toThrow(/at most 2420 characters/);
+    expect(() => encodeQr('a'.repeat(2332), { errorCorrection: 'M' })).toThrow(/at most 2331 bytes/);
     expect(() => encodeQr('')).toThrow(/empty/);
   });
 
