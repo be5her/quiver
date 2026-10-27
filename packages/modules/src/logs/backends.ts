@@ -106,6 +106,9 @@ export class GrafanaLogsBackend implements LogsBackend {
 
 const TIMEOUT_MS = 30_000;
 
+/** The most a select endpoint's answer is read: 5000 entries of a few KB each fit, a runaway pipe result does not. */
+export const MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
+
 /** The `vm_app_version{version="victoria-logs-…"}` line VictoriaLogs exposes in `/metrics`. */
 const VERSION_RE = /vm_app_version\{[^}]*\bversion="([^"]+)"/;
 
@@ -188,15 +191,45 @@ export class VictoriaLogsBackend implements LogsBackend {
     } catch (err) {
       const cause = (err as { cause?: { code?: string; message?: string } }).cause;
       const why = cause?.code ?? cause?.message ?? (err as Error).message;
-      throw new QuiverError('LOGS_UNREACHABLE', `VictoriaLogs at ${this.where()} did not answer: ${why}`, { url: this.base });
+      throw new QuiverError('LOGS_UNREACHABLE', `VictoriaLogs at ${this.where()} did not answer: ${this.scrub(why)}`, { url: this.base });
     }
-    const text = await res.text();
-    const message = text.trim().slice(0, 500);
+    const text = await this.readCapped(res, args['query']);
+    const message = this.scrub(text.trim().slice(0, 500));
     if (res.status === 401 || res.status === 403) {
       throw new QuiverError('LOGS_AUTH_FAILED', `VictoriaLogs at ${this.where()} refused the credentials (${res.status})${message ? `: ${message}` : ''}`, { url: this.base, status: res.status });
     }
     if (res.status < 200 || res.status >= 300) throw new QuiverError('REQUEST_FAILED', message || `VictoriaLogs answered ${res.status}`, { query: args['query'], status: res.status });
     return text;
+  }
+
+  /** The body as text, refused past MAX_RESPONSE_BYTES rather than read into memory whole. */
+  private async readCapped(res: Awaited<ReturnType<typeof undiciFetch>>, query: string | undefined): Promise<string> {
+    const tooLarge = () => new QuiverError('REQUEST_FAILED', `VictoriaLogs answered more than ${MAX_RESPONSE_BYTES / 1024 / 1024} MB; narrow the query, lower the limit or keep fewer fields with \`| fields …\``, { query });
+    if (Number(res.headers.get('content-length') ?? 0) > MAX_RESPONSE_BYTES) {
+      await res.body?.cancel().catch(() => {});
+      throw tooLarge();
+    }
+    if (!res.body) return '';
+    const decoder = new TextDecoder();
+    let text = '';
+    let bytes = 0;
+    try {
+      // Throwing out of the loop cancels the rest of the body.
+      for await (const chunk of res.body as AsyncIterable<Uint8Array>) {
+        bytes += chunk.byteLength;
+        if (bytes > MAX_RESPONSE_BYTES) throw tooLarge();
+        text += decoder.decode(chunk, { stream: true });
+      }
+    } catch (err) {
+      if (err instanceof QuiverError) throw err;
+      throw new QuiverError('LOGS_UNREACHABLE', `VictoriaLogs at ${this.where()} stopped answering: ${this.scrub((err as Error).message)}`, { url: this.base });
+    }
+    return text + decoder.decode();
+  }
+
+  /** A message with the stored password or token taken out, should a library ever quote a header back. */
+  private scrub(message: string): string {
+    return this.secret.length >= 4 ? message.split(this.secret).join('•••') : message;
   }
 
   private json(text: string, expr: string): unknown {
