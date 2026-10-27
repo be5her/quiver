@@ -15,7 +15,8 @@ const actionErrorsLogged = new Set<string>();
 
 /**
  * The action of one call to a command that declares actions, or undefined: for a command without actions, and when
- * `of` throws (logged once per command), in which case only the rules for the whole command apply.
+ * `of` throws (logged once per command), in which case only the rules for the whole command apply and the call counts
+ * as one that changes data.
  */
 export async function actionOf(command: CommandDefinition, input: unknown, ctx: CommandContext): Promise<string | undefined> {
   if (!command.actions) return undefined;
@@ -114,9 +115,12 @@ export class CommandRegistry {
     };
     if (mcp.paused) refuse('paused', 'paused', 'Agents are paused in Quiver. The user can resume them from the status bar or Settings > MCP.');
 
-    const mutates = typeof command.mutating === 'function' ? await command.mutating(input as never, ctx) : Boolean(command.mutating);
     const action = await actionOf(command, input, ctx);
     if (action) trace.action = action;
+    // A call of a command with actions whose action could not be told may be any of them, so it counts as changing
+    // data: the mode decides it when no rule for the whole command does, never the default for reads.
+    const unknownAction = command.actions !== undefined && action === undefined;
+    const mutates = unknownAction || (typeof command.mutating === 'function' ? await command.mutating(input as never, ctx) : Boolean(command.mutating));
     const agentName = ctx.agent?.name;
     const decide = (config: typeof mcp) =>
       decideAgentPermission({

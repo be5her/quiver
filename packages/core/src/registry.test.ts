@@ -265,7 +265,7 @@ describe('CommandRegistry and command actions', () => {
     actions: {
       list: ['select', 'ddl', 'other'],
       of: ({ sql }) => {
-        if (sql === 'BOOM') throw new Error('cannot tell');
+        if (sql.includes('BOOM')) throw new Error('cannot tell');
         return sql.startsWith('SELECT') ? 'select' : sql.startsWith('CREATE') ? 'ddl' : 'other';
       },
       describe: { ddl: 'schema changes' },
@@ -326,6 +326,9 @@ describe('CommandRegistry and command actions', () => {
       await expect(run({ mode: 'allow', rules: [{ match: 'test.sql#other', action: 'deny' }] }, 'BOOM', trace)).resolves.toBe('BOOM');
       expect(trace).toEqual({ decision: 'allowed' });
       await expect(run({ mode: 'allow', rules: [{ match: 'test.sql', action: 'deny' }] }, 'BOOM')).rejects.toMatchObject({ details: { reason: 'rule' } });
+      // Never the default for reads: a call its own mutating calls a read gets the mode, as it may be any action.
+      await expect(run({ mode: 'read-only', rules: [] }, 'SELECT BOOM')).rejects.toMatchObject({ details: { reason: 'read-only' } });
+      await expect(run({ mode: 'read-only', rules: [] }, 'SELECT 1')).resolves.toBe('SELECT 1');
       expect(warned).toHaveLength(1);
     } finally {
       console.warn = warn;
