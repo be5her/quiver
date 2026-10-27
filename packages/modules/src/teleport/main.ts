@@ -223,6 +223,7 @@ const clusterRemove = defineCommand({
   handler: async ({ proxy }, ctx): Promise<TeleportStatus> => {
     const { session, tunnels, forwards } = getTeleport(ctx.host);
     const teleport = ctx.host.config.get().teleport;
+    session.abandonRenewal(proxy);
     await Promise.all([tunnels.stopCluster(proxy), forwards.stopCluster(proxy)]);
     invalidateCaches(proxy);
     await ctx.host.config.update({
@@ -251,6 +252,8 @@ const clusterAutoRenew = defineCommand({
     if (!addr) throw new QuiverError('INVALID_INPUT', 'Proxy address is empty');
     const teleport = ctx.host.config.get().teleport;
     if (isAutoRenewOn(teleport, addr) !== enabled) await ctx.host.config.update({ teleport: { ...teleport, autoRenew: setAutoRenew(teleport.autoRenew, addr, enabled) } });
+    // Turned off while its renewal runs or waits: that tsh login is cancelled, not left to finish.
+    if (!enabled) getTeleport(ctx.host).session.abandonRenewal(addr);
     ctx.host.emit('teleport.changed', { reason: 'status' });
     // A certificate that is due already is renewed now rather than on the next poll.
     return getTeleport(ctx.host).session.refresh();
@@ -265,6 +268,8 @@ const windowFocus = defineCommand({
   hidden: true,
   input: z.object({ focused: z.boolean() }),
   handler: async ({ focused }, ctx) => {
+    // Only the window knows; an agent claiming focus could make a renewal open the browser behind the user's back.
+    if (ctx.caller !== 'ui') throw new QuiverError('INVALID_INPUT', 'Window focus is only reported by the Quiver window');
     getTeleport(ctx.host).session.setFocused(focused);
     return { focused };
   },
@@ -839,6 +844,8 @@ export const teleportModule = defineModule({
         const teleport = host.config.get().teleport;
         for (const proxy of proxiesToAutoLogin(teleport, initial.clusters).filter((p) => !isAutoRenewOn(teleport, p))) {
           const cluster = initial.clusters.find((c) => sameProxy(c.proxy, proxy));
+          // A renewal the session started (Keep me logged in) may be running: one login at a time, so wait for it.
+          await session.whenLoginDone();
           console.log(`[quiver] teleport certificate for ${cluster ? clusterLabel(cluster) : proxy} expired, starting tsh login (${nowIso()})`);
           await session.login(proxy).catch((err) => console.warn(`[quiver] teleport auto-login for ${proxy} failed: ${(err as Error).message}`));
         }

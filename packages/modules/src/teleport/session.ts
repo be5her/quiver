@@ -76,6 +76,12 @@ export class TeleportSession {
   private readonly renewals = new Map<string, TeleportRenewalRecord>();
   /** The cluster (normalized proxy) a renewal is running for. */
   private renewing: string | null = null;
+  /** The `tsh login` of the running renewal, so turning the setting off or removing the cluster can cancel it. */
+  private renewalRun: LoginRun | null = null;
+  /** The running renewal was given up (setting off, cluster removed, logout): it is not recorded or followed up. */
+  private renewalAbandoned = false;
+  /** `tsh logout` calls running: no renewal starts meanwhile. */
+  private logouts = 0;
   /** The cluster whose renewal waits for the window to come to the front. */
   private waitingForFocus: string | null = null;
   /** Whether a Quiver window is in front; hosts without a window never report, and never wait. */
@@ -224,9 +230,29 @@ export class TeleportSession {
     if (focused && !was && this.waitingForFocus) void this.refresh().catch(() => {});
   }
 
+  /**
+   * Give up the renewal running for this cluster (the user turned Keep me logged in off, removed the cluster or is
+   * logging out of it): its `tsh login` is cancelled, and the attempt is neither recorded nor followed by a refresh.
+   * A login the user started is never touched. Without a proxy, any running renewal.
+   */
+  abandonRenewal(proxy?: string | null): void {
+    if (this.waitingForFocus && (!proxy || this.waitingForFocus === normalizeProxy(proxy))) {
+      this.waitingForFocus = null;
+      this.opts.onChange('renewal');
+    }
+    if (!this.renewing || (proxy && this.renewing !== normalizeProxy(proxy))) return;
+    this.renewalAbandoned = true;
+    if (this.renewalRun && this.loginRun === this.renewalRun) this.cancelLogin();
+  }
+
+  /** Wait until no `tsh login` runs, automatic or not (e.g. before logging in on launch). */
+  async whenLoginDone(): Promise<void> {
+    while (this.loginRun) await this.loginRun.promise.catch(() => {});
+  }
+
   /** Start the renewal that is due, if any. Runs after every status read, the poll's and everyone else's. */
   private considerRenewal(): void {
-    if (!this.started || this.status.state === 'no-tsh') return;
+    if (!this.started || this.status.state === 'no-tsh' || this.logouts > 0) return;
     const config = this.opts.getConfig();
     const [proxy] = proxiesToAutoRenew(config, this.status.clusters, { loginRunning: this.loginRun !== null || this.renewing !== null, records: Object.fromEntries(this.renewals) });
     const waitedFor = this.waitingForFocus;
@@ -258,6 +284,7 @@ export class TeleportSession {
       this.opts.onChange('renewal', { proxy: cluster.proxy, label, phase, browser, background: !this.focused, ...extra });
     const record: TeleportRenewalRecord = { lastAttemptAt: nowIso(), lastResult: null, lastError: null, validUntil: cluster.validUntil };
     this.renewing = key;
+    this.renewalAbandoned = false;
     this.renewals.set(key, record);
     console.log(`[quiver] teleport certificate for ${label} ${cluster.state === 'expired' ? 'expired' : 'expires soon'}, renewing with tsh login (${record.lastAttemptAt})`);
     announce('start');
@@ -267,6 +294,7 @@ export class TeleportSession {
     try {
       // A still valid certificate is usually reissued without the browser; if tsh opens it anyway, say so at once.
       const run = this.spawnLogin(cluster.proxy, browser ? undefined : () => announce('browser', { browser: true }));
+      this.renewalRun = run;
       const outcome = await run.promise;
       const after = findCluster(outcome.status.clusters, cluster.proxy);
       const usable = after?.state === 'logged-in' || after?.state === 'expiring';
@@ -277,8 +305,21 @@ export class TeleportSession {
     } catch (err) {
       error = (err as Error).message;
     }
-    this.renewals.set(key, { ...record, lastResult: result, lastError: result === 'failed' ? error : null });
+    this.renewalRun = null;
     this.renewing = null;
+    // Quitting (stop() cancels the login), or the user turned the setting off, removed the cluster or logged out of
+    // it meanwhile: not the user cancelling this certificate's renewal, and nothing to refresh.
+    if (!this.started || this.renewalAbandoned || !isAutoRenewOn(this.opts.getConfig(), cluster.proxy)) {
+      this.renewalAbandoned = false;
+      this.renewals.delete(key);
+      console.log(`[quiver] teleport renewal for ${label} given up (${this.started ? 'turned off, removed or logged out' : 'stopping'})`);
+      if (this.started) {
+        this.opts.onChange('renewal');
+        this.considerRenewal();
+      }
+      return;
+    }
+    this.renewals.set(key, { ...record, lastResult: result, lastError: result === 'failed' ? error : null });
     if (result === 'ok') {
       try {
         await this.opts.onRenewed?.(cluster.proxy);
@@ -432,7 +473,15 @@ export class TeleportSession {
       if (!cluster?.user) return this.refresh();
       args = ['logout', `--proxy=${cluster.proxy}`, `--user=${cluster.user}`];
     }
-    const run = await runTsh(tsh, args, { timeoutMs: 30_000 });
+    // No renewal starts while tsh logs out, and one running for that cluster is given up: logging out wins.
+    this.logouts++;
+    let run: Awaited<ReturnType<typeof runTsh>>;
+    try {
+      this.abandonRenewal(proxy?.trim() ? proxy : null);
+      run = await runTsh(tsh, args, { timeoutMs: 30_000 });
+    } finally {
+      this.logouts--;
+    }
     if (run.code !== 0 && !/not logged in/i.test(`${run.stderr}${run.stdout}`)) throw new QuiverError('REQUEST_FAILED', `tsh logout failed: ${tshErrorMessage(run)}`);
     this.lastLogin = { proxy: null, output: [] };
     return this.refresh();
