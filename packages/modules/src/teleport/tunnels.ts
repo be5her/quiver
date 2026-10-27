@@ -135,11 +135,20 @@ export class TunnelManager {
       await this.kill(live);
       n++;
     }
+    this.stopStarting((key) => key.startsWith(`teleport:${normalizeProxy(proxy)}:`));
     return n;
   }
 
   async stopAll(): Promise<void> {
+    this.stopStarting(() => true);
     await Promise.all([...this.tunnels.values()].map((t) => this.kill(t)));
+  }
+
+  /** A tunnel still starting (e.g. restarted after a renewal) when its cluster or the app stops is stopped once it is up. */
+  private stopStarting(match: (key: string) => boolean): void {
+    for (const [key, pending] of this.starting) {
+      if (match(key)) void pending.then((live) => this.kill(live), () => {});
+    }
   }
 
   /**
@@ -154,9 +163,12 @@ export class TunnelManager {
       const { key, spec } = live;
       const users = [...live.users];
       const port = live.info.port;
-      await this.kill(live);
-      if (this.starting.has(key) || this.tunnels.has(key)) continue;
-      const pending = this.start(spec, key, port).finally(() => this.starting.delete(key));
+      if (this.starting.has(key)) continue;
+      // Registered before the old process is gone, so a connection asking for this tunnel meanwhile waits for the
+      // restarted one instead of starting a second tunnel on another port.
+      const pending = this.kill(live)
+        .then(() => this.start(spec, key, port))
+        .finally(() => this.starting.delete(key));
       this.starting.set(key, pending);
       try {
         const fresh = await pending;
