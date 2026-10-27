@@ -7,7 +7,12 @@ import {
   DbTableEditSchema,
   EXPORT_EXTENSIONS,
   QuiverError,
+  REDIS_ACTIONS,
+  REDIS_ACTION_DESCRIPTIONS,
+  SQL_ACTIONS,
+  SQL_ACTION_DESCRIPTIONS,
   SavedQueryDraftSchema,
+  TABLE_EDITS_ACTIONS,
   SavedQuerySchema,
   buildTableEdits,
   dbAccessProblem,
@@ -22,8 +27,11 @@ import {
   normalizeGrafanaUrl,
   nowIso,
   redisCommandIsReadOnly,
+  redisCommandsAction,
   redisScriptIsReadOnly,
+  scriptAction,
   scriptIsReadOnly,
+  tableEditsAction,
   type CommandContext,
   type DbConnection,
   type DbConnectionSummary,
@@ -353,6 +361,11 @@ const tableApply = defineCommand({
     'Inserts, updates and deletes rows of a table, each edit keyed by the primary key, inside one transaction. Pass preview to get the statements without running them. An update or delete that matches anything but exactly one row rolls everything back.',
   scope: 'workspace',
   mutating: ({ preview }) => !preview,
+  actions: {
+    list: TABLE_EDITS_ACTIONS,
+    of: ({ edits }) => tableEditsAction(edits),
+    describe: { insert: 'Only inserts rows', update: 'Only updates rows', delete: 'Only deletes rows', mixed: 'Edits of more than one kind (deny it too when denying delete)' },
+  },
   input: ConnectionIdInput.extend({
     table: z.string(),
     database: z.string().nullable().optional(),
@@ -432,7 +445,18 @@ const queryRun = defineCommand({
   mutating: async ({ connectionId, query }, ctx) => {
     const conn = await ws(ctx).store.get<DbConnection>(COLLECTIONS.connections, connectionId);
     if (!conn) return false;
-    return conn.kind === 'redis' ? !redisScriptIsReadOnly(query) : !scriptIsReadOnly(query);
+    return conn.kind === 'redis' ? !redisScriptIsReadOnly(query) : scriptAction(query) !== 'select';
+  },
+  // SQL by its most severe statement. Redis commands through the query runner are select when they only read and
+  // other otherwise; db.redis.command names their actions finely.
+  actions: {
+    list: SQL_ACTIONS,
+    of: async ({ connectionId, query }, ctx) => {
+      const conn = await ws(ctx).store.get<DbConnection>(COLLECTIONS.connections, connectionId);
+      if (conn?.kind === 'redis') return redisScriptIsReadOnly(query) ? 'select' : 'other';
+      return scriptAction(query);
+    },
+    describe: { ...SQL_ACTION_DESCRIPTIONS, other: `${SQL_ACTION_DESCRIPTIONS.other}; a Redis command that writes` },
   },
   input: RunInput,
   handler: async (input, ctx): Promise<DbQueryResult[]> => {
@@ -700,6 +724,7 @@ const redisCommand = defineCommand({
     'Runs Redis commands given as argument lists (no quoting rules: a value may hold spaces, quotes or line breaks), e.g. [["SET", "k", "v", "KEEPTTL"]]. Read-only commands always work; anything that writes is gated. The key browser uses it for its edits.',
   scope: 'workspace',
   mutating: ({ commands }) => !commands.every(redisCommandIsReadOnly),
+  actions: { list: REDIS_ACTIONS, of: ({ commands }) => redisCommandsAction(commands), describe: REDIS_ACTION_DESCRIPTIONS },
   input: ConnectionIdInput.extend({ commands: z.array(z.array(z.string()).min(1)).min(1).max(100) }),
   handler: async ({ connectionId, commands }, ctx): Promise<DbQueryResult[]> => {
     const results = await withDriver(ctx, connectionId, (d) => requireRedis(d).exec(commands));

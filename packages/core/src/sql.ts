@@ -250,6 +250,65 @@ export function scriptIsReadOnly(sql: string): boolean {
   return splitStatements(sql).every((s) => classifyStatement(s).readOnly);
 }
 
+// ---------- actions, for agent rules ----------
+
+/** What a SQL statement does, as an agent rule names it (`db.query.run#ddl`). */
+export type SqlAction = 'select' | 'insert' | 'update' | 'delete' | 'ddl' | 'other';
+
+/** The actions of `db.query.run`. A script with several statements gets its most severe one (`scriptAction`). */
+export const SQL_ACTIONS: readonly SqlAction[] = ['select', 'insert', 'update', 'delete', 'ddl', 'other'];
+
+export const SQL_ACTION_DESCRIPTIONS: Record<SqlAction, string> = {
+  select: 'Reads only: SELECT, SHOW, DESCRIBE, EXPLAIN, a WITH that selects, a reading PRAGMA',
+  insert: 'INSERT or REPLACE rows (also through WITH)',
+  update: 'UPDATE or MERGE rows (also through WITH)',
+  delete: 'DELETE rows (also through WITH)',
+  ddl: 'Changes the schema or privileges: CREATE, ALTER, DROP, TRUNCATE, RENAME, COMMENT, GRANT, REVOKE',
+  other: 'Anything else that is not a read: SET, CALL, transactions, VACUUM, SELECT INTO OUTFILE, a writing PRAGMA',
+};
+
+const DDL_VERBS = new Set(['CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'RENAME', 'COMMENT', 'GRANT', 'REVOKE']);
+const DML_ACTIONS: Record<string, SqlAction> = { INSERT: 'insert', REPLACE: 'insert', UPDATE: 'update', MERGE: 'update', DELETE: 'delete' };
+/** How severe each action is, when a script mixes them: `other` is ranked with `ddl` below it, as it may be anything. */
+const SQL_SEVERITY: Record<SqlAction, number> = { select: 0, insert: 1, update: 2, delete: 3, other: 4, ddl: 5 };
+
+/**
+ * The action of one statement. A read is `select`, whatever its verb; `WITH` and `EXPLAIN ANALYZE` take the action
+ * of the statement they run. Built on `classifyStatement`, so `select` is exactly what it calls read-only.
+ */
+export function statementAction(statement: string): SqlAction {
+  const info = classifyStatement(statement);
+  if (info.readOnly) return 'select';
+  if (DDL_VERBS.has(info.verb)) return 'ddl';
+  const dml = DML_ACTIONS[info.verb];
+  if (dml) return dml;
+  if (info.verb === 'EXPLAIN') {
+    const inner = topLevelWords(stripComments(statement)).find((w) => MAIN_VERBS.has(w));
+    return (inner && DML_ACTIONS[inner]) || 'other';
+  }
+  return 'other';
+}
+
+/** The action of a script: its most severe statement's (`ddl` beats `other` beats `delete`, and so on); `select` when empty. */
+export function scriptAction(sql: string): SqlAction {
+  let worst: SqlAction = 'select';
+  for (const statement of splitStatements(sql)) {
+    const action = statementAction(statement);
+    if (SQL_SEVERITY[action] > SQL_SEVERITY[worst]) worst = action;
+  }
+  return worst;
+}
+
+/** What a batch of table edits does (`db.table.apply#delete`): the one kind they all have, or `mixed`. */
+export type TableEditsAction = 'insert' | 'update' | 'delete' | 'mixed';
+
+export const TABLE_EDITS_ACTIONS: readonly TableEditsAction[] = ['insert', 'update', 'delete', 'mixed'];
+
+export function tableEditsAction(edits: readonly { kind: 'insert' | 'update' | 'delete' }[]): TableEditsAction {
+  const kinds = new Set(edits.map((e) => e.kind));
+  return kinds.size === 1 ? [...kinds][0] : 'mixed';
+}
+
 // ---------- Redis ----------
 
 const REDIS_READ_COMMANDS = new Set([
@@ -294,6 +353,38 @@ export function redisCommandIsReadOnly(argv: string[]): boolean {
 
 export function redisScriptIsReadOnly(text: string): boolean {
   return parseRedisCommands(text).every(redisCommandIsReadOnly);
+}
+
+/** What a Redis command does, as an agent rule names it (`db.redis.command#admin`). */
+export type RedisAction = 'read' | 'write' | 'admin';
+
+export const REDIS_ACTIONS: readonly RedisAction[] = ['read', 'write', 'admin'];
+
+export const REDIS_ACTION_DESCRIPTIONS: Record<RedisAction, string> = {
+  read: 'Read-only commands: GET, HGETALL, SCAN, TTL, INFO…',
+  write: 'Commands that change keys: SET, DEL, EXPIRE, HSET, LPUSH…',
+  admin: 'Server-wide commands: FLUSHALL, FLUSHDB, CONFIG, SHUTDOWN, SAVE, ACL, SCRIPT, MODULE, REPLICAOF, CLIENT KILL…',
+};
+
+/** Commands that act on the whole server or every key, rather than on named keys. */
+const REDIS_ADMIN_COMMANDS = new Set([
+  'FLUSHALL', 'FLUSHDB', 'CONFIG', 'SHUTDOWN', 'SAVE', 'BGSAVE', 'BGREWRITEAOF', 'ACL', 'MODULE', 'SCRIPT', 'FUNCTION',
+  'SLAVEOF', 'REPLICAOF', 'FAILOVER', 'CLUSTER', 'SWAPDB', 'MIGRATE', 'MONITOR', 'SYNC', 'PSYNC', 'SLOWLOG', 'LATENCY', 'RESET',
+]);
+
+/** The action of one Redis command: `read` exactly when `redisCommandIsReadOnly`, else `admin` or `write`. */
+export function redisCommandAction(argv: string[]): RedisAction {
+  if (redisCommandIsReadOnly(argv)) return 'read';
+  const cmd = (argv[0] ?? '').toUpperCase();
+  // A read command made a write by its subcommand (CLIENT KILL, DEBUG RELOAD, MEMORY PURGE) acts on the server.
+  if (REDIS_ADMIN_COMMANDS.has(cmd) || REDIS_WRITE_SUBCOMMANDS[cmd]) return 'admin';
+  return 'write';
+}
+
+/** The action of several commands: `admin` beats `write` beats `read`. */
+export function redisCommandsAction(commands: string[][]): RedisAction {
+  const actions = new Set(commands.map(redisCommandAction));
+  return actions.has('admin') ? 'admin' : actions.has('write') ? 'write' : 'read';
 }
 
 /** True for a statement that returns rows and can be wrapped as a subquery: SELECT, VALUES, or a CTE ending in one. */

@@ -213,6 +213,11 @@ const push = defineCommand({
     'Pushes the current branch to its upstream, or to remote and branch when given (a branch name, not a refspec: nothing is deleted or forced through it). setUpstream makes that the upstream (remote defaults to origin, branch to the current one). forceWithLease overwrites the remote branch only if it is where it was last fetched.',
   scope: 'workspace',
   mutating: true,
+  actions: {
+    list: ['push', 'force'],
+    of: ({ forceWithLease }) => (forceWithLease ? 'force' : 'push'),
+    describe: { push: 'A plain push, which the remote refuses unless it fast-forwards', force: 'A push with forceWithLease, which can overwrite commits on the remote branch' },
+  },
   input: GitPushInputSchema,
   handler: async ({ remote, branch, setUpstream, forceWithLease }, ctx): Promise<local.GitRemoteResult> => {
     const ws = workspace(ctx);

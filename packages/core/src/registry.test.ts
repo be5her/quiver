@@ -254,3 +254,85 @@ describe('CommandRegistry', () => {
     expect(() => registry.register('test', echo)).toThrow(/twice/);
   });
 });
+
+describe('CommandRegistry and command actions', () => {
+  const statement = defineCommand({
+    id: 'test.sql',
+    title: 'Run SQL',
+    description: 'runs a statement',
+    scope: 'global',
+    mutating: ({ sql }) => !sql.startsWith('SELECT'),
+    actions: {
+      list: ['select', 'ddl', 'other'],
+      of: ({ sql }) => {
+        if (sql === 'BOOM') throw new Error('cannot tell');
+        return sql.startsWith('SELECT') ? 'select' : sql.startsWith('CREATE') ? 'ddl' : 'other';
+      },
+      describe: { ddl: 'schema changes' },
+    },
+    input: z.object({ sql: z.string() }),
+    handler: async ({ sql }) => sql,
+  });
+  const registry = new CommandRegistry();
+  registry.registerModule({ id: 'test', commands: [statement, echo] });
+  const agent = { name: 'claude-code', version: '1', userAgent: null };
+  type Permissions = ReturnType<typeof defaultGlobalConfig>['mcp']['permissions'];
+  const run = (permissions: Permissions, sql: string, trace: ExecuteTrace = {}, approve?: (request: ApprovalRequest) => ApprovalOutcome, name = agent.name) =>
+    registry.execute('test.sql', { sql }, { caller: 'mcp', host: fakeHost({ permissions }, approve), agent: { ...agent, name } }, trace);
+
+  it('decides each call with its action, and says which action and rule refused it', async () => {
+    const permissions: Permissions = { mode: 'allow', rules: [{ match: 'test.sql#ddl', action: 'deny' }] };
+    const trace: ExecuteTrace = {};
+    await expect(run(permissions, 'CREATE TABLE t', trace)).rejects.toMatchObject({
+      code: 'MUTATION_BLOCKED',
+      message: expect.stringContaining('"test.sql" (ddl)'),
+      details: { reason: 'rule', action: 'ddl', rule: { match: 'test.sql#ddl', action: 'deny' }, level: 'global' },
+    });
+    expect(trace).toEqual({ decision: 'refused', action: 'ddl' });
+    const allowed: ExecuteTrace = {};
+    await expect(run(permissions, 'INSERT 1', allowed)).resolves.toBe('INSERT 1');
+    expect(allowed).toEqual({ decision: 'allowed', action: 'other' });
+    await expect(run(permissions, 'SELECT 1')).resolves.toBe('SELECT 1');
+    await expect(run({ mode: 'read-only', rules: [] }, 'INSERT 1')).rejects.toMatchObject({ details: { reason: 'read-only', action: 'other' } });
+  });
+
+  it('asks with the action in the request', async () => {
+    const asked: ApprovalRequest[] = [];
+    await run({ mode: 'allow', rules: [{ match: 'test.sql#ddl', action: 'ask' }] }, 'CREATE TABLE t', {}, (request) => {
+      asked.push(request);
+      return { approved: true, how: 'once' };
+    });
+    await run({ mode: 'allow', rules: [{ match: 'test.sql#ddl', action: 'ask' }] }, 'INSERT 1', {}, (request) => {
+      asked.push(request);
+      return { approved: true, how: 'once' };
+    });
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toMatchObject({ commandId: 'test.sql', action: 'ddl', agent: { name: 'claude-code' } });
+  });
+
+  it('applies a rule for an agent to that agent only', async () => {
+    const permissions: Permissions = { mode: 'allow', rules: [{ match: 'test.sql', action: 'deny', agent: 'cursor' }] };
+    await expect(run(permissions, 'INSERT 1', {}, undefined, 'claude-code')).resolves.toBe('INSERT 1');
+    await expect(run(permissions, 'INSERT 1', {}, undefined, 'cursor')).rejects.toMatchObject({ details: { reason: 'rule', rule: { agent: 'cursor' } } });
+  });
+
+  it('applies only the command-level rules when the action cannot be told, and logs that once', async () => {
+    const warn = console.warn;
+    const warned: unknown[] = [];
+    console.warn = (...args: unknown[]) => void warned.push(args);
+    try {
+      const trace: ExecuteTrace = {};
+      // The action rule cannot match a call without an action; the command rule does.
+      await expect(run({ mode: 'allow', rules: [{ match: 'test.sql#other', action: 'deny' }] }, 'BOOM', trace)).resolves.toBe('BOOM');
+      expect(trace).toEqual({ decision: 'allowed' });
+      await expect(run({ mode: 'allow', rules: [{ match: 'test.sql', action: 'deny' }] }, 'BOOM')).rejects.toMatchObject({ details: { reason: 'rule' } });
+      expect(warned).toHaveLength(1);
+    } finally {
+      console.warn = warn;
+    }
+  });
+
+  it('lists the commands that declare actions', () => {
+    expect(registry.listActions()).toEqual([{ commandId: 'test.sql', actions: ['select', 'ddl', 'other'], describe: { ddl: 'schema changes' } }]);
+  });
+});

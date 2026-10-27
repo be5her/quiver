@@ -239,10 +239,35 @@ export interface CommandDefinition<S extends AnyZodObject = AnyZodObject, O = un
    * Throws to refuse the call without asking.
    */
   beforeApproval?(input: z.infer<S>, ctx: CommandContext): Promise<void>;
+  /**
+   * What one call does, for a command that does several things (a query runner runs a SELECT or a DROP TABLE), so an
+   * agent rule can name it: `db.query.run#ddl`. Optional; a command without it is matched by its id alone.
+   */
+  actions?: CommandActions<z.infer<S>>;
   /** Hidden commands are plumbing: not listed in the palette or exposed over MCP. */
   hidden?: boolean;
   input: S;
   handler(input: z.infer<S>, ctx: CommandContext): Promise<O>;
+}
+
+/** The actions a command declares, for agent rules (`CommandDefinition.actions`). */
+export interface CommandActions<I = unknown> {
+  /** Every action a call can have, e.g. `select`, `insert`, `ddl`. */
+  list: readonly string[];
+  /**
+   * The action of one call, from its validated input: one of `list`. Total and cheap (no network). When it throws,
+   * the call's action counts as unknown and only the rules for the whole command apply to it.
+   */
+  of(input: I, ctx: CommandContext): string | Promise<string>;
+  /** One line per action, for the rules editor. */
+  describe?: Record<string, string>;
+}
+
+/** A command's actions as `mcp.permissions.actions` lists them. */
+export interface CommandActionsInfo {
+  commandId: string;
+  actions: string[];
+  describe: Record<string, string>;
 }
 
 export interface CommandMeta {
@@ -321,7 +346,7 @@ export interface HostEvents {
   'store.changed': { workspaceId: string; collection: string };
   'state.changed': { workspaceId: string; key: string };
   'mcp.status': { running: boolean; port: number; error?: string };
-  'mcp.call': { tool: string; workspaceId?: string; ok: boolean; durationMs: number; at: string; agent?: string; decision?: AgentCallDecision | null };
+  'mcp.call': { tool: string; workspaceId?: string; ok: boolean; durationMs: number; at: string; agent?: string; decision?: AgentCallDecision | null; action?: string | null };
   /** An agent's call waits for the user to allow or deny it. */
   'mcp.approval.requested': PendingApproval;
   /** The agent activity feed got a call (`call`), or approvals were asked, answered or timed out (`approvals`). */

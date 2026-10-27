@@ -435,6 +435,24 @@ const section: SmokeSection = async (t) => {
       blocked.length === 0 && (await head()) === headBefore && names.includes('side') && !names.includes('agent-side') && (await run<GitStash[]>('git.stash.list', {}, id)).length >= 1 && (await run<GitTag[]>('git.tag.list', {}, id)).length === 1,
       blocked,
     );
+
+    // A rule on one action of git.push: git.push#force denied under mode allow refuses a force push, a plain push goes through.
+    const mcpBefore = structuredClone(t.host.config.get().mcp);
+    await run('config.update', { patch: { mcp: { ...mcpBefore, permissions: { mode: 'allow', rules: [{ match: 'git.push#force', action: 'deny' }] } } } }, null);
+    try {
+      await sh('branch', 'agent-push');
+      const plainPush = await rpc('git_push', { remote: 'origin', branch: 'agent-push' });
+      const remoteHas = (await inBare('branch', '--list', 'agent-push')).stdout.includes('agent-push');
+      const forcePush = await rpc('git_push', { remote: 'origin', branch: 'agent-push', forceWithLease: true });
+      const refusal = JSON.parse(forcePush.result?.content?.[0]?.text ?? '{}') as { code?: string; details?: { reason?: string; action?: string; rule?: { match?: string } } };
+      check(
+        'git manage: git.push#force deny with mode allow refuses a force push, naming the action and the rule, while a plain push goes through',
+        plainPush.result?.isError !== true && remoteHas && forcePush.result?.isError === true && refusal.code === 'MUTATION_BLOCKED' && refusal.details?.reason === 'rule' && refusal.details.action === 'force' && refusal.details.rule?.match === 'git.push#force',
+        { plain: plainPush.result?.content?.[0]?.text?.slice(0, 200), refusal },
+      );
+    } finally {
+      await run('config.update', { patch: { mcp: { ...t.host.config.get().mcp, permissions: mcpBefore.permissions, allowMutating: mcpBefore.allowMutating } } }, null);
+    }
   } finally {
     t.host.emit = emit;
     if (ws) await run('workspace.close', { id: ws.id }, null).catch(() => {});

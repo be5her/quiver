@@ -9,8 +9,13 @@ import {
   RingBuffer,
   decideAgentPermission,
   defineCommand,
+  RULE_MATCH_GRAMMAR,
   isValidRuleMatch,
   mcpRecordingFileName,
+  parseRuleMatch,
+  removeRule,
+  ruleAppliesToAgent,
+  ruleMatchFor,
   ruleSpecificity,
   toErrorPayload,
   upsertRule,
@@ -61,7 +66,11 @@ export interface HostOptions {
   cliShims?: string;
 }
 
-const ruleSchema = z.object({ match: z.string().trim().refine(isValidRuleMatch, 'a command id, a glob like git.* or *'), action: z.enum(['allow', 'ask', 'deny']) });
+const ruleSchema = z.object({
+  match: z.string().trim().refine(isValidRuleMatch, `Not a rule match: use ${RULE_MATCH_GRAMMAR}`),
+  action: z.enum(['allow', 'ask', 'deny']),
+  agent: z.string().trim().max(200).optional().describe('The agent the rule applies to, by the client name from the MCP handshake; every agent when absent'),
+});
 
 export interface InvokeOptions {
   caller: Caller;
@@ -281,6 +290,7 @@ export class Host {
       decision,
       ok: entry.ok,
       durationMs: entry.durationMs,
+      action: entry.action,
     });
     this.activityChanged();
   }
@@ -316,27 +326,54 @@ export class Host {
     // A workspace allow does not count for a global command, so its rule goes in the global ones.
     if (!pending.workspace || this.scopeOf(pending.commandId) !== 'workspace') return 'global';
     const wsRules = workspaceRulesFor(this.config.get().mcp, pending.workspace.id);
-    return wsRules.some((r) => ruleSpecificity(r.match, pending.commandId) >= 0) ? 'workspace' : 'global';
+    return wsRules.some((r) => ruleAppliesToAgent(r, pending.agent.name) && ruleSpecificity(r.match, pending.commandId, pending.action) >= 0) ? 'workspace' : 'global';
+  }
+
+  /**
+   * Refuses a rule on an action the command does not have: `db.query.run#drop` (the action is `ddl`), or an action on
+   * a command that declares none. A command id that is not registered (yet) is let through, as rules for it are.
+   */
+  private requireKnownAction(match: string): void {
+    const { command, action } = parseRuleMatch(match);
+    if (action === undefined) return;
+    const entry = this.registry.get(command);
+    if (!entry) return;
+    const actions = entry.command.actions?.list ?? [];
+    if (!actions.includes(action)) {
+      throw new QuiverError(
+        'INVALID_INPUT',
+        actions.length ? `${command} has no action "${action}"; its actions are ${actions.join(', ')}` : `${command} declares no actions; a rule for it names the command alone`,
+        { match, actions },
+      );
+    }
   }
 
   private scopeOf(commandId: string): 'global' | 'workspace' {
     return this.registry.get(commandId)?.command.scope ?? 'global';
   }
 
-  /** The MCP section with an allow rule for a waiting call's tool added at that level. */
-  private withAllowRule(pending: PendingApproval, level: 'workspace' | 'global'): GlobalConfig['mcp'] {
+  /** The MCP section with an allow rule for a waiting call's tool, or for its action of the tool, added at that level. */
+  private withAllowRule(pending: PendingApproval, level: 'workspace' | 'global', scope: 'tool' | 'action'): GlobalConfig['mcp'] {
     const mcp = this.config.get().mcp;
-    const rule = { match: pending.commandId, action: 'allow' as const };
+    const rule = { match: ruleMatchFor(pending.commandId, scope === 'action' ? pending.action : undefined), action: 'allow' as const };
+    // An ask rule at least as specific for this call (`db.query.run#ddl: ask`, or one for this agent) would still ask
+    // after the allow, so it goes: the user just said to allow what it asks about.
+    const floor = ruleSpecificity(rule.match, pending.commandId, pending.action);
+    const apply = (rules: AgentPermissionRule[]) =>
+      upsertRule(
+        rules.filter((r) => !(r.action === 'ask' && ruleAppliesToAgent(r, pending.agent.name) && ruleSpecificity(r.match, pending.commandId, pending.action) >= floor)),
+        rule,
+      );
     if (level === 'workspace' && pending.workspace) {
-      return { ...mcp, workspaceRules: withWorkspaceRules(mcp, pending.workspace.id, upsertRule(workspaceRulesFor(mcp, pending.workspace.id), rule)) };
+      return { ...mcp, workspaceRules: withWorkspaceRules(mcp, pending.workspace.id, apply(workspaceRulesFor(mcp, pending.workspace.id))) };
     }
-    return { ...mcp, permissions: { ...mcp.permissions, rules: upsertRule(mcp.permissions.rules, rule) } };
+    return { ...mcp, permissions: { ...mcp.permissions, rules: apply(mcp.permissions.rules) } };
   }
 
   /** Whether an MCP section lets a waiting call through without asking, as the registry would decide it. */
   private allowedBy(mcp: GlobalConfig['mcp'], pending: PendingApproval): boolean {
     const workspaceRules = workspaceRulesFor(mcp, pending.workspace?.id, this.scopeOf(pending.commandId));
-    return decideAgentPermission({ commandId: pending.commandId, mutating: pending.mutating, permissions: mcp.permissions, workspaceRules }).action === 'allow';
+    return decideAgentPermission({ commandId: pending.commandId, mutating: pending.mutating, permissions: mcp.permissions, workspaceRules, action: pending.action, agent: pending.agent.name }).action === 'allow';
   }
 
   /** Pauses or resumes every agent; pausing also refuses the calls that wait for an answer. */
@@ -647,11 +684,11 @@ export class Host {
         id: 'mcp.approval.respond',
         title: 'Answer an agent call waiting for approval',
         description:
-          'Allows the call once, allows the tool for this agent until Quiver restarts (session), allows the tool for good by adding an allow rule (always: in the workspace rules when one of them matches the tool, otherwise the global ones), or denies the call. Only the UI answers.',
+          'Allows the call once, allows the tool for this agent until Quiver restarts (session), allows the tool for good by adding an allow rule (always: in the workspace rules when one of them matches the tool, otherwise the global ones; with scope "action", the rule names only the action of this call, db.query.run#select), or denies the call. Only the UI answers.',
         scope: 'global',
         hidden: true,
-        input: z.object({ id: z.string(), choice: z.enum(['once', 'session', 'always', 'deny']) }),
-        handler: async ({ id, choice }, ctx) => {
+        input: z.object({ id: z.string(), choice: z.enum(['once', 'session', 'always', 'deny']), scope: z.enum(['tool', 'action']).default('tool') }),
+        handler: async ({ id, choice, scope }, ctx) => {
           if (ctx.caller !== 'ui') throw new QuiverError('INVALID_INPUT', 'Only the Quiver window answers approvals');
           const pending = this.approvals.list().find((p) => p.id === id);
           if (!pending) throw new QuiverError('NOT_FOUND', `No approval ${id} is waiting; it may have been answered or timed out`);
@@ -659,10 +696,11 @@ export class Host {
           // other waiting calls it would let through later: a workspace rule only those in that workspace, and a global
           // one not those a workspace rule still asks about.
           const level = choice === 'always' ? this.allowLevel(pending) : undefined;
-          const next = level ? this.withAllowRule(pending, level) : undefined;
+          const ruleScope = scope === 'action' && pending.action ? 'action' : 'tool';
+          const next = level ? this.withAllowRule(pending, level, ruleScope) : undefined;
           const answered = this.approvals.respond(id, choice, next ? { covers: (other) => this.allowedBy(next, other) } : {});
           if (next) await this.config.update({ mcp: next });
-          return { answered, choice, level };
+          return { answered, choice, level, ...(level ? { match: ruleMatchFor(pending.commandId, ruleScope === 'action' ? pending.action : undefined) } : {}) };
         },
       }),
       defineCommand({
@@ -706,13 +744,15 @@ export class Host {
       defineCommand({
         id: 'mcp.permissions.setRule',
         title: 'Set or remove an agent rule',
-        description: 'Adds or changes the global or workspace rule for a command id or glob; a null action removes it.',
+        description:
+          'Adds or changes the global or workspace rule for a command id, a command id and one of its actions (db.query.run#ddl), or a glob, for every agent or for one (agent); a null action removes it.',
         scope: 'global',
         hidden: true,
         input: ruleSchema.extend({ level: z.enum(['global', 'workspace']), action: ruleSchema.shape.action.nullable() }),
-        handler: async ({ level, match, action }, ctx) => {
+        handler: async ({ level, match, action, agent }, ctx) => {
           if (ctx.caller === 'mcp') throw new QuiverError('INVALID_INPUT', 'Agents cannot change their own permissions');
-          const apply = (rules: AgentPermissionRule[]) => (action ? upsertRule(rules, { match, action }) : rules.filter((r) => r.match !== match));
+          if (action) this.requireKnownAction(match);
+          const apply = (rules: AgentPermissionRule[]) => (action ? upsertRule(rules, { match, action, agent }) : removeRule(rules, { match, agent }));
           if (level === 'global') {
             const mcp = this.config.get().mcp;
             return { rules: (await this.config.update({ mcp: { ...mcp, permissions: { ...mcp.permissions, rules: apply(mcp.permissions.rules) } } })).mcp.permissions.rules };
@@ -720,6 +760,15 @@ export class Host {
           if (!ctx.workspace) throw new QuiverError('NO_WORKSPACE', 'Workspace rules need an open workspace');
           return this.writeWorkspaceRules(ctx.workspace.id, apply(workspaceRulesFor(this.config.get().mcp, ctx.workspace.id)));
         },
+      }),
+      defineCommand({
+        id: 'mcp.permissions.actions',
+        title: 'Actions agent rules can name',
+        description: 'The commands that declare actions, each with its actions and a line about each, for rules like db.query.run#ddl.',
+        scope: 'global',
+        hidden: true,
+        input: z.object({}),
+        handler: async () => this.registry.listActions(),
       }),
       defineCommand({
         id: 'mcp.permissions.workspace',
@@ -739,7 +788,8 @@ export class Host {
         input: z.object({ rules: z.array(ruleSchema) }),
         handler: async ({ rules }, ctx) => {
           if (ctx.caller === 'mcp') throw new QuiverError('INVALID_INPUT', 'Agents cannot change their own permissions');
-          return this.writeWorkspaceRules(ctx.workspace!.id, rules);
+          for (const rule of rules) this.requireKnownAction(rule.match);
+          return this.writeWorkspaceRules(ctx.workspace!.id, rules.reduce<AgentPermissionRule[]>((all, rule) => upsertRule(all, rule), []));
         },
       }),
       // The recording is the user's view of what agents do, so none of it is a tool agents can call.

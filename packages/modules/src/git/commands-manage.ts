@@ -77,6 +77,11 @@ const branchDelete = defineCommand({
     'Deletes a local branch. Refuses the current branch, a branch checked out in another worktree (details.reason "checked-out-elsewhere", details.path that worktree), and a branch whose commits are in none of its upstream, HEAD and the default branch (details.reason "not-merged") unless force is true; a forced delete leaves those commits only in the reflog. The remote branch is untouched; see git.branch.deleteRemote.',
   scope: 'workspace',
   mutating: true,
+  actions: {
+    list: ['delete', 'force'],
+    of: ({ force }) => (force ? 'force' : 'delete'),
+    describe: { delete: 'Deletes a branch whose commits are kept elsewhere', force: 'Deletes the branch even when its commits are in no other branch' },
+  },
   input: GitBranchDeleteInputSchema,
   handler: async ({ name, force }, ctx): Promise<GitStatus> => {
     const { ws, root } = await repo(ctx);
@@ -264,6 +269,11 @@ const reset = defineCommand({
     'Moves the current branch to ref. soft keeps the index and the files (the undone commits become staged changes); mixed keeps the files and unstages everything; hard also discards every uncommitted change to tracked files, which cannot be undone. Commits left behind stay in the reflog.',
   scope: 'workspace',
   mutating: true,
+  actions: {
+    list: ['soft', 'mixed', 'hard'],
+    of: ({ mode }) => mode,
+    describe: { soft: 'Keeps the index and the files', mixed: 'Keeps the files, unstages everything', hard: 'Discards every uncommitted change to tracked files' },
+  },
   input: GitResetInputSchema,
   handler: async ({ ref, mode }, ctx): Promise<GitStatus> => {
     const { ws, root } = await repo(ctx);
@@ -377,6 +387,16 @@ const discard = defineCommand({
     'Throws away changes to files, which cannot be undone: tracked files go back to the index (staged: true takes them back to HEAD, staged changes included), and a path git.status lists as untracked is deleted (an untracked folder entry, "new/", with everything in it). Paths are relative to the repository root; ignored files are never deleted.',
   scope: 'workspace',
   mutating: true,
+  // From the same plan the handler makes, on a local git status: restoring tracked files, deleting untracked ones, or both.
+  actions: {
+    list: ['changes', 'untracked', 'both'],
+    of: async ({ paths, staged }, ctx) => {
+      const { root } = await repo(ctx);
+      const plan = planDiscard((await local.status(root)).files, paths, staged);
+      return plan.clean.length ? (plan.restore.length ? 'both' : 'untracked') : 'changes';
+    },
+    describe: { changes: 'Throws away changes to tracked files', untracked: 'Deletes untracked files', both: 'Both in one call' },
+  },
   input: GitDiscardInputSchema,
   handler: async ({ paths, staged }, ctx): Promise<GitStatus> => {
     const { ws, root } = await repo(ctx);

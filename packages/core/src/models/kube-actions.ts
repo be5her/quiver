@@ -256,6 +256,36 @@ export function isDestructiveKubeAction(action: KubeAction): boolean {
   return action.action === 'delete' || action.action === 'rollout-undo' || action.action === 'cordon' || (action.action === 'scale' && action.params.replicas === 0);
 }
 
+// ---------- actions, for agent rules ----------
+
+/** What a `teleport.kube.action` call does, as an agent rule names it (`teleport.kube.action#delete`): the action id, and `scale-to-zero` for a scale to 0 replicas. */
+export type KubeRuleAction = KubeActionId | 'scale-to-zero';
+
+export const KUBE_RULE_ACTIONS: readonly KubeRuleAction[] = [
+  'scale',
+  'scale-to-zero',
+  'rollout-restart',
+  'rollout-undo',
+  'rollout-pause',
+  'rollout-resume',
+  'delete',
+  'cordon',
+  'uncordon',
+  'set-image',
+  'cronjob-trigger',
+];
+
+export const KUBE_RULE_ACTION_DESCRIPTIONS: Record<KubeRuleAction, string> = {
+  ...(Object.fromEntries(KUBE_ACTIONS.map((a) => [a.id, a.description])) as Record<KubeActionId, string>),
+  scale: 'kubectl scale <type> <name> --replicas <n>, n at least 1',
+  'scale-to-zero': 'kubectl scale <type> <name> --replicas 0: stops every pod of the workload',
+};
+
+/** The rule action of a validated kube action. */
+export function kubeRuleAction(action: KubeAction): KubeRuleAction {
+  return action.action === 'scale' && action.params.replicas === 0 ? 'scale-to-zero' : action.action;
+}
+
 // ---------- port forwards ----------
 
 /** Local ports start above the privileged range. */
