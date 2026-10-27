@@ -182,7 +182,7 @@ const section: SmokeSection = async ({ host, check, run, rpc, toolNames }) => {
         out = await readOutput();
       }
       await wait(200);
-      await shot('08d-dns-lookup-light');
+      await shot('08f-dns-lookup-light');
       check(
         'ui: the DNS lookup tab shows the CNAME chain, the resolver and time, and a table per type, names on one line',
         opened === true &&
@@ -203,7 +203,7 @@ const section: SmokeSection = async ({ host, check, run, rpc, toolNames }) => {
       await setInput('dns-name', 'quiver.test');
       await js(`${pane}?.querySelector('[data-testid=dns-lookup]')?.click()`);
       await wait(600);
-      await shot('08e-dns-lookup-dark');
+      await shot('08g-dns-lookup-dark');
       const zoneOut = await readOutput();
       await setInput('dns-name', 'missing.quiver.test');
       await js(`${pane}?.querySelector('[data-testid=dns-lookup]')?.click()`);
@@ -233,12 +233,12 @@ const section: SmokeSection = async ({ host, check, run, rpc, toolNames }) => {
       await js(`${pane}?.querySelector('[data-testid=dns-lookup]')?.click()`);
       await wait(600);
       const narrowReverse = await readOutput();
-      await shot('08f-dns-lookup-narrow-dark');
+      await shot('08h-dns-lookup-narrow-dark');
       await setInput('dns-name', 'quiver.test');
       await js(`${pane}?.querySelector('[data-testid=dns-lookup]')?.click()`);
       await wait(600);
       const narrowZone = await readOutput();
-      await shot('08g-dns-lookup-narrow-soa');
+      await shot('08i-dns-lookup-narrow-soa');
       await js(`(() => { const t = ${pane}?.querySelector('[data-testid=dns-lookup-tool]'); if (t) t.style.maxWidth = ''; })()`);
       check(
         'ui: in a narrow DNS lookup tab the ip6.arpa name and the SOA table wrap instead of scrolling sideways',

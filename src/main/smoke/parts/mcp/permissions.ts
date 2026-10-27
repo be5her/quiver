@@ -11,7 +11,8 @@ interface CallResult {
 /**
  * Agent rules per action and per agent: `db.query.run#ddl` refusing a CREATE TABLE while a SELECT and an INSERT go
  * through, a rule for one agent by its name, the refusal naming the action and the rule, the action in the activity
- * feed, matches the save commands refuse, and `mcp.permissions.actions`; with --shots, Always allow for one action
+ * feed, matches the save commands refuse, and `mcp.permissions.actions`; across lanes, `tools.*: deny` hiding the QR
+ * and DNS tools and a logs connection secret masked in the approval; with --shots, Always allow for one action
  * from the approval dialog and the rules editor's Action and Agent columns. The kube action and git push rules are
  * checked in the teleport part and the git part, where their fixtures are.
  */
@@ -128,6 +129,40 @@ const permissions: SmokeSection = async (t) => {
       'agent rules: a call without an agent name is not matched by a rule for one agent',
       direct.ok,
       direct.ok ? 'ok' : direct.error,
+    );
+
+    // ---------- across lanes: a module glob hides the new tools, and a logs secret is masked ----------
+    await setMcp({ permissions: { mode: 'allow', rules: [] } });
+    const toolsBefore = await toolNames(smoke);
+    await setMcp({ permissions: { mode: 'allow', rules: [{ match: 'tools.*', action: 'deny' }] } });
+    const toolsDenied = await toolNames(smoke);
+    check(
+      'agent rules: tools.* deny leaves tools_qr_encode and tools_dns_lookup out of tools/list, and other modules in',
+      toolsBefore.includes('tools_qr_encode') &&
+        toolsBefore.includes('tools_dns_lookup') &&
+        !toolsDenied.includes('tools_qr_encode') &&
+        !toolsDenied.includes('tools_dns_lookup') &&
+        !toolsDenied.some((n) => n.startsWith('tools_')) &&
+        toolsDenied.includes('db_query_run'),
+      { before: toolsBefore.filter((n) => n.startsWith('tools_')), denied: toolsDenied.filter((n) => n.startsWith('tools_')) },
+    );
+    // The approval payload is the only place an agent call's arguments are shown; the activity feed records none.
+    const logsSecret = 'smoke-cross-lane-logs-token';
+    await setMcp({ permissions: { mode: 'allow', rules: [{ match: 'logs.connection.save', action: 'ask' }] } });
+    const saveCall = call(smoke, 'logs_connection_save', { connection: { kind: 'victorialogs', name: 'smoke cross-lane', url: 'http://127.0.0.1:9', auth: 'bearer' }, secret: logsSecret });
+    const saveAsked = await nextPending('logs.connection.save');
+    if (saveAsked) await run('mcp.approval.respond', { id: saveAsked.id, choice: 'deny' }, null);
+    const saved = await saveCall;
+    const saveFeed = (await run<{ calls: AgentActivityEntry[] }>('mcp.activity.list', {}, null)).calls.filter((c) => c.tool === 'logs.connection.save');
+    check(
+      'agent rules: an agent’s logs_connection_save with a secret shows it masked in the approval, and the activity feed never holds it',
+      Boolean(saveAsked) &&
+        !JSON.stringify(saveAsked?.input).includes(logsSecret) &&
+        (saveAsked?.input as { secret?: unknown } | undefined)?.secret !== undefined &&
+        saved.isError &&
+        saveFeed.length > 0 &&
+        !JSON.stringify(saveFeed).includes(logsSecret),
+      { input: saveAsked?.input, saved: saved.isError, feed: saveFeed.length },
     );
 
     // ---------- matches the save commands refuse ----------
