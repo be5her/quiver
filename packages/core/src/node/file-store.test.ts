@@ -72,6 +72,21 @@ describe('FileStore external changes', () => {
     expect((await store.list('environments')).length).toBe(41);
   });
 
+  it('a read that started loading during a reload does not cache what it read over a save made after it', async () => {
+    const { store } = await tempStore();
+    for (let i = 0; i < 40; i++) await store.put('environments', { id: 'e' + i, name: String(i) });
+    for (let round = 0; round < 5; round++) {
+      // The get finds the cache dropped by the reload and reads the folder too; the put runs after the reload and caches
+      // its item in the reload's map. The get's read, finishing last, must not replace that map with one lacking the item.
+      const id = 'late' + round;
+      const reload = store.reload('environments');
+      // Once the reload has dropped the cache and is reading the folder.
+      await new Promise((r) => setImmediate(r));
+      await Promise.all([reload, store.get('environments', 'e0'), store.put('environments', { id, name: id })]);
+      expect(await store.get('environments', id)).toEqual({ id, name: id });
+    }
+  });
+
   it('the watcher does not report a first save into a new collection twice, however fast it fires', async () => {
     const { store, changes } = await tempStore();
     // A 1 ms debounce makes the watcher's reload run while the save is still landing (what a slow
