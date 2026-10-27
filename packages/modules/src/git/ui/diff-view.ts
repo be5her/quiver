@@ -1,8 +1,8 @@
 import { Component, Service, computed, effect, inject, input, linkedSignal, model, signal } from '@angular/core';
-import type { GitDiffFile, GitFileContent } from '@quiver/core';
+import { buildFileTree, fileTreeItems, type GitDiffFile, type GitFileContent } from '@quiver/core';
 import { Button, ContextMenu, DiffEditor, EmptyState, HostBridge, Segment, Segmented, Spinner } from '@quiver/ui';
 import { FileUser } from 'lucide';
-import { GitFileLayoutToggle, GitFileRowDef, GitFileTree } from './file-tree';
+import { GitFileLayoutPref, GitFileLayoutToggle, GitFileRowDef, GitFileTree } from './file-tree';
 import { GitActions } from './git-actions';
 import { applyPatch, codeClass, diffCode, languageForPath, parsePatch, splitPath, splitRows, type BlameAt, type DiffBase, type PatchRow, type SplitCell } from './git-format';
 
@@ -334,10 +334,15 @@ export class GitDiffView {
     this.contextMenu.open(event, [{ label: 'Blame', testId: 'git-menu-blame', select: () => this.actions.openBlame(at.path, at.ref) }]);
   }
 
-  protected readonly current = computed<GitDiffFile | undefined>(() => {
+  private readonly tree = inject(GitFileLayoutPref).tree;
+  /** The file shown when none is picked: the first row of the list, which in a tree is the first file under the first folder. */
+  private readonly first = computed<GitDiffFile | undefined>(() => {
     const files = this.files();
-    return files.find((f) => f.path === this.selected()) ?? files[0];
+    if (!this.tree() || files.length < 2) return files[0];
+    return buildFileTree(files, { compact: true }).flatMap((n) => fileTreeItems(n))[0];
   });
+
+  protected readonly current = computed<GitDiffFile | undefined>(() => this.files().find((f) => f.path === this.selected()) ?? this.first());
   protected readonly code = diffCode;
   protected readonly codeClass = codeClass;
   protected readonly whole = drawableWhole;

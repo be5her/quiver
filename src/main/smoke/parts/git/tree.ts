@@ -169,10 +169,12 @@ const section: SmokeSection = async ({ check, run, ws: mainWs }) => ({
       const historyRows = await js(
         `(() => { const t = ${visible('[data-testid=git-history-tab]')}?.querySelector('[data-testid=git-diff-files]'); return t ? [...t.querySelectorAll('[data-tree-row]')].map((r) => r.dataset.testid === 'git-folder' ? r.dataset.path + '/ (' + r.dataset.count + ')' : r.dataset.path) : null; })()`,
       );
+      // With no file picked, the diff shown is the tree's first file, not git's (.gitignore).
+      const historyFirst = await waitFor(`${visible('[data-testid=git-history-tab]')}?.querySelector('[data-testid=git-diff-path]')?.textContent.trim() === 'docs/guide.md'`);
       check(
-        'git tree: the History shows a commit\'s files as a tree',
-        historyTree && JSON.stringify(historyRows) === JSON.stringify(['docs/ (1)', 'docs/guide.md', 'src/a/ (2)', 'src/a/b/ (1)', 'src/a/b/y.ts', 'src/a/x.ts', '.gitignore', 'root.txt']),
-        historyRows,
+        'git tree: the History shows a commit\'s files as a tree, opening on its first file',
+        historyTree && historyFirst && JSON.stringify(historyRows) === JSON.stringify(['docs/ (1)', 'docs/guide.md', 'src/a/ (2)', 'src/a/b/ (1)', 'src/a/b/y.ts', 'src/a/x.ts', '.gitignore', 'root.txt']),
+        { historyRows, historyFirst },
       );
       await js(`document.documentElement.classList.add('dark')`);
       await wait(150);
