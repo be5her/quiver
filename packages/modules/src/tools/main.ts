@@ -1,5 +1,29 @@
 import { createHash } from 'node:crypto';
-import { QR_MAX_BYTES, QuiverError, defineCommand, defineModule, encodeQr, relativeTime, renderQrSvg } from '@quiver/core';
+import { getServers, type AnyRecord, type CaaRecord } from 'node:dns';
+import { Resolver } from 'node:dns/promises';
+import { domainToASCII, domainToUnicode } from 'node:url';
+import {
+  classifyDnsError,
+  cnameChain,
+  DEFAULT_DNS_TYPES,
+  defineCommand,
+  defineModule,
+  DNS_RECORD_TYPES,
+  encodeQr,
+  formatDnsServer,
+  parseDnsName,
+  parseDnsServer,
+  QR_MAX_BYTES,
+  QuiverError,
+  relativeTime,
+  renderQrSvg,
+  reverseDnsName,
+  sortDnsRecords,
+  type DnsRecord,
+  type DnsRecordData,
+  type DnsRecordType,
+  type DnsServer,
+} from '@quiver/core';
 import { JWT_ALGORITHMS, jwtParts, verifyJwt } from '@quiver/core/node';
 import { z } from 'zod';
 
@@ -203,7 +227,211 @@ const qrEncode = defineCommand({
   },
 });
 
+type DnsAnswer = { name: string; target: string };
+
+/** One type's records; `name` is filled in by the caller once the CNAME chain is known. */
+async function queryDnsType(resolver: Resolver, type: Exclude<DnsRecordType, 'CNAME'>, name: string): Promise<DnsRecord[]> {
+  const rec = (data: DnsRecordData, ttl: number | null = null, recordType: string = type): DnsRecord => ({ query: type, type: recordType, name, ttl, data });
+  switch (type) {
+    case 'A':
+      return (await resolver.resolve4(name, { ttl: true })).map((a) => rec({ address: a.address }, a.ttl));
+    case 'AAAA':
+      return (await resolver.resolve6(name, { ttl: true })).map((a) => rec({ address: a.address }, a.ttl));
+    case 'MX':
+      return (await resolver.resolveMx(name)).map((m) => rec({ exchange: m.exchange, priority: m.priority }));
+    case 'NS':
+      return (await resolver.resolveNs(name)).map((target) => rec({ target }));
+    case 'TXT':
+      return (await resolver.resolveTxt(name)).map((entries) => rec({ entries }));
+    case 'SOA': {
+      const s = await resolver.resolveSoa(name);
+      return [rec({ nsname: s.nsname, hostmaster: s.hostmaster, serial: s.serial, refresh: s.refresh, retry: s.retry, expire: s.expire, minttl: s.minttl })];
+    }
+    case 'SRV':
+      return (await resolver.resolveSrv(name)).map((s) => rec({ target: s.name, priority: s.priority, weight: s.weight, port: s.port }));
+    case 'CAA':
+      return (await resolver.resolveCaa(name)).map((c) => rec(caaData(c)));
+    case 'PTR':
+      return (await resolver.resolvePtr(name)).map((target) => rec({ target }));
+    case 'ANY':
+      return (await resolver.resolveAny(name)).map((r) => rec(anyData(r), 'ttl' in r && typeof r.ttl === 'number' ? r.ttl : null, r.type));
+  }
+}
+
+/** A CAA record as its RFC 8659 fields: Node gives the tag as the key (`issue`, `issuewild`, `iodef`, …). */
+function caaData(c: CaaRecord): DnsRecordData {
+  const tag = Object.keys(c).find((k) => k !== 'critical' && k !== 'type') ?? 'issue';
+  return { critical: c.critical, tag, value: String((c as unknown as Record<string, unknown>)[tag] ?? '') };
+}
+
+function anyData(r: AnyRecord): DnsRecordData {
+  switch (r.type) {
+    case 'A':
+    case 'AAAA':
+      return { address: r.address };
+    case 'CNAME':
+    case 'NS':
+    case 'PTR':
+      return { target: r.value };
+    case 'MX':
+      return { exchange: r.exchange, priority: r.priority };
+    case 'TXT':
+      return { entries: r.entries };
+    case 'SOA':
+      return { nsname: r.nsname, hostmaster: r.hostmaster, serial: r.serial, refresh: r.refresh, retry: r.retry, expire: r.expire, minttl: r.minttl };
+    case 'SRV':
+      return { target: r.name, priority: r.priority, weight: r.weight, port: r.port };
+    case 'CAA':
+      return caaData(r);
+    default:
+      return { target: JSON.stringify(r) };
+  }
+}
+
+/**
+ * The CNAME links from `name`, one alias at a time until a name is not one (at most 16 hops, stopping at a loop).
+ * `missing` is how the first question ended when `name` is not an alias: ENODATA (it exists) or ENOTFOUND (NXDOMAIN).
+ */
+async function followCnames(resolver: Resolver, name: string): Promise<{ answers: DnsAnswer[]; missing?: 'ENODATA' | 'ENOTFOUND' }> {
+  const answers: DnsAnswer[] = [];
+  const seen = new Set<string>();
+  for (let current = name; answers.length < 16 && !seen.has(current.toLowerCase().replace(/\.$/, '')); ) {
+    seen.add(current.toLowerCase().replace(/\.$/, ''));
+    let targets: string[];
+    try {
+      targets = await resolver.resolveCname(current);
+    } catch (err) {
+      const c = classifyDnsError(err);
+      if (c.kind === 'empty') return { answers, ...(answers.length ? {} : { missing: c.code }) };
+      throw err;
+    }
+    if (!targets.length) break;
+    answers.push({ name: current, target: targets[0] });
+    current = targets[0];
+  }
+  return { answers, ...(answers.length ? {} : { missing: 'ENODATA' as const }) };
+}
+
+/** A system resolver as `getServers()` lists it (`1.1.1.1`, `1.1.1.1:5353`, `::1`, `[::1]:5353`). */
+function parseSystemServer(text: string): DnsServer {
+  try {
+    return parseDnsServer(text);
+  } catch {
+    return { address: text, port: 53 };
+  }
+}
+
+const dnsLookup = defineCommand({
+  id: 'tools.dns.lookup',
+  title: 'DNS lookup',
+  description:
+    'Looks a name up in DNS, several record types at once: A, AAAA, CNAME, MX, NS, TXT, SOA and CAA by default; SRV, PTR and ANY on request. Returns the records in the order of the types (TTL for A and AAAA only), the CNAME chain when the name is an alias, the resolver used and the time taken. An IP address is looked up in reverse (PTR) instead. server is an IP with an optional port (1.1.1.1, 8.8.8.8:53, [2606:4700:4700::1111]:53), the system resolvers when left out; host names are refused. Types with no records ("no data") or a name that does not exist (NXDOMAIN, "ENOTFOUND") are listed under empty; failures such as timeouts or refusals under errors.',
+  scope: 'global',
+  input: z.object({
+    name: z.string().max(1024),
+    types: z.array(z.enum(DNS_RECORD_TYPES)).max(DNS_RECORD_TYPES.length).optional(),
+    server: z.string().max(80).optional(),
+    timeoutMs: z.number().int().min(500).max(20000).default(5000),
+  }),
+  handler: async ({ name: input, types, server, timeoutMs }) => {
+    const started = performance.now();
+    const target = parseDnsName(input, { toAscii: domainToASCII, toUnicode: domainToUnicode });
+    const custom = server?.trim() ? parseDnsServer(server) : null;
+    // c-ares doubles the timeout on each retry, so a per-try timeout of timeoutMs would let two tries of an unanswered
+    // question take three times as long or more. Each try gets half, and a deadline cancels whatever is still pending
+    // at timeoutMs, so the whole lookup (CNAME walk included) ends within the call's timeout.
+    const resolver = new Resolver({ timeout: Math.max(250, Math.floor(timeoutMs / 2)), tries: 2 });
+    if (custom) resolver.setServers([formatDnsServer(custom)]);
+    const systemServers = getServers();
+    const used = custom ?? (systemServers[0] ? parseSystemServer(systemServers[0]) : { address: '', port: 53 });
+    const asked: DnsRecordType[] = target.kind === 'ip' ? ['PTR'] : [...new Set(types?.length ? types : DEFAULT_DNS_TYPES)];
+    const asciiName = target.kind === 'ip' ? reverseDnsName(target.address) : target.asciiName;
+    const records: DnsRecord[] = [];
+    const errors: { type: string; code: string; message: string }[] = [];
+    const empty: { type: string; code: 'ENODATA' | 'ENOTFOUND' }[] = [];
+    let timedOut = false;
+    const fail = (type: string, err: unknown) => {
+      const c = classifyDnsError(timedOut && (err as { code?: unknown })?.code === 'ECANCELLED' ? { code: 'ETIMEOUT' } : err);
+      if (c.kind === 'empty') empty.push({ type, code: c.code });
+      else errors.push({ type, code: c.code, message: c.message });
+    };
+    let chain: DnsAnswer[] = [];
+    let reverse: { address: string; names: string[] } | undefined;
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      resolver.cancel();
+    }, timeoutMs);
+    try {
+      if (target.kind === 'ip') {
+        reverse = { address: target.address, names: [] };
+        try {
+          reverse.names = await resolver.reverse(target.address);
+          records.push(...reverse.names.map((n): DnsRecord => ({ query: 'PTR', type: 'PTR', name: asciiName, ttl: null, data: { target: n } })));
+          if (!reverse.names.length) empty.push({ type: 'PTR', code: 'ENODATA' });
+        } catch (err) {
+          fail('PTR', err);
+        }
+      } else {
+        // Every type runs at once; the resolver follows an alias for them, so their records belong to the chain's end.
+        const wantsCname = asked.includes('CNAME');
+        let cnameMissing: 'ENODATA' | 'ENOTFOUND' | undefined;
+        const [followed, ...found] = await Promise.all([
+          followCnames(resolver, asciiName).then(
+            ({ answers, missing }) => {
+              cnameMissing = missing;
+              return cnameChain(asciiName, answers);
+            },
+            (err) => {
+              if (wantsCname) fail('CNAME', err);
+              return [];
+            },
+          ),
+          ...asked
+            .filter((t): t is Exclude<DnsRecordType, 'CNAME'> => t !== 'CNAME')
+            .map((type) =>
+              queryDnsType(resolver, type, asciiName).then(
+                (list) => {
+                  if (!list.length) empty.push({ type, code: 'ENODATA' });
+                  return list;
+                },
+                (err) => {
+                  fail(type, err);
+                  return [];
+                },
+              ),
+            ),
+        ]);
+        chain = followed;
+        const owner = chain.length ? chain[chain.length - 1].target : asciiName;
+        if (wantsCname) {
+          records.push(...chain.map((link): DnsRecord => ({ query: 'CNAME', type: 'CNAME', name: link.name, ttl: null, data: { target: link.target } })));
+          // Not an alias: say whether the name exists at all, as the CNAME question found out.
+          if (!chain.length && !errors.some((e) => e.type === 'CNAME')) empty.push({ type: 'CNAME', code: cnameMissing ?? 'ENODATA' });
+        }
+        for (const r of found.flat()) records.push({ ...r, name: r.type === 'PTR' || r.query === 'ANY' ? asciiName : owner });
+      }
+    } finally {
+      clearTimeout(deadline);
+      resolver.cancel();
+    }
+    const order = (type: string) => asked.indexOf(type as DnsRecordType);
+    return {
+      name: target.kind === 'ip' ? target.address : target.name,
+      asciiName,
+      server: { address: used.address, port: used.port, source: custom ? ('custom' as const) : ('system' as const) },
+      systemServers,
+      types: asked,
+      records: sortDnsRecords(records, asked),
+      chain,
+      ...(reverse ? { reverse } : {}),
+      empty: empty.sort((a, b) => order(a.type) - order(b.type)),
+      errors: errors.sort((a, b) => order(a.type) - order(b.type)),
+      durationMs: Math.round(performance.now() - started),
+    };
+  },
+});
+
 export const toolsModule = defineModule({
   id: 'tools',
-  commands: [jsonFormat, jsonMinify, base64Encode, base64Decode, urlEncode, urlDecode, jwtDecode, jwtVerify, uuidGenerate, hashDigest, timestampConvert, qrEncode],
+  commands: [jsonFormat, jsonMinify, base64Encode, base64Decode, urlEncode, urlDecode, jwtDecode, jwtVerify, uuidGenerate, hashDigest, timestampConvert, qrEncode, dnsLookup],
 });

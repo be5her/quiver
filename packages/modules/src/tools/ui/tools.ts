@@ -42,8 +42,11 @@ export interface ToolDescriptor {
   summary?: (result: Record<string, unknown>) => ToolSummary | null;
   /** Run on every keystroke instead of on demand. */
   live?: boolean;
-  /** How the output is drawn: text in an editor (the default), or 'qr' for the QR tool's symbol from its result. */
-  render?: 'qr';
+  /**
+   * How the tool is drawn: text in the input and output editors (the default); 'qr' draws the QR tool's symbol from its
+   * result in place of the output editor; 'dns' is a view of its own in place of both editors (the DNS lookup's tables).
+   */
+  render?: 'qr' | 'dns';
 }
 
 /** The JWT tab's verdict once a key is given: valid and when it expires, or what is wrong. */
@@ -165,6 +168,7 @@ export const TOOLS: ToolDescriptor[] = [
     render: 'qr',
     live: true,
   },
+  { id: 'dns', title: 'DNS lookup', description: 'Every record type, the CNAME chain, any resolver.', commandId: 'tools.dns.lookup', render: 'dns' },
 ];
 
 /** The option values as the command takes them. */
