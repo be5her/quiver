@@ -27,7 +27,11 @@ const HELLO_WORLD_1Q = [
   '111111100101000000010',
 ];
 
-/** Draw the matrix with a quiet zone into an RGBA buffer, as a camera frame would show it, and read it back. */
+/**
+ * Draw the matrix with a quiet zone into an RGBA buffer, as a camera frame would show it, and read it back. jsqr 1.4
+ * has version 23's alignment centres wrong (74 for 78), so a 23-L symbol does not read back; keep decoded texts off
+ * version 23 (the alignment test below checks ours against Table E.1).
+ */
 function decode(code: QrCode, scale = 4): string | null {
   const margin = 4;
   const side = (code.size + margin * 2) * scale;
@@ -45,6 +49,20 @@ function decode(code: QrCode, scale = 4): string | null {
   });
   return jsQR(pixels, side, side, { inversionAttempts: 'dontInvert' })?.data ?? null;
 }
+
+/** Annex E, Table E.1: the alignment pattern centres of versions 2 to 40. */
+const TABLE_E1: Record<number, number[]> = {
+  2: [6, 18], 3: [6, 22], 4: [6, 26], 5: [6, 30], 6: [6, 34], 7: [6, 22, 38], 8: [6, 24, 42], 9: [6, 26, 46], 10: [6, 28, 50],
+  11: [6, 30, 54], 12: [6, 32, 58], 13: [6, 34, 62], 14: [6, 26, 46, 66], 15: [6, 26, 48, 70], 16: [6, 26, 50, 74], 17: [6, 30, 54, 78],
+  18: [6, 30, 56, 82], 19: [6, 30, 58, 86], 20: [6, 34, 62, 90], 21: [6, 28, 50, 72, 94], 22: [6, 26, 50, 74, 98], 23: [6, 30, 54, 78, 102],
+  24: [6, 28, 54, 80, 106], 25: [6, 32, 58, 84, 110], 26: [6, 30, 58, 86, 114], 27: [6, 34, 62, 90, 118], 28: [6, 26, 50, 74, 98, 122],
+  29: [6, 30, 54, 78, 102, 126], 30: [6, 26, 52, 78, 104, 130], 31: [6, 30, 56, 82, 108, 134], 32: [6, 34, 60, 86, 112, 138],
+  33: [6, 30, 58, 86, 114, 142], 34: [6, 34, 62, 90, 118, 146], 35: [6, 30, 54, 78, 102, 126, 150], 36: [6, 24, 50, 76, 102, 128, 154],
+  37: [6, 28, 54, 80, 106, 132, 158], 38: [6, 32, 58, 84, 110, 136, 162], 39: [6, 26, 54, 82, 110, 138, 166], 40: [6, 30, 58, 86, 114, 142, 170],
+};
+
+/** The 5×5 alignment pattern as rows. */
+const ALIGNMENT = ['11111', '10001', '10101', '10001', '11111'];
 
 /** The 7×7 finder pattern as rows. */
 const FINDER = ['1111111', '1000001', '1011101', '1011101', '1011101', '1000001', '1111111'];
@@ -93,9 +111,20 @@ describe('encodeQr', () => {
     expect(block(code.modules, 0, 0, 7)).toEqual(FINDER);
     expect(block(code.modules, code.size - 7, 0, 7)).toEqual(FINDER);
     expect(block(code.modules, 0, code.size - 7, 7)).toEqual(FINDER);
-    expect(alignmentPositions(32)).toEqual([6, 34, 60, 86, 112, 138]);
-    expect(alignmentPositions(40)).toEqual([6, 30, 58, 86, 114, 142, 170]);
+    // Every alignment pattern of the symbol is in place: the centres of Table E.1, skipping the three finder corners.
+    const centres = alignmentPositions(code.version);
+    for (const cy of centres) {
+      for (const cx of centres) {
+        const corner = (cx === 6 && cy === 6) || (cx === 6 && cy === centres.at(-1)) || (cx === centres.at(-1) && cy === 6);
+        if (!corner) expect(block(code.modules, cx - 2, cy - 2, 5), `alignment at ${cx},${cy}`).toEqual(ALIGNMENT);
+      }
+    }
     expect(decode(code, 2)).toBe('x'.repeat(2000));
+  });
+
+  it('places the alignment patterns of Table E.1 for every version', () => {
+    expect(alignmentPositions(1)).toEqual([]);
+    for (let version = 2; version <= 40; version++) expect(alignmentPositions(version), `version ${version}`).toEqual(TABLE_E1[version]);
   });
 
   it('holds 2953 bytes at 40-L and refuses more, or empty text', () => {
