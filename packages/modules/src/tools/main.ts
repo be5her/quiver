@@ -317,7 +317,10 @@ const dnsLookup = defineCommand({
     const started = performance.now();
     const target = parseDnsName(input, { toAscii: domainToASCII, toUnicode: domainToUnicode });
     const custom = server?.trim() ? parseDnsServer(server) : null;
-    const resolver = new Resolver({ timeout: timeoutMs, tries: 2 });
+    // c-ares doubles the timeout on each retry, so a per-try timeout of timeoutMs would let two tries of an unanswered
+    // question take three times as long or more. Each try gets half, and a deadline cancels whatever is still pending
+    // at timeoutMs, so the whole lookup (CNAME walk included) ends within the call's timeout.
+    const resolver = new Resolver({ timeout: Math.max(250, Math.floor(timeoutMs / 2)), tries: 2 });
     if (custom) resolver.setServers([formatDnsServer(custom)]);
     const systemServers = getServers();
     const used = custom ?? (systemServers[0] ? parseSystemServer(systemServers[0]) : { address: '', port: 53 });
@@ -326,13 +329,18 @@ const dnsLookup = defineCommand({
     const records: DnsRecord[] = [];
     const errors: { type: string; code: string; message: string }[] = [];
     const empty: { type: string; code: 'ENODATA' | 'ENOTFOUND' }[] = [];
+    let timedOut = false;
     const fail = (type: string, err: unknown) => {
-      const c = classifyDnsError(err);
+      const c = classifyDnsError(timedOut && (err as { code?: unknown })?.code === 'ECANCELLED' ? { code: 'ETIMEOUT' } : err);
       if (c.kind === 'empty') empty.push({ type, code: c.code });
       else errors.push({ type, code: c.code, message: c.message });
     };
     let chain: DnsAnswer[] = [];
     let reverse: { address: string; names: string[] } | undefined;
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      resolver.cancel();
+    }, timeoutMs);
     try {
       if (target.kind === 'ip') {
         reverse = { address: target.address, names: [] };
@@ -383,6 +391,7 @@ const dnsLookup = defineCommand({
         for (const r of found.flat()) records.push({ ...r, name: r.type === 'PTR' || r.query === 'ANY' ? asciiName : owner });
       }
     } finally {
+      clearTimeout(deadline);
       resolver.cancel();
     }
     const order = (type: string) => asked.indexOf(type as DnsRecordType);
