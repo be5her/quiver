@@ -1,6 +1,6 @@
 # Smoke test
 
-`npm run smoke` builds the app, starts Electron with `QUIVER_SMOKE=1` and runs every check against local fakes: an echo server, a GraphQL endpoint, WebSocket and SSE servers, a RESP server standing in for Redis, a fake Grafana, a fake `tsh` and MCP servers. Nothing outside the machine is touched, user data goes to a temporary folder and Quiver's MCP server listens on a private port, so a Quiver you have open is left alone. The run prints one `PASS` or `FAIL` line per check, a table of checks and time per part, and exits non-zero when a check failed.
+`npm run smoke` builds the app, starts Electron with `QUIVER_SMOKE=1` and runs every check against local fakes: an echo server, a GraphQL endpoint, WebSocket and SSE servers, a RESP server standing in for Redis, a fake Grafana and a fake VictoriaLogs sharing its log entries, a fake `tsh` and MCP servers. Nothing outside the machine is touched, user data goes to a temporary folder and Quiver's MCP server listens on a private port, so a Quiver you have open is left alone. The run prints one `PASS` or `FAIL` line per check, a table of checks and time per part, and exits non-zero when a check failed.
 
 ## Running part of it
 
