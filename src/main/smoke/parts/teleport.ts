@@ -327,6 +327,38 @@ export default definePart({
       const queryEntry = actionHist.entries.find((e) => e.kind === 'query');
       const agentRerunQuery = queryEntry ? await asAgent('teleport.kube.history.rerun', { id: queryEntry.id }) : null;
       check('mcp: rerunning a query from history stays allowed', Boolean(agentRerunQuery?.ok), agentRerunQuery && !agentRerunQuery.ok ? agentRerunQuery.error : queryEntry);
+
+      // A rule on one action: teleport.kube.action#delete asks, under mode allow, and only a delete waits for the user.
+      {
+        const mcpBefore = structuredClone(host.config.get().mcp);
+        await run('config.update', { patch: { mcp: { ...mcpBefore, permissions: { mode: 'allow', rules: [{ match: 'teleport.kube.action#delete', action: 'ask' }] } } } }, null);
+        try {
+          const approvals = () => run<PendingApproval[]>('mcp.approval.list', {}, null);
+          const scaled = await asAgent('teleport.kube.action', { ...target, action: samples[0].action });
+          const noneAsked = (await approvals()).length === 0;
+          const deleteCall = asAgent('teleport.kube.action', { ...target, action: samples[5].action });
+          let asked: PendingApproval | undefined;
+          await until(async () => Boolean((asked = (await approvals()).find((p) => p.commandId === 'teleport.kube.action'))), 4000);
+          if (asked) await run('mcp.approval.respond', { id: asked.id, choice: 'deny' }, null);
+          const deleted = await deleteCall;
+          const scaleToZero = await asAgent('teleport.kube.action', { ...target, action: { action: 'scale', params: { kind: 'deployments', name: 'api', ...ns, replicas: 0 } } });
+          check(
+            'mcp: a teleport.kube.action#delete ask rule under mode allow lets a scale through and asks only about a delete, the approval naming the action',
+            scaled.ok &&
+              noneAsked &&
+              asked?.action === 'delete' &&
+              !deleted.ok &&
+              (deleted.error.details as { reason?: string; action?: string }).reason === 'denied' &&
+              (deleted.error.details as { action?: string }).action === 'delete' &&
+              scaleToZero.ok &&
+              (await approvals()).length === 0,
+            { scaled: scaled.ok || scaled.error, asked: asked?.action, deleted: deleted.ok || deleted.error.details, scaleToZero: scaleToZero.ok || scaleToZero.error },
+          );
+        } finally {
+          for (const p of await run<PendingApproval[]>('mcp.approval.list', {}, null)) await run('mcp.approval.respond', { id: p.id, choice: 'deny' }, null).catch(() => {});
+          await run('config.update', { patch: { mcp: { ...host.config.get().mcp, permissions: mcpBefore.permissions, allowMutating: mcpBefore.allowMutating } } }, null);
+        }
+      }
       check(
         'mcp lists the kube action tools',
         ['teleport_kube_action', 'teleport_kube_action_preview', 'teleport_kube_protect', 'teleport_kube_portForward_start', 'teleport_kube_portForward_list', 'teleport_kube_portForward_stop'].every((n) => names.includes(n)),

@@ -1,6 +1,8 @@
 import {
   DbConnectionSchema,
   KUBE_CLUSTER_NAME,
+  KUBE_RULE_ACTIONS,
+  KUBE_RULE_ACTION_DESCRIPTIONS,
   KubeActionSchema,
   KubePortForwardSpecSchema,
   KubeQuerySchema,
@@ -14,6 +16,7 @@ import {
   isKubeProtected,
   isPinned,
   kubeActionTarget,
+  kubeRuleAction,
   newDbConnection,
   normalizeProxy,
   nowIso,
@@ -514,6 +517,7 @@ const kubeAction = defineCommand({
     'Returns stdout, stderr, the exit code and the exact command that ran.',
   scope: 'global',
   mutating: true,
+  actions: { list: KUBE_RULE_ACTIONS, of: ({ action }) => kubeRuleAction(action), describe: KUBE_RULE_ACTION_DESCRIPTIONS },
   input: z.object({
     proxy: ProxyInput,
     cluster: KubeClusterInput,

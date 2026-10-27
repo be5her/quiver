@@ -53,8 +53,9 @@
       <h3 class="text-xs font-semibold mt-5 mb-2">Agent permissions</h3>
       <p class="text-xs text-muted mb-3">
         Commands that only read are open to agents; the mode decides what commands that delete, write or change shared state get. Rules come first: a command id
-        (<code class="font-mono">db.query.run</code>), a module (<code class="font-mono">git.*</code>) or <code class="font-mono">*</code>. A deny anywhere wins and hides
-        the tool from agents, then the most specific rule, workspace rules before these. The command line and this window are you, so none of this applies to them.
+        (<code class="font-mono">db.query.run</code>), one action of it (<code class="font-mono">db.query.run#ddl</code>, for the tools that say what a call does), a
+        module (<code class="font-mono">git.*</code>) or <code class="font-mono">*</code>, for every agent or one by name. A deny anywhere wins (on a whole tool it hides the
+        tool from agents), then the most specific rule (an action before its tool, a rule for the agent before one for every agent), workspace rules before these. The command line and this window are you, so none of this applies to them.
       </p>
       <div class="flex items-center gap-4 flex-wrap">
         <label class="flex items-center gap-2 text-sm"

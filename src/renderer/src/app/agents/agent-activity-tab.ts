@@ -27,6 +27,9 @@ import { AgentsState, DECISION_LABEL } from './agents-state';
           <div class="flex items-center gap-2 px-3 py-1 text-xs" data-testid="agent-pending-row" [attr.data-tool]="p.commandId">
             <span class="w-28 truncate font-medium">{{ p.agent.name }}</span>
             <code class="font-mono truncate">{{ p.commandId }}</code>
+            @if (p.action) {
+              <code class="font-mono text-muted shrink-0">· {{ p.action }}</code>
+            }
             <span class="text-muted truncate">{{ p.workspace?.name ?? '' }}</span>
             <div class="flex-1"></div>
             <button qButton size="sm" variant="ghost" (click)="agents.respond(p, 'deny')">Deny</button>
@@ -43,10 +46,13 @@ import { AgentsState, DECISION_LABEL } from './agents-state';
     } @else {
       <div class="flex-1 overflow-y-auto" data-testid="agent-activity-list">
         @for (c of agents.calls(); track c.id) {
-          <div class="px-3 py-1 border-b border-edge/60 flex items-center gap-2 min-w-0 text-xs" data-testid="agent-activity-row" [attr.data-tool]="c.tool" [attr.data-decision]="c.decision" [attr.data-agent]="c.agent.name">
+          <div class="px-3 py-1 border-b border-edge/60 flex items-center gap-2 min-w-0 text-xs" data-testid="agent-activity-row" [attr.data-tool]="c.tool" [attr.data-decision]="c.decision" [attr.data-agent]="c.agent.name" [attr.data-action]="c.action ?? ''">
             <span class="text-[10px] text-muted shrink-0 w-16 whitespace-nowrap">{{ time(c.at) }}</span>
             <span class="text-[11px] font-medium shrink-0 w-28 truncate" [title]="c.agent.version ? c.agent.name + ' ' + c.agent.version : c.agent.name">{{ c.agent.name }}</span>
-            <span class="font-mono shrink-0 max-w-64 truncate" [title]="c.tool">{{ c.tool }}</span>
+            <span class="font-mono shrink-0 max-w-64 truncate" [title]="c.action ? c.tool + '#' + c.action : c.tool">{{ c.tool }}</span>
+            @if (c.action) {
+              <span class="font-mono shrink-0 text-muted" data-testid="agent-activity-action">· {{ c.action }}</span>
+            }
             <span class="text-muted truncate flex-1">{{ c.workspace?.name ?? '' }}</span>
             <span class="w-20 shrink-0 text-[11px]" [class]="decision(c).color">{{ decision(c).label }}</span>
             <span qBadge class="shrink-0" [class]="c.ok ? 'text-success' : 'text-danger'">{{ c.ok ? 'ok' : 'failed' }}</span>

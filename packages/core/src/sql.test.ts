@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildTableEdits, classifyStatement, coerceCellInput, isSelectLike, parseRedisCommands, redisCommandIsReadOnly, scriptIsReadOnly, splitStatementRanges, splitStatements, sqlLiteral, statementAt, stripComments, wrapForPage } from './sql';
+import { SQL_ACTIONS, buildTableEdits, classifyStatement, coerceCellInput, isSelectLike, parseRedisCommands, redisCommandAction, redisCommandIsReadOnly, redisCommandsAction, scriptAction, scriptIsReadOnly, splitStatementRanges, splitStatements, sqlLiteral, statementAction, statementAt, stripComments, tableEditsAction, wrapForPage } from './sql';
 
 describe('splitStatements', () => {
   it('splits on semicolons outside strings and comments', () => {
@@ -42,7 +42,6 @@ describe('classifyStatement', () => {
     expect(ro('EXPLAIN SELECT 1')).toBe(true);
     expect(ro('PRAGMA table_info(t)')).toBe(false);
     expect(ro('PRAGMA foreign_keys')).toBe(true);
-    expect(ro('WITH x AS (INSERT INTO a VALUES (1)) SELECT * FROM x')).toBe(true);
     expect(ro('USE db')).toBe(true);
   });
   it('recognises writes', () => {
@@ -55,6 +54,8 @@ describe('classifyStatement', () => {
     expect(ro("SELECT * FROM t INTO OUTFILE '/tmp/x'")).toBe(false);
     expect(ro('CALL proc()')).toBe(false);
     expect(ro('SET @a = 1')).toBe(false);
+    // A PostgreSQL data-modifying CTE runs its INSERT even though the statement ends in a SELECT.
+    expect(ro('WITH x AS (INSERT INTO a VALUES (1) RETURNING *) SELECT * FROM x')).toBe(false);
   });
   it('reports the verb', () => {
     expect(classifyStatement('WITH a AS (SELECT 1) UPDATE t SET x = 1').verb).toBe('UPDATE');
@@ -157,5 +158,126 @@ describe('wrapForPage and isSelectLike', () => {
     expect(isSelectLike('WITH x AS (SELECT 1) SELECT * FROM x')).toBe(true);
     expect(isSelectLike('SHOW TABLES')).toBe(false);
     expect(isSelectLike('UPDATE t SET a = 1')).toBe(false);
+  });
+});
+
+describe('actions for agent rules', () => {
+  it('names the action of one statement', () => {
+    const cases: [string, string][] = [
+      ['SELECT 1', 'select'],
+      ['show tables', 'select'],
+      ['EXPLAIN SELECT * FROM t', 'select'],
+      ['WITH x AS (SELECT 1) SELECT * FROM x', 'select'],
+      ['PRAGMA table_info(t)', 'other'],
+      ['PRAGMA foreign_keys', 'select'],
+      ['INSERT INTO t VALUES (1)', 'insert'],
+      ['replace into t values (1)', 'insert'],
+      ['WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x', 'insert'],
+      ['UPDATE t SET a = 1', 'update'],
+      ['MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET a = 1', 'update'],
+      ['DELETE FROM t', 'delete'],
+      ['WITH old AS (SELECT id FROM t) DELETE FROM t WHERE id IN (SELECT id FROM old)', 'delete'],
+      ['EXPLAIN ANALYZE DELETE FROM t', 'delete'],
+      ['CREATE TABLE t (id int)', 'ddl'],
+      ['/* c */ drop table t', 'ddl'],
+      ['ALTER TABLE t ADD c int', 'ddl'],
+      ['TRUNCATE t', 'ddl'],
+      ['GRANT SELECT ON t TO u', 'ddl'],
+      ['SET search_path = x', 'other'],
+      ['CALL p()', 'other'],
+      ['SELECT * INTO OUTFILE "/tmp/x" FROM t', 'other'],
+      ['VACUUM', 'other'],
+    ];
+    expect(cases.map(([sql]) => [sql, statementAction(sql)])).toEqual(cases);
+  });
+
+  it('gives a script its most severe action, and select exactly when it is read-only', () => {
+    expect(scriptAction('SELECT 1; INSERT INTO t VALUES (1)')).toBe('insert');
+    expect(scriptAction('INSERT INTO t VALUES (1); DELETE FROM t; UPDATE t SET a = 1')).toBe('delete');
+    expect(scriptAction('DELETE FROM t; SET x = 1')).toBe('other');
+    expect(scriptAction('SET x = 1; DROP TABLE t; SELECT 1')).toBe('ddl');
+    expect(scriptAction('')).toBe('select');
+    for (const sql of ['SELECT 1; SHOW tables', 'SELECT 1; DELETE FROM t', "SELECT 'DROP TABLE t'", '-- DROP TABLE t\nSELECT 1']) {
+      expect(scriptAction(sql) === 'select').toBe(scriptIsReadOnly(sql));
+    }
+    expect(SQL_ACTIONS).toEqual(['select', 'insert', 'update', 'delete', 'ddl', 'other']);
+  });
+
+  it('finds the writes a read-looking statement makes', () => {
+    const cases: [string, string][] = [
+      // Data-modifying CTEs (PostgreSQL), upserts and MERGE branches take their most severe change.
+      ['WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d', 'delete'],
+      ['WITH u AS (UPDATE t SET a = 1 RETURNING *) SELECT * FROM u', 'update'],
+      ['INSERT INTO t VALUES (1) ON DUPLICATE KEY UPDATE a = 1', 'update'],
+      ['INSERT INTO t VALUES (1) ON CONFLICT (id) DO UPDATE SET a = 1', 'update'],
+      ['MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE', 'delete'],
+      // SELECT INTO a table creates it; INTO OUTFILE or a variable writes elsewhere.
+      ['SELECT * INTO t2 FROM t', 'ddl'],
+      ['WITH x AS (SELECT 1) SELECT * INTO TEMP t2 FROM x', 'ddl'],
+      ['SELECT 1 INTO @a', 'other'],
+      // EXPLAIN ANALYZE runs the statement, however it is spelled.
+      ['EXPLAIN (ANALYZE) DELETE FROM t', 'delete'],
+      ['EXPLAIN (ANALYZE, BUFFERS) WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d', 'delete'],
+      ['EXPLAIN ANALYSE UPDATE t SET a = 1', 'update'],
+      // Built-in functions that write.
+      ["SELECT nextval('s')", 'other'],
+      ['SELECT pg_terminate_backend(42)', 'other'],
+      ["SELECT * FROM dblink('db', 'DELETE FROM t') AS x(a int)", 'other'],
+      // Text that one engine reads as a comment or a string and another runs.
+      ['SELECT 1 # 2; DROP TABLE t', 'ddl'],
+      ["SELECT '\\'; DROP TABLE t; --'", 'ddl'],
+      ["SELECT $$'$$; DROP TABLE t; -- '", 'ddl'],
+      ['SELECT $$; DROP TABLE t; $$', 'ddl'],
+      ["/* /* */ ' */ DROP TABLE t; -- '", 'ddl'],
+      ["SELECT E'\\'', '\\'; DROP TABLE t; --'", 'ddl'],
+      ["WITH a AS (SELECT '\\'') DELETE FROM t WHERE c = ') SELECT '", 'delete'],
+      ['SELECT $$; SELECT 1 # 1; DROP TABLE t; -- $$', 'ddl'],
+    ];
+    expect(cases.map(([sql]) => [sql, scriptAction(sql)])).toEqual(cases);
+  });
+
+  it('keeps ordinary reads select', () => {
+    for (const sql of [
+      "SELECT 'it''s; fine', \"col\" FROM t WHERE a = 'x;y' -- trailing; comment",
+      'SELECT * FROM t WHERE id = 1 FOR UPDATE',
+      'SELECT * FROM t FOR NO KEY UPDATE',
+      "SELECT replace(name, 'a', 'b') FROM t",
+      'SELECT `a`, [b] FROM t',
+      'SELECT $1::int',
+      'WITH x AS (SELECT 1) SELECT * FROM x',
+      'EXPLAIN SELECT * FROM t',
+      'EXPLAIN DELETE FROM t',
+      'SELECT deleted_at, updated_by FROM t',
+    ]) {
+      expect([sql, scriptAction(sql)]).toEqual([sql, 'select']);
+    }
+  });
+
+  it('names the action of Redis commands: admin beats write beats read', () => {
+    expect(redisCommandAction(['GET', 'k'])).toBe('read');
+    expect(redisCommandAction(['set', 'k', 'v'])).toBe('write');
+    expect(redisCommandAction(['DEL', 'k'])).toBe('write');
+    expect(redisCommandAction(['FLUSHALL'])).toBe('admin');
+    expect(redisCommandAction(['config', 'set', 'maxmemory', '1'])).toBe('admin');
+    expect(redisCommandAction(['CLIENT', 'LIST'])).toBe('read');
+    expect(redisCommandAction(['CLIENT', 'KILL', 'ID', '1'])).toBe('admin');
+    expect(redisCommandsAction([['GET', 'a'], ['TTL', 'a']])).toBe('read');
+    expect(redisCommandsAction([['GET', 'a'], ['SET', 'a', '1']])).toBe('write');
+    expect(redisCommandsAction([['SET', 'a', '1'], ['FLUSHDB']])).toBe('admin');
+    // Scripts can call anything; subcommands outside the read list act on the server.
+    expect(redisCommandAction(['EVAL', "return redis.call('FLUSHALL')", '0'])).toBe('admin');
+    expect(redisCommandAction(['FCALL', 'f', '0'])).toBe('admin');
+    expect(redisCommandAction(['CLIENT', 'UNBLOCK', '7'])).toBe('admin');
+    expect(redisCommandAction(['DEBUG', 'LOADAOF'])).toBe('admin');
+    expect(redisCommandAction(['debug', 'object', 'k'])).toBe('read');
+    expect(redisCommandAction(['MEMORY', 'USAGE', 'k'])).toBe('read');
+    expect(redisCommandAction(['SORT', 'k', 'STORE', 'd'])).toBe('write');
+    expect(redisCommandAction(['MULTI'])).toBe('write');
+  });
+
+  it('names the action of a batch of table edits', () => {
+    expect(tableEditsAction([{ kind: 'insert' }, { kind: 'insert' }])).toBe('insert');
+    expect(tableEditsAction([{ kind: 'delete' }])).toBe('delete');
+    expect(tableEditsAction([{ kind: 'update' }, { kind: 'delete' }])).toBe('mixed');
   });
 });

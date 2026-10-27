@@ -180,3 +180,78 @@ describe('MCP calls and agent permissions over HTTP', () => {
     expect(calls.at(-1)).toMatchObject({ tool: 'test.write', ok: false, decision: 'cancelled' });
   });
 });
+
+describe('MCP and rules per action and per agent', () => {
+  let running: RunningMcpServer | undefined;
+  afterEach(async () => {
+    await running?.close();
+    running = undefined;
+  });
+
+  function actionRegistry(): CommandRegistry {
+    const r = new CommandRegistry();
+    r.registerModule({
+      id: 'act',
+      commands: [
+        defineCommand({
+          id: 'act.run',
+          title: 'Run',
+          description: 'Runs a statement.',
+          scope: 'global',
+          mutating: ({ kind }) => kind !== 'read',
+          actions: { list: ['read', 'drop'], of: ({ kind }) => kind },
+          input: z.object({ kind: z.enum(['read', 'drop']) }),
+          handler: async ({ kind }) => kind,
+        }),
+      ],
+    });
+    return r;
+  }
+
+  async function connect(host: HostApi, name: string) {
+    const calls: McpCallEntry[] = [];
+    const port = await new Promise<number>((resolve, reject) => {
+      const probe = createServer();
+      probe.once('error', reject);
+      probe.listen(0, '127.0.0.1', () => {
+        const { port: p } = probe.address() as { port: number };
+        probe.close(() => resolve(p));
+      });
+    });
+    running = await startMcpServer({ registry: actionRegistry(), host, port, version: 'test', resolveWorkspace: async () => undefined, onCall: (entry) => void calls.push(entry) });
+    const client = new Client({ name, version: '1' });
+    await client.connect(new StreamableHTTPClientTransport(new URL(running.url)));
+    return { client, calls };
+  }
+
+  const payload = (result: Awaited<ReturnType<Client['callTool']>>) => JSON.parse((result.content as { text: string }[])[0].text) as { code?: string; details?: Record<string, unknown> };
+
+  it('keeps a tool listed when a rule denies one of its actions, refuses that action with the rule, and reports the action', async () => {
+    const { client, calls } = await connect(fakeHost({ permissions: { mode: 'allow', rules: [{ match: 'act.run#drop', action: 'deny' }] } }), 'claude-code');
+    const { tools: list } = await client.listTools();
+    expect(list.map((t) => t.name)).toContain('act_run');
+    const refused = await client.callTool({ name: 'act_run', arguments: { kind: 'drop' } });
+    expect(refused.isError).toBe(true);
+    expect(payload(refused)).toMatchObject({ code: 'MUTATION_BLOCKED', details: { reason: 'rule', action: 'drop', rule: { match: 'act.run#drop', action: 'deny' } } });
+    const read = await client.callTool({ name: 'act_run', arguments: { kind: 'read' } });
+    expect(read.isError).toBeFalsy();
+    expect(calls.map((c) => [c.tool, c.decision, c.action])).toEqual([
+      ['act.run', 'refused', 'drop'],
+      ['act.run', 'allowed', 'read'],
+    ]);
+    await client.close();
+  });
+
+  it('hides a tool a rule denies to this agent only', async () => {
+    const host = fakeHost({ permissions: { mode: 'allow', rules: [{ match: 'act.run', action: 'deny', agent: 'cursor' }] } });
+    const cursor = await connect(host, 'cursor');
+    expect((await cursor.client.listTools()).tools.map((t) => t.name)).not.toContain('act_run');
+    expect((await cursor.client.callTool({ name: 'act_run', arguments: { kind: 'read' } })).isError).toBe(true);
+    await cursor.client.close();
+    await running?.close();
+    const claude = await connect(host, 'claude-code');
+    expect((await claude.client.listTools()).tools.map((t) => t.name)).toContain('act_run');
+    expect((await claude.client.callTool({ name: 'act_run', arguments: { kind: 'drop' } })).isError).toBeFalsy();
+    await claude.client.close();
+  });
+});

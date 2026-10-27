@@ -12,6 +12,8 @@ export interface ApprovalRequest {
   /** The arguments with credentials masked (`maskArguments`). */
   input: unknown;
   mutating: boolean;
+  /** What this call does, for a command that declares actions (`ddl` for a `db.query.run`); absent otherwise. */
+  action?: string;
 }
 
 export interface PendingApproval extends ApprovalRequest {
@@ -204,6 +206,8 @@ export interface AgentActivityEntry {
   agent: Pick<McpAgent, 'name' | 'version'>;
   /** The command id, e.g. `db.query.run`. */
   tool: string;
+  /** What the call did, for a command that declares actions (`ddl`); null otherwise, or when it was not worked out. */
+  action?: string | null;
   workspace: Pick<WorkspaceInfo, 'id' | 'name'> | null;
   /** Null when the call failed before the permissions were looked at, e.g. on invalid arguments. */
   decision: AgentCallDecision | null;

@@ -4,8 +4,9 @@ import { capabilityLabels, contentText, expandUriTemplate, skeletonFromSchema } 
 import type { McpConfigFile, McpLogEntry, McpPrompt, McpPromptResult, McpReadResourceResult, McpRecordedCall, McpRecordedCallSummary, McpRecordingFile, McpRecordingStatus, McpResource, McpResourceTemplate, McpServerSummary, McpTool, McpToolCallOutcome } from '@quiver/core';
 import { definePart, runSections, until } from '../part';
 import agents from './mcp/agents';
+import permissions from './mcp/permissions';
 
-/** The inspector and the call recorder; agent permissions are their own section, `mcp/agents.ts`. */
+/** The inspector and the call recorder; agent permissions are their own sections, `mcp/agents.ts` and `mcp/permissions.ts` (rules per action and per agent). */
 const inspector = definePart({
   name: 'mcp',
   summary: 'MCP inspector and call recorder',
@@ -497,6 +498,6 @@ const inspector = definePart({
 
 export default definePart({
   name: 'mcp',
-  summary: 'MCP inspector and call recorder: stdio, HTTP and SSE servers, Quiver itself, the inspector and recorder UI; agent permissions, approvals, pause and activity',
-  run: (t) => runSections(t, [inspector.run, agents]),
+  summary: 'MCP inspector and call recorder: stdio, HTTP and SSE servers, Quiver itself, the inspector and recorder UI; agent permissions, approvals, pause and activity; rules per action and per agent',
+  run: (t) => runSections(t, [inspector.run, agents, permissions]),
 });
