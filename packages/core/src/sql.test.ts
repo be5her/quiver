@@ -264,6 +264,15 @@ describe('actions for agent rules', () => {
     expect(redisCommandsAction([['GET', 'a'], ['TTL', 'a']])).toBe('read');
     expect(redisCommandsAction([['GET', 'a'], ['SET', 'a', '1']])).toBe('write');
     expect(redisCommandsAction([['SET', 'a', '1'], ['FLUSHDB']])).toBe('admin');
+    // Scripts can call anything; subcommands outside the read list act on the server.
+    expect(redisCommandAction(['EVAL', "return redis.call('FLUSHALL')", '0'])).toBe('admin');
+    expect(redisCommandAction(['FCALL', 'f', '0'])).toBe('admin');
+    expect(redisCommandAction(['CLIENT', 'UNBLOCK', '7'])).toBe('admin');
+    expect(redisCommandAction(['DEBUG', 'LOADAOF'])).toBe('admin');
+    expect(redisCommandAction(['debug', 'object', 'k'])).toBe('read');
+    expect(redisCommandAction(['MEMORY', 'USAGE', 'k'])).toBe('read');
+    expect(redisCommandAction(['SORT', 'k', 'STORE', 'd'])).toBe('write');
+    expect(redisCommandAction(['MULTI'])).toBe('write');
   });
 
   it('names the action of a batch of table edits', () => {

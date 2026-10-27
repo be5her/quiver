@@ -472,11 +472,14 @@ const REDIS_READ_COMMANDS = new Set([
   'FT.SEARCH', 'FT.INFO', 'FT._LIST', 'TS.GET', 'TS.RANGE', 'TS.INFO',
 ]);
 
-const REDIS_WRITE_SUBCOMMANDS: Record<string, Set<string>> = {
-  CLIENT: new Set(['KILL', 'PAUSE', 'UNPAUSE', 'SETNAME', 'NO-EVICT', 'NO-TOUCH', 'REPLY', 'TRACKING', 'CACHING']),
-  MEMORY: new Set(['PURGE']),
-  OBJECT: new Set(),
-  DEBUG: new Set(['RELOAD', 'RESTART', 'CRASH-AND-RECOVER', 'SEGFAULT', 'SET-ACTIVE-EXPIRE', 'CHANGE-REPL-ID', 'JMAP', 'POPULATE', 'SLEEP']),
+/**
+ * The subcommands that only read, for the read commands that also have subcommands acting on the server: any other
+ * subcommand (CLIENT KILL or UNBLOCK, DEBUG RELOAD, LOADAOF or PANIC, MEMORY PURGE, one added in a later Redis) writes.
+ */
+const REDIS_READ_SUBCOMMANDS: Record<string, Set<string>> = {
+  CLIENT: new Set(['LIST', 'INFO', 'GETNAME', 'ID', 'GETREDIR', 'TRACKINGINFO', 'HELP']),
+  MEMORY: new Set(['USAGE', 'STATS', 'DOCTOR', 'MALLOC-STATS', 'HELP']),
+  DEBUG: new Set(['OBJECT', 'DIGEST', 'DIGEST-VALUE', 'HTSTATS', 'HTSTATS-KEY', 'SDSLEN', 'LISTPACK', 'QUICKLIST', 'HELP']),
 };
 
 /** Parse a console-style command line (one command per line, shell quoting) into argv lists. */
@@ -492,10 +495,8 @@ export function parseRedisCommands(text: string): string[][] {
 export function redisCommandIsReadOnly(argv: string[]): boolean {
   const cmd = (argv[0] ?? '').toUpperCase();
   if (!REDIS_READ_COMMANDS.has(cmd)) return false;
-  const sub = (argv[1] ?? '').toUpperCase();
-  const gated = REDIS_WRITE_SUBCOMMANDS[cmd];
-  if (gated && gated.has(sub)) return false;
-  return true;
+  const reads = REDIS_READ_SUBCOMMANDS[cmd];
+  return !reads || reads.has((argv[1] ?? '').toUpperCase());
 }
 
 export function redisScriptIsReadOnly(text: string): boolean {
@@ -510,13 +511,15 @@ export const REDIS_ACTIONS: readonly RedisAction[] = ['read', 'write', 'admin'];
 export const REDIS_ACTION_DESCRIPTIONS: Record<RedisAction, string> = {
   read: 'Read-only commands: GET, HGETALL, SCAN, TTL, INFO…',
   write: 'Commands that change keys: SET, DEL, EXPIRE, HSET, LPUSH…',
-  admin: 'Server-wide commands: FLUSHALL, FLUSHDB, CONFIG, SHUTDOWN, SAVE, ACL, SCRIPT, MODULE, REPLICAOF, CLIENT KILL…',
+  admin: 'Server-wide commands and scripts: FLUSHALL, FLUSHDB, CONFIG, SHUTDOWN, SAVE, ACL, SCRIPT, EVAL, FCALL, MODULE, REPLICAOF, CLIENT KILL…',
 };
 
 /** Commands that act on the whole server or every key, rather than on named keys. */
 const REDIS_ADMIN_COMMANDS = new Set([
   'FLUSHALL', 'FLUSHDB', 'CONFIG', 'SHUTDOWN', 'SAVE', 'BGSAVE', 'BGREWRITEAOF', 'ACL', 'MODULE', 'SCRIPT', 'FUNCTION',
   'SLAVEOF', 'REPLICAOF', 'FAILOVER', 'CLUSTER', 'SWAPDB', 'MIGRATE', 'MONITOR', 'SYNC', 'PSYNC', 'SLOWLOG', 'LATENCY', 'RESET',
+  // A script can call any command, FLUSHALL included.
+  'EVAL', 'EVALSHA', 'EVAL_RO', 'EVALSHA_RO', 'FCALL', 'FCALL_RO',
 ]);
 
 /** The action of one Redis command: `read` exactly when `redisCommandIsReadOnly`, else `admin` or `write`. */
@@ -524,7 +527,7 @@ export function redisCommandAction(argv: string[]): RedisAction {
   if (redisCommandIsReadOnly(argv)) return 'read';
   const cmd = (argv[0] ?? '').toUpperCase();
   // A read command made a write by its subcommand (CLIENT KILL, DEBUG RELOAD, MEMORY PURGE) acts on the server.
-  if (REDIS_ADMIN_COMMANDS.has(cmd) || REDIS_WRITE_SUBCOMMANDS[cmd]) return 'admin';
+  if (REDIS_ADMIN_COMMANDS.has(cmd) || REDIS_READ_SUBCOMMANDS[cmd]) return 'admin';
   return 'write';
 }
 
