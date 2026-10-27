@@ -53,7 +53,7 @@ export interface AgentRuleChange {
         >
           <code class="flex-1 min-w-0 text-xs font-mono bg-surface border border-edge rounded-md px-2 py-1.5 truncate" [title]="matchCount(rule.match) + ' tools'">{{ commandOf(rule) }}</code>
           <span class="w-28 shrink-0 px-1 text-xs font-mono truncate" data-testid="agent-rule-row-tool-action" [class.text-muted]="!actionOf(rule)" [title]="actionTitle(rule)">{{ actionOf(rule) ?? 'any' }}</span>
-          <span class="w-32 shrink-0 px-1 text-xs truncate" data-testid="agent-rule-row-agent" [class.text-muted]="!rule.agent" [title]="rule.agent ?? 'Every agent'">{{ rule.agent ?? 'any agent' }}</span>
+          <span class="w-32 shrink-0 px-1 text-xs truncate" data-testid="agent-rule-row-agent" [class.text-muted]="!rule.agent" [title]="rule.agent ? 'Clients that call themselves ' + rule.agent + ' when they connect (a name any client can give)' : 'Every agent'">{{ rule.agent ?? 'any agent' }}</span>
           <select qSelect class="w-28 shrink-0" data-testid="agent-rule-row-action" [attr.aria-label]="'Decision for ' + describe(rule)" (change)="setAction(rule, $any($event.target).value)">
             @for (a of actions; track a) {
               <option [value]="a" [selected]="a === rule.action">{{ a }}</option>
@@ -129,6 +129,11 @@ export interface AgentRuleChange {
       </datalist>
       @if (match().trim()) {
         <p class="text-[11px]" data-testid="agent-rule-hint" [class]="valid() ? 'text-muted' : 'text-danger'">{{ hint() }}</p>
+      }
+      @if (agent().trim(); as name) {
+        <p class="text-[11px] text-warning" data-testid="agent-rule-agent-note">
+          An agent is named by what its client says when it connects, and any client can say it: an allow for {{ name }} lets through every client that calls itself that, and a deny stops only those.
+        </p>
       }
     </div>
   `,
