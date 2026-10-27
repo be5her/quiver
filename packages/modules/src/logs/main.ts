@@ -125,6 +125,17 @@ async function saveConnection(ctx: CommandContext, draft: LogsConnectionDraft, s
   return summary(w, merged);
 }
 
+/**
+ * Whether a save points an existing connection that has a stored password or token at another VictoriaLogs
+ * address without giving a new secret: the next query would send the stored one there.
+ */
+async function movesStoredSecret(w: WorkspaceApi, draft: LogsConnectionDraft, secret: string | undefined): Promise<boolean> {
+  if (!draft.id || secret !== undefined || draft.url === undefined) return false;
+  const existing = await w.store.get<LogsConnection>(LOGS_COLLECTION, draft.id);
+  if (!existing || !(await connectionsWithSecret(w)).has(draft.id)) return false;
+  return normalizeVictoriaLogsUrl(draft.url) !== normalizeVictoriaLogsUrl(LogsConnectionSchema.parse(existing).url);
+}
+
 /** A connection that can be queried: an address and a data source, or a VictoriaLogs address. */
 function queryable(conn: LogsConnection): LogsConnection {
   if (conn.kind === 'victorialogs') {
@@ -199,12 +210,19 @@ const connectionSave = defineCommand({
   id: 'logs.connection.save',
   title: 'Save logs connection',
   description:
-    'Creates or updates a logs connection; omit id to create. Only the fields given are changed. `kind` is grafana (the default) or victorialogs. For grafana: `grafanaUrl` is the Grafana that holds the VictoriaLogs data source, `datasourceUid` and `datasourceName` pick it (logs.datasources lists them once signed in). For victorialogs: `url` is the server (e.g. http://localhost:9428), `tenant` `{ accountId, projectId }` is sent as the AccountID and ProjectID headers (null removes it), `auth` is none, basic (with `authUsername`) or bearer. `secret` is the password or token: encrypted and stored on this machine only, never in the committed file; an empty string removes it, and leaving it out keeps the stored one.',
+    'Creates or updates a logs connection; omit id to create. Only the fields given are changed. `kind` is grafana (the default) or victorialogs. For grafana: `grafanaUrl` is the Grafana that holds the VictoriaLogs data source, `datasourceUid` and `datasourceName` pick it (logs.datasources lists them once signed in). For victorialogs: `url` is the server (e.g. http://localhost:9428), `tenant` `{ accountId, projectId }` is sent as the AccountID and ProjectID headers (null removes it), `auth` is none, basic (with `authUsername`) or bearer. `secret` is the password or token: encrypted and stored on this machine only, never in the committed file; an empty string removes it, and leaving it out keeps the stored one (moving a connection that has one to another `url` without a new secret counts as a mutation, since the stored one would be sent there).',
   scope: 'workspace',
   input: z.object({
     connection: LogsConnectionDraftSchema,
-    secret: z.string().optional().describe('Password (basic) or token (bearer) of a direct connection; stored on this machine only. "" removes it.'),
+    secret: z
+      .string()
+      // Sent as a header: a line break or control character would be refused by the HTTP client with the value in its message.
+      .refine((v) => !/[\u0000-\u001f\u007f]/.test(v), 'The password or token cannot hold line breaks or control characters')
+      .optional()
+      .describe('Password (basic) or token (bearer) of a direct connection; stored on this machine only. "" removes it.'),
   }),
+  // Pointing a connection with a stored password or token at another address would send that secret there: an agent needs mutations for that.
+  mutating: async ({ connection, secret }, ctx) => movesStoredSecret(ws(ctx), connection, secret),
   handler: async ({ connection, secret }, ctx) => saveConnection(ctx, connection, secret),
 });
 

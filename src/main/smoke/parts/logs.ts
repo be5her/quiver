@@ -396,6 +396,25 @@ async function directChecks(t: SmokeContext, vl: FakeVictoriaLogs): Promise<{ ui
       !names.includes('logs_signin'),
     { agentText: agentText.slice(0, 300), masked, agentTest },
   );
+  // The stored token stays where it was given: an agent cannot point the connection elsewhere without mutations, nor read the token from a list.
+  const agentMove = await fail('logs.connection.save', { connection: { id: saved.id, url: 'http://127.0.0.1:9' } }, 'mcp');
+  const agentRename = await fail('logs.connection.save', { connection: { id: saved.id, name: 'VL-Direct' } }, 'mcp');
+  const agentList = await rpc('tools/call', { name: 'logs_connection_list', arguments: {} });
+  const agentListText = agentList.result?.content?.[0]?.text ?? '';
+  const afterMove = await run<LogsConnectionSummary>('logs.connection.get', { id: saved.id }, ws.id);
+  const NEWLINE_SECRET = 'line-break-secret\nX-Other: 1';
+  const badSecret = await fail('logs.connection.save', { connection: { id: saved.id }, secret: NEWLINE_SECRET });
+  check(
+    'logs: an agent may not move a connection with a stored token to another address, never gets the token from a list, and a token with a line break is refused without being quoted',
+    agentMove.startsWith('MUTATION_BLOCKED') &&
+      agentRename === 'ok' &&
+      afterMove.url === vl.url &&
+      agentListText.includes('VL-Direct') &&
+      !agentListText.includes(TOKEN) &&
+      badSecret.startsWith('INVALID_INPUT') &&
+      !badSecret.includes('line-break-secret'),
+    { agentMove, agentRename, url: afterMove.url, badSecret },
+  );
   if (agentConn) await run('logs.connection.delete', { id: agentConn.id }, ws.id);
   const agentLocal = await fs.readFile(path.join(folder, '.quiver', 'local', 'logs-secrets.json'), 'utf8').catch(() => '');
   check('logs: deleting a direct connection forgets its secret on this machine', Boolean(agentConn) && !agentLocal.includes(`logs-connection:${agentConn?.id}`), { agentLocal });
