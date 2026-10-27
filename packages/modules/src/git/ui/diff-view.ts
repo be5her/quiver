@@ -1,7 +1,8 @@
 import { Component, Service, computed, effect, inject, input, linkedSignal, model, signal } from '@angular/core';
-import type { GitDiffFile, GitFileContent } from '@quiver/core';
+import { buildFileTree, fileTreeItems, type GitDiffFile, type GitFileContent } from '@quiver/core';
 import { Button, ContextMenu, DiffEditor, EmptyState, HostBridge, Segment, Segmented, Spinner } from '@quiver/ui';
 import { FileUser } from 'lucide';
+import { GitFileLayoutPref, GitFileLayoutToggle, GitFileRowDef, GitFileTree } from './file-tree';
 import { GitActions } from './git-actions';
 import { applyPatch, codeClass, diffCode, languageForPath, parsePatch, splitPath, splitRows, type BlameAt, type DiffBase, type PatchRow, type SplitCell } from './git-format';
 
@@ -229,32 +230,42 @@ export class GitDiffMode {
  */
 @Component({
   selector: 'q-git-diff-view',
-  imports: [Button, EmptyState, GitDiffMode, GitFullDiff, GitPatch],
+  imports: [Button, EmptyState, GitDiffMode, GitFileLayoutToggle, GitFileRowDef, GitFileTree, GitFullDiff, GitPatch],
   template: `
     @if (!files().length) {
       <q-empty-state [title]="emptyTitle()" [hint]="emptyHint()" data-testid="git-diff-empty" />
     } @else {
       <div class="flex h-full min-h-0">
         @if (files().length > 1) {
-          <div class="w-64 shrink-0 border-r border-edge overflow-y-auto py-1" data-testid="git-diff-files">
-            @for (f of files(); track f.path) {
-              <button
-                type="button"
-                class="w-full flex items-center gap-1.5 px-2 h-7 text-left text-[13px] hover:bg-elevated min-w-0"
-                [class.bg-elevated]="f.path === current()?.path"
-                [title]="f.origPath ? f.origPath + ' → ' + f.path : f.path"
-                data-testid="git-diff-file"
-                [attr.data-path]="f.path"
-                (click)="selected.set(f.path)"
-                (contextmenu)="fileMenu($event, f)"
-              >
-                <span class="font-mono text-[11px] font-bold w-3 shrink-0" [class]="codeClass(code(f))">{{ code(f) }}</span>
-                <span class="truncate">{{ name(f.path) }}</span>
-                <span class="truncate text-[11px] text-muted flex-1 min-w-0">{{ dir(f.path) }}</span>
-                <span class="text-[10px] text-success shrink-0">+{{ f.additions }}</span>
-                <span class="text-[10px] text-danger shrink-0">-{{ f.deletions }}</span>
-              </button>
-            }
+          <div class="w-64 shrink-0 border-r border-edge flex flex-col min-h-0" data-testid="git-diff-files">
+            <div class="flex items-center gap-1 pl-2 pr-1 h-7 shrink-0 border-b border-edge/60">
+              <span class="text-[11px] text-muted flex-1">{{ files().length }} files</span>
+              <q-git-file-layout-toggle />
+            </div>
+            <q-git-file-tree class="flex-1 min-h-0 overflow-y-auto py-1" [files]="files()">
+              <ng-template qGitFileRow let-f let-tree="tree" let-indent="indent">
+                <button
+                  type="button"
+                  class="w-full flex items-center gap-1.5 pr-2 h-7 text-left text-[13px] hover:bg-elevated focus-visible:bg-elevated outline-none min-w-0"
+                  [class.bg-elevated]="f.path === current()?.path"
+                  [style.padding-left.px]="indent"
+                  [title]="f.origPath ? f.origPath + ' → ' + f.path : f.path"
+                  data-tree-row
+                  data-testid="git-diff-file"
+                  [attr.data-path]="f.path"
+                  (click)="selected.set(f.path)"
+                  (contextmenu)="fileMenu($event, f)"
+                >
+                  <span class="font-mono text-[11px] font-bold w-3 shrink-0" [class]="codeClass(code(f))">{{ code(f) }}</span>
+                  <span class="truncate" [class.flex-1]="tree">{{ name(f.path) }}</span>
+                  @if (!tree) {
+                    <span class="truncate text-[11px] text-muted flex-1 min-w-0">{{ dir(f.path) }}</span>
+                  }
+                  <span class="text-[10px] text-success shrink-0">+{{ f.additions }}</span>
+                  <span class="text-[10px] text-danger shrink-0">-{{ f.deletions }}</span>
+                </button>
+              </ng-template>
+            </q-git-file-tree>
           </div>
         }
         @if (current(); as f) {
@@ -323,10 +334,15 @@ export class GitDiffView {
     this.contextMenu.open(event, [{ label: 'Blame', testId: 'git-menu-blame', select: () => this.actions.openBlame(at.path, at.ref) }]);
   }
 
-  protected readonly current = computed<GitDiffFile | undefined>(() => {
+  private readonly tree = inject(GitFileLayoutPref).tree;
+  /** The file shown when none is picked: the first row of the list, which in a tree is the first file under the first folder. */
+  private readonly first = computed<GitDiffFile | undefined>(() => {
     const files = this.files();
-    return files.find((f) => f.path === this.selected()) ?? files[0];
+    if (!this.tree() || files.length < 2) return files[0];
+    return buildFileTree(files, { compact: true }).flatMap((n) => fileTreeItems(n))[0];
   });
+
+  protected readonly current = computed<GitDiffFile | undefined>(() => this.files().find((f) => f.path === this.selected()) ?? this.first());
   protected readonly code = diffCode;
   protected readonly codeClass = codeClass;
   protected readonly whole = drawableWhole;

@@ -7,6 +7,8 @@ import {
   KUBE_FORWARDABLE,
   KUBE_REPLICAS_MAX,
   KUBE_ROLLABLE,
+  KUBE_RULE_ACTIONS,
+  KUBE_RULE_ACTION_DESCRIPTIONS,
   KUBE_SCALABLE,
   buildKubeActionArgs,
   buildPortForwardArgs,
@@ -14,6 +16,7 @@ import {
   isDestructiveKubeAction,
   kubeActionErrors,
   kubeActionTarget,
+  kubeRuleAction,
   parseKubeAction,
   resolveKubeAction,
   type KubeAction,
@@ -258,5 +261,19 @@ describe('port forwards', () => {
     bad({ localPort: 80 });
     bad({ localPort: undefined });
     bad({ address: '0.0.0.0' });
+  });
+});
+
+describe('kube actions for agent rules', () => {
+  it('names every catalogue action, and a scale to 0 replicas apart', () => {
+    const ns = { namespace: 'payments' };
+    expect(kubeRuleAction(parseKubeAction({ action: 'scale', params: { kind: 'deployments', name: 'api', ...ns, replicas: 3 } }))).toBe('scale');
+    expect(kubeRuleAction(parseKubeAction({ action: 'scale', params: { kind: 'deployments', name: 'api', ...ns, replicas: 0 } }))).toBe('scale-to-zero');
+    expect(kubeRuleAction(parseKubeAction({ action: 'delete', params: { kind: 'pods', name: 'api-1', ...ns } }))).toBe('delete');
+    expect(kubeRuleAction(parseKubeAction({ action: 'cordon', params: { node: 'n1' } }))).toBe('cordon');
+    // Every catalogue action is a rule action, with a description.
+    for (const info of KUBE_ACTIONS) expect(KUBE_RULE_ACTIONS).toContain(info.id);
+    expect(KUBE_RULE_ACTIONS).toHaveLength(KUBE_ACTIONS.length + 1);
+    for (const id of KUBE_RULE_ACTIONS) expect(KUBE_RULE_ACTION_DESCRIPTIONS[id]).toBeTruthy();
   });
 });

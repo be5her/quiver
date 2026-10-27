@@ -50,17 +50,18 @@ export class AgentsState {
     this.tabs.openTab(untracked(this.app.scope), { type: 'shell.agents', title: 'Agent activity', data: { key: 'agents' } }, { singletonKey: 'shell.agents:agents' });
   }
 
-  async respond(pending: PendingApproval, choice: ApprovalChoice): Promise<void> {
+  /** Answers a waiting call; for Always allow, `scope` says whether the rule names the call's action or the whole tool. */
+  async respond(pending: PendingApproval, choice: ApprovalChoice, scope: 'tool' | 'action' = 'tool'): Promise<void> {
     if (untracked(this.answering) === pending.id) return;
     this.answering.set(pending.id);
     try {
-      const { level } = await this.host.invoke<{ level?: 'workspace' | 'global' }>('mcp.approval.respond', { id: pending.id, choice }, null);
+      const { level, match } = await this.host.invoke<{ level?: 'workspace' | 'global'; match?: string }>('mcp.approval.respond', { id: pending.id, choice, scope }, null);
       // Forget the ids the list no longer holds, and hide this one until the reload drops it.
       const still = new Set(untracked(this.pending).map((p) => p.id));
       this.answered.update((ids) => new Set([...ids].filter((id) => still.has(id)).concat(pending.id)));
       if (choice === 'always') {
         const where = level === 'workspace' && pending.workspace ? ` in ${pending.workspace.name}` : '';
-        this.toasts.notify(`${pending.commandId} is now always allowed for agents${where}. Change it in Settings > MCP.`, 'success');
+        this.toasts.notify(`${match ?? pending.commandId} is now always allowed for agents${where}. Change it in Settings > MCP.`, 'success');
       }
     } catch (err) {
       this.toasts.error(err);

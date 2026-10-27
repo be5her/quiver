@@ -1,7 +1,7 @@
 import { NgTemplateOutlet } from '@angular/common';
 import { Component, computed, inject, input, linkedSignal, signal, untracked } from '@angular/core';
 import { FormField, form } from '@angular/forms/signals';
-import { PALETTES, resolvePalette, workspaceRulesFor, type AgentPermissionMode, type AgentPermissionRule, type AgentRuleAction, type GlobalConfig, type TeleportStatus, type Variable } from '@quiver/core';
+import { PALETTES, isAutoRenewOn, resolvePalette, workspaceRulesFor, type AgentPermissionMode, type AgentPermissionRule, type GlobalConfig, type TeleportStatus, type Variable } from '@quiver/core';
 import {
   AppState,
   Button,
@@ -18,7 +18,7 @@ import {
   type TabComponent,
 } from '@quiver/ui';
 import { Copy, X } from 'lucide';
-import { AgentRulesEditor } from '../agents/rules-editor';
+import { AgentRulesEditor, type AgentRuleChange } from '../agents/rules-editor';
 import { AboutPanel } from './about-panel';
 import { CliPanel } from './cli-panel';
 
@@ -123,7 +123,7 @@ export class SettingsTab implements TabComponent {
     this.host.invoke('mcp.permissions.setMode', { mode }, null).catch((err) => this.toasts.error(err));
   }
 
-  protected setRule(level: 'global' | 'workspace', change: { match: string; action: AgentRuleAction | null }): void {
+  protected setRule(level: 'global' | 'workspace', change: AgentRuleChange): void {
     this.host
       .invoke('mcp.permissions.setRule', { level, ...change }, level === 'global' ? null : (untracked(this.workspace)?.id ?? null))
       .catch((err) => this.toasts.error(err));
@@ -145,6 +145,15 @@ export class SettingsTab implements TabComponent {
 
   protected toggleLoginOnLaunch(config: GlobalConfig, event: Event): void {
     void this.update({ teleport: { ...config.teleport, loginOnLaunch: (event.target as HTMLInputElement).checked } });
+  }
+
+  protected isAutoRenew(config: GlobalConfig, proxy: string): boolean {
+    return isAutoRenewOn(config.teleport, proxy);
+  }
+
+  protected toggleAutoRenew(proxy: string, event: Event): void {
+    const enabled = (event.target as HTMLInputElement).checked;
+    this.host.invoke('teleport.cluster.autoRenew', { proxy, enabled }, null).catch((err) => this.toasts.error(err));
   }
 
   protected toggleAgentsOnProtected(config: GlobalConfig, event: Event): void {

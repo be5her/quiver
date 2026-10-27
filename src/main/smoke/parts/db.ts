@@ -410,6 +410,32 @@ export default definePart({
     check('mcp blocks redis writes by default', mcpRedisWrite.result?.isError === true);
     const mcpConnections = await rpc('tools/call', { name: 'db_connection_list', arguments: {} });
     check('mcp connection list has no password', !(mcpConnections.result?.content?.[0]?.text ?? '').includes('hunter2'));
+    // The stored password stays where it was given, and a tunnel command is a process an agent may not start without mutations.
+    {
+      const tool = async (name: string, args: unknown) => {
+        const out = await rpc('tools/call', { name, arguments: args });
+        return { blocked: out.result?.isError === true && (out.result.content?.[0]?.text ?? '').includes('MUTATION_BLOCKED'), error: out.result?.isError === true, text: out.result?.content?.[0]?.text ?? '' };
+      };
+      const base = { id: redis.id, kind: 'redis', name: 'smoke redis', host: '127.0.0.1', port: fakeRedis.port };
+      const moveHost = await tool('db_connection_save', { connection: { ...base, host: '127.0.0.2' } });
+      const movePort = await tool('db_connection_save', { connection: { ...base, port: 9 } });
+      const moveWithPassword = await tool('db_connection_test', { connection: { ...base, port: 9 }, password: 'agent-typed' });
+      const testElsewhere = await tool('db_connection_test', { connection: { ...base, host: '127.0.0.2' } });
+      const testAsIs = await tool('db_connection_test', { connection: base });
+      const rename = await tool('db_connection_save', { connection: { ...base, name: 'smoke redis (agent)' } });
+      const tunnel = { type: 'command', command: 'node -e "process.exit(0)" {port}' };
+      const newTunnel = await tool('db_connection_save', { connection: { kind: 'redis', name: 'agent tunnel', access: tunnel } });
+      const testTunnel = await tool('db_connection_test', { connection: { kind: 'redis', name: 'agent tunnel', access: tunnel } });
+      const afterAgent = await run<DbConnectionSummary>('db.connection.get', { id: redis.id }, ws.id);
+      const tunnels = (await run<DbConnectionSummary[]>('db.connection.list', {}, ws.id)).filter((c) => c.name === 'agent tunnel');
+      check(
+        'db: an agent may not point a connection with a stored password elsewhere or start a tunnel command, but may rename it and test it as it is',
+        moveHost.blocked && movePort.blocked && !moveWithPassword.blocked && testElsewhere.blocked && !testAsIs.error && !rename.error && newTunnel.blocked && testTunnel.blocked &&
+          afterAgent.host === '127.0.0.1' && afterAgent.port === fakeRedis.port && afterAgent.hasPassword && afterAgent.name === 'smoke redis (agent)' && tunnels.length === 0,
+        { moveHost, movePort, moveWithPassword: moveWithPassword.blocked, testElsewhere, testAsIs: testAsIs.text.slice(0, 200), rename: rename.error, newTunnel, testTunnel, afterAgent: { host: afterAgent.host, port: afterAgent.port, name: afterAgent.name } },
+      );
+      await run('db.connection.save', { connection: base }, ws.id);
+    }
 
     return {
       ui: async (u) => {

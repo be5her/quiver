@@ -29,16 +29,20 @@ const ARM_DELAY_MS = 400;
           data-testid="agent-approval"
           [attr.data-approval]="pending.id"
           [attr.data-tool]="pending.commandId"
+          [attr.data-action]="pending.action ?? ''"
           (keydown.escape)="agents.respond(pending, 'deny')"
         >
           <div class="flex items-start gap-2">
             <svg [qIcon]="icons.ShieldAlert" class="size-4 text-warning shrink-0 mt-0.5"></svg>
             <div class="min-w-0">
               <h2 id="agent-approval-title" class="text-sm font-semibold">
-                <span data-testid="agent-approval-agent">{{ pending.agent.name }}</span> wants to run {{ pending.title }}
+                <span data-testid="agent-approval-agent" title="The name the agent's client gave when it connected; any client can give it">{{ pending.agent.name }}</span> wants to run {{ pending.title }}
               </h2>
               <p class="text-xs text-muted mt-0.5">
                 <code class="font-mono" data-testid="agent-approval-tool">{{ pending.commandId }}</code>
+                @if (pending.action) {
+                  · <code class="font-mono font-semibold text-fg" data-testid="agent-approval-action" [title]="'What this call does: rules can name it as ' + pending.commandId + '#' + pending.action">{{ pending.action }}</code>
+                }
                 @if (pending.mutating) {
                   · can change data
                 }
@@ -62,11 +66,28 @@ const ARM_DELAY_MS = 400;
               <span class="text-warning" data-testid="agent-approval-queue">{{ waiting() }} more waiting</span>
             }
           </div>
-          <div class="flex flex-wrap items-center gap-2">
-            <button qButton variant="ghost" data-testid="agent-approval-deny" [disabled]="busy()" (click)="agents.respond(pending, 'deny')">Deny</button>
-            <div class="flex-1"></div>
-            <button qButton data-testid="agent-approval-always" [disabled]="busy()" title="Adds a rule that allows this tool for every agent, in Settings > MCP" (click)="agents.respond(pending, 'always')">Always allow</button>
-            <button qButton data-testid="agent-approval-session" [disabled]="busy()" [title]="'Allows ' + pending.commandId + ' for ' + pending.agent.name + ' until Quiver restarts'" (click)="agents.respond(pending, 'session')">
+          <!-- Right-aligned, so the buttons that wrap to a second line (Always allow for an action and for the tool) stay under the others. -->
+          <div class="flex flex-wrap items-center justify-end gap-2">
+            <button qButton variant="ghost" class="mr-auto" data-testid="agent-approval-deny" [disabled]="busy()" (click)="agents.respond(pending, 'deny')">Deny</button>
+            @if (pending.action) {
+              <div class="flex items-center gap-1" role="group" aria-label="Always allow">
+                <button
+                  qButton
+                  data-testid="agent-approval-always-action"
+                  [disabled]="busy()"
+                  [title]="'Adds a rule that allows ' + pending.commandId + '#' + pending.action + ' for every agent, in Settings > MCP; its other actions still follow their rules'"
+                  (click)="agents.respond(pending, 'always', 'action')"
+                >
+                  Always allow {{ pending.action }}
+                </button>
+                <button qButton data-testid="agent-approval-always" [disabled]="busy()" title="Adds a rule that allows this tool, every action of it, for every agent, in Settings > MCP" (click)="agents.respond(pending, 'always', 'tool')">
+                  Always allow tool
+                </button>
+              </div>
+            } @else {
+              <button qButton data-testid="agent-approval-always" [disabled]="busy()" title="Adds a rule that allows this tool for every agent, in Settings > MCP" (click)="agents.respond(pending, 'always')">Always allow</button>
+            }
+            <button qButton data-testid="agent-approval-session" [disabled]="busy()" [title]="'Allows ' + pending.commandId + ' for ' + pending.agent.name + ' until Quiver restarts: for any client that gives that name'" (click)="agents.respond(pending, 'session')">
               Allow until restart
             </button>
             <button qButton variant="primary" data-testid="agent-approval-once" [disabled]="busy()" (click)="agents.respond(pending, 'once')">Allow once</button>

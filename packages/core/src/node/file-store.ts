@@ -39,8 +39,10 @@ export class FileStore implements StoreApi {
   private readonly pending = new Map<string, ReturnType<typeof setTimeout>>();
   /** This store's own writes in flight, per collection. */
   private readonly writing = new Map<string, number>();
-  /** The reload of each collection under way, so the next waits for it. */
-  private readonly reloading = new Map<string, Promise<boolean>>();
+  /** The last reload or write of each collection, queued or under way, so the next waits for it. */
+  private readonly busy = new Map<string, Promise<unknown>>();
+  /** The read of each collection's folder under way, which a load finding no cache joins rather than starting another. */
+  private readonly loading = new Map<string, Promise<Map<string, Entity>>>();
 
   constructor(
     readonly root: string,
@@ -69,6 +71,28 @@ export class FileStore implements StoreApi {
   private async load(collection: string): Promise<Map<string, Entity>> {
     const cached = this.cache.get(collection);
     if (cached) return cached;
+    // Two reads of the folder at once would each cache what they read, and the one finishing last would replace the
+    // map a save made meanwhile had put its item in. So a load joins the read under way, and a read that a reload or
+    // invalidate superseded caches nothing and hands over to the newer one.
+    const inFlight = this.loading.get(collection);
+    if (inFlight) return inFlight;
+    const read = this.readFolder(collection).then(
+      (map) => {
+        if (this.loading.get(collection) !== read) return this.load(collection);
+        this.loading.delete(collection);
+        this.cache.set(collection, map);
+        return map;
+      },
+      (err: unknown) => {
+        if (this.loading.get(collection) === read) this.loading.delete(collection);
+        throw err;
+      },
+    );
+    this.loading.set(collection, read);
+    return read;
+  }
+
+  private async readFolder(collection: string): Promise<Map<string, Entity>> {
     const map = new Map<string, Entity>();
     const dir = this.collectionDir(collection);
     let files: string[] = [];
@@ -89,7 +113,6 @@ export class FileStore implements StoreApi {
       }
       map.set(item.id, item);
     }
-    this.cache.set(collection, map);
     return map;
   }
 
@@ -164,22 +187,31 @@ export class FileStore implements StoreApi {
     );
   }
 
+  /**
+   * Run reloads and this store's own writes of one collection one at a time. A second reload started while the first
+   * has dropped the cache would find nothing cached and report a change that is not there (the watcher can fire twice
+   * that close together). A save landing while a reload reads the folder would be cached in a map the reload then
+   * replaces with what it read before the save's file was there, so the saved item would be missing until the next
+   * reload.
+   */
+  private async serial<T>(collection: string, run: () => Promise<T>): Promise<T> {
+    const next = (this.busy.get(collection) ?? Promise.resolve()).catch(() => {}).then(run);
+    this.busy.set(collection, next);
+    try {
+      return await next;
+    } finally {
+      if (this.busy.get(collection) === next) this.busy.delete(collection);
+    }
+  }
+
   /** Re-read a collection from disk; reports a change when it differs from what was cached. */
   async reload(collection: string): Promise<boolean> {
-    // One at a time per collection: a second reload started while the first has dropped the cache would find nothing
-    // cached and report a change that is not there (the watcher can fire twice that close together).
-    const run = (this.reloading.get(collection) ?? Promise.resolve(false)).catch(() => false).then(() => this.reloadNow(collection));
-    this.reloading.set(collection, run);
-    try {
-      return await run;
-    } finally {
-      if (this.reloading.get(collection) === run) this.reloading.delete(collection);
-    }
+    return this.serial(collection, () => this.reloadNow(collection));
   }
 
   private async reloadNow(collection: string): Promise<boolean> {
     const before = this.cache.get(collection);
-    this.cache.delete(collection);
+    this.drop(collection);
     const after = await this.load(collection);
     if (before && sameEntities(before, after)) return false;
     this.onChange(collection);
@@ -188,8 +220,17 @@ export class FileStore implements StoreApi {
 
   /** Drop caches so the next read hits disk. Used after external edits. */
   invalidate(collection?: string): void {
-    if (collection) this.cache.delete(collection);
-    else this.cache.clear();
+    if (collection) this.drop(collection);
+    else {
+      this.cache.clear();
+      this.loading.clear();
+    }
+  }
+
+  /** Forget the cached items and any read under way, so the next load reads the folder afresh. */
+  private drop(collection: string): void {
+    this.cache.delete(collection);
+    this.loading.delete(collection);
   }
 
   async list<T extends Entity>(collection: string): Promise<T[]> {
@@ -232,7 +273,7 @@ export class FileStore implements StoreApi {
   private async write<T>(collection: string, run: () => Promise<T>): Promise<T> {
     this.writing.set(collection, (this.writing.get(collection) ?? 0) + 1);
     try {
-      return await run();
+      return await this.serial(collection, run);
     } finally {
       const left = (this.writing.get(collection) ?? 1) - 1;
       if (left) this.writing.set(collection, left);

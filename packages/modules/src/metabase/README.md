@@ -32,7 +32,7 @@ Connections are committed under `.quiver/metabase-connections/` and hold no secr
 ## Agents
 
 Allowed:
-- `metabase_connection_list`, `metabase_connection_get`, `metabase_connection_save` and `metabase_connection_test`
+- `metabase_connection_list`, `metabase_connection_get` and `metabase_connection_test`
 - `metabase_session`, which says whether this machine can reach the server and as whom
 - `metabase_databases` and `metabase_tables`
 - `metabase_table_rows`, a page of a table's rows through the query builder, with filters and an order
@@ -41,6 +41,7 @@ Allowed:
 - `metabase_history_list`
 
 Decided per call:
+- `metabase_connection_save`: gated when it gives a connection with a stored API key another `url` (the key would be sent there); creating, renaming and other changes are allowed
 - `metabase_query_run`: `SELECT`, `SHOW` and `EXPLAIN` work, anything that writes is gated
 - `metabase_export`: exports a question (`cardId`), SQL (`sql`) or a table through filters (`tableId`); gated when it writes a file, or when its SQL writes; without a path it returns CSV or JSON as text
 
@@ -66,7 +67,7 @@ The host-level checks cover:
 - a CSV export as text and an Excel export to a file, and a table export through a filter as CSV text
 - the history and clearing it
 - an API key connection: `AUTH_REQUIRED` before a key, setting it, the test with the key, a summary that says a key is stored but never holds it, and clearing it
-- what agents may call: no sign-in tool, `metabase_table_rows` allowed, an `INSERT` refused and a `SELECT` allowed, and the gated commands refused
+- what agents may call: no sign-in tool, `metabase_table_rows` allowed, an `INSERT` refused and a `SELECT` allowed, and the gated commands refused, and moving a connection with a stored key to another address refused while a rename is allowed
 - sign-out on Metabase and locally
 
 In the UI, the checks cover:

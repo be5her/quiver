@@ -1,4 +1,6 @@
-@if (tool(); as tool) {
+@if (tool()?.render === 'dns') {
+  <q-dns-lookup class="flex-1 min-h-0" />
+} @else if (tool(); as tool) {
   <div class="flex items-center gap-3 px-3 h-10 border-b border-edge shrink-0 flex-wrap">
     <span class="text-sm font-medium">{{ tool.title }}</span>
     @for (opt of tool.options ?? []; track opt.key) {
@@ -53,9 +55,17 @@
       } @else if (summary(); as summary) {
         <div class="text-xs px-1 font-medium" [class]="summary.ok ? 'text-success' : 'text-danger'" data-testid="tool-summary">{{ summary.text }}</div>
       }
-      <div class="flex-1 min-h-0">
-        <q-code-editor [value]="output()" readonly [language]="outputLanguage()" placeholder="Output" wrap />
-      </div>
+      @if (tool.render === 'qr') {
+        @if (result(); as result) {
+          <q-qr-output [result]="asQr(result)" [margin]="optionNumber('margin')" [moduleSize]="optionNumber('moduleSize')" />
+        } @else {
+          <div class="flex-1 min-h-0 flex items-center justify-center rounded border border-edge bg-surface text-xs text-muted">Type text or a URL to see its QR code</div>
+        }
+      } @else {
+        <div class="flex-1 min-h-0">
+          <q-code-editor [value]="output()" readonly [language]="outputLanguage()" placeholder="Output" wrap />
+        </div>
+      }
     </div>
   </div>
 } @else {

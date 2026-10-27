@@ -54,6 +54,8 @@ export interface McpCallEntry {
   agent: McpAgent;
   /** Null when the call failed before the permissions were looked at, e.g. on invalid arguments. */
   decision: AgentCallDecision | null;
+  /** What the call did, for a command that declares actions (`ddl`); null otherwise. */
+  action: string | null;
 }
 
 /** Who a server built for one request serves: the agent, and the rules of the workspace it is bound to (by default the workspace's rules in the config). */
@@ -98,9 +100,17 @@ export function buildMcpServer(opts: McpServerOptions, workspace: WorkspaceApi |
   const agent = session.agent ?? UNKNOWN_AGENT;
   const mcp = opts.host.config.get().mcp;
   const workspaceRules = session.workspaceRules ?? workspaceRulesFor(mcp, workspace?.id);
-  // As in the registry: for a global command, a workspace's allow rules do not count.
+  // As in the registry: for a global command, a workspace's allow rules do not count. The list is decided without an
+  // action, so a rule on one action of a tool (`db.query.run#ddl: deny`) never hides it: its other actions may be
+  // allowed. The registry decides each call with its action when it runs. Rules for another agent are skipped.
   const decide = (commandId: string, mutating: boolean, scope: 'global' | 'workspace') =>
-    decideAgentPermission({ commandId, mutating, permissions: mcp.permissions, workspaceRules: scope === 'workspace' ? workspaceRules : workspaceRules.filter((r) => r.action !== 'allow') });
+    decideAgentPermission({
+      commandId,
+      mutating,
+      permissions: mcp.permissions,
+      workspaceRules: scope === 'workspace' ? workspaceRules : workspaceRules.filter((r) => r.action !== 'allow'),
+      agent: agent.name,
+    });
 
   server.registerTool(
     'workspace_current',
@@ -137,8 +147,10 @@ export function buildMcpServer(opts: McpServerOptions, workspace: WorkspaceApi |
         const at = new Date().toISOString();
         const trace: ExecuteTrace = {};
         const report = (ok: boolean) =>
-          opts.onCall?.({ tool: meta.id, workspaceId: workspace?.id, ok, durationMs: performance.now() - started, at, agent, decision: trace.decision ?? null });
+          opts.onCall?.({ tool: meta.id, workspaceId: workspace?.id, ok, durationMs: performance.now() - started, at, agent, decision: trace.decision ?? null, action: trace.action ?? null });
         try {
+          // The registry works out the call's action (`command.actions.of`) from the validated input before it decides,
+          // with this agent's name, and a refusal's details carry the action and the rule that decided.
           const result = await opts.registry.execute(meta.id, args, { caller: 'mcp', host: opts.host, workspace, agent, signal: extra?.signal }, trace);
           report(true);
           return text(result);

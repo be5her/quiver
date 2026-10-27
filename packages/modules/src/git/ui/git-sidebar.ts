@@ -23,6 +23,7 @@ import {
   Trash2,
   Undo2,
 } from 'lucide';
+import { GitFileLayoutToggle, GitFileRowDef, GitFileTree, GitFolderActionsDef } from './file-tree';
 import { GitActions } from './git-actions';
 import { injectGitChanged } from './git-events';
 import { ago, codeClass, codeWord, errorReason, groupChanges, splitPath } from './git-format';
@@ -38,7 +39,7 @@ const GROUP_TITLE: Record<Group, string> = { conflicts: 'Merge conflicts', stage
 /** One group of changed files, with stage or unstage per file and for the whole group. */
 @Component({
   selector: 'q-git-change-group',
-  imports: [Icon, IconButton],
+  imports: [GitFileRowDef, GitFileTree, GitFolderActionsDef, Icon, IconButton],
   template: `
     <div
       class="group flex items-center gap-1 pl-2 pr-1 h-7 cursor-pointer hover:bg-elevated"
@@ -64,34 +65,50 @@ const GROUP_TITLE: Record<Group, string> = { conflicts: 'Merge conflicts', stage
       <span class="text-[10px] text-muted bg-elevated rounded-full px-1.5 group-hover:hidden">{{ files().length }}</span>
     </div>
     @if (open()) {
-      @for (f of files(); track f.path) {
-        <div
-          class="group flex items-center gap-1.5 pl-7 pr-1 h-6 cursor-pointer hover:bg-elevated min-w-0"
-          role="button"
-          tabindex="0"
-          data-testid="git-file"
-          [attr.data-path]="f.path"
-          [attr.data-group]="group()"
-          [title]="tooltip(f)"
-          (click)="opened.emit(f)"
-          (keydown.enter)="opened.emit(f)"
-          (contextmenu)="fileMenu($event, f)"
-        >
-          <span class="truncate text-[13px]">{{ name(f.path) }}</span>
-          <span class="truncate text-[11px] text-muted flex-1 min-w-0">{{ dir(f.path) }}</span>
-          <span class="hidden group-hover:flex items-center">
-            @if (discardable()) {
-              <button qIconButton [label]="group() === 'untracked' ? 'Delete' : 'Discard changes'" size="sm" data-testid="git-discard" (click)="discardOne($event, f)"><svg [qIcon]="icons.Undo2" class="size-3.5"></svg></button>
+      <q-git-file-tree [files]="files()" [stateKey]="'git/tree/' + group()" [listIndent]="28" [treeIndent]="14">
+        <ng-template qGitFolderActions let-items let-row="row">
+          @if (discardable()) {
+            <button qIconButton [label]="group() === 'untracked' ? 'Delete all in folder' : 'Discard all in folder'" size="sm" data-testid="git-folder-discard" (click)="discardAll($event, items, row.path)"><svg [qIcon]="icons.Undo2" class="size-3.5"></svg></button>
+          }
+          @if (group() === 'staged') {
+            <button qIconButton label="Unstage all in folder" size="sm" data-testid="git-folder-unstage" (click)="all($event, items)"><svg [qIcon]="icons.Minus" class="size-3.5"></svg></button>
+          } @else {
+            <button qIconButton [label]="group() === 'conflicts' ? 'Mark all in folder resolved' : 'Stage all in folder'" size="sm" data-testid="git-folder-stage" (click)="all($event, items)"><svg [qIcon]="icons.Plus" class="size-3.5"></svg></button>
+          }
+        </ng-template>
+        <ng-template qGitFileRow let-f let-tree="tree" let-indent="indent">
+          <div
+            class="group flex items-center gap-1.5 pr-1 h-6 cursor-pointer hover:bg-elevated focus-visible:bg-elevated outline-none min-w-0"
+            role="button"
+            tabindex="0"
+            data-tree-row
+            data-testid="git-file"
+            [attr.data-path]="f.path"
+            [attr.data-group]="group()"
+            [style.padding-left.px]="indent"
+            [title]="tooltip(f)"
+            (click)="opened.emit(f)"
+            (keydown.enter)="opened.emit(f)"
+            (contextmenu)="fileMenu($event, f)"
+          >
+            <span class="truncate text-[13px]" [class.flex-1]="tree">{{ name(f.path) }}</span>
+            @if (!tree) {
+              <span class="truncate text-[11px] text-muted flex-1 min-w-0">{{ dir(f.path) }}</span>
             }
-            @if (group() === 'staged') {
-              <button qIconButton label="Unstage" size="sm" data-testid="git-unstage" (click)="one($event, f)"><svg [qIcon]="icons.Minus" class="size-3.5"></svg></button>
-            } @else {
-              <button qIconButton [label]="group() === 'conflicts' ? 'Mark resolved' : 'Stage'" size="sm" data-testid="git-stage" (click)="one($event, f)"><svg [qIcon]="icons.Plus" class="size-3.5"></svg></button>
-            }
-          </span>
-          <span class="font-mono text-[11px] font-bold w-3 text-center shrink-0" [class]="codeClass(code(f))">{{ code(f) }}</span>
-        </div>
-      }
+            <span class="hidden group-hover:flex items-center">
+              @if (discardable()) {
+                <button qIconButton [label]="group() === 'untracked' ? 'Delete' : 'Discard changes'" size="sm" data-testid="git-discard" (click)="discardOne($event, f)"><svg [qIcon]="icons.Undo2" class="size-3.5"></svg></button>
+              }
+              @if (group() === 'staged') {
+                <button qIconButton label="Unstage" size="sm" data-testid="git-unstage" (click)="one($event, f)"><svg [qIcon]="icons.Minus" class="size-3.5"></svg></button>
+              } @else {
+                <button qIconButton [label]="group() === 'conflicts' ? 'Mark resolved' : 'Stage'" size="sm" data-testid="git-stage" (click)="one($event, f)"><svg [qIcon]="icons.Plus" class="size-3.5"></svg></button>
+              }
+            </span>
+            <span class="font-mono text-[11px] font-bold w-3 text-center shrink-0" [class]="codeClass(code(f))">{{ code(f) }}</span>
+          </div>
+        </ng-template>
+      </q-git-file-tree>
     }
   `,
   host: { class: 'block' },
@@ -141,9 +158,10 @@ export class GitChangeGroup {
     void (this.group() === 'staged' ? this.actions.unstage(withOrigin([f])) : this.actions.stage([f.path]));
   }
 
-  protected all(event: Event): void {
+  /** The whole group, or the files under a folder row. */
+  protected all(event: Event, files: readonly GitFileChange[] = this.files()): void {
     event.stopPropagation();
-    void (this.group() === 'staged' ? this.actions.unstage(withOrigin(this.files())) : this.actions.stage(this.files().map((f) => f.path)));
+    void (this.group() === 'staged' ? this.actions.unstage(withOrigin(files)) : this.actions.stage(files.map((f) => f.path)));
   }
 
   protected discardOne(event: Event, f: GitFileChange): void {
@@ -151,9 +169,9 @@ export class GitChangeGroup {
     void this.actions.discard([f.path], this.group() === 'untracked');
   }
 
-  protected discardAll(event: Event): void {
+  protected discardAll(event: Event, files: readonly GitFileChange[] = this.files(), folder?: string): void {
     event.stopPropagation();
-    void this.actions.discard(this.files().map((f) => f.path), this.group() === 'untracked');
+    void this.actions.discard(files.map((f) => f.path), this.group() === 'untracked', folder);
   }
 
   /** Right-click on a file: open its changes, or blame it (as committed, at HEAD, when it was deleted). Git cannot blame an untracked file. */
@@ -168,14 +186,14 @@ export class GitChangeGroup {
 }
 
 /** The paths to unstage: a staged rename's old path too, or its deletion would stay staged. */
-function withOrigin(files: GitFileChange[]): string[] {
+function withOrigin(files: readonly GitFileChange[]): string[] {
   return files.flatMap((f) => (f.origPath ? [f.path, f.origPath] : [f.path]));
 }
 
 /** The workspace repository: branch and remote, the operation in progress, the commit box, the changed files, the stashes and the branches. */
 @Component({
   selector: 'q-git-sidebar',
-  imports: [Button, Checkbox, EmptyState, FormField, GitChangeGroup, GitWorktreesSection, Icon, IconButton, SectionHeader, Spinner, TextArea],
+  imports: [Button, Checkbox, EmptyState, FormField, GitChangeGroup, GitFileLayoutToggle, GitWorktreesSection, Icon, IconButton, SectionHeader, Spinner, TextArea],
   template: `
     @if (statusError(); as error) {
       @if (!current()) {
@@ -268,6 +286,7 @@ function withOrigin(files: GitFileChange[]): string[] {
 
       <!-- Changes -->
       <q-section-header title="Changes">
+        <q-git-file-layout-toggle />
         <button qIconButton label="Refresh" size="sm" data-testid="git-refresh" (click)="reloadAll()"><svg [qIcon]="icons.RefreshCw" class="size-3.5"></svg></button>
       </q-section-header>
       @let g = groups();

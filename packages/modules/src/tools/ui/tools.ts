@@ -42,6 +42,11 @@ export interface ToolDescriptor {
   summary?: (result: Record<string, unknown>) => ToolSummary | null;
   /** Run on every keystroke instead of on demand. */
   live?: boolean;
+  /**
+   * How the tool is drawn: text in the input and output editors (the default); 'qr' draws the QR tool's symbol from its
+   * result in place of the output editor; 'dns' is a view of its own in place of both editors (the DNS lookup's tables).
+   */
+  render?: 'qr' | 'dns';
 }
 
 /** The JWT tab's verdict once a key is given: valid and when it expires, or what is wrong. */
@@ -142,6 +147,28 @@ export const TOOLS: ToolDescriptor[] = [
     ],
   },
   { id: 'timestamp', title: 'Timestamp', description: 'Convert between unix and ISO.', commandId: 'tools.timestamp.convert', inputKey: 'value', outputLanguage: 'json', placeholder: 'now, 1700000000, or 2026-01-01T00:00:00Z', live: true },
+  {
+    id: 'qr',
+    title: 'QR code',
+    description: 'Encode text or a URL as a QR code.',
+    commandId: 'tools.qr.encode',
+    inputKey: 'text',
+    placeholder: 'https://example.com',
+    options: [
+      {
+        key: 'errorCorrection',
+        label: 'Error correction',
+        type: 'select',
+        default: 'M',
+        choices: [{ value: 'L', label: 'L (7%)' }, { value: 'M', label: 'M (15%)' }, { value: 'Q', label: 'Q (25%)' }, { value: 'H', label: 'H (30%)' }],
+      },
+      { key: 'margin', label: 'Margin', type: 'number', default: 4 },
+      { key: 'moduleSize', label: 'Module px', type: 'number', default: 8 },
+    ],
+    render: 'qr',
+    live: true,
+  },
+  { id: 'dns', title: 'DNS lookup', description: 'Every record type, the CNAME chain, any resolver.', commandId: 'tools.dns.lookup', render: 'dns' },
 ];
 
 /** The option values as the command takes them. */

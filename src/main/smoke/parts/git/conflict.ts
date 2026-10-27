@@ -374,28 +374,43 @@ const section: SmokeSection = async (t) => {
 
         // Edits made here survive a reload of the same file and mark the tab unsaved; a change on disk is pointed out
         // rather than dropping them, and Use the file on disk takes it.
+        //
+        // Refresh is disabled while the file loads (git.conflict.get runs several git processes, which can take over a
+        // second on a busy Windows machine), and a click on it then is dropped: wait for it to be enabled, click, and
+        // wait for that load to end.
+        const refreshButton = `[...${tab}?.querySelectorAll('button') ?? []].find((b) => b.textContent.trim() === 'Refresh')`;
+        let refreshWaited = 0;
+        const refreshMs: number[] = [];
+        const refresh = async () => {
+          if (await js(`${refreshButton}?.disabled === true`)) refreshWaited++;
+          await waitFor(`${refreshButton}?.disabled === false`, 6000);
+          const clicked = Date.now();
+          await js(`${refreshButton}?.click()`);
+          await wait(100);
+          await waitFor(`${refreshButton}?.disabled === false`, 6000);
+          refreshMs.push(Date.now() - clicked);
+        };
         const dirtyDot = `Boolean([...document.querySelectorAll('[data-testid=tab][data-title="conf.txt (conflict)"]')].find((e) => e.offsetParent !== null)?.querySelector('.bg-warning'))`;
         await js(`${tab}?.querySelector('[data-testid=conflict-actions][data-index="0"] [data-choice=ours]')?.click()`);
-        await js(`[...${tab}?.querySelectorAll('button') ?? []].find((b) => b.textContent.trim() === 'Refresh')?.click()`);
-        await wait(400);
+        await refresh();
         const kept = await state();
         const markedDirty = await js(dirtyDot);
         const original = await fs.readFile(path.join(ui, 'conf.txt'), 'utf8');
         await fs.writeFile(path.join(ui, 'conf.txt'), original.replace('tail\n', 'tail edited\n'));
-        await js(`[...${tab}?.querySelectorAll('button') ?? []].find((b) => b.textContent.trim() === 'Refresh')?.click()`);
+        await refresh();
         const noted = await waitFor(`Boolean(${tab}?.querySelector('[data-testid=git-conflict-changed-on-disk]'))`, 3000);
         const stillKept = await state();
         await shot('32cc-git-conflict-changed-on-disk-light');
         await click('[data-testid=git-conflict-tab][data-path="conf.txt"] [data-testid=git-conflict-use-disk]');
         const tookDisk = await waitFor(`${tab}?.querySelectorAll('[data-testid=conflict-actions]').length === 2 && !${tab}?.querySelector('[data-testid=git-conflict-changed-on-disk]')`, 3000);
         await fs.writeFile(path.join(ui, 'conf.txt'), original);
-        await js(`[...${tab}?.querySelectorAll('button') ?? []].find((b) => b.textContent.trim() === 'Refresh')?.click()`);
+        await refresh();
         const backToDisk = await waitFor(`!${tab}?.querySelector('.cm-content')?.textContent.includes('tail edited')`, 3000);
         const clean = !(await js(dirtyDot));
         check(
           'git conflict ui: an edit survives a reload and marks the tab unsaved; a change on disk is noted, and Use the file on disk takes it',
           (kept as { counter: string } | null)?.counter === 'Conflict 1 of 1' && Boolean(markedDirty) && noted && (stillKept as { counter: string } | null)?.counter === 'Conflict 1 of 1' && tookDisk && backToDisk && clean,
-          { kept, markedDirty, noted, stillKept, tookDisk, backToDisk, clean },
+          { kept, markedDirty, noted, stillKept, tookDisk, backToDisk, clean, refreshWaited, refreshMs },
         );
 
         // Accept incoming on both; Mark resolved then saves and stages the file.

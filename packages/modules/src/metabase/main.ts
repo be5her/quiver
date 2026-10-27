@@ -141,6 +141,14 @@ async function saveConnection(w: WorkspaceApi, draft: MetabaseConnectionDraft): 
   return summaryOf(w, merged);
 }
 
+/** A save that gives an existing connection with a stored API key another address. */
+async function movesStoredKey(w: WorkspaceApi, draft: MetabaseConnectionDraft): Promise<boolean> {
+  if (!draft.id || draft.url === undefined || !(await hasApiKey(w, draft.id))) return false;
+  const existing = await w.store.get<MetabaseConnection>(METABASE_COLLECTION, draft.id);
+  if (!existing) return true;
+  return normalizeMetabaseUrl(draft.url) !== normalizeMetabaseUrl(MetabaseConnectionSchema.parse(existing).url);
+}
+
 /** Note on the API key session what a request found out about the key. */
 function noteAuth(ctx: CommandContext, conn: MetabaseConnection, err: unknown): void {
   if (conn.auth !== 'apikey' || !(err instanceof QuiverError)) return;
@@ -191,6 +199,8 @@ const connectionSave = defineCommand({
     'Creates or updates a Metabase connection; omit id to create. `url` is Metabase\'s address (a sub-path is kept), `auth` is `browser` (the user signs in in a Quiver window) or `apikey` (set the key with metabase.apikey.set). Only the fields given are changed.',
   scope: 'workspace',
   input: z.object({ connection: MetabaseConnectionDraftSchema }),
+  // Pointing a connection with a stored API key at another address would send the key there: an agent needs mutations for that.
+  mutating: async ({ connection }, ctx) => movesStoredKey(ws(ctx), connection),
   handler: async ({ connection }, ctx) => saveConnection(ws(ctx), connection),
 });
 

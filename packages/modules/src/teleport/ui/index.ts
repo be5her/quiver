@@ -3,6 +3,7 @@ import { AppState, defineModuleUI } from '@quiver/ui';
 import { ShieldCheck } from 'lucide';
 import { KubeQueryTab } from './kube-query-tab';
 import { TeleportActions } from './teleport-actions';
+import { TeleportRenewalStatusItem } from './teleport-renewal-status-item';
 import { TeleportSidebar } from './teleport-sidebar';
 
 /**
@@ -20,6 +21,9 @@ export const teleportModuleUI = defineModuleUI({
   availability: 'always',
   sidebar: TeleportSidebar,
   tabs: { 'teleport.kube': KubeQueryTab },
+  // Keep me logged in: reports whether the window is in front and announces renewals, also while Teleport is hidden.
+  statusItems: [TeleportRenewalStatusItem],
+  statusItemsWhenHidden: true,
   actions: () => {
     const teleport = inject(TeleportActions);
     const app = inject(AppState);

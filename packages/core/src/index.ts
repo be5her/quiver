@@ -63,3 +63,6 @@ export * from './queues-messages';
 export * from './queues-sqs';
 export * from './cli-args';
 export * from './junit';
+export * from './file-tree';
+export * from './qr';
+export * from './dns-lookup';

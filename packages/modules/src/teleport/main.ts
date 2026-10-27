@@ -1,19 +1,24 @@
 import {
   DbConnectionSchema,
   KUBE_CLUSTER_NAME,
+  KUBE_RULE_ACTIONS,
+  KUBE_RULE_ACTION_DESCRIPTIONS,
   KubeActionSchema,
   KubePortForwardSpecSchema,
   KubeQuerySchema,
   QuiverError,
   lastKubeNamespace,
+  loggedOutCluster,
   clusterLabel,
   dbKindForProtocol,
   defineCommand,
   defineModule,
+  isAutoRenewOn,
   isDestructiveKubeAction,
   isKubeProtected,
   isPinned,
   kubeActionTarget,
+  kubeRuleAction,
   newDbConnection,
   normalizeProxy,
   nowIso,
@@ -23,6 +28,7 @@ import {
   proxyAddress,
   resolveKubeAction,
   sameProxy,
+  setAutoRenew,
   setKubeProtected,
   togglePin,
   type Caller,
@@ -80,7 +86,7 @@ function targetClusters(session: TeleportSession, proxy: string | undefined): Te
   if (proxy) {
     const resolved = session.resolveProxy(proxy);
     const cluster = status.clusters.find((c) => sameProxy(c.proxy, resolved));
-    return cluster ? [cluster] : [{ proxy: resolved, cluster: null, user: null, roles: [], validUntil: null, kubeCluster: null, state: 'logged-out', current: false, configured: false }];
+    return cluster ? [cluster] : [loggedOutCluster(resolved, false)];
   }
   return status.clusters.filter(usable);
 }
@@ -136,7 +142,7 @@ const status = defineCommand({
   id: 'teleport.status',
   title: 'Teleport status',
   description:
-    'Where tsh is, every known cluster with its proxy, name, user, certificate expiry and state (logged-out, expired, logged-in, expiring), whether a login is running, pinned resources, and the local tunnels. The top-level state is no-tsh or the best cluster state.',
+    'Where tsh is, every known cluster with its proxy, name, user, certificate expiry and state (logged-out, expired, logged-in, expiring), whether a login is running, pinned resources, and the local tunnels. Per cluster, autoRenew says whether Keep me logged in renews its certificate before it expires, and renewal the last automatic attempt (lastAttemptAt, lastResult ok, failed or cancelled, lastError, nextEligibleAt, running, waitingForFocus). The top-level state is no-tsh or the best cluster state.',
   scope: 'global',
   input: z.object({ refresh: z.boolean().optional().describe('Run tsh status now instead of returning the last poll') }),
   handler: async ({ refresh }, ctx): Promise<TeleportStatus> => {
@@ -213,19 +219,62 @@ const clusterRemove = defineCommand({
   id: 'teleport.cluster.remove',
   title: 'Remove Teleport cluster',
   description:
-    'Removes a proxy address from Settings along with its pins, and stops its tunnels and Kubernetes port forwards. Protected Kubernetes clusters stay protected. The tsh profile on disk is untouched; use teleport.logout for that.',
+    'Removes a proxy address from Settings along with its pins and Keep me logged in, and stops its tunnels and Kubernetes port forwards. Protected Kubernetes clusters stay protected. The tsh profile on disk is untouched; use teleport.logout for that.',
   scope: 'global',
   mutating: true,
   input: z.object({ proxy: z.string() }),
   handler: async ({ proxy }, ctx): Promise<TeleportStatus> => {
     const { session, tunnels, forwards } = getTeleport(ctx.host);
     const teleport = ctx.host.config.get().teleport;
+    session.abandonRenewal(proxy);
     await Promise.all([tunnels.stopCluster(proxy), forwards.stopCluster(proxy)]);
     invalidateCaches(proxy);
     await ctx.host.config.update({
-      teleport: { ...teleport, proxies: teleport.proxies.filter((p) => !sameProxy(p, proxy)), pins: teleport.pins.filter((p) => !sameProxy(p.proxy, proxy)) },
+      teleport: {
+        ...teleport,
+        proxies: teleport.proxies.filter((p) => !sameProxy(p, proxy)),
+        pins: teleport.pins.filter((p) => !sameProxy(p.proxy, proxy)),
+        autoRenew: setAutoRenew(teleport.autoRenew, proxy, false),
+      },
     });
     return session.refresh();
+  },
+});
+
+const clusterAutoRenew = defineCommand({
+  id: 'teleport.cluster.autoRenew',
+  title: 'Keep me logged in to a Teleport cluster',
+  description:
+    'Turns Keep me logged in on or off for one cluster on this machine. When on, Quiver runs tsh login --proxy=<addr> for the cluster when its certificate is about to expire (less than 30 minutes left) or has expired, at most once per 10 minutes, one cluster at a time, and restarts its tunnels afterwards. An expired certificate needs the browser for SSO, so that renewal waits until the Quiver window is in front. Returns the status.',
+  scope: 'global',
+  // It changes what Quiver does on this machine: logins that may open the browser.
+  mutating: true,
+  input: z.object({ proxy: z.string().describe('Proxy address of the cluster (see teleport.status)'), enabled: z.boolean() }),
+  handler: async ({ proxy, enabled }, ctx): Promise<TeleportStatus> => {
+    const addr = proxyAddress(proxy);
+    if (!addr) throw new QuiverError('INVALID_INPUT', 'Proxy address is empty');
+    const teleport = ctx.host.config.get().teleport;
+    if (isAutoRenewOn(teleport, addr) !== enabled) await ctx.host.config.update({ teleport: { ...teleport, autoRenew: setAutoRenew(teleport.autoRenew, addr, enabled) } });
+    // Turned off while its renewal runs or waits: that tsh login is cancelled, not left to finish.
+    if (!enabled) getTeleport(ctx.host).session.abandonRenewal(addr);
+    ctx.host.emit('teleport.changed', { reason: 'status' });
+    // A certificate that is due already is renewed now rather than on the next poll.
+    return getTeleport(ctx.host).session.refresh();
+  },
+});
+
+const windowFocus = defineCommand({
+  id: 'teleport.window.focus',
+  title: 'Tell Teleport whether Quiver is in front',
+  description: 'The window reports whether it is focused, so a certificate renewal that opens the browser waits until the user is looking.',
+  scope: 'global',
+  hidden: true,
+  input: z.object({ focused: z.boolean() }),
+  handler: async ({ focused }, ctx) => {
+    // Only the window knows; an agent claiming focus could make a renewal open the browser behind the user's back.
+    if (ctx.caller !== 'ui') throw new QuiverError('INVALID_INPUT', 'Window focus is only reported by the Quiver window');
+    getTeleport(ctx.host).session.setFocused(focused);
+    return { focused };
   },
 });
 
@@ -514,6 +563,7 @@ const kubeAction = defineCommand({
     'Returns stdout, stderr, the exit code and the exact command that ran.',
   scope: 'global',
   mutating: true,
+  actions: { list: KUBE_RULE_ACTIONS, of: ({ action }) => kubeRuleAction(action), describe: KUBE_RULE_ACTION_DESCRIPTIONS },
   input: z.object({
     proxy: ProxyInput,
     cluster: KubeClusterInput,
@@ -763,6 +813,8 @@ export const teleportModule = defineModule({
     logout,
     clusterAdd,
     clusterRemove,
+    clusterAutoRenew,
+    windowFocus,
     pin,
     dbList,
     dbConnect,
@@ -791,9 +843,13 @@ export const teleportModule = defineModule({
     void session
       .start()
       .then(async (initial) => {
-        // One browser flow at a time: expired clusters are logged into one after another.
-        for (const proxy of proxiesToAutoLogin(host.config.get().teleport, initial.clusters)) {
+        // One browser flow at a time: expired clusters are logged into one after another. Those with Keep me
+        // logged in on are the session's to renew, which it does after its first status read.
+        const teleport = host.config.get().teleport;
+        for (const proxy of proxiesToAutoLogin(teleport, initial.clusters).filter((p) => !isAutoRenewOn(teleport, p))) {
           const cluster = initial.clusters.find((c) => sameProxy(c.proxy, proxy));
+          // A renewal the session started (Keep me logged in) may be running: one login at a time, so wait for it.
+          await session.whenLoginDone();
           console.log(`[quiver] teleport certificate for ${cluster ? clusterLabel(cluster) : proxy} expired, starting tsh login (${nowIso()})`);
           await session.login(proxy).catch((err) => console.warn(`[quiver] teleport auto-login for ${proxy} failed: ${(err as Error).message}`));
         }

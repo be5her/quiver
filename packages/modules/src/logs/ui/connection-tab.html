@@ -1,15 +1,15 @@
 @if (loadError(); as error) {
   <div class="p-4 text-sm text-danger">{{ error }}</div>
 } @else if (summary.value(); as c) {
-  <div class="flex flex-col h-full min-h-0 w-full" data-testid="logs-connection-tab" [attr.data-session]="c.session.state">
+  <div class="flex flex-col h-full min-h-0 w-full" data-testid="logs-connection-tab" [attr.data-session]="c.session.state" [attr.data-kind]="c.kind">
     <div class="flex items-center gap-2 px-3 h-10 border-b border-edge shrink-0">
       <svg [qIcon]="icons.Logs" class="size-4 text-accent shrink-0"></svg>
       <span class="font-medium text-sm shrink-0 truncate max-w-64">{{ c.name }}</span>
-      <span class="text-xs text-muted truncate min-w-0" [title]="c.grafanaUrl">{{ where() }}</span>
+      <span class="text-xs text-muted truncate min-w-0" [title]="direct() ? c.url : c.grafanaUrl">{{ where() }}</span>
       <span class="flex-1 min-w-4"></span>
       <span class="size-2 rounded-full shrink-0" [class]="dot()"></span>
       <span class="text-xs text-muted shrink-0 truncate max-w-56" data-testid="logs-tab-session" [title]="c.session.error ?? sessionText()">{{ sessionText() }}</span>
-      @if (c.session.state === 'signed-out') {
+      @if (c.session.state === 'signed-out' && !direct()) {
         <button qButton size="sm" variant="primary" [icon]="icons.LogIn" [disabled]="!c.grafanaUrl" (click)="signInAndRun()">Sign in</button>
       }
       @if (configured()) {

@@ -58,6 +58,10 @@ async function hasPasswordSet(ws: WorkspaceApi): Promise<Set<string>> {
   return new Set(Object.keys(secrets));
 }
 
+export async function hasPassword(ws: WorkspaceApi, connectionId: string): Promise<boolean> {
+  return (await hasPasswordSet(ws)).has(connectionId);
+}
+
 // ---------- connections ----------
 
 export async function listConnections(ws: WorkspaceApi): Promise<DbConnectionSummary[]> {

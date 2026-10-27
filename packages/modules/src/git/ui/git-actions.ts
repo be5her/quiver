@@ -606,9 +606,10 @@ export class GitActions {
   }
 
   /** Throw away changes after asking: working changes go back to the index, untracked files are deleted. */
-  async discard(paths: string[], untracked: boolean): Promise<void> {
+  /** Discards changes, or deletes untracked files, after asking; `folder` names the folder row they were picked from. */
+  async discard(paths: string[], untracked: boolean, folder?: string): Promise<void> {
     if (!paths.length) return;
-    const what = paths.length === 1 ? splitPath(paths[0]).name : `${paths.length} files`;
+    const what = (paths.length === 1 ? splitPath(paths[0]).name : `${paths.length} files`) + (folder ? ` in ${folder}` : '');
     const ok = await this.dialogs.confirm(
       untracked
         ? { title: `Delete ${what}?`, message: `Git does not track ${paths.length === 1 ? 'it' : 'them'}, so ${paths.length === 1 ? 'it is' : 'they are'} deleted from disk for good.`, confirmLabel: 'Delete', danger: true }

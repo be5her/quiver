@@ -11,6 +11,10 @@ export interface FakeTshState {
   /** tsh's current profile (what a bare `tsh` uses). */
   current: string | null;
   profiles: Record<string, FakeTshProfile>;
+  /** How long a certificate `tsh login` issues is valid (default 12 hours). */
+  lifetimeMs?: number;
+  /** How long `tsh login` takes (default 400 ms), so a smoke check can cancel one. */
+  loginDelayMs?: number;
 }
 
 export interface FakeTsh {
@@ -23,6 +27,12 @@ export interface FakeTsh {
   setState(state: FakeTshState | null): Promise<void>;
   /** Move a cluster's certificate into the past. */
   expire(proxy: string): Promise<void>;
+  /** Move a cluster's certificate expiry, e.g. into the expiring-soon window. */
+  setValidUntil(proxy: string, validUntil: Date): Promise<void>;
+  /** Change how the next logins behave: certificate lifetime and how long a login takes. */
+  setLogin(options: { lifetimeMs?: number; loginDelayMs?: number }): Promise<void>;
+  /** Every argv the fake was started with, in order (after the script path). */
+  calls(): Promise<string[][]>;
   /** Stands in for the user's `~/.kube/config`; the smoke points KUBECONFIG at it. */
   homeKubeconfig: string;
   /** Every `tsh kubectl` call the fake received: argv after `kubectl`, the KUBECONFIG it ran with, and the pid of the second process that ran it. */
@@ -44,10 +54,12 @@ export async function writeFakeTsh(dir: string, redisPort: number): Promise<Fake
   const script = path.join(dir, 'fake-tsh.cjs');
   const homeKubeconfig = path.join(dir, 'home-kubeconfig.yaml');
   const callsFile = path.join(dir, 'fake-kubectl-calls.jsonl');
+  const argvFile = path.join(dir, 'fake-tsh-argv.jsonl');
   const source = FAKE_TSH_SOURCE.replace('__STATE_FILE__', JSON.stringify(stateFile))
     .replace('__REDIS_PORT__', String(redisPort))
     .replace('__HOME_KUBECONFIG__', JSON.stringify(homeKubeconfig))
-    .replace('__CALLS_FILE__', JSON.stringify(callsFile));
+    .replace('__CALLS_FILE__', JSON.stringify(callsFile))
+    .replace('__ARGV_FILE__', JSON.stringify(argvFile));
   await fs.writeFile(script, source, 'utf8');
   const node = findNode();
   const quote = (p: string) => `"${p.replace(/\\/g, '/')}"`;
@@ -73,6 +85,23 @@ export async function writeFakeTsh(dir: string, redisPort: number): Promise<Fake
       if (!state?.profiles[proxy]) throw new Error(`fake tsh: no profile for ${proxy}`);
       state.profiles[proxy].validUntil = new Date(Date.now() - 60_000).toISOString();
       await setState(state);
+    },
+    setValidUntil: async (proxy, validUntil) => {
+      const state = await getState();
+      if (!state?.profiles[proxy]) throw new Error(`fake tsh: no profile for ${proxy}`);
+      state.profiles[proxy].validUntil = validUntil.toISOString();
+      await setState(state);
+    },
+    setLogin: async (options) => {
+      const state = (await getState()) ?? { current: null, profiles: {} };
+      await setState({ ...state, ...options });
+    },
+    calls: async () => {
+      const text = await fs.readFile(argvFile, 'utf8').catch(() => '');
+      return text
+        .split('\n')
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as string[]);
     },
     homeKubeconfig,
     kubectlCalls: async () => {
@@ -107,7 +136,10 @@ const STATE_FILE = __STATE_FILE__;
 const REDIS_PORT = __REDIS_PORT__;
 const HOME_KUBECONFIG = __HOME_KUBECONFIG__;
 const CALLS_FILE = __CALLS_FILE__;
+const ARGV_FILE = __ARGV_FILE__;
 const args = process.argv.slice(2);
+// The second process of tsh kubectl is the same call; only the first one is logged.
+if (!process.env.FAKE_TSH_KUBECTL_CHILD) fs.appendFileSync(ARGV_FILE, JSON.stringify(args) + '\n');
 const flag = (name) => { const a = args.find((x) => x.startsWith('--' + name + '=')); return a ? a.slice(name.length + 3) : undefined; };
 const out = (s) => process.stdout.write(s + '\n');
 const err = (s) => process.stderr.write(s + '\n');
@@ -393,13 +425,19 @@ switch (args[0]) {
   case 'login': {
     const proxy = flag('proxy');
     if (!proxy) { err('ERROR: missing --proxy'); process.exit(1); }
-    err('If browser window does not open automatically, open it by clicking on the link:');
-    err(' http://127.0.0.1:61234/abcd1234');
+    // Like Teleport reissuing a certificate that is still valid: no browser. A missing or expired one needs SSO,
+    // and the real tsh prints this before it opens the browser.
+    const before = read();
+    const existing = findProxy(before, proxy);
+    if (!existing || expired(before.profiles[existing])) {
+      err('If browser window does not open automatically, open it by clicking on the link:');
+      err(' http://127.0.0.1:61234/abcd1234');
+    }
     setTimeout(() => {
       const state = read();
       const key = findProxy(state, proxy) || proxy;
       const previous = state.profiles[key] || {};
-      state.profiles[key] = { cluster: proxy.replace(/:\d+$/, ''), validUntil: new Date(Date.now() + 12 * 3600 * 1000).toISOString(), kube: previous.kube || null };
+      state.profiles[key] = { cluster: proxy.replace(/:\d+$/, ''), validUntil: new Date(Date.now() + (state.lifetimeMs || 12 * 3600 * 1000)).toISOString(), kube: previous.kube || null };
       state.current = key;
       write(state);
       out('> Profile URL:        https://' + key);
@@ -408,7 +446,7 @@ switch (args[0]) {
       out('  Roles:              access, github-dev');
       out('  Valid until:        ' + state.profiles[key].validUntil);
       process.exit(0);
-    }, 400);
+    }, before.loginDelayMs || 400);
     break;
   }
   case 'logout': {

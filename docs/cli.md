@@ -78,7 +78,7 @@ A request without the right token is refused, and so is any request with an `Ori
 
 The command runs as caller `cli`: the user's own process, with the user's rights. Agent permissions do not apply to it (they are for `mcp` callers only), and results are not masked: `quiver api.environment.get` shows secret values the way the app's own editor does. A workspace command runs in the folder the call names; a folder the app does not have open is opened for the call, as with an MCP client's `?workspace=`, without being added to the ones reopened on the next start.
 
-Pausing agents, the permission mode and the allow, ask and deny rules in Settings > MCP leave the CLI alone, and it never raises an approval. The checks that protect the user from a slip still apply, the same as in the window: a Kubernetes action on a protected cluster needs the cluster's name typed, given as `--confirm-cluster <name>` (`quiver teleport.kube.action --proxy <proxy> --cluster prod-eks --confirm-cluster prod-eks --input @action.json`), and git's own refusals stand, such as deleting the current branch, or an unmerged one without `--force`.
+Pausing agents, the permission mode and the allow, ask and deny rules in Settings > MCP (per tool, per action such as `db.query.run#ddl`, and per agent) leave the CLI alone, and it never raises an approval. The checks that protect the user from a slip still apply, the same as in the window: a Kubernetes action on a protected cluster needs the cluster's name typed, given as `--confirm-cluster <name>` (`quiver teleport.kube.action --proxy <proxy> --cluster prod-eks --confirm-cluster prod-eks --input @action.json`), and git's own refusals stand, such as deleting the current branch, or an unmerged one without `--force`.
 
 ## Headless mode
 

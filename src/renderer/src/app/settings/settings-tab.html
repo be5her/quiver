@@ -53,8 +53,9 @@
       <h3 class="text-xs font-semibold mt-5 mb-2">Agent permissions</h3>
       <p class="text-xs text-muted mb-3">
         Commands that only read are open to agents; the mode decides what commands that delete, write or change shared state get. Rules come first: a command id
-        (<code class="font-mono">db.query.run</code>), a module (<code class="font-mono">git.*</code>) or <code class="font-mono">*</code>. A deny anywhere wins and hides
-        the tool from agents, then the most specific rule, workspace rules before these. The command line and this window are you, so none of this applies to them.
+        (<code class="font-mono">db.query.run</code>), one action of it (<code class="font-mono">db.query.run#ddl</code>, for the tools that say what a call does), a
+        module (<code class="font-mono">git.*</code>) or <code class="font-mono">*</code>, for every agent or one by name. A deny anywhere wins (on a whole tool it hides the
+        tool from agents), then the most specific rule (an action before its tool, a rule for the agent before one for every agent), workspace rules before these. The command line and this window are you, so none of this applies to them.
       </p>
       <div class="flex items-center gap-4 flex-wrap">
         <label class="flex items-center gap-2 text-sm"
@@ -98,6 +99,9 @@
         @for (proxy of config.teleport.proxies; track proxy) {
           <div class="flex items-center gap-2" data-testid="teleport-proxy">
             <code class="flex-1 text-xs font-mono bg-surface border border-edge rounded-md px-2 py-1.5 truncate">{{ proxy }}</code>
+            <label class="flex items-center gap-1.5 text-xs shrink-0" title="Renew the certificate with tsh login when it is about to expire" data-testid="settings-teleport-auto-renew"
+              ><input qCheckbox [checked]="isAutoRenew(config, proxy)" (change)="toggleAutoRenew(proxy, $event)" />Keep me logged in</label
+            >
             <button qButton size="sm" variant="ghost" [icon]="icons.X" title="Remove this cluster and its pins" (click)="removeCluster(proxy)">Remove</button>
           </div>
         } @empty {
@@ -117,7 +121,7 @@
       <p class="text-[11px] text-muted mt-1 font-mono truncate" [title]="teleport.value()?.tsh?.join(' ') ?? ''">{{ tshNote() }}</p>
       <label class="flex items-center gap-2 text-sm mt-3"
         ><input qCheckbox [checked]="config.teleport.loginOnLaunch" (change)="toggleLoginOnLaunch(config, $event)" />Log in on launch to every cluster whose certificate has
-        expired (opens the browser, one cluster at a time)</label
+        expired (opens the browser, one cluster at a time). Keep me logged in on a cluster also renews it while Quiver runs.</label
       >
       <label class="flex items-center gap-2 text-sm mt-2" data-testid="settings-kube-agents-protected"
         ><input qCheckbox [checked]="config.teleport.agentActionsOnProtected" (change)="toggleAgentsOnProtected(config, $event)" />Let agents run Kubernetes actions and port

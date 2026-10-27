@@ -7,11 +7,17 @@ import {
   DbTableEditSchema,
   EXPORT_EXTENSIONS,
   QuiverError,
+  REDIS_ACTIONS,
+  REDIS_ACTION_DESCRIPTIONS,
+  SQL_ACTIONS,
+  SQL_ACTION_DESCRIPTIONS,
   SavedQueryDraftSchema,
+  TABLE_EDITS_ACTIONS,
   SavedQuerySchema,
   buildTableEdits,
   dbAccessProblem,
   dbDataCollection,
+  defaultPort,
   defineCommand,
   defineModule,
   formatRows,
@@ -22,10 +28,14 @@ import {
   normalizeGrafanaUrl,
   nowIso,
   redisCommandIsReadOnly,
+  redisCommandsAction,
   redisScriptIsReadOnly,
+  scriptAction,
   scriptIsReadOnly,
+  tableEditsAction,
   type CommandContext,
   type DbConnection,
+  type DbConnectionDraft,
   type DbConnectionSummary,
   type DbConnectionTest,
   type DbExportFormat,
@@ -42,7 +52,7 @@ import {
   type WorkspaceApi,
 } from '@quiver/core';
 import { z } from 'zod';
-import { COLLECTIONS, DriverPool, HISTORY_LOG, explainAccessError, getConnection, listConnections, readPassword, withTemporaryDriver, writePassword } from './connections';
+import { COLLECTIONS, DriverPool, HISTORY_LOG, explainAccessError, getConnection, hasPassword, listConnections, readPassword, withTemporaryDriver, writePassword } from './connections';
 import { grafanaSessions } from '../grafana/sessions';
 import { grafanaRedisDatasources, type Driver, type RedisDriverApi } from './drivers';
 
@@ -99,6 +109,28 @@ function checkedAccess<T extends DbConnection>(connection: T): T {
   return { ...connection, access: { ...access, grafanaUrl } };
 }
 
+/** Where a connection sends its password: the kind, the address, TLS and the way in (a tunnel, a Grafana). */
+function passwordTarget(c: DbConnection): string {
+  return JSON.stringify([c.kind, c.host.trim().toLowerCase(), c.port || defaultPort(c.kind), c.ssl, c.access]);
+}
+
+/**
+ * Whether saving or testing `draft` would do what agents need mutations for: run a tunnel command
+ * that is not the one already saved (it starts any process), or point a connection whose password
+ * is stored at another place without giving a password of its own (the stored one would be sent there).
+ */
+async function draftNeedsMutations(w: WorkspaceApi, draft: DbConnectionDraft, password: string | undefined, clearPassword = false): Promise<boolean> {
+  const stored = draft.id ? await w.store.get<DbConnection>(COLLECTIONS.connections, draft.id) : undefined;
+  const existing = stored ? DbConnectionSchema.parse(stored) : undefined;
+  const parsed = DbConnectionSchema.safeParse({ ...(existing ?? newDbConnection(draft.kind)), ...draft, id: draft.id ?? 'draft', createdAt: 'draft', updatedAt: 'draft' });
+  // The handler refuses what does not parse.
+  if (!parsed.success) return false;
+  const next = parsed.data;
+  if (next.access.type === 'command' && !(existing?.access.type === 'command' && existing.access.command === next.access.command)) return true;
+  if (!draft.id || password !== undefined || clearPassword || !(await hasPassword(w, draft.id))) return false;
+  return !existing || passwordTarget(existing) !== passwordTarget(next);
+}
+
 const ConnectionIdInput = z.object({ connectionId: z.string().describe('Id of a saved connection (see db.connection.list)') });
 
 // ---------- connections ----------
@@ -137,6 +169,8 @@ const connectionSave = defineCommand({
     password: z.string().optional(),
     clearPassword: z.boolean().optional(),
   }),
+  // A new tunnel command starts a process, and repointing a connection with a stored password would send it elsewhere.
+  mutating: async ({ connection, password, clearPassword }, ctx) => draftNeedsMutations(ws(ctx), connection, password, clearPassword),
   handler: async ({ connection, password, clearPassword }, ctx): Promise<DbConnectionSummary> => {
     const w = ws(ctx);
     const existing = connection.id ? await w.store.get<DbConnection>(COLLECTIONS.connections, connection.id) : undefined;
@@ -184,6 +218,8 @@ const connectionTest = defineCommand({
     connection: DbConnectionDraftSchema.optional(),
     password: z.string().optional(),
   }),
+  // An inline connection with a saved id reuses the stored password, and a tunnel command in it runs: the same rule as a save.
+  mutating: async ({ connection, password }, ctx) => (connection ? draftNeedsMutations(ws(ctx), connection, password) : false),
   handler: async (input, ctx): Promise<DbConnectionTest> => {
     const w = ws(ctx);
     const started = performance.now();
@@ -353,6 +389,11 @@ const tableApply = defineCommand({
     'Inserts, updates and deletes rows of a table, each edit keyed by the primary key, inside one transaction. Pass preview to get the statements without running them. An update or delete that matches anything but exactly one row rolls everything back.',
   scope: 'workspace',
   mutating: ({ preview }) => !preview,
+  actions: {
+    list: TABLE_EDITS_ACTIONS,
+    of: ({ edits }) => tableEditsAction(edits),
+    describe: { insert: 'Only inserts rows', update: 'Only updates rows', delete: 'Only deletes rows', mixed: 'Edits of more than one kind (deny it too when denying delete)' },
+  },
   input: ConnectionIdInput.extend({
     table: z.string(),
     database: z.string().nullable().optional(),
@@ -432,7 +473,18 @@ const queryRun = defineCommand({
   mutating: async ({ connectionId, query }, ctx) => {
     const conn = await ws(ctx).store.get<DbConnection>(COLLECTIONS.connections, connectionId);
     if (!conn) return false;
-    return conn.kind === 'redis' ? !redisScriptIsReadOnly(query) : !scriptIsReadOnly(query);
+    return conn.kind === 'redis' ? !redisScriptIsReadOnly(query) : scriptAction(query) !== 'select';
+  },
+  // SQL by its most severe statement. Redis commands through the query runner are select when they only read and
+  // other otherwise; db.redis.command names their actions finely.
+  actions: {
+    list: SQL_ACTIONS,
+    of: async ({ connectionId, query }, ctx) => {
+      const conn = await ws(ctx).store.get<DbConnection>(COLLECTIONS.connections, connectionId);
+      if (conn?.kind === 'redis') return redisScriptIsReadOnly(query) ? 'select' : 'other';
+      return scriptAction(query);
+    },
+    describe: { ...SQL_ACTION_DESCRIPTIONS, other: `${SQL_ACTION_DESCRIPTIONS.other}; a Redis command that writes` },
   },
   input: RunInput,
   handler: async (input, ctx): Promise<DbQueryResult[]> => {
@@ -700,6 +752,7 @@ const redisCommand = defineCommand({
     'Runs Redis commands given as argument lists (no quoting rules: a value may hold spaces, quotes or line breaks), e.g. [["SET", "k", "v", "KEEPTTL"]]. Read-only commands always work; anything that writes is gated. The key browser uses it for its edits.',
   scope: 'workspace',
   mutating: ({ commands }) => !commands.every(redisCommandIsReadOnly),
+  actions: { list: REDIS_ACTIONS, of: ({ commands }) => redisCommandsAction(commands), describe: REDIS_ACTION_DESCRIPTIONS },
   input: ConnectionIdInput.extend({ commands: z.array(z.array(z.string()).min(1)).min(1).max(100) }),
   handler: async ({ connectionId, commands }, ctx): Promise<DbQueryResult[]> => {
     const results = await withDriver(ctx, connectionId, (d) => requireRedis(d).exec(commands));
