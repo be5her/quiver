@@ -621,6 +621,9 @@ export default definePart({
       // On: one tsh login --proxy within a poll, a new certificate, the cluster's tunnel restarted, the kubeconfig redone.
       const tunnelBefore = (await status()).tunnels.find((t) => t.target === 'smoke-redis' && t.proxy === first);
       const otherTunnelBefore = (await status()).tunnels.find((t) => t.target === 'second-redis');
+      // A port forward running from before the renewal holds the old certificate: one that dies soon after is restarted once.
+      const fwdTarget = { proxy: first, cluster: 'prod-eks', kind: 'services', name: 'api', namespace: 'payments', remotePort: 80 };
+      const oldForward = await run<KubePortForward>('teleport.kube.portForward.start', fwdTarget, null);
       const oldCert = soon(10).toISOString();
       await fakeTsh.setValidUntil(first, new Date(oldCert));
       const firstLogins = await loginsTo(first);
@@ -660,9 +663,53 @@ export default definePart({
       const kq2 = await run<KubeRunResult>('teleport.kube.query', { proxy: first, cluster: 'prod-eks', query: { operation: 'namespaces', params: {} } }, null);
       check('teleport renew: the next kube query runs tsh kube login once more, and only once', kq1.exitCode === 0 && kq2.exitCode === 0 && (await kubeLogins()) === kubeLoginsBefore + 1, { before: kubeLoginsBefore, after: await kubeLogins() });
 
+      // The forward from before the renewal dies (its kubectl, the process holding the port): restarted once, on the same port.
+      const forwardPid = async () => (await fakeTsh.kubectlCalls()).findLast((c) => c.argv[0] === 'port-forward' && c.argv[1] === 'services/api')?.pid;
+      // The restart is a new forward (new id) for the same target on the same local port.
+      const sameForward = (x: KubePortForward) => x.name === 'api' && x.localPort === oldForward.localPort;
+      const oldForwardPid = await forwardPid();
+      if (oldForwardPid) process.kill(oldForwardPid);
+      const forwardBack = await until(async () => {
+        const f = (await run<KubePortForward[]>('teleport.kube.portForward.list', { proxy: first }, null)).find(sameForward);
+        return Boolean(f && f.state === 'running' && f.pid !== oldForward.pid && (await readBanner(f.localPort)) !== null);
+      }, 8000);
+      const restartedForward = (await run<KubePortForward[]>('teleport.kube.portForward.list', { proxy: first }, null)).find(sameForward);
+      check(
+        'teleport renew: a port forward that exits within a minute of the renewal is restarted on the same local port',
+        oldForward.state === 'running' && Boolean(oldForwardPid) && forwardBack && restartedForward?.localPort === oldForward.localPort,
+        { before: [oldForward.pid, oldForward.localPort], after: restartedForward && [restartedForward.pid, restartedForward.localPort, restartedForward.state] },
+      );
+      const newForwardPid = await forwardPid();
+      if (newForwardPid && newForwardPid !== oldForwardPid) process.kill(newForwardPid);
+      const exitedAgain = await until(async () => (await run<KubePortForward[]>('teleport.kube.portForward.list', { proxy: first }, null)).find(sameForward)?.state === 'exited', 5000);
+      await settle();
+      const afterSecondExit = (await run<KubePortForward[]>('teleport.kube.portForward.list', { proxy: first }, null)).find(sameForward);
+      check('teleport renew: a restarted forward that exits again stays exited (restarted once)', newForwardPid !== oldForwardPid && exitedAgain && afterSecondExit?.state === 'exited', afterSecondExit && [afterSecondExit.state, afterSecondExit.pid]);
+      for (const f of (await run<KubePortForward[]>('teleport.kube.portForward.list', { proxy: first }, null)).filter(sameForward)) await run('teleport.kube.portForward.stop', { id: f.id }, null);
+
       // A cancelled attempt is not retried until the certificate changes.
       await fakeTsh.setLogin({ loginDelayMs: 5000 });
       const cancelCert = (await status()).clusters.find((c) => c.proxy === second)?.validUntil;
+
+      // Turned off while its renewal runs: that tsh login is cancelled, and the attempt is not held against the certificate.
+      const offLogins = await loginsTo(second);
+      await run('teleport.cluster.autoRenew', { proxy: second, enabled: true }, null);
+      const offStarted = await until(async () => {
+        const s = await status();
+        return s.loginInProgress && Boolean(clusterOf(s, second)?.renewal?.running) && (await loginsTo(second)) === offLogins + 1;
+      }, 5000);
+      await run('teleport.cluster.autoRenew', { proxy: second, enabled: false }, null);
+      const offGivenUp = await until(async () => {
+        const s = await status();
+        return !s.loginInProgress && clusterOf(s, second)?.renewal === null;
+      }, 5000);
+      await settle();
+      check(
+        'teleport renew: turning Keep me logged in off mid-attempt cancels that tsh login and forgets the attempt',
+        offStarted && offGivenUp && (await loginsTo(second)) === offLogins + 1 && clusterOf(await status(), second)?.validUntil === cancelCert,
+        { offStarted, offGivenUp, logins: (await loginsTo(second)) - offLogins, renewal: clusterOf(await status(), second)?.renewal },
+      );
+
       const secondLogins = await loginsTo(second);
       await run('teleport.cluster.autoRenew', { proxy: second, enabled: true }, null);
       const started = await until(async () => {
@@ -701,7 +748,9 @@ export default definePart({
         { renewal: clusterOf(lastLogin, second)?.renewal, output: lastLogin.loginOutput },
       );
 
-      // Agents: the switch is gated, the status shows the renewal.
+      // Agents: the switch is gated, the status shows the renewal, and only the window reports focus.
+      const agentFocus = await host.invoke('teleport.window.focus', { focused: true }, { caller: 'mcp', workspaceId: null });
+      check('teleport renew: window focus is refused from anyone but the window', !agentFocus.ok && agentFocus.error.code === 'INVALID_INPUT', agentFocus.ok || agentFocus.error);
       const mcpAutoRenew = await rpc('tools/call', { name: 'teleport_cluster_autoRenew', arguments: { proxy: first, enabled: false } });
       check('mcp blocks teleport_cluster_autoRenew by default', mcpAutoRenew.result?.isError === true && (mcpAutoRenew.result.content?.[0]?.text ?? '').includes('MUTATION_BLOCKED') && host.config.get().teleport.autoRenew.includes(first));
       const mcpRenewStatus = await rpc('tools/call', { name: 'teleport_status', arguments: {} });
