@@ -596,6 +596,125 @@ export default definePart({
     const afterRelogin = await run<DbQueryResult[]>('db.query.run', { connectionId: teleportConn.id, query: 'PING', record: false }, ws.id);
     check('teleport: query works after re-login', afterRelogin[0].value === 'PONG');
 
+    // ---------- teleport: Keep me logged in renews certificates before they expire ----------
+    {
+      // A poll every 400 ms instead of every minute; the session reads it again for every poll.
+      process.env.QUIVER_TELEPORT_POLL_MS = '400';
+      const status = () => run<TeleportStatus>('teleport.status', {}, null);
+      const loginsTo = async (proxy: string) => (await fakeTsh.calls()).filter((a) => a[0] === 'login' && a.includes(`--proxy=${proxy}`)).length;
+      const kubeLogins = async () => (await fakeTsh.calls()).filter((a) => a[0] === 'kube' && a[1] === 'login' && a[2] === 'prod-eks').length;
+      const soon = (minutes: number) => new Date(Date.now() + minutes * 60_000);
+      const settle = () => new Promise((r) => setTimeout(r, 1500));
+      const renewalOf = async (proxy: string) => clusterOf(await status(), proxy)?.renewal ?? null;
+
+      // Off: an expiring certificate is left alone.
+      await fakeTsh.setValidUntil(second, soon(10));
+      const secondLoginsOff = await loginsTo(second);
+      const off = await run<TeleportStatus>('teleport.status', { refresh: true }, null);
+      await settle();
+      check(
+        'teleport renew: with Keep me logged in off, an expiring certificate is left alone',
+        clusterOf(off, second)?.state === 'expiring' && clusterOf(off, second)?.autoRenew === false && (await loginsTo(second)) === secondLoginsOff && (await renewalOf(second)) === null,
+        { state: clusterOf(off, second)?.state, logins: (await loginsTo(second)) - secondLoginsOff },
+      );
+
+      // On: one tsh login --proxy within a poll, a new certificate, the cluster's tunnel restarted, the kubeconfig redone.
+      const tunnelBefore = (await status()).tunnels.find((t) => t.target === 'smoke-redis' && t.proxy === first);
+      const otherTunnelBefore = (await status()).tunnels.find((t) => t.target === 'second-redis');
+      const oldCert = soon(10).toISOString();
+      await fakeTsh.setValidUntil(first, new Date(oldCert));
+      const firstLogins = await loginsTo(first);
+      const kubeLoginsBefore = await kubeLogins();
+      const on = await run<TeleportStatus>('teleport.cluster.autoRenew', { proxy: first, enabled: true }, null);
+      check('teleport renew: the setting is saved per cluster and shown in the status', host.config.get().teleport.autoRenew.includes(first) && clusterOf(on, first)?.autoRenew === true && clusterOf(on, second)?.autoRenew === false, host.config.get().teleport.autoRenew);
+      const renewedOk = await until(async () => (await renewalOf(first))?.lastResult === 'ok', 8000);
+      const afterRenew = await status();
+      const renewedCluster = clusterOf(afterRenew, first);
+      check(
+        'teleport renew: an expiring certificate gets one tsh login --proxy and comes back logged in with a new certificate',
+        renewedOk &&
+          (await loginsTo(first)) === firstLogins + 1 &&
+          renewedCluster?.state === 'logged-in' &&
+          renewedCluster.validUntil !== oldCert &&
+          new Date(renewedCluster.validUntil ?? 0).getTime() > Date.now() + 60 * 60_000 &&
+          renewedCluster.renewal?.nextEligibleAt === null,
+        { renewal: renewedCluster?.renewal, logins: (await loginsTo(first)) - firstLogins, state: renewedCluster?.state },
+      );
+      const tunnelAfter = await until(async () => {
+        const t = (await status()).tunnels.find((x) => x.target === 'smoke-redis' && x.proxy === first);
+        return Boolean(t && t.pid !== tunnelBefore?.pid && t.users.length === tunnelBefore?.users.length);
+      }, 5000);
+      const restartedTunnel = (await status()).tunnels.find((t) => t.target === 'smoke-redis' && t.proxy === first);
+      const viaRestarted = await run<DbQueryResult[]>('db.query.run', { connectionId: teleportConn.id, query: 'PING', record: false }, ws.id);
+      check(
+        'teleport renew: the cluster\'s tunnel is restarted (a new tsh proxy db on the same port, its users kept) and the connection still works',
+        Boolean(tunnelBefore?.users.length) &&
+          tunnelAfter &&
+          restartedTunnel?.port === tunnelBefore?.port &&
+          JSON.stringify([...(restartedTunnel?.users ?? [])].sort()) === JSON.stringify([...(tunnelBefore?.users ?? [])].sort()) &&
+          viaRestarted[0].value === 'PONG',
+        { before: tunnelBefore && [tunnelBefore.pid, tunnelBefore.port], after: restartedTunnel && [restartedTunnel.pid, restartedTunnel.port, restartedTunnel.users] },
+      );
+      check('teleport renew: tunnels of other clusters are left alone', (await status()).tunnels.find((t) => t.target === 'second-redis')?.pid === otherTunnelBefore?.pid, otherTunnelBefore?.pid);
+      const kq1 = await run<KubeRunResult>('teleport.kube.query', { proxy: first, cluster: 'prod-eks', query: { operation: 'namespaces', params: {} } }, null);
+      const kq2 = await run<KubeRunResult>('teleport.kube.query', { proxy: first, cluster: 'prod-eks', query: { operation: 'namespaces', params: {} } }, null);
+      check('teleport renew: the next kube query runs tsh kube login once more, and only once', kq1.exitCode === 0 && kq2.exitCode === 0 && (await kubeLogins()) === kubeLoginsBefore + 1, { before: kubeLoginsBefore, after: await kubeLogins() });
+
+      // A cancelled attempt is not retried until the certificate changes.
+      await fakeTsh.setLogin({ loginDelayMs: 5000 });
+      const cancelCert = (await status()).clusters.find((c) => c.proxy === second)?.validUntil;
+      const secondLogins = await loginsTo(second);
+      await run('teleport.cluster.autoRenew', { proxy: second, enabled: true }, null);
+      const started = await until(async () => {
+        const s = await status();
+        // Running, and the fake got the call (cancelling before node has started the script would leave no trace of it).
+        return s.loginInProgress && s.loginProxy === second && Boolean(clusterOf(s, second)?.renewal?.running) && (await loginsTo(second)) === secondLogins + 1;
+      }, 5000);
+      await run('teleport.login.cancel', {}, null);
+      const cancelled = await until(async () => (await renewalOf(second))?.lastResult === 'cancelled', 5000);
+      await settle();
+      const afterCancel = clusterOf(await status(), second);
+      check(
+        'teleport renew: a cancelled renewal is not retried for the same certificate',
+        started && cancelled && (await loginsTo(second)) === secondLogins + 1 && afterCancel?.validUntil === cancelCert && afterCancel?.renewal?.lastResult === 'cancelled' && afterCancel.renewal.nextEligibleAt === null && !afterCancel.renewal.running,
+        { started, cancelled, logins: (await loginsTo(second)) - secondLogins, renewal: afterCancel?.renewal },
+      );
+
+      // A new certificate gets a new attempt; an expired one needs the browser, so it waits for the window to be in front.
+      await fakeTsh.setLogin({ loginDelayMs: 0 });
+      await run('teleport.window.focus', { focused: false }, null);
+      await fakeTsh.expire(second);
+      await run<TeleportStatus>('teleport.status', { refresh: true }, null);
+      await settle();
+      const waiting = clusterOf(await status(), second);
+      check(
+        'teleport renew: an expired certificate (a browser login) waits while Quiver is in the background',
+        waiting?.state === 'expired' && waiting.renewal?.waitingForFocus === true && (await loginsTo(second)) === secondLogins + 1,
+        { state: waiting?.state, renewal: waiting?.renewal, logins: (await loginsTo(second)) - secondLogins },
+      );
+      await run('teleport.window.focus', { focused: true }, null);
+      const browserRenewed = await until(async () => (await renewalOf(second))?.lastResult === 'ok', 8000);
+      const lastLogin = await status();
+      check(
+        'teleport renew: it runs once the window is in front, with the browser link in the sidebar output',
+        browserRenewed && (await loginsTo(second)) === secondLogins + 2 && clusterOf(lastLogin, second)?.state === 'logged-in' && lastLogin.loginProxy === second && lastLogin.loginOutput.some((l) => l.includes('http://127.0.0.1:61234')),
+        { renewal: clusterOf(lastLogin, second)?.renewal, output: lastLogin.loginOutput },
+      );
+
+      // Agents: the switch is gated, the status shows the renewal.
+      const mcpAutoRenew = await rpc('tools/call', { name: 'teleport_cluster_autoRenew', arguments: { proxy: first, enabled: false } });
+      check('mcp blocks teleport_cluster_autoRenew by default', mcpAutoRenew.result?.isError === true && (mcpAutoRenew.result.content?.[0]?.text ?? '').includes('MUTATION_BLOCKED') && host.config.get().teleport.autoRenew.includes(first));
+      const mcpRenewStatus = await rpc('tools/call', { name: 'teleport_status', arguments: {} });
+      const mcpRenewText = mcpRenewStatus.result?.content?.[0]?.text ?? '';
+      const mcpRenewed = mcpRenewText.startsWith('{') ? clusterOf(JSON.parse(mcpRenewText) as TeleportStatus, first) : undefined;
+      check('mcp: teleport_status shows Keep me logged in and the last renewal', mcpRenewed?.autoRenew === true && mcpRenewed.renewal?.lastResult === 'ok', mcpRenewed?.renewal ?? mcpRenewText.slice(0, 200));
+
+      // The second cluster's setting goes off again (the UI turns it on from the cluster menu); the first stays on for the UI.
+      await run('teleport.cluster.autoRenew', { proxy: second, enabled: false }, null);
+      delete process.env.QUIVER_TELEPORT_POLL_MS;
+      await run('teleport.status', { refresh: true }, null);
+    }
+
     check(
       'mcp lists teleport tools',
       ['teleport_status', 'teleport_db_list', 'teleport_db_connect', 'teleport_kube_list', 'teleport_pin', 'teleport_cluster_add'].every((n) => names.includes(n)) && !names.includes('teleport_login_cancel'),
@@ -684,6 +803,42 @@ export default definePart({
         await js(`document.documentElement.classList.remove('dark')`);
         await wait(300);
         await shot('10-teleport-light');
+        // Keep me logged in: the lines on a cluster that has it, and the switch in the cluster's menu.
+        {
+          const clusterSel = (proxy: string) => `document.querySelector('[data-testid=teleport-cluster][data-proxy="${proxy}"]')`;
+          const autoLine = await js(`${clusterSel(first)}?.querySelector('[data-testid=teleport-renew-auto]')?.textContent.trim() ?? null`);
+          const renewedLine = await js(`${clusterSel(first)}?.querySelector('[data-testid=teleport-renewal]')?.textContent.trim() ?? null`);
+          const mark = await js(`Boolean(${clusterSel(first)}?.querySelector('[data-testid=teleport-auto-renew-mark]'))`);
+          check(
+            'ui: a cluster with Keep me logged in says it renews automatically, and when it last did',
+            autoLine === 'renews automatically' && typeof renewedLine === 'string' && /^renewed (just now|\d+ minutes? ago)$/.test(renewedLine) && mark === true,
+            { autoLine, renewedLine, mark },
+          );
+          const secondRenews = () => js(`Boolean(${clusterSel(second)}?.querySelector('[data-testid=teleport-renew-auto]'))`);
+          await js(`${clusterSel(second)}?.querySelector('[data-testid=teleport-cluster-menu]')?.click()`);
+          await wait(300);
+          const menuChecked = await js(`document.querySelector('[data-testid=teleport-menu-auto-renew]')?.getAttribute('aria-checked') ?? null`);
+          await js(`document.querySelector('[data-testid=teleport-menu-auto-renew]')?.click()`);
+          const switchedOn = await until(async () => host.config.get().teleport.autoRenew.includes(second) && (await secondRenews()) === true, 3000);
+          check('ui: Keep me logged in is a switch in the cluster menu, and the cluster then says it renews automatically', menuChecked === 'false' && switchedOn, { menuChecked, switchedOn });
+          // Saving the setting changes the config, and the theme follows the system again: back to light for the shot.
+          await wait(500);
+          await js(`document.documentElement.classList.remove('dark')`);
+          await wait(300);
+          await shot('10c-teleport-auto-renew-light');
+          await js(`document.documentElement.classList.add('dark')`);
+          await wait(300);
+          await shot('10d-teleport-auto-renew-dark');
+          await js(`document.documentElement.classList.remove('dark')`);
+          await js(`${clusterSel(second)}?.querySelector('[data-testid=teleport-cluster-menu]')?.click()`);
+          await wait(300);
+          const checkedNow = await js(`document.querySelector('[data-testid=teleport-menu-auto-renew]')?.getAttribute('aria-checked') ?? null`);
+          await js(`document.querySelector('[data-testid=teleport-menu-auto-renew]')?.click()`);
+          const switchedOff = await until(async () => !host.config.get().teleport.autoRenew.includes(second) && (await secondRenews()) === false, 3000);
+          check('ui: the same menu turns it off again', checkedNow === 'true' && switchedOff, { checkedNow, switchedOff });
+          await wait(500);
+          await js(`document.documentElement.classList.remove('dark')`);
+        }
         // The pinned row's tick follows the terminal's kubectl context even while its cluster's section is collapsed
         // (and its kube list not loaded), e.g. when it changes from a terminal or an agent.
         const secondHeader = `document.querySelector('[data-testid=teleport-cluster][data-proxy="${fakeTsh.proxies.second}"] > [role=button]')`;
@@ -1028,6 +1183,7 @@ export default definePart({
         }
       },
       after: async () => {
+        await run('teleport.cluster.autoRenew', { proxy: first, enabled: false }, null);
         const outSecond = await run<TeleportStatus>('teleport.logout', { proxy: second }, null);
         check(
           'teleport: logout of one cluster keeps the other',

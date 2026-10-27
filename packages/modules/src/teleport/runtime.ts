@@ -28,8 +28,17 @@ export function getTeleport(host: HostApi): TeleportRuntime {
   });
   const session = new TeleportSession({
     getConfig: () => host.config.get().teleport,
-    onChange: (reason) => host.emit('teleport.changed', { reason }),
+    onChange: (reason, renewal) => host.emit('teleport.changed', renewal ? { reason, renewal } : { reason }),
     tunnels: () => tunnels.list(),
+    // The smoke shortens the poll to see a renewal happen; it sets this in the running process.
+    pollMs: () => Number(process.env.QUIVER_TELEPORT_POLL_MS) || 60_000,
+    // Everything that holds the old certificate: tunnels restart now, the private kubeconfig is written again by
+    // the next query's `tsh kube login`, and port forwards that die of the old certificate restart once.
+    onRenewed: async (proxy) => {
+      kube.forget(proxy);
+      forwards.noteRenewal(proxy);
+      await tunnels.restartCluster(proxy);
+    },
   });
   const kube = new KubeRunner({
     session,

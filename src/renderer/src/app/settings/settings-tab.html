@@ -98,6 +98,9 @@
         @for (proxy of config.teleport.proxies; track proxy) {
           <div class="flex items-center gap-2" data-testid="teleport-proxy">
             <code class="flex-1 text-xs font-mono bg-surface border border-edge rounded-md px-2 py-1.5 truncate">{{ proxy }}</code>
+            <label class="flex items-center gap-1.5 text-xs shrink-0" title="Renew the certificate with tsh login when it is about to expire" data-testid="settings-teleport-auto-renew"
+              ><input qCheckbox [checked]="isAutoRenew(config, proxy)" (change)="toggleAutoRenew(proxy, $event)" />Keep me logged in</label
+            >
             <button qButton size="sm" variant="ghost" [icon]="icons.X" title="Remove this cluster and its pins" (click)="removeCluster(proxy)">Remove</button>
           </div>
         } @empty {
@@ -117,7 +120,7 @@
       <p class="text-[11px] text-muted mt-1 font-mono truncate" [title]="teleport.value()?.tsh?.join(' ') ?? ''">{{ tshNote() }}</p>
       <label class="flex items-center gap-2 text-sm mt-3"
         ><input qCheckbox [checked]="config.teleport.loginOnLaunch" (change)="toggleLoginOnLaunch(config, $event)" />Log in on launch to every cluster whose certificate has
-        expired (opens the browser, one cluster at a time)</label
+        expired (opens the browser, one cluster at a time). Keep me logged in on a cluster also renews it while Quiver runs.</label
       >
       <label class="flex items-center gap-2 text-sm mt-2" data-testid="settings-kube-agents-protected"
         ><input qCheckbox [checked]="config.teleport.agentActionsOnProtected" (change)="toggleAgentsOnProtected(config, $event)" />Let agents run Kubernetes actions and port

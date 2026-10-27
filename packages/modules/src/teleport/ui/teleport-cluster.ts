@@ -1,10 +1,10 @@
 import { Component, computed, inject, input, signal } from '@angular/core';
 import { clusterLabel, formatRemaining, sameProxy, type DbConnectionSummary, type TeleportClusterStatus, type TeleportStatus } from '@quiver/core';
-import { Button, Dialogs, HostBridge, Icon, IconButton, Spinner, Toasts } from '@quiver/ui';
-import { ChevronDown, ChevronRight, LogIn, LogOut, Terminal, Trash2, X } from 'lucide';
+import { Button, ContextMenu, Dialogs, HostBridge, Icon, IconButton, Spinner, Toasts } from '@quiver/ui';
+import { ChevronDown, ChevronRight, Ellipsis, LogIn, LogOut, RefreshCw, Terminal, Trash2, X } from 'lucide';
 import { TeleportActions } from './teleport-actions';
 import { TeleportDatabases } from './teleport-databases';
-import { STATE_DOT, STATE_LABEL, isUsable } from './teleport-display';
+import { STATE_DOT, STATE_LABEL, isUsable, renewalLine } from './teleport-display';
 import { TeleportKubes } from './teleport-kubes';
 import { TeleportLoginLog } from './teleport-login-log';
 import { TeleportViewState, clock } from './teleport-view-state';
@@ -22,12 +22,13 @@ export class TeleportCluster {
   private readonly toasts = inject(Toasts);
   private readonly actions = inject(TeleportActions);
   private readonly view = inject(TeleportViewState);
+  private readonly menu = inject(ContextMenu);
 
   readonly cluster = input.required<TeleportClusterStatus>();
   readonly status = input.required<TeleportStatus>();
   readonly connections = input<DbConnectionSummary[]>();
 
-  protected readonly icons = { ChevronDown, ChevronRight, LogIn, LogOut, Terminal, Trash2, X };
+  protected readonly icons = { ChevronDown, ChevronRight, Ellipsis, LogIn, LogOut, RefreshCw, Terminal, Trash2, X };
   protected readonly stateDot = STATE_DOT;
   private readonly now = clock(30_000);
   protected readonly busy = signal<'login' | 'logout' | null>(null);
@@ -43,8 +44,34 @@ export class TeleportCluster {
   protected readonly remaining = computed(() => formatRemaining(this.cluster().validUntil, this.now()));
   protected readonly title = computed(() => {
     const c = this.cluster();
-    return `${c.proxy}\n${STATE_LABEL[c.state]}${c.validUntil ? `\nValid until ${new Date(c.validUntil).toLocaleString()}` : ''}`;
+    return `${c.proxy}\n${STATE_LABEL[c.state]}${c.validUntil ? `\nValid until ${new Date(c.validUntil).toLocaleString()}` : ''}${c.autoRenew ? '\nRenews automatically (Keep me logged in)' : ''}`;
   });
+  protected readonly renewal = computed(() => renewalLine(this.cluster(), this.now()));
+  protected readonly autoNote = computed(() => {
+    const state = this.cluster().state;
+    return state === 'expired' ? 'logs in again automatically' : state === 'logged-out' ? 'renews automatically once logged in' : 'renews automatically';
+  });
+
+  protected openMenu(event: MouseEvent): void {
+    event.stopPropagation();
+    const c = this.cluster();
+    this.menu.open(event, [
+      { label: 'Keep me logged in', checked: c.autoRenew, testId: 'teleport-menu-auto-renew', select: () => void this.setAutoRenew(!c.autoRenew) },
+      'separator',
+      { label: this.usable() ? 'Log in again' : 'Log in', disabled: this.loggingIn(), select: () => void this.login() },
+      ...(this.usable() ? [{ label: 'Log out', select: () => void this.logout() }] : []),
+      ...(c.configured ? [{ label: 'Remove from Quiver', danger: true, select: () => void this.remove() }] : []),
+    ]);
+  }
+
+  private async setAutoRenew(enabled: boolean): Promise<void> {
+    try {
+      await this.host.invoke('teleport.cluster.autoRenew', { proxy: this.cluster().proxy, enabled }, null);
+      this.toasts.notify(enabled ? `${this.label()}: the certificate renews automatically before it expires` : `${this.label()}: automatic renewal off`);
+    } catch (err) {
+      this.toasts.error(err);
+    }
+  }
   protected readonly expiredAt = computed(() => {
     const until = this.cluster().validUntil;
     return until ? new Date(until).toLocaleString() : '';
@@ -64,8 +91,8 @@ export class TeleportCluster {
     }
   }
 
-  protected async logout(event: MouseEvent): Promise<void> {
-    event.stopPropagation();
+  protected async logout(event?: MouseEvent): Promise<void> {
+    event?.stopPropagation();
     const label = this.label();
     const ok = await this.dialogs.confirm({
       title: `Log out of ${label}?`,
@@ -85,8 +112,8 @@ export class TeleportCluster {
     }
   }
 
-  protected async remove(event: MouseEvent): Promise<void> {
-    event.stopPropagation();
+  protected async remove(event?: MouseEvent): Promise<void> {
+    event?.stopPropagation();
     const ok = await this.dialogs.confirm({
       title: `Remove ${this.label()} from Quiver?`,
       message: 'Its pins are removed and its tunnels stopped. The tsh profile stays on disk.',

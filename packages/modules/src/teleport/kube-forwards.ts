@@ -10,6 +10,8 @@ const MAX_FORWARDS = 16;
 const START_TIMEOUT_MS = 30_000;
 /** How long a stopped forward may take to exit before it is killed harder. */
 const STOP_GRACE_MS = 3000;
+/** A forward that exits this soon after its cluster's certificate was renewed is started again, once. */
+const RENEWAL_RESTART_WINDOW_MS = 60_000;
 
 const WINDOWS = process.platform === 'win32';
 
@@ -61,6 +63,8 @@ export class KubeForwards {
   private starting = 0;
   /** Proxies being logged out (normalized; `*` for all of them), with how many logouts hold each: no forward starts on them meanwhile. */
   private readonly closing = new Map<string, number>();
+  /** When each cluster's certificate was last renewed automatically (normalized proxy). */
+  private readonly renewedAt = new Map<string, number>();
 
   constructor(private readonly opts: KubeForwardsOptions) {}
 
@@ -216,9 +220,37 @@ export class KubeForwards {
           fail(`kubectl port-forward exited${code === null ? '' : ` with code ${code}`}: ${info.output.at(-1) ?? 'no output'}`);
           return;
         }
-        if (this.live.get(info.id) === forward) this.opts.onChange();
+        if (this.live.get(info.id) !== forward) return;
+        this.opts.onChange();
+        this.restartIfRenewed(forward);
       });
     });
+  }
+
+  /**
+   * A cluster's certificate was renewed. Running forwards are left alone, but tsh's hold the old certificate: one
+   * that exits on its own within a minute from now is started again, once, on the same local port.
+   */
+  noteRenewal(proxy: string): void {
+    this.renewedAt.set(normalizeProxy(proxy), Date.now());
+  }
+
+  private restartIfRenewed(forward: LiveForward): void {
+    const { info } = forward;
+    const at = this.renewedAt.get(normalizeProxy(info.proxy));
+    // A forward started after the renewal already has the new certificate, so a restart is never restarted again.
+    if (!at || Date.now() - at > RENEWAL_RESTART_WINDOW_MS || new Date(info.startedAt).getTime() > at) return;
+    this.live.delete(info.id);
+    const spec: KubePortForwardSpec = { kind: info.kind, name: info.name, namespace: info.namespace, remotePort: info.remotePort, localPort: info.localPort };
+    this.start({ proxy: info.proxy, cluster: info.cluster, spec }).then(
+      () => this.opts.onChange(),
+      (err) => {
+        // Listed as exited again, with why the restart failed.
+        info.output.push(`Restart after the certificate renewal failed: ${(err as Error).message}`);
+        this.live.set(info.id, forward);
+        this.opts.onChange();
+      },
+    );
   }
 
   /** Drop a forward from the list, then stop it and every process tsh started for it. */
