@@ -24,6 +24,10 @@ export type QuiverErrorCode =
   | 'NOT_SUPPORTED'
   /** A stored secret is encrypted for the Quiver app on this machine, and this host cannot read it (the headless CLI). */
   | 'SECRET_UNAVAILABLE'
+  /** A VictoriaLogs server queried directly refused the connection's credentials (401 or 403). */
+  | 'LOGS_AUTH_FAILED'
+  /** A VictoriaLogs server queried directly could not be reached. */
+  | 'LOGS_UNREACHABLE'
   | 'INTERNAL';
 
 export interface ErrorPayload {

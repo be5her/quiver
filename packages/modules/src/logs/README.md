@@ -1,31 +1,40 @@
 # Logs
 
-VictoriaLogs through Grafana. You sign in to Grafana once in a Quiver window, with the same account you use in the browser (Google and other SSO work), and query your log data sources there: a LogsQL line, a time range and limit, filters that are one click from any field, level chips with counts, a histogram, entries newest first with the one you pick in full, and follow mode for new entries.
+VictoriaLogs directly or through Grafana. A connection either talks to a VictoriaLogs server itself (a local or self-hosted one without Grafana, with its tenant and basic or bearer auth), or goes through a Grafana you sign in to once in a Quiver window, with the same account you use in the browser (Google and other SSO work). Either way you get the same view: a LogsQL line, a time range and limit, filters that are one click from any field, level chips with counts, a histogram, entries newest first with the one you pick in full, and follow mode for new entries.
 
 ## How it works
 
-A connection is one JSON file under `.quiver/logs-connections/`: a name, the Grafana address (a sub-path is kept) and the VictoriaLogs data source in it (uid, name and type). It holds no credentials, so a teammate who pulls it signs in with their own account.
+A connection is one JSON file under `.quiver/logs-connections/` with a name and a `kind`: `grafana` (the Grafana address, a sub-path kept, and the VictoriaLogs data source in it: uid, name and type) or `victorialogs` (the server's address, the tenant and the auth kind; see [Direct connections](#direct-connections)). A file without `kind`, written before there were two, is a Grafana connection. It holds no credentials, so a teammate who pulls it signs in or enters a token with their own account.
 
 **Signing in.** "Sign in" opens Grafana's `/login` page in a separate window, and you finish the sign-in there as you would in a browser. The window runs Grafana and the identity provider sandboxed, without Quiver's preload, with every permission refused and only http(s) pages allowed; a popup an identity provider opens (Google's sign-in button does) gets a window of its own, sandboxed the same way and closed with the sign-in window, so it can post the outcome back to the page that opened it. It reports a browser user agent without the Electron and Quiver tokens, because Google's sign-in refuses pages it takes for an embedded web view ("This browser or app may not be secure"). Once Grafana serves a page other than the login form and `/api/user` answers (checked on every navigation and every couple of seconds, so a sign-in that only swaps the page's view is noticed too; a server that upgrades http to https still counts), the window closes and the connection shows who is signed in. The session lives in its own Electron partition, one per Grafana origin, in the app data folder: it is per machine, never in the project, and shared by every connection and workspace that uses that Grafana. The Databases module's Redis connections through a Grafana Redis data source share it too, so signing in or out in either module counts for both (`packages/modules/src/grafana/sessions.ts` holds the one set of sessions). Chromium keeps its cookies encrypted with the OS keychain, like the rest of Quiver's secrets.
 
 **Staying signed in.** Grafana asks clients to renew the session token every few minutes (`grafana_session_expiry`, or a 401 with `session.token.rotate`). Before each request Quiver renews it when it is due, and when a request is still refused it renews once more and retries. Only then does the request fail with `SIGN_IN_REQUIRED`, and the view offers "Sign in". With default Grafana settings a session lasts 30 days, or 7 days without use. "Sign out" calls Grafana's `/logout` and clears the partition.
 
-**Querying.** Every query goes through Grafana's `/api/ds/query` with the data source's uid, the way Explore runs it. Grafana's data source proxy is not used, because it skips the plugin and so the data source's tenant headers (`AccountID`, `ProjectID`). As a result your Grafana permissions and the data source's tenant and auth apply as they do in the browser. Filters are exact matches (`app:="api"`, `!level:="Debug"` to leave one out), ANDed in front of the query's filter part. That part is put in parentheses so an `or` in it cannot swallow them, and the pipes stay at the end. The entries come back newest first with nanosecond order. `level` (or `severity`, `log.level`, `lvl`) becomes the entry's level. The other fields are listed beside the message, except `_stream_id`. Pipe results (`| stats …`, `| field_values …`) come back as entries whose fields are the columns. The histogram is a `hits` query over the filter part, in about 60 buckets. The field picker runs `| field_names`, and value counts run `| stats by (<field>) count() hits | sort by (hits desc) | limit N`, all within the range.
+**Querying.** Every query of a Grafana connection goes through Grafana's `/api/ds/query` with the data source's uid, the way Explore runs it. Grafana's data source proxy is not used, because it skips the plugin and so the data source's tenant headers (`AccountID`, `ProjectID`). As a result your Grafana permissions and the data source's tenant and auth apply as they do in the browser. Filters are exact matches (`app:="api"`, `!level:="Debug"` to leave one out), ANDed in front of the query's filter part. That part is put in parentheses so an `or` in it cannot swallow them, and the pipes stay at the end. The entries come back newest first with nanosecond order. `level` (or `severity`, `log.level`, `lvl`) becomes the entry's level. The other fields are listed beside the message, except `_stream_id`. Pipe results (`| stats …`, `| field_values …`) come back as entries whose fields are the columns. The histogram is a `hits` query over the filter part, in about 60 buckets. The field picker runs `| field_names`, and value counts run `| stats by (<field>) count() hits | sort by (hits desc) | limit N`, all within the range.
+
+### Direct connections
+
+A connection of kind `victorialogs` queries a VictoriaLogs server over its HTTP API, with no Grafana and no sign-in. The setup's "Connect" switch picks the kind; the new-connection prompt asks for it too. The file holds the address (`http://localhost:9428`; an address without a scheme is http, since VictoriaLogs serves plain http by default, and a sub-path for a proxy is kept), an optional tenant (`accountId` and `projectId`, non-negative integers, sent as the `AccountID` and `ProjectID` headers) and the auth kind: none, basic (with the username) or a bearer token. The password or token is not in the file: `logs.connection.save` takes it as `secret`, encrypts it with `host.secrets` and keeps it under `.quiver/local/logs-secrets.json` as `logs-connection:<id>`, on this machine only. `logs.connection.get` and `list` say `hasSecret` and never return the value; the setup shows "Stored on this machine" with Change and Clear. Deleting the connection forgets it.
+
+The module has one backend interface (`backends.ts`: query, hits, field names, field values, check) with two implementations. The Grafana one is the `/api/ds/query` code described here; the direct one calls `POST /select/logsql/query` (`query`, `start`, `end`, `limit`; the answer is JSON lines, read line by line), `/select/logsql/hits` (`step` for about 60 buckets), `/select/logsql/field_names` and `/select/logsql/field_values` (`limit`). The commands fold the filters into the query the same way for both, and the entry shape (`_time` read to the nanosecond, the level field, `_stream_id` out of the fields) is shared code, so the view cannot tell the kinds apart. A 401 or 403 fails with `LOGS_AUTH_FAILED` and the server's message, a server that does not answer (within 30 seconds) with `LOGS_UNREACHABLE`, and a LogsQL error with the server's text. An answer over 64 MB is refused rather than read whole. A password or token with a line break or control character is refused when saved, and the stored one is taken out of any error message.
+
+There is no session, so `logs.session` checks the server instead (field names over the last minute, through the same auth and tenant as a query): `signed-in` with no user when it answers, `signed-out` with the error when it does not; a query keeps that state current. **Test** (`logs.connection.test`) runs the same check and also reads the server version from `/metrics` when the server serves it. The sidebar row says "direct" (or "unreachable") instead of the data source, its tooltip the last check, and the tab and setup offer no Sign in or Sign out: `logs.signin`, `logs.signout` and `logs.datasources` refuse a direct connection with `NOT_SUPPORTED`.
 
 **The view.** The query line takes LogsQL, and Enter runs it. The range is the last 5 minutes to 7 days, and the limit is 100 to 5000 entries. Each run resolves the range once, so the entries, the histogram and the chips describe the same span. Level chips count each level with the other filters applied and toggle that level. "+ Filter" lists the fields in range, then a field's most common values with counts, and keeps or leaves out the one you pick. Clicking an entry shows its message (indented when it is JSON, with numbers kept as written so a 64-bit id is not rounded) and its fields, each with keep and leave-out buttons. Chips flip between keeping and leaving out when clicked. Follow asks every 5 seconds for entries newer than the newest one on screen and puts them on top, keeping up to 5000. It looks five minutes past this machine's clock, so a server whose clock runs ahead still shows up, and an entry stamped in the future does not end the next poll's range before it starts. The query, filters, range and limit are kept in the tab, so they come back with it. Each query is recorded in the workspace history under `.quiver/local` with its filters, range and count or error.
 
 ## Agents
 
 Allowed:
-- `logs_connection_list`, `logs_connection_get` and `logs_connection_save`
-- `logs_session`, which says whether this machine is signed in and as whom
+- `logs_connection_list`, `logs_connection_get` and `logs_connection_save`; a `secret` given to save is stored like one from the view, is masked wherever the call is shown (the approval dialog), and never comes back (`hasSecret` says whether one is stored). A save that moves a connection with a stored password or token to another address without giving a new one is gated, since the next query would send the stored secret there
+- `logs_connection_test`, which checks that a connection answers
+- `logs_session`, which says whether this machine is signed in and as whom (for a direct connection, whether the server answers)
 - `logs_datasources`
 - `logs_query`, `logs_hits`, `logs_fields` and `logs_values`
 - `logs_history_list`
 
 Gated:
 - `logs_signout`, which ends a session every connection to that Grafana shares
-- `logs_connection_delete`
+- `logs_connection_delete`, which also forgets a direct connection's stored secret
 - `logs_history_clear`
 
 Signing in is not a tool: it needs a person at the window, so `logs.signin` is hidden from MCP and the palette. A query from an agent when nobody is signed in fails with `SIGN_IN_REQUIRED`, and its message tells the agent to ask you to sign in from Quiver (the Logs view, or the database connection that goes through that Grafana). Agents get the same entries the view shows. Pipes such as `| fields _time, _msg, level` keep large results small.
@@ -33,6 +42,8 @@ Signing in is not a tool: it needs a person at the window, so `logs.signin` is h
 ## Verified by
 
 The smoke runs a fake Grafana. Its login page sends the window on through a stand-in identity provider and back with a session cookie, without anyone clicking. It requires token renewals, answers `/api/user` and the data sources, and answers `/api/ds/query` with VictoriaLogs-shaped frames. It also has Redis data sources for the db part (`fake-grafana-redis.ts`), which the Logs data source list leaves out. Those frames support exact filters, free text, `field_names`, `stats by` counts and `hits` buckets, and come back oldest first. The smoke can add an entry while it runs, such as one stamped two minutes ahead of the clock, as a server whose clock runs ahead would stamp it.
+
+For direct connections the logs part starts a fake VictoriaLogs (`fake-victorialogs.ts`) that serves the same entries from the same store and filter logic as the fake Grafana (`fake-logs.ts`): the four `/select/logsql` endpoints, `/health` and a `/metrics` version line. It checks a bearer token (or basic auth) and refuses with 401 otherwise, and keeps tenants apart by the `AccountID` and `ProjectID` headers.
 
 The host-level checks cover:
 - sign-in and a second sign-in that opens no window
@@ -42,6 +53,13 @@ The host-level checks cover:
 - the history
 - what agents may call
 - sign-out (on Grafana and locally) and signing in again
+- a direct connection saved with a token: the committed file without it, the local file with it encrypted, `hasSecret`, a negative tenant and a non-http address refused
+- Test with the token and tenant headers and the version, and a wrong token failing with `LOGS_AUTH_FAILED` in Test, in a query and in the connection's state
+- direct queries with filters folded, newest first and the limit, hits, field names and values, a LogsQL error, the tenant deciding what is seen
+- sign-in, sign-out and data sources refused for a direct connection, its check as the session, its history
+- an agent saving a direct connection with a secret (never returned, masked in the approval view) and testing it; deleting forgets the secret
+- an agent refused moving a connection with a stored token to another address, the token never in an agent's list, a token with a line break refused without being quoted
+- an unreachable server failing with `LOGS_UNREACHABLE`, and a connection file without `kind` read as Grafana
 
 In the UI, the checks cover:
 - the sidebar's signed-in row
@@ -52,5 +70,7 @@ In the UI, the checks cover:
 - follow mode picking up the entry stamped ahead of the clock and staying on past it
 - the filter picker's fields, values and counts
 - the settings view
+- the direct connection in the sidebar, its tab running the query with no Sign in button, its setup (address, tenant, a stored token not shown) and Test
+- the kind switch turning a new connection into a direct one, and deleting it from its setup
 
 The smoke checks are in [`src/main/smoke/parts/logs.ts`](../../../../src/main/smoke/parts/logs.ts); `npm run smoke -- logs` runs them alone, with `--shots` for the UI checks.

@@ -1,14 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { fakeRedisDatasources } from './fake-grafana-redis';
-
-interface Entry {
-  at: number;
-  /** Nanoseconds past `at`, stable per entry the way VictoriaLogs keeps them, so an entry has one id across queries. */
-  nanos: number;
-  msg: string;
-  fields: Record<string, string>;
-}
+import { createFakeLogs, type FakeLogEntry, type FakeLogs } from './fake-logs';
 
 export interface FakeGrafana {
   url: string;
@@ -17,7 +10,9 @@ export interface FakeGrafana {
   /** Make every live token due for renewal, as Grafana does every few minutes. */
   expireTokens(): void;
   /** Add an entry while running, such as one stamped ahead of this machine's clock by a server whose clock runs ahead. */
-  add(entry: Omit<Entry, 'nanos'>): void;
+  add(entry: Omit<FakeLogEntry, 'nanos'>): void;
+  /** The entries behind the VictoriaLogs data source, which the fake VictoriaLogs serves too. */
+  logs: FakeLogs;
   close(): Promise<void>;
 }
 
@@ -35,16 +30,7 @@ export async function startFakeGrafana(redisPort: number): Promise<FakeGrafana> 
   const tokens = new Map<string, { renewBy: number }>();
   const seen: FakeGrafana['seen'] = { exprs: [], redis: [], logins: 0, rotations: 0, logouts: 0 };
   const redis = fakeRedisDatasources(redisPort, seen);
-  const start = Date.now();
-  const entries: Entry[] = [];
-  const add = (entry: Omit<Entry, 'nanos'>) => {
-    entries.push({ ...entry, nanos: entries.length * 7 });
-  };
-  add({ at: start - 60_000, msg: 'GET /health 200', fields: { _stream_id: 's-api', app: 'api', level: 'Information' } });
-  add({ at: start - 50_000, msg: 'payment failed: card declined', fields: { _stream_id: 's-api', app: 'api', level: 'Error', 'error.code': 'E42' } });
-  add({ at: start - 40_000, msg: '{"event":"order.created","id":7,"items":[1,2]}', fields: { _stream_id: 's-worker', app: 'worker', level: 'Information' } });
-  add({ at: start - 30_000, msg: 'retrying publish', fields: { _stream_id: 's-worker', app: 'worker', level: 'Warning' } });
-  add({ at: start - 20_000, msg: 'cache miss', fields: { _stream_id: 's-api', app: 'api', level: 'Debug' } });
+  const logs = createFakeLogs();
 
   const nowS = () => Math.floor(Date.now() / 1000);
   const cookieOf = (req: IncomingMessage, name: string) =>
@@ -70,21 +56,6 @@ export async function startFakeGrafana(redisPort: number): Promise<FakeGrafana> 
     return { token };
   };
 
-  const matches = (expr: string) => {
-    const filterPart = expr.split('|')[0] ?? '';
-    const exact = [...filterPart.matchAll(/(!?)("(?:[^"\\]|\\.)*"|[\w.]+):="((?:[^"\\]|\\.)*)"/g)].map((m) => ({
-      exclude: m[1] === '!',
-      field: m[2]!.startsWith('"') ? (JSON.parse(m[2]!) as string) : m[2]!,
-      value: JSON.parse(`"${m[3]}"`) as string,
-    }));
-    const words = filterPart
-      .replace(/(!?)("(?:[^"\\]|\\.)*"|[\w.]+):="((?:[^"\\]|\\.)*)"/g, ' ')
-      .replace(/[()*]/g, ' ')
-      .split(/\s+/)
-      .filter(Boolean);
-    return (e: Entry) => exact.every((f) => ((e.fields[f.field] ?? '') === f.value) !== f.exclude) && words.every((w) => e.msg.toLowerCase().includes(w.toLowerCase()));
-  };
-
   const logsFrame = (rows: { at: number; nanos?: number; line: string; labels: Record<string, string> }[]) => ({
     schema: { refId: 'A', fields: [{ name: 'Time', type: 'time' }, { name: 'Line', type: 'string' }, { name: 'labels', type: 'other' }] },
     data: { values: [rows.map((r) => r.at), rows.map((r) => r.line), rows.map((r) => r.labels)], nanos: [rows.map((r) => r.nanos ?? 0), null, null] },
@@ -99,26 +70,19 @@ export async function startFakeGrafana(redisPort: number): Promise<FakeGrafana> 
     }
     const from = Number(body.from);
     const to = Number(body.to);
-    const hit = entries.filter((e) => e.at >= from && e.at <= to).filter(matches(q.expr));
+    const hit = logs.select(q.expr, from, to);
     if (q.queryType === 'hits') {
-      const step = Number.parseInt(q.step ?? '60', 10) * 1000;
-      const buckets = new Map<number, number>();
-      for (const e of hit) buckets.set(Math.floor(e.at / step) * step, (buckets.get(Math.floor(e.at / step) * step) ?? 0) + 1);
-      const times = [...buckets.keys()].sort((a, b) => a - b);
-      return { status: 200, body: { results: { A: { frames: [{ schema: { fields: [{ name: 'Time', type: 'time' }, { name: 'Value', type: 'number' }] }, data: { values: [times, times.map((t) => buckets.get(t))] } }] } } } };
+      const buckets = logs.buckets(hit, Number.parseInt(q.step ?? '60', 10) * 1000);
+      return { status: 200, body: { results: { A: { frames: [{ schema: { fields: [{ name: 'Time', type: 'time' }, { name: 'Value', type: 'number' }] }, data: { values: [buckets.map(([t]) => t), buckets.map(([, n]) => n)] } }] } } } };
     }
     if (q.expr.includes('| field_names')) {
-      const counts = new Map<string, number>();
-      for (const e of hit) for (const k of ['_msg', '_time', '_stream_id', ...Object.keys(e.fields)]) counts.set(k, (counts.get(k) ?? 0) + 1);
-      const rows = [...counts].map(([name, hits]) => ({ at: to, line: JSON.stringify({ name, hits: String(hits) }), labels: { name, hits: String(hits) } }));
+      const rows = logs.fieldNames(hit).map(([name, hits]) => ({ at: to, line: JSON.stringify({ name, hits: String(hits) }), labels: { name, hits: String(hits) } }));
       return { status: 200, body: { results: { A: { frames: [logsFrame(rows)] } } } };
     }
     const stats = /\| stats by \(("[^"]+"|[\w.]+)\) count\(\) hits/.exec(q.expr);
     if (stats) {
       const field = stats[1]!.startsWith('"') ? (JSON.parse(stats[1]!) as string) : stats[1]!;
-      const counts = new Map<string, number>();
-      for (const e of hit) counts.set(e.fields[field] ?? '', (counts.get(e.fields[field] ?? '') ?? 0) + 1);
-      const rows = [...counts].map(([value, hits]) => ({ at: to, line: JSON.stringify({ [field]: value, hits: String(hits) }), labels: { [field]: value, hits: String(hits) } }));
+      const rows = logs.fieldValues(hit, field).map(([value, hits]) => ({ at: to, line: JSON.stringify({ [field]: value, hits: String(hits) }), labels: { [field]: value, hits: String(hits) } }));
       return { status: 200, body: { results: { A: { frames: [logsFrame(rows)] } } } };
     }
     // Unsorted, oldest first, the way a raw query can come back.
@@ -213,7 +177,8 @@ export async function startFakeGrafana(redisPort: number): Promise<FakeGrafana> 
   return {
     url: `http://127.0.0.1:${port}`,
     seen,
-    add,
+    add: logs.add,
+    logs,
     expireTokens: () => {
       for (const state of tokens.values()) state.renewBy = nowS() - 1;
     },

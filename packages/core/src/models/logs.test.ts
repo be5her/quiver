@@ -2,21 +2,30 @@ import { describe, expect, it } from 'vitest';
 import {
   LOGS_CLOCK_SKEW_MS,
   LogsConnectionDraftSchema,
+  LogsConnectionSchema,
   cleanGrafanaError,
   composeLogsQuery,
   describeLogsConnection,
   grafanaPartition,
   logLevelTone,
+  logsConnectionAddress,
+  logsConnectionReady,
   logsFieldName,
   logsFilterExpr,
   logsFollowRange,
   logsHitsStep,
   newLogsConnection,
   normalizeGrafanaUrl,
+  normalizeVictoriaLogsUrl,
   parseHitsFrames,
   parseLogFrames,
+  parseVictoriaLogsHits,
+  parseVictoriaLogsLines,
+  parseVictoriaLogsValues,
   resolveLogsTime,
+  rfc3339ToNs,
   splitLogsQuery,
+  victoriaLogsHeaders,
   type GrafanaFrame,
 } from './logs';
 
@@ -168,5 +177,98 @@ describe('levels and errors', () => {
     expect(cleanGrafanaError('error from datasource: cannot parse `query` arg: compound token cannot start with ""; context: [app:(((]; query=app:(((\n')).toBe(
       'cannot parse `query` arg: compound token cannot start with ""; context: [app:(((]',
     );
+  });
+});
+
+describe('direct VictoriaLogs connections', () => {
+  it('reads a file without kind as a Grafana connection, and a direct one with its defaults', () => {
+    const old = LogsConnectionSchema.parse({ id: 'a', name: 'Old', grafanaUrl: 'https://g.example.com', datasourceUid: 'vl', createdAt: 'x', updatedAt: 'x' });
+    expect(old).toMatchObject({ kind: 'grafana', url: '', auth: 'none' });
+    expect(old.tenant).toBeUndefined();
+    expect(logsConnectionReady(old)).toBe(true);
+    expect(logsConnectionAddress(old)).toBe('https://g.example.com');
+    const direct = newLogsConnection({ kind: 'victorialogs', url: 'http://localhost:9428' });
+    expect(logsConnectionReady(direct)).toBe(true);
+    expect(logsConnectionAddress(direct)).toBe('http://localhost:9428');
+    expect(logsConnectionReady(newLogsConnection({ kind: 'victorialogs' }))).toBe(false);
+  });
+
+  it('validates the tenant and lets a draft take it away', () => {
+    expect(LogsConnectionDraftSchema.parse({ tenant: { accountId: 0, projectId: 3 } })).toEqual({ tenant: { accountId: 0, projectId: 3 } });
+    expect(LogsConnectionDraftSchema.parse({ tenant: null })).toEqual({ tenant: null });
+    expect(LogsConnectionDraftSchema.safeParse({ tenant: { accountId: -1, projectId: 0 } }).success).toBe(false);
+    expect(LogsConnectionDraftSchema.safeParse({ tenant: { accountId: 1.5, projectId: 0 } }).success).toBe(false);
+    expect(LogsConnectionDraftSchema.safeParse({ kind: 'loki' }).success).toBe(false);
+  });
+
+  it('defaults the address to http and keeps a sub-path', () => {
+    expect(normalizeVictoriaLogsUrl('localhost:9428/')).toBe('http://localhost:9428');
+    expect(normalizeVictoriaLogsUrl('https://logs.example.com/vl/?x=1')).toBe('https://logs.example.com/vl');
+    expect(normalizeVictoriaLogsUrl('ftp://x')).toBe('');
+    expect(normalizeGrafanaUrl('grafana.example.com')).toBe('https://grafana.example.com');
+  });
+
+  it('describes a direct connection by host and tenant', () => {
+    expect(describeLogsConnection({ kind: 'victorialogs', url: 'http://127.0.0.1:9428', grafanaUrl: '', datasourceName: '' })).toBe('127.0.0.1:9428 · VictoriaLogs');
+    expect(describeLogsConnection({ kind: 'victorialogs', url: 'http://vl:9428', tenant: { accountId: 2, projectId: 7 }, grafanaUrl: '', datasourceName: '' })).toBe('vl:9428 · VictoriaLogs · tenant 2:7');
+  });
+
+  it('sends the tenant headers and basic or bearer auth', () => {
+    expect(victoriaLogsHeaders({ auth: 'none', tenant: { accountId: 1, projectId: 2 } }, 'ignored')).toEqual({ AccountID: '1', ProjectID: '2' });
+    expect(victoriaLogsHeaders({ auth: 'basic', authUsername: 'ü', tenant: undefined }, 'p:w')).toEqual({ Authorization: `Basic ${Buffer.from('ü:p:w').toString('base64')}` });
+    expect(victoriaLogsHeaders({ auth: 'bearer', tenant: undefined }, 'tok')).toEqual({ Authorization: 'Bearer tok' });
+    expect(victoriaLogsHeaders({ auth: 'bearer', tenant: undefined }, '')).toEqual({});
+  });
+
+  it('reads RFC 3339 times to the nanosecond', () => {
+    expect(rfc3339ToNs('2026-10-13T07:11:09.000000250Z')).toBe('1791875469000000250');
+    expect(rfc3339ToNs('2026-10-13T07:11:09Z')).toBe('1791875469000000000');
+    expect(rfc3339ToNs('2026-10-13T09:11:09.5+02:00')).toBe('1791875469500000000');
+    expect(rfc3339ToNs('not a time')).toBe('0');
+  });
+
+  it('reads JSON lines as the same entries the Grafana frames give, newest first', () => {
+    const lines = [
+      { _time: '2026-10-13T07:11:08Z', _msg: 'started', _stream_id: 's1', _stream: '{app="api"}', app: 'api', level: 'Information' },
+      { _time: '2026-10-13T07:11:09.000000250Z', _msg: 'failed to pay', _stream_id: 's1', app: 'api', level: 'Error', 'error.code': 'E42' },
+      { _time: '2026-10-13T07:11:09.000000100Z', _msg: '{"a":1}', _stream_id: 's2', app: 'web', hits: 5 },
+    ];
+    const text = [JSON.stringify(lines[0]), JSON.stringify(lines[1]), '', 'not json', JSON.stringify(lines[2])].join('\n');
+    const entries = parseVictoriaLogsLines(text);
+    expect(entries.map((e) => e.msg)).toEqual(['failed to pay', '{"a":1}', 'started']);
+    expect(entries[0]).toMatchObject({ ns: '1791875469000000250', time: '2026-10-13T07:11:09.000Z', level: 'Error', fields: { app: 'api', level: 'Error', 'error.code': 'E42' } });
+    expect(entries[1]).toMatchObject({ level: null, fields: { app: 'web', hits: '5' } });
+    expect(entries[2]!.fields).toMatchObject({ _stream: '{app="api"}' });
+    for (const e of entries) for (const k of ['_stream_id', '_time', '_msg']) expect(e.fields).not.toHaveProperty(k);
+    // The same entry through Grafana and directly is the same entry, id included.
+    const viaGrafana = parseLogFrames([
+      {
+        schema: { fields: [{ name: 'Time', type: 'time' }, { name: 'Line', type: 'string' }, { name: 'labels', type: 'other' }] },
+        data: { values: [[1791875469000], ['failed to pay'], [{ _stream_id: 's1', app: 'api', level: 'Error', 'error.code': 'E42' }]], nanos: [[250], null, null] },
+      },
+    ]);
+    expect(viaGrafana[0]).toEqual(entries[0]);
+  });
+
+  it('reads pipe results as entries whose fields are the columns', () => {
+    const [row] = parseVictoriaLogsLines(`${JSON.stringify({ app: 'api', hits: '3' })}\n`);
+    expect(row).toMatchObject({ ns: '0', msg: '', level: null, fields: { app: 'api', hits: '3' } });
+  });
+
+  it('adds up hits series and reads field names and values', () => {
+    const body = {
+      hits: [
+        { fields: { app: 'api' }, timestamps: ['2026-10-13T07:11:00Z', '2026-10-13T07:10:30Z'], values: [3, 1], total: 4 },
+        { fields: { app: 'web' }, timestamps: ['2026-10-13T07:11:00Z'], values: [2], total: 2 },
+      ],
+    };
+    const t = Date.parse('2026-10-13T07:11:00Z');
+    expect(parseVictoriaLogsHits(body)).toEqual({ buckets: [{ time: t - 30_000, count: 1 }, { time: t, count: 5 }], total: 6 });
+    expect(parseVictoriaLogsHits({})).toEqual({ buckets: [], total: 0 });
+    expect(parseVictoriaLogsValues({ values: [{ value: 'level', hits: 5 }, { value: '', hits: '2' }, null] })).toEqual([
+      { name: 'level', hits: 5 },
+      { name: '', hits: 2 },
+    ]);
+    expect(parseVictoriaLogsValues('nope')).toEqual([]);
   });
 });

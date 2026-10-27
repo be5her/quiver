@@ -5,16 +5,43 @@ import { newId, nowIso } from '../ids';
 /** Grafana data source types that are VictoriaLogs. */
 export const VICTORIA_LOGS_TYPES: readonly string[] = ['victoriametrics-logs-datasource'];
 
-/** A VictoriaLogs data source reached through Grafana, saved with the project. Signing in is per machine. */
+/** How a connection reaches VictoriaLogs: through a Grafana data source, or the VictoriaLogs server itself. */
+export const LOGS_CONNECTION_KINDS = ['grafana', 'victorialogs'] as const;
+export type LogsConnectionKind = (typeof LOGS_CONNECTION_KINDS)[number];
+
+/** How a direct connection authenticates; the password or token is a per-machine secret, never in the file. */
+export const LOGS_AUTH_KINDS = ['none', 'basic', 'bearer'] as const;
+export type LogsAuthKind = (typeof LOGS_AUTH_KINDS)[number];
+
+/** A VictoriaLogs tenant, sent as the `AccountID` and `ProjectID` headers. */
+export const LogsTenantSchema = z.object({
+  accountId: z.number().int().min(0),
+  projectId: z.number().int().min(0),
+});
+export type LogsTenant = z.infer<typeof LogsTenantSchema>;
+
+/**
+ * A VictoriaLogs connection saved with the project: a data source reached through Grafana (`kind: grafana`,
+ * signing in is per machine), or a VictoriaLogs server queried directly (`kind: victorialogs`, its password
+ * or token stored per machine). A file without `kind` is a Grafana connection, as every file was before.
+ */
 export const LogsConnectionSchema = z.object({
   id: z.string(),
   name: z.string().default('Logs'),
+  kind: z.enum(LOGS_CONNECTION_KINDS).default('grafana'),
   /** Grafana's address, e.g. `https://grafana.example.com`; a sub-path is kept. */
   grafanaUrl: z.string().default(''),
   /** The data source queried through that Grafana. */
   datasourceUid: z.string().default(''),
   datasourceName: z.string().default(''),
   datasourceType: z.string().default(VICTORIA_LOGS_TYPES[0]!),
+  /** For `victorialogs`: the server, e.g. `http://localhost:9428`; a sub-path is kept. */
+  url: z.string().default(''),
+  /** For `victorialogs`: the tenant, when the server has several. */
+  tenant: LogsTenantSchema.optional(),
+  /** For `victorialogs`: basic auth (username and password) or a bearer token. */
+  auth: z.enum(LOGS_AUTH_KINDS).default('none'),
+  authUsername: z.string().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -28,6 +55,12 @@ export const LogsConnectionDraftSchema = z.object({
   datasourceUid: z.string().optional(),
   datasourceName: z.string().optional(),
   datasourceType: z.string().optional(),
+  kind: z.enum(LOGS_CONNECTION_KINDS).optional(),
+  url: z.string().optional(),
+  /** null takes the tenant away. */
+  tenant: LogsTenantSchema.nullable().optional(),
+  auth: z.enum(LOGS_AUTH_KINDS).optional(),
+  authUsername: z.string().optional(),
   createdAt: z.string().optional(),
   updatedAt: z.string().optional(),
 });
@@ -58,7 +91,24 @@ export interface LogsSession {
 }
 
 export interface LogsConnectionSummary extends LogsConnection {
+  /**
+   * For Grafana: the sign-in on this machine. For a direct connection: the last check of the server,
+   * `signed-in` (with no user) when it answered, `signed-out` with the error when it did not.
+   */
   session: LogsSession;
+  /** Whether a password or token is stored on this machine for a direct connection; the value is never returned. */
+  hasSecret: boolean;
+}
+
+/** What `logs.connection.test` found. */
+export interface LogsConnectionTest {
+  ok: boolean;
+  /** The server's version, when it says so cheaply. */
+  version?: string;
+  error?: string;
+  /** The error code, e.g. LOGS_AUTH_FAILED or LOGS_UNREACHABLE. */
+  code?: string;
+  tookMs: number;
 }
 
 export interface LogsDatasource {
@@ -130,11 +180,19 @@ export function normalizeGrafanaUrl(raw: string): string {
   return normalizeServiceUrl(raw);
 }
 
+/**
+ * A VictoriaLogs server's address: `localhost:9428` becomes `http://localhost:9428` (VictoriaLogs serves
+ * plain http unless told otherwise), a sub-path stays, query and hash go. Empty when it is no http(s) address.
+ */
+export function normalizeVictoriaLogsUrl(raw: string): string {
+  return normalizeServiceUrl(raw, 'http');
+}
+
 /** The address of a web service signed in to from Quiver, as Grafana and Metabase take it: scheme added, sub-path kept, query and hash dropped. */
-export function normalizeServiceUrl(raw: string): string {
+export function normalizeServiceUrl(raw: string, defaultScheme: 'http' | 'https' = 'https'): string {
   const trimmed = raw.trim();
   if (!trimmed) return '';
-  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `${defaultScheme}://${trimmed}`;
   let url: URL;
   try {
     url = new URL(withScheme);
@@ -151,10 +209,42 @@ export function grafanaPartition(grafanaUrl: string): string {
   return `persist:quiver-grafana-${origin.replace(/[^a-z0-9]+/g, '-')}`;
 }
 
-/** Host and data source, for lists. */
-export function describeLogsConnection(conn: Pick<LogsConnection, 'grafanaUrl' | 'datasourceName'>): string {
-  const host = conn.grafanaUrl.replace(/^[a-z]+:\/\//i, '').split(/[/?#]/)[0] ?? '';
-  return [host, conn.datasourceName].filter(Boolean).join(' · ');
+/** Host and data source (or "VictoriaLogs" and the tenant for a direct connection), for lists. */
+export function describeLogsConnection(conn: Pick<LogsConnection, 'grafanaUrl' | 'datasourceName'> & Partial<Pick<LogsConnection, 'kind' | 'url' | 'tenant'>>): string {
+  const hostOf = (url: string) => url.replace(/^[a-z]+:\/\//i, '').split(/[/?#]/)[0] ?? '';
+  if (conn.kind === 'victorialogs') {
+    const tenant = conn.tenant ? `tenant ${conn.tenant.accountId}:${conn.tenant.projectId}` : '';
+    return [hostOf(conn.url ?? ''), 'VictoriaLogs', tenant].filter(Boolean).join(' · ');
+  }
+  return [hostOf(conn.grafanaUrl), conn.datasourceName].filter(Boolean).join(' · ');
+}
+
+/** Where a connection's queries go: the Grafana address, or the VictoriaLogs server for a direct one. */
+export function logsConnectionAddress(conn: Pick<LogsConnection, 'grafanaUrl'> & Partial<Pick<LogsConnection, 'kind' | 'url'>>): string {
+  return conn.kind === 'victorialogs' ? (conn.url ?? '') : conn.grafanaUrl;
+}
+
+/** Whether a connection has what a query needs: a Grafana address and a data source, or a server address. */
+export function logsConnectionReady(conn: Pick<LogsConnection, 'grafanaUrl' | 'datasourceUid'> & Partial<Pick<LogsConnection, 'kind' | 'url'>>): boolean {
+  return conn.kind === 'victorialogs' ? Boolean(conn.url) : Boolean(conn.grafanaUrl && conn.datasourceUid);
+}
+
+/** The headers a direct connection sends: the tenant, and basic or bearer auth with the stored secret. */
+export function victoriaLogsHeaders(conn: Pick<LogsConnection, 'auth' | 'authUsername' | 'tenant'>, secret: string): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (conn.tenant) {
+    headers['AccountID'] = String(conn.tenant.accountId);
+    headers['ProjectID'] = String(conn.tenant.projectId);
+  }
+  if (conn.auth === 'basic') headers['Authorization'] = `Basic ${utf8Base64(`${conn.authUsername ?? ''}:${secret}`)}`;
+  else if (conn.auth === 'bearer' && secret) headers['Authorization'] = `Bearer ${secret}`;
+  return headers;
+}
+
+function utf8Base64(text: string): string {
+  let binary = '';
+  for (const byte of new TextEncoder().encode(text)) binary += String.fromCharCode(byte);
+  return btoa(binary);
 }
 
 // ---------- LogsQL ----------
@@ -320,20 +410,96 @@ export function parseLogFrames(frames: readonly GrafanaFrame[]): LogEntry[] {
       const ns = (BigInt(Math.trunc(ms)) * 1_000_000n + BigInt(Math.trunc(extra))).toString();
       const msg = lineAt >= 0 ? asText(values[lineAt]?.[i]) : '';
       const labels = labelsAt >= 0 ? labelsOf(values[labelsAt]?.[i]) : {};
-      const stream = labels['_stream_id'] ?? '';
-      delete labels['_stream_id'];
-      const levelKey = Object.keys(labels).find((k) => LEVEL_KEYS.includes(k.toLowerCase()));
-      out.push({
-        id: `${ns}-${fnv1a(`${stream}\u0000${msg}`)}`,
-        time: new Date(ms).toISOString(),
-        ns,
-        msg,
-        level: levelKey ? labels[levelKey]! : null,
-        fields: labels,
-      });
+      out.push(makeLogEntry(ns, msg, labels));
     }
   }
   return out.sort(compareLogEntries);
+}
+
+/**
+ * One entry as the view shows it, whichever way it came: `_stream_id` goes into the id and out of the
+ * fields, and the first level-like field becomes the level.
+ */
+export function makeLogEntry(ns: string, msg: string, fields: Record<string, string>): LogEntry {
+  const labels = { ...fields };
+  const stream = labels['_stream_id'] ?? '';
+  delete labels['_stream_id'];
+  const levelKey = Object.keys(labels).find((k) => LEVEL_KEYS.includes(k.toLowerCase()));
+  return {
+    id: `${ns}-${fnv1a(`${stream}\u0000${msg}`)}`,
+    time: new Date(Number(BigInt(ns) / 1_000_000n)).toISOString(),
+    ns,
+    msg,
+    level: levelKey ? labels[levelKey]! : null,
+    fields: labels,
+  };
+}
+
+// ---------- VictoriaLogs HTTP API ----------
+
+/**
+ * An RFC 3339 time as VictoriaLogs writes `_time` (`2024-05-01T10:00:00.123456789Z`, or with an offset)
+ * in nanoseconds since the epoch, as decimal digits, the fraction kept to the nanosecond. '0' when it
+ * cannot be read.
+ */
+export function rfc3339ToNs(text: string): string {
+  const m = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:?\d{2})?$/i.exec(text.trim());
+  if (!m) return '0';
+  const ms = Date.parse(`${m[1]}${m[3] ?? 'Z'}`);
+  if (Number.isNaN(ms)) return '0';
+  const fraction = BigInt((m[2] ?? '').padEnd(9, '0').slice(0, 9));
+  return (BigInt(ms) * 1_000_000n + fraction).toString();
+}
+
+/**
+ * Log entries from `/select/logsql/query`, which answers one JSON object per line: `_time`, `_msg` and
+ * the other fields. Pipe results (`| stats …`) are lines without `_time` or `_msg`, and their columns are
+ * the fields. Newest first, like the Grafana path.
+ */
+export function parseVictoriaLogsLines(text: string): LogEntry[] {
+  const out: LogEntry[] = [];
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    let row: unknown;
+    try {
+      row = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!row || typeof row !== 'object' || Array.isArray(row)) continue;
+    const fields = labelsOf(row);
+    const ns = fields['_time'] ? rfc3339ToNs(fields['_time']) : '0';
+    const msg = fields['_msg'] ?? '';
+    delete fields['_time'];
+    delete fields['_msg'];
+    out.push(makeLogEntry(ns, msg, fields));
+  }
+  return out.sort(compareLogEntries);
+}
+
+/** Histogram buckets from `/select/logsql/hits`: one series per stream group, RFC 3339 (or epoch) timestamps; the series add up. */
+export function parseVictoriaLogsHits(body: unknown): { buckets: { time: number; count: number }[]; total: number } {
+  const byTime = new Map<number, number>();
+  const series = body && typeof body === 'object' ? (body as { hits?: unknown }).hits : undefined;
+  for (const s of Array.isArray(series) ? (series as { timestamps?: unknown; values?: unknown }[]) : []) {
+    const timestamps = Array.isArray(s?.timestamps) ? (s.timestamps as unknown[]) : [];
+    const values = Array.isArray(s?.values) ? (s.values as unknown[]) : [];
+    timestamps.forEach((t, i) => {
+      const time = typeof t === 'number' ? (t < 1e11 ? t * 1000 : t) : Date.parse(String(t));
+      if (Number.isNaN(time)) return;
+      byTime.set(time, (byTime.get(time) ?? 0) + Number(values[i] ?? 0));
+    });
+  }
+  const buckets = [...byTime].map(([time, count]) => ({ time, count })).sort((a, b) => a.time - b.time);
+  return { buckets, total: buckets.reduce((n, b) => n + b.count, 0) };
+}
+
+/** Names or values with their counts from `/select/logsql/field_names` and `/field_values`: `{ values: [{ value, hits }] }`. */
+export function parseVictoriaLogsValues(body: unknown): LogsFieldCount[] {
+  const values = body && typeof body === 'object' ? (body as { values?: unknown }).values : undefined;
+  return (Array.isArray(values) ? (values as unknown[]) : [])
+    .filter((v): v is { value?: unknown; hits?: unknown } => Boolean(v) && typeof v === 'object')
+    .map((v) => ({ name: asText(v.value), hits: Number(v.hits ?? 0) }));
 }
 
 /** Histogram buckets from the frames of a `hits` query; several frames (one per stream group) add up. */

@@ -1,8 +1,9 @@
 import { sign } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { LogsConnectionSummary, LogsDatasource, LogsFieldCount, LogsHistoryEntry, LogsHits, LogsQueryResult, LogsSession } from '@quiver/core';
-import { definePart, until } from '../part';
+import { maskArguments, type LogsConnectionSummary, type LogsConnectionTest, type LogsDatasource, type LogsFieldCount, type LogsHistoryEntry, type LogsHits, type LogsQueryResult, type LogsSession } from '@quiver/core';
+import { FAKE_VICTORIALOGS_VERSION, startFakeVictoriaLogs, type FakeVictoriaLogs } from '../fake-victorialogs';
+import { definePart, freePort, until, type SmokeContext, type UiContext } from '../part';
 
 export default definePart({
   name: 'logs',
@@ -123,16 +124,21 @@ export default definePart({
       check('logs: signing in after signing out goes through the login page again', back.state === 'signed-in' && fakeGrafana.seen.logins === logins0 + 2, { back: back.state, logins: fakeGrafana.seen.logins });
     }
 
+    // VictoriaLogs directly: a fake VictoriaLogs serving the fake Grafana's entries, behind a bearer token and a tenant.
+    const fakeVl = await startFakeVictoriaLogs(fakeGrafana.logs);
+    const direct = await directChecks(t, fakeVl);
+
     return {
+      after: () => fakeVl.close(),
       ui: async (u) => {
         const { js, wait, shot } = u;
         // Logs: the connection signed in above, its entries with level chips and histogram, filters from an entry and from the picker, the setup.
         await js(`document.querySelector('[data-testid=activity-item][data-drag-id=logs]').click()`);
         await wait(600);
-        const logsRows = (await js(`[...document.querySelectorAll('[data-testid=logs-connection]')].map((r) => [r.textContent.trim(), r.getAttribute('data-session')])`)) as string[][];
+        const logsRows = (await js(`[...document.querySelectorAll('[data-testid=logs-connection][data-kind=grafana]')].map((r) => [r.textContent.trim(), r.getAttribute('data-session')])`)) as string[][];
         check('ui: logs: the sidebar lists the connection, signed in', logsRows.length === 1 && logsRows[0]![0]!.includes('VictoriaLogs-Smoke') && logsRows[0]![1] === 'signed-in', logsRows);
         const logsEntries = () => js(`[...document.querySelectorAll('[data-testid=logs-entry]')].map((r) => r.getAttribute('data-level') + ':' + r.textContent.trim())`) as Promise<string[]>;
-        await js(`document.querySelector('[data-testid=logs-connection]').click()`);
+        await js(`document.querySelector('[data-testid=logs-connection][data-kind=grafana]').click()`);
         await until(async () => (await logsEntries()).length === 5, 6000);
         const firstEntries = await logsEntries();
         check(
@@ -225,9 +231,285 @@ export default definePart({
         await shot('28e-logs-setup-light');
         await js(`document.querySelector('[data-testid=logs-setup-done]').click()`);
         await wait(400);
+        await direct.ui(u);
         await js(`document.querySelector('[data-testid=activity-item][data-drag-id=api]').click()`);
         await wait(200);
       },
     };
   },
 });
+
+/**
+ * A connection of kind victorialogs against the fake VictoriaLogs: the secret kept out of the project, test,
+ * queries, hits, fields and values with the tenant and token sent, sign-in refused, the history, what an agent
+ * sees, an unreachable server and a file written before connections had a kind. Its UI checks run after the
+ * Grafana ones, from the logs part's `ui` hook.
+ */
+async function directChecks(t: SmokeContext, vl: FakeVictoriaLogs): Promise<{ ui: (u: UiContext) => Promise<void> }> {
+  const { host, check, run, ws, folder, rpc, toolNames: names } = t;
+  const fail = async (id: string, input: unknown, caller: 'ui' | 'mcp' = 'ui') => {
+    const out = await host.invoke(id, input, { caller, workspaceId: ws.id });
+    return out.ok ? 'ok' : `${out.error.code}: ${out.error.message}`;
+  };
+  const TOKEN = 'vl-smoke-token-3141';
+  vl.requireAuth({ kind: 'bearer', token: TOKEN });
+  vl.setTenant({ accountId: 3, projectId: 7 });
+  const sent = () => vl.seen.filter((s) => s.path.startsWith('/select/'));
+
+  const saved = await run<LogsConnectionSummary>(
+    'logs.connection.save',
+    { connection: { name: 'VL-Direct', kind: 'victorialogs', url: `${vl.url}/?from=smoke`, tenant: { accountId: 3, projectId: 7 }, auth: 'bearer' }, secret: TOKEN },
+    ws.id,
+  );
+  const fileText = await fs.readFile(path.join(folder, '.quiver', 'logs-connections', `${saved.id}.json`), 'utf8');
+  const onDisk = JSON.parse(fileText) as Record<string, unknown>;
+  const localText = await fs.readFile(path.join(folder, '.quiver', 'local', 'logs-secrets.json'), 'utf8').catch(() => '');
+  const got = await run<LogsConnectionSummary>('logs.connection.get', { id: saved.id }, ws.id);
+  check(
+    'logs: a direct VictoriaLogs connection is committed with its address, tenant and auth kind, and its token only on this machine, encrypted',
+    onDisk['kind'] === 'victorialogs' &&
+      onDisk['url'] === vl.url &&
+      JSON.stringify(onDisk['tenant']) === JSON.stringify({ accountId: 3, projectId: 7 }) &&
+      onDisk['auth'] === 'bearer' &&
+      !fileText.includes(TOKEN) &&
+      !('secret' in onDisk) &&
+      localText.includes(`logs-connection:${saved.id}`) &&
+      !localText.includes(TOKEN) &&
+      got.hasSecret === true &&
+      !JSON.stringify(got).includes(TOKEN) &&
+      got.session.state === 'unknown',
+    { onDisk, hasSecret: got.hasSecret, session: got.session.state },
+  );
+  const badTenant = await fail('logs.connection.save', { connection: { id: saved.id, tenant: { accountId: -1, projectId: 0 } } });
+  const badUrl = await fail('logs.connection.save', { connection: { id: saved.id, url: 'ftp://nowhere' } });
+  check('logs: a negative tenant id and a non-http address are refused', badTenant.startsWith('INVALID_INPUT') && badUrl.startsWith('INVALID_INPUT'), { badTenant, badUrl });
+
+  const tested = await run<LogsConnectionTest>('logs.connection.test', { id: saved.id }, ws.id);
+  const lastTest = sent().at(-1);
+  const afterTest = await run<LogsConnectionSummary>('logs.connection.get', { id: saved.id }, ws.id);
+  check(
+    'logs: Test reaches the server with the token and the tenant headers, and reads its version',
+    tested.ok === true && tested.version === FAKE_VICTORIALOGS_VERSION && lastTest?.path === '/select/logsql/field_names' && lastTest.tenant === '3:7' && lastTest.authorization === `Bearer ${TOKEN}` && afterTest.session.state === 'signed-in' && afterTest.session.user === null,
+    { tested, lastTest, session: afterTest.session },
+  );
+  await run('logs.connection.save', { connection: { id: saved.id }, secret: 'wrong-token' }, ws.id);
+  const refused = await run<LogsConnectionTest>('logs.connection.test', { id: saved.id }, ws.id);
+  const refusedQuery = await fail('logs.query', { id: saved.id });
+  const listedRefused = (await run<LogsConnectionSummary[]>('logs.connection.list', {}, ws.id)).find((c) => c.id === saved.id);
+  check(
+    'logs: a wrong token fails Test with LOGS_AUTH_FAILED and the server message, and the connection shows it',
+    refused.ok === false &&
+      refused.code === 'LOGS_AUTH_FAILED' &&
+      refused.error?.includes('missing or wrong credentials') === true &&
+      refusedQuery.startsWith('LOGS_AUTH_FAILED') &&
+      listedRefused?.session.state === 'signed-out' &&
+      listedRefused.session.error?.includes('refused the credentials') === true,
+    { refused, refusedQuery, session: listedRefused?.session },
+  );
+  await run('logs.connection.save', { connection: { id: saved.id }, secret: TOKEN }, ws.id);
+
+  const api = await run<LogsQueryResult>('logs.query', { id: saved.id, filters: [{ field: 'app', value: 'api' }], from: 'now-15m', limit: 100 }, ws.id);
+  const apiSent = sent().at(-1);
+  check(
+    'logs: a direct query folds the filters in and returns the same entries as through Grafana, newest first',
+    api.query === 'app:="api"' &&
+      apiSent?.path === '/select/logsql/query' &&
+      apiSent.args['query'] === 'app:="api"' &&
+      apiSent.args['limit'] === '100' &&
+      apiSent.tenant === '3:7' &&
+      JSON.stringify(api.entries.map((e) => e.msg)) === JSON.stringify(['cache miss', 'payment failed: card declined', 'GET /health 200']) &&
+      api.entries[1]?.level === 'Error' &&
+      api.entries[1]?.fields['error.code'] === 'E42' &&
+      !('_stream_id' in (api.entries[0]?.fields ?? {})) &&
+      !('_time' in (api.entries[0]?.fields ?? {})) &&
+      api.limited === false,
+    { query: api.query, sent: apiSent, entries: api.entries.map((e) => [e.msg, e.level]) },
+  );
+  const narrowed = await run<LogsQueryResult>('logs.query', { id: saved.id, query: 'payment', filters: [{ field: 'level', value: 'Debug', exclude: true }], limit: 1 }, ws.id);
+  check(
+    'logs: a direct free-text query with an excluding filter, and the limit sent and reported',
+    narrowed.query === '!level:="Debug" (payment)' && narrowed.entries.length === 1 && narrowed.entries[0]?.msg === 'payment failed: card declined' && narrowed.limited === true && sent().at(-1)?.args['limit'] === '1',
+    { query: narrowed.query, entries: narrowed.entries.map((e) => e.msg), limited: narrowed.limited },
+  );
+  const dHits = await run<LogsHits>('logs.hits', { id: saved.id, query: '* | stats count()', from: 'now-15m' }, ws.id);
+  const hitsSent = sent().at(-1);
+  const dFields = await run<LogsFieldCount[]>('logs.fields', { id: saved.id }, ws.id);
+  const dLevels = await run<LogsFieldCount[]>('logs.values', { id: saved.id, field: 'level' }, ws.id);
+  const valuesSent = sent().at(-1);
+  check(
+    'logs: direct hits count the filter part in about 60 buckets, and field names and values come from their endpoints',
+    dHits.total === 5 &&
+      dHits.stepMs === 30_000 &&
+      hitsSent?.path === '/select/logsql/hits' &&
+      hitsSent.args['query'] === '*' &&
+      hitsSent.args['step'] === '30s' &&
+      dFields.map((f) => f.name).join() === 'app,level,error.code' &&
+      dLevels[0]?.name === 'Information' &&
+      dLevels[0]?.hits === 2 &&
+      dLevels.length === 4 &&
+      valuesSent?.path === '/select/logsql/field_values' &&
+      valuesSent.args['field'] === 'level' &&
+      valuesSent.args['limit'] === '50',
+    { hits: dHits.total, stepMs: dHits.stepMs, hitsSent: hitsSent?.args, fields: dFields, levels: dLevels },
+  );
+  const dBroken = await fail('logs.query', { id: saved.id, query: 'app:(((' });
+  check("logs: a direct LogsQL error comes back with the server's message", dBroken.startsWith('REQUEST_FAILED: cannot parse query') && dBroken.includes("missing ')'"), dBroken);
+  const otherTenant = await run<LogsQueryResult>('logs.query', { id: saved.id, query: '*', limit: 10 }, ws.id).then(async (all) => {
+    await run('logs.connection.save', { connection: { id: saved.id, tenant: null } }, ws.id);
+    const none = await run<LogsQueryResult>('logs.query', { id: saved.id, query: '*', limit: 10 }, ws.id);
+    const noHeaders = sent().at(-1)?.tenant ?? null;
+    await run('logs.connection.save', { connection: { id: saved.id, tenant: { accountId: 3, projectId: 7 } } }, ws.id);
+    return { all: all.entries.length, none: none.entries.length, noHeaders };
+  });
+  check('logs: the tenant decides what a direct query sees; without one no tenant headers are sent', otherTenant.all === 5 && otherTenant.none === 0 && otherTenant.noHeaders === null, otherTenant);
+
+  const dSession = await run<LogsSession>('logs.session', { id: saved.id }, ws.id);
+  const dSignIn = await fail('logs.signin', { id: saved.id });
+  const dSignOut = await fail('logs.signout', { id: saved.id });
+  const dSources = await fail('logs.datasources', { id: saved.id });
+  check(
+    'logs: a direct connection is "signed in" with no user when the server answers, and sign-in, sign-out and data sources are refused',
+    dSession.state === 'signed-in' && dSession.user === null && dSignIn.startsWith('NOT_SUPPORTED') && dSignIn.includes('needs no sign-in') && dSignOut.startsWith('NOT_SUPPORTED') && dSources.startsWith('NOT_SUPPORTED'),
+    { dSession, dSignIn, dSignOut, dSources },
+  );
+  const dHistory = await run<LogsHistoryEntry[]>('logs.history.list', { id: saved.id }, ws.id);
+  check(
+    'logs: direct queries are recorded in the history with their count or error',
+    dHistory.length === 6 && dHistory.some((h) => h.query === 'app:(((' && h.error?.startsWith('cannot parse query') === true) && dHistory.some((h) => h.error?.includes('refused the credentials') === true) && dHistory.some((h) => h.count === 3),
+    dHistory.map((h) => [h.query, h.count, h.error]),
+  );
+
+  // An agent: saving with a secret works, the secret never comes back and is masked where calls are shown; Test is allowed.
+  const AGENT_SECRET = 'agent-secret-2718';
+  const agentSave = await rpc('tools/call', { name: 'logs_connection_save', arguments: { connection: { name: 'Agent VL', kind: 'victorialogs', url: vl.url, auth: 'basic', authUsername: 'agent' }, secret: AGENT_SECRET } });
+  const agentText = agentSave.result?.content?.[0]?.text ?? JSON.stringify(agentSave.error ?? null);
+  const agentConn = agentSave.result?.isError ? null : (JSON.parse(agentText) as LogsConnectionSummary);
+  const masked = JSON.stringify(maskArguments({ connection: { name: 'Agent VL' }, secret: AGENT_SECRET }));
+  const agentTest = agentConn ? await fail('logs.connection.test', { id: saved.id }, 'mcp') : 'not saved';
+  check(
+    'logs: an agent saves a direct connection with a secret, never sees it back, has it masked in the approval and activity views, and may test',
+    agentConn?.hasSecret === true &&
+      !agentText.includes(AGENT_SECRET) &&
+      !masked.includes(AGENT_SECRET) &&
+      agentTest === 'ok' &&
+      names.includes('logs_connection_test') &&
+      !names.includes('logs_signin'),
+    { agentText: agentText.slice(0, 300), masked, agentTest },
+  );
+  // The stored token stays where it was given: an agent cannot point the connection elsewhere without mutations, nor read the token from a list.
+  const agentMove = await fail('logs.connection.save', { connection: { id: saved.id, url: 'http://127.0.0.1:9' } }, 'mcp');
+  const agentRename = await fail('logs.connection.save', { connection: { id: saved.id, name: 'VL-Direct' } }, 'mcp');
+  const agentList = await rpc('tools/call', { name: 'logs_connection_list', arguments: {} });
+  const agentListText = agentList.result?.content?.[0]?.text ?? '';
+  const afterMove = await run<LogsConnectionSummary>('logs.connection.get', { id: saved.id }, ws.id);
+  const NEWLINE_SECRET = 'line-break-secret\nX-Other: 1';
+  const badSecret = await fail('logs.connection.save', { connection: { id: saved.id }, secret: NEWLINE_SECRET });
+  check(
+    'logs: an agent may not move a connection with a stored token to another address, never gets the token from a list, and a token with a line break is refused without being quoted',
+    agentMove.startsWith('MUTATION_BLOCKED') &&
+      agentRename === 'ok' &&
+      afterMove.url === vl.url &&
+      agentListText.includes('VL-Direct') &&
+      !agentListText.includes(TOKEN) &&
+      badSecret.startsWith('INVALID_INPUT') &&
+      !badSecret.includes('line-break-secret'),
+    { agentMove, agentRename, url: afterMove.url, badSecret },
+  );
+  if (agentConn) await run('logs.connection.delete', { id: agentConn.id }, ws.id);
+  const agentLocal = await fs.readFile(path.join(folder, '.quiver', 'local', 'logs-secrets.json'), 'utf8').catch(() => '');
+  check('logs: deleting a direct connection forgets its secret on this machine', Boolean(agentConn) && !agentLocal.includes(`logs-connection:${agentConn?.id}`), { agentLocal });
+
+  // An unreachable server: a port nothing listens on.
+  const deadPort = await freePort();
+  const dead = await run<LogsConnectionSummary>('logs.connection.save', { connection: { name: 'VL-Down', kind: 'victorialogs', url: `127.0.0.1:${deadPort}` } }, ws.id);
+  const deadTest = await run<LogsConnectionTest>('logs.connection.test', { id: dead.id }, ws.id);
+  const deadQuery = await fail('logs.query', { id: dead.id });
+  check(
+    'logs: an unreachable VictoriaLogs fails with LOGS_UNREACHABLE, and an address without a scheme is http',
+    dead.url === `http://127.0.0.1:${deadPort}` && deadTest.ok === false && deadTest.code === 'LOGS_UNREACHABLE' && deadQuery.startsWith('LOGS_UNREACHABLE'),
+    { url: dead.url, deadTest, deadQuery },
+  );
+  await run('logs.connection.delete', { id: dead.id }, ws.id);
+
+  // A connection file from before connections had a kind is still a Grafana connection.
+  const oldId = 'logs-old-format-smoke';
+  await fs.writeFile(
+    path.join(folder, '.quiver', 'logs-connections', `${oldId}.json`),
+    JSON.stringify({ id: oldId, name: 'Old format', grafanaUrl: 'https://grafana.example.com', datasourceUid: 'vl', datasourceName: 'VL', datasourceType: 'victoriametrics-logs-datasource', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' }, null, 2),
+  );
+  await until(async () => (await host.invoke('logs.connection.get', { id: oldId }, { caller: 'ui', workspaceId: ws.id })).ok, 5000);
+  const old = await run<LogsConnectionSummary>('logs.connection.get', { id: oldId }, ws.id);
+  const oldSignIn = await run<LogsConnectionSummary>('logs.connection.save', { connection: { id: oldId, name: 'Old format, renamed' } }, ws.id);
+  check('logs: a connection file without a kind is read as a Grafana connection, and saving it keeps it one', old.kind === 'grafana' && old.grafanaUrl === 'https://grafana.example.com' && old.hasSecret === false && oldSignIn.kind === 'grafana', { kind: old.kind, saved: oldSignIn.kind });
+  await run('logs.connection.delete', { id: oldId }, ws.id);
+
+  return {
+    ui: async ({ js, wait, shot }) => {
+      const tab = '[data-testid=logs-connection-tab][data-kind=victorialogs]';
+      const row = (await js(`(() => { const r = document.querySelector('[data-testid=logs-connection][data-kind=victorialogs]'); return r && { text: r.textContent.trim(), session: r.getAttribute('data-session'), title: r.getAttribute('title') }; })()`)) as { text: string; session: string; title: string } | null;
+      check('ui: logs: the sidebar shows the direct connection as direct, with its check instead of a signed-in user', Boolean(row?.text.includes('VL-Direct') && row.text.includes('direct') && row.title.includes('VictoriaLogs') && row.title.includes('Direct · Reachable')), row);
+      await js(`document.querySelector('[data-testid=logs-connection][data-kind=victorialogs]').click()`);
+      const directEntries = () => js(`[...document.querySelectorAll('${tab} [data-testid=logs-entry]')].map((r) => r.getAttribute('data-level') + ':' + r.textContent.trim())`) as Promise<string[]>;
+      await until(async () => (await directEntries()).length >= 5, 6000);
+      await until(async () => (await js(`document.querySelectorAll('${tab} [data-testid=logs-level-chip]').length`)) === 4, 4000);
+      const entries = await directEntries();
+      const header = await js(`({ session: document.querySelector('${tab} [data-testid=logs-tab-session]')?.textContent.trim(), signIn: [...document.querySelectorAll('${tab} button')].some((b) => b.textContent.trim() === 'Sign in') })`);
+      check(
+        'ui: logs: the direct connection tab runs its query and lists the entries newest first, reachable and without a Sign in button',
+        entries.length >= 5 && entries.some((e) => e.startsWith('Error:') && e.includes('payment failed')) && entries.at(-1)!.includes('GET /health 200') && JSON.stringify(header) === JSON.stringify({ session: 'Reachable', signIn: false }),
+        { entries, header },
+      );
+      await shot('28f-logs-direct-light');
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(300);
+      await shot('28g-logs-direct-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
+      await wait(200);
+
+      await js(`document.querySelector('${tab} [data-testid=logs-settings]').click()`);
+      await until(async () => Boolean(await js(`document.querySelector('${tab} [data-testid=logs-setup][data-kind=victorialogs]')`)), 3000);
+      await js(`document.querySelector('${tab} [data-testid=logs-test]').click()`);
+      await until(async () => Boolean(await js(`document.querySelector('${tab} [data-testid=logs-test-result]')`)), 4000);
+      const setup = await js(
+        `({ url: document.querySelector('${tab} [data-testid=logs-vl-url]')?.value, account: document.querySelector('${tab} [data-testid=logs-vl-account]')?.value, project: document.querySelector('${tab} [data-testid=logs-vl-project]')?.value, secret: document.querySelector('${tab} [data-testid=logs-vl-secret-state]')?.textContent.trim(), secretShown: Boolean(document.querySelector('${tab} [data-testid=logs-vl-secret]')), kind: document.querySelector('${tab} [data-testid=logs-kind-victorialogs]')?.getAttribute('aria-selected'), test: document.querySelector('${tab} [data-testid=logs-test-result]')?.getAttribute('data-ok'), testText: document.querySelector('${tab} [data-testid=logs-test-result]')?.textContent.trim() })`,
+      );
+      const s = setup as Record<string, string | boolean | undefined>;
+      check(
+        'ui: logs: the direct setup shows the address, tenant and a stored token it does not show, and Test succeeds',
+        s['url'] === vl.url && s['account'] === '3' && s['project'] === '7' && s['secret'] === 'Stored on this machine' && s['secretShown'] === false && s['kind'] === 'true' && s['test'] === 'true' && String(s['testText']).includes('v1.30.0'),
+        setup,
+      );
+      await shot('28h-logs-direct-setup-light');
+      await js(`document.documentElement.classList.add('dark')`);
+      await wait(300);
+      await shot('28i-logs-direct-setup-dark');
+      await js(`document.documentElement.classList.remove('dark')`);
+      await wait(200);
+      await js(`document.querySelector('${tab} [data-testid=logs-setup-done]').click()`);
+      await wait(300);
+
+      // The kind switch: a Grafana connection without an address yet, switched to VictoriaLogs in its setup.
+      const fresh = await run<LogsConnectionSummary>('logs.connection.save', { connection: { name: 'Switch me' } }, ws.id);
+      await until(async () => Boolean(await js(`document.querySelector('[data-testid=logs-connection][data-kind=grafana][title^="No Grafana address"]')`)), 3000);
+      await js(`[...document.querySelectorAll('[data-testid=logs-connection]')].find((r) => r.textContent.includes('Switch me'))?.click()`);
+      const freshTab = `[data-testid=logs-connection-tab]:not([data-kind=victorialogs]) [data-testid=logs-setup][data-kind=grafana]`;
+      await until(async () => Boolean(await js(`[...document.querySelectorAll('${freshTab}')].find((el) => el.offsetParent !== null)`)), 3000);
+      await js(`[...document.querySelectorAll('[data-testid=logs-kind-victorialogs]')].find((el) => el.offsetParent !== null)?.click()`);
+      const switched = await until(async () => (await run<LogsConnectionSummary>('logs.connection.get', { id: fresh.id }, ws.id)).kind === 'victorialogs', 3000);
+      await until(async () => Boolean(await js(`[...document.querySelectorAll('[data-testid=logs-vl-url]')].find((el) => el.offsetParent !== null)`)), 3000);
+      const urlField = await js(`Boolean([...document.querySelectorAll('[data-testid=logs-vl-url]')].find((el) => el.offsetParent !== null))`);
+      check('ui: logs: the kind switch turns a connection into a direct one and shows the VictoriaLogs form', switched && urlField === true, { switched, urlField });
+      await shot('28j-logs-kind-switch-light');
+      // Deleted from its setup, which asks first and closes the tab.
+      await js(`[...document.querySelectorAll('[data-testid=logs-delete]')].find((el) => el.offsetParent !== null)?.click()`);
+      const confirmButton = `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Delete')`;
+      await until(() => js(`Boolean(${confirmButton})`).then(Boolean), 3000);
+      await js(`${confirmButton}?.click()`);
+      const gone = await until(async () => !(await host.invoke('logs.connection.get', { id: fresh.id }, { caller: 'ui', workspaceId: ws.id })).ok, 3000);
+      const tabsOpen = () => js(`document.querySelectorAll('[data-testid=logs-connection-tab]').length`);
+      await until(async () => (await tabsOpen()) === 2, 3000);
+      const tabsLeft = await tabsOpen();
+      check('ui: logs: deleting a connection from its setup removes it and closes its tab', gone && tabsLeft === 2, { gone, tabsLeft });
+    },
+  };
+}
