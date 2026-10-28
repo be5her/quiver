@@ -59,7 +59,7 @@ The smoke runs a fake Metabase. Its login page signs in the way Google's button 
 
 The host-level checks cover:
 - normalising the address and refusing a bad one
-- `SIGN_IN_REQUIRED` before signing in, then sign-in, who is signed in, the session cookie kept for 14 days so it survives a restart, and a second sign-in that opens no window
+- `SIGN_IN_REQUIRED` before signing in, then sign-in, who is signed in, the session cookie kept for 14 days so it survives a restart, and a second sign-in that opens no window and keeps a session cookie that has no expiry yet
 - databases, tables with their fields, the collection tree and items, and search
 - a question with a parameter and its columns, and a dashboard's questions
 - native query rows, a failed query's message and the truncated flag

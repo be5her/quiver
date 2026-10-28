@@ -67,6 +67,7 @@ export class MetabaseSessions {
     const web = requireWeb(host);
     const base = requireBase(metabaseUrl);
     const already = await this.whoami(host, base).catch(() => null);
+    if (already) await web.keepCookie(metabasePartition(base), base, SESSION_COOKIE, KEEP_SESSION_S).catch(() => false);
     if (already) return this.set(host, base, { state: 'signed-in', user: already, error: null, checkedAt: nowIso() });
 
     this.set(host, base, { state: 'signing-in', user: null, error: null, checkedAt: nowIso() });

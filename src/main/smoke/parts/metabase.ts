@@ -82,8 +82,17 @@ export default definePart({
       sessionCookie?.session === false && keptDays > 13.9 && keptDays <= 14 && sessionCookie.hostOnly === true && sessionCookie.httpOnly === true,
       { session: sessionCookie?.session, days: keptDays, hostOnly: sessionCookie?.hostOnly, httpOnly: sessionCookie?.httpOnly },
     );
+    // A live session whose cookie is for the browser session only again (set before this machine kept it): signing in keeps it too.
+    if (sessionCookie) {
+      await session.fromPartition(metabasePartition(fakeMetabase.url)).cookies.set({ url: fakeMetabase.url, name: sessionCookie.name, value: sessionCookie.value, path: sessionCookie.path, httpOnly: true, sameSite: sessionCookie.sameSite });
+    }
     const again = await run<MetabaseSession>('metabase.signin', { connectionId: browser.id }, ws.id);
-    check('metabase: signing in again with a live session opens no window', again.state === 'signed-in' && fakeMetabase.seen.logins === logins0 + 1, { again: again.state, logins: fakeMetabase.seen.logins });
+    const [againCookie] = await session.fromPartition(metabasePartition(fakeMetabase.url)).cookies.get({ url: fakeMetabase.url, name: 'metabase.SESSION' });
+    check(
+      'metabase: signing in again with a live session opens no window and keeps a browser-session cookie',
+      again.state === 'signed-in' && fakeMetabase.seen.logins === logins0 + 1 && againCookie?.session === false && againCookie.value === sessionCookie?.value,
+      { again: again.state, logins: fakeMetabase.seen.logins, session: againCookie?.session },
+    );
     const tested = await run<MetabaseTestResult>('metabase.connection.test', { connectionId: browser.id }, ws.id);
     check('metabase: the connection test says who is signed in and the version', tested.user.email === 'smoke@example.com' && tested.version === 'v0.52.0', tested);
 

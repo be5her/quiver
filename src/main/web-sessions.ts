@@ -1,4 +1,4 @@
-import { BrowserWindow, app, session, type Session } from 'electron';
+import { BrowserWindow, app, session, type Cookie, type Session } from 'electron';
 import type { WebResponse, WebSessionsApi } from '@quiver/core';
 import { iconPath } from './window';
 
@@ -156,12 +156,20 @@ export class ElectronWebSessions implements WebSessionsApi {
 
   async keepCookie(partition: string, url: string, name: string, maxAgeS: number): Promise<boolean> {
     const cookies = this.get(partition).cookies;
-    const [found] = await cookies.get({ url, name });
+    // A server that upgrades http to https sets a Secure cookie, which Chromium only matches on the https address.
+    const urls = url.startsWith('http:') ? [url, `https:${url.slice('http:'.length)}`] : [url];
+    let at = url;
+    let found: Cookie | undefined;
+    for (const candidate of urls) {
+      [found] = await cookies.get({ url: candidate, name });
+      at = candidate;
+      if (found) break;
+    }
     if (!found) return false;
     if (!found.session) return true;
     // Set again with an expiry, which is what makes Chromium write it to disk; a host-only cookie stays host-only.
     await cookies.set({
-      url,
+      url: at,
       name: found.name,
       value: found.value,
       domain: found.hostOnly ? undefined : found.domain,
