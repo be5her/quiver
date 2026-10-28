@@ -174,6 +174,12 @@ export interface WebSessionsApi {
   fetch(partition: string, url: string, init?: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number; binary?: boolean }): Promise<WebResponse>;
   /** A cookie the partition holds for `url`, or null. */
   cookie(partition: string, url: string, name: string): Promise<string | null>;
+  /**
+   * Keep a cookie the server set for the browser session only (no expiry, so it is gone when the app
+   * quits) for `maxAgeS` seconds instead. A cookie that has an expiry is left as it is. Answers
+   * whether the partition holds the cookie.
+   */
+  keepCookie(partition: string, url: string, name: string, maxAgeS: number): Promise<boolean>;
   /** Forget everything the partition stored: cookies, storage and cache. */
   clear(partition: string): Promise<void>;
 }

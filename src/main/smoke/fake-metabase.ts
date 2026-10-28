@@ -442,10 +442,11 @@ export async function startFakeMetabase(): Promise<FakeMetabase> {
         }
         if (path === '/auth/sso/popup') {
           // The identity provider's popup: it signs in, tells its opener and closes, the way Google Identity Services does.
+          // Like Metabase after a Google sign-in, the cookie has no expiry: it lasts for the browser session only.
           const token = randomUUID();
           sessions.add(token);
           seen.logins++;
-          res.writeHead(200, { 'content-type': 'text/html', 'Set-Cookie': `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=1209600` });
+          res.writeHead(200, { 'content-type': 'text/html', 'Set-Cookie': `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax` });
           res.end("<!doctype html><title>Sign in</title><script>window.opener.postMessage('metabase-signed-in', '*'); window.close();</script>");
           return;
         }
