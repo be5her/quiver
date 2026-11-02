@@ -32,6 +32,8 @@ export async function startFakePostgres(options: { password: string; databases: 
   };
   const TEXT = 25;
   const BOOL = 16;
+  const NAME = 19;
+  const CHAR = 18;
   const NAME_ARRAY = 1003;
   const TEXT_ARRAY = 1009;
 
@@ -60,9 +62,10 @@ export async function startFakePostgres(options: { password: string; databases: 
 
   /** The catalog's answers for a table with a composite key, an index, a foreign key and a table pointing at it. */
   const catalog = (sql: string) => {
-    const array = /array_agg\(a\.attname::text/.test(sql) ? TEXT_ARRAY : NAME_ARRAY;
+    // Each aggregate has its own type, so casting only one of a query's two does not pass for casting both.
+    const arrays = [...sql.matchAll(/array_agg\(a\.attname(::text)?/g)].map((m) => (m[1] ? TEXT_ARRAY : NAME_ARRAY));
     if (/FROM pg_attribute a LEFT JOIN pg_attrdef/.test(sql)) {
-      const columns: [string, number][] = [['attname', TEXT], ['format_type', TEXT], ['attnotnull', BOOL], ['pg_get_expr', TEXT], ['attidentity', TEXT], ['attgenerated', TEXT]];
+      const columns: [string, number][] = [['attname', NAME], ['format_type', TEXT], ['attnotnull', BOOL], ['pg_get_expr', TEXT], ['attidentity', CHAR], ['attgenerated', CHAR]];
       return resultSet(columns, [
         ['tenant_id', 'integer', 't', null, '', ''],
         ['id', 'integer', 't', null, '', ''],
@@ -70,14 +73,14 @@ export async function startFakePostgres(options: { password: string; databases: 
       ]);
     }
     if (/FROM pg_index ix/.test(sql)) {
-      const columns: [string, number][] = [['relname', TEXT], ['indisunique', BOOL], ['indisprimary', BOOL], ['array_agg', array]];
+      const columns: [string, number][] = [['relname', NAME], ['indisunique', BOOL], ['indisprimary', BOOL], ['array_agg', arrays[0]]];
       return resultSet(columns, [
         ['orders_pkey', 't', 't', '{tenant_id,id}'],
         ['orders_customer_idx', 'f', 'f', '{customer_id}'],
       ]);
     }
     if (/FROM pg_constraint con/.test(sql)) {
-      const columns: [string, number][] = [['conname', TEXT], ['nspname', TEXT], ['relname', TEXT], ['nspname', TEXT], ['relname', TEXT], ['array_agg', array], ['array_agg', array], ['?column?', BOOL]];
+      const columns: [string, number][] = [['conname', NAME], ['nspname', NAME], ['relname', NAME], ['nspname', NAME], ['relname', NAME], ['array_agg', arrays[0]], ['array_agg', arrays[1]], ['?column?', BOOL]];
       return resultSet(columns, [
         ['orders_customer_fk', 'public', 'orders', 'public', 'customers', '{customer_id}', '{id}', 't'],
         ['items_order_fk', 'public', 'items', 'public', 'orders', '{tenant_id,order_id}', '{tenant_id,id}', 'f'],

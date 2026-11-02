@@ -448,11 +448,11 @@ export default definePart({
       byId.out.ok && draftOfSaved.out.ok && fakePg.seen.passwords.slice(passwordsBefore).every((p) => p === 'pg-secret') && fakePg.seen.passwords.length === passwordsBefore + 2,
       { byId, draftOfSaved },
     );
-    // What makes a PostgreSQL table editable: catalog names come as name[], which pg does not turn into arrays by itself.
+    // The grid's editing needs this key: catalog names come as name[], which pg does not turn into arrays by itself. The edit itself runs in the live checks above.
     const pgOrders = await outcome('db.schema.table', { connectionId: pgSaved.id, table: 'orders' });
     const pgOrdersDetail = pgOrders.ok ? (pgOrders.value as DbTableDetail) : null;
     check(
-      'db: a postgres table comes back with its composite key, index and foreign key columns as lists, so its grid can edit',
+      'db: a postgres table comes back with its composite key, index and foreign key columns as lists',
       JSON.stringify(pgOrdersDetail?.primaryKey) === JSON.stringify(['tenant_id', 'id']) &&
         JSON.stringify(pgOrdersDetail?.indexes.map((i) => i.columns)) === JSON.stringify([['tenant_id', 'id'], ['customer_id']]) &&
         JSON.stringify(pgOrdersDetail?.foreignKeys.map((k) => [k.columns, k.refColumns])) === JSON.stringify([[['customer_id'], ['id']]]) &&
