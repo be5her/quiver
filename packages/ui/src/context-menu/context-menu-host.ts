@@ -45,12 +45,16 @@ export class ContextMenuHost {
       document.addEventListener('mousedown', onDown, true);
       window.addEventListener('blur', close);
       window.addEventListener('resize', close);
-      document.addEventListener('scroll', close, true);
+      // A long menu scrolls: only a scroll of what is behind it leaves it pointing at the wrong place.
+      const onScroll = (e: Event) => {
+        if (!this.panel()?.nativeElement.contains(e.target as Node)) close();
+      };
+      document.addEventListener('scroll', onScroll, true);
       onCleanup(() => {
         document.removeEventListener('mousedown', onDown, true);
         window.removeEventListener('blur', close);
         window.removeEventListener('resize', close);
-        document.removeEventListener('scroll', close, true);
+        document.removeEventListener('scroll', onScroll, true);
       });
     });
   }

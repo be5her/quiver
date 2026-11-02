@@ -1,3 +1,4 @@
+import type { NetScanHost } from './net-scan';
 import type { NetworkConfig } from './network';
 import type { ActivityBarLayout } from './activity-bar';
 import type { McpAgent, McpRecordingStatus } from './models/mcp-recording';
@@ -405,6 +406,8 @@ export interface HostEvents {
   'runner.changed': { workspaceId: string; reason: 'tasks' | 'state' | 'output'; taskId?: string; runId?: string };
   /** Queues: connections changed (`connections`), messages were produced or purged (`messages`), or a live consumer got messages or ended (`consumer`); `destination` when one topic or queue was touched. */
   'queues.changed': { workspaceId: string; reason: 'connections' | 'messages' | 'consumer'; connectionId?: string; consumerId?: string; destination?: string };
+  /** Tools: a network scan got through more addresses (`done` of `total`), with the host just found, if any. */
+  'tools.netscan.progress': { scanId: string; done: number; total: number; host?: NetScanHost };
   /** The in-app updater moved: checking, a version found, download progress, downloaded, or an error. */
   'app.update': UpdateState;
 }

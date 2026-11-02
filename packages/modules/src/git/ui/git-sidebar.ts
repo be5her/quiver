@@ -10,6 +10,7 @@ import {
   ChevronDown,
   ChevronRight,
   Check,
+  CloudOff,
   CloudUpload,
   Download,
   GitBranch as GitBranchIcon,
@@ -372,6 +373,9 @@ function withOrigin(files: readonly GitFileChange[]): string[] {
           >
             <svg [qIcon]="b.current ? icons.Check : icons.GitBranchIcon" class="size-3.5 shrink-0" [class]="b.current ? 'text-accent' : 'text-muted'"></svg>
             <span class="truncate text-[13px] flex-1" [class.font-medium]="b.current">{{ b.name }}</span>
+            @if (b.gone) {
+              <span class="shrink-0 text-warning" [title]="'Deleted on the remote: ' + b.upstream + ' no longer exists there'" data-testid="git-branch-gone"><svg [qIcon]="icons.CloudOff" class="size-3.5"></svg></span>
+            }
             @if (b.ahead || b.behind) {
               <span class="text-[10px] text-muted shrink-0">↑{{ b.ahead }} ↓{{ b.behind }}</span>
             }
@@ -410,7 +414,7 @@ export class GitSidebar {
   private readonly app = inject(AppState);
   protected readonly modKey = inject(HostBridge).modKey;
 
-  protected readonly icons = { Archive, ArchiveRestore, ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, CloudUpload, Download, GitBranchIcon, GitPullRequest, History, ListTree, PackageOpen, RefreshCw, Plus, Trash2 };
+  protected readonly icons = { Archive, ArchiveRestore, ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, CloudOff, CloudUpload, Download, GitBranchIcon, GitPullRequest, History, ListTree, PackageOpen, RefreshCw, Plus, Trash2 };
   protected readonly status = invokeResource<GitStatus>('git.status');
   // The same sidebar serves every workspace with Git on screen, so another repository's files never show here.
   /** The status of the workspace on screen, once read. */

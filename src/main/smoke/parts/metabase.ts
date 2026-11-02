@@ -464,6 +464,8 @@ export default definePart({
         // The host checks end signed in; the sidebar shows both connections and the browser one's tree.
         await js(`document.querySelector('[data-testid=activity-item][data-drag-id=metabase]')?.click()`);
         await until(async () => Boolean(await js(`Boolean(${v('[data-testid=mb-sidebar]')})`)), 4000);
+        // The sidebar draws before its list has loaded.
+        await until(async () => Boolean(await js(`document.querySelectorAll('[data-testid=mb-connection-row]').length > 0`)), 4000);
         const rows = (await js(`[...document.querySelectorAll('[data-testid=mb-connection-row]')].map((r) => [r.textContent.trim(), Boolean(r.querySelector('[data-testid=mb-session-dot]'))])`)) as [string, boolean][];
         check(
           'ui: metabase: the sidebar lists the connections with a session dot',

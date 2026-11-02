@@ -2,7 +2,7 @@ import { Component, computed, inject, input, linkedSignal, signal } from '@angul
 import { FormField, form } from '@angular/forms/signals';
 import type { GitBranch, GitTag } from '@quiver/core';
 import { Badge, Button, Checkbox, ContextMenu, EmptyState, Icon, IconButton, Input, Spinner, invokeResource, type Tab, type TabComponent } from '@quiver/ui';
-import { ArrowDown, ArrowUp, Brush, Check, Cloud, Ellipsis, FolderGit2, GitBranch as GitBranchIcon, RefreshCw, Tag } from 'lucide';
+import { ArrowDown, ArrowUp, Brush, Check, Cloud, CloudOff, Ellipsis, FolderGit2, GitBranch as GitBranchIcon, RefreshCw, Tag } from 'lucide';
 import { GitActions } from './git-actions';
 import { GitWorktreeActions } from './worktree-actions';
 import { injectGitChanged } from './git-events';
@@ -10,7 +10,8 @@ import { ago, cleanupCandidates, refMatches } from './git-format';
 
 /**
  * Every branch and tag of the repository: local branches with their upstream, ahead/behind, last commit and the
- * current, merged and gone badges, then the remote branches and the tags, all under one filter. Each row has a menu
+ * current, merged and deleted-on-remote badges, then the remote branches, the ones deleted there that a local branch
+ * still tracks, and the tags, all under one filter. Each row has a menu
  * (the ⋯ button or a right-click) with what can be done to it; "Clean up" lists the merged and gone local branches
  * to delete in one go.
  */
@@ -37,7 +38,7 @@ import { ago, cleanupCandidates, refMatches } from './git-format';
             class="shrink-0 whitespace-nowrap"
             [icon]="icons.Brush"
             [disabled]="!candidates().length"
-            [title]="candidates().length ? '' : 'No local branch is merged or gone'"
+            [title]="candidates().length ? '' : 'No local branch is merged or deleted on the remote'"
             data-testid="git-branches-cleanup"
             (click)="openCleanup()"
           >
@@ -64,7 +65,7 @@ import { ago, cleanupCandidates, refMatches } from './git-format';
                     <span qBadge class="text-success shrink-0">merged</span>
                   }
                   @if (b.gone) {
-                    <span qBadge class="text-warning shrink-0" title="Its upstream was deleted on the remote">gone</span>
+                    <span qBadge class="text-warning shrink-0 gap-1" [title]="b.upstream + ' was deleted on the remote; this local branch is still here'" data-testid="git-branches-gone"><svg [qIcon]="icons.CloudOff" class="size-3"></svg>deleted on remote</span>
                   }
                   <span class="flex-1 truncate text-xs text-muted min-w-0">{{ b.subject }}</span>
                   <span class="text-[11px] text-muted shrink-0">{{ ago(b.date) }}</span>
@@ -72,7 +73,7 @@ import { ago, cleanupCandidates, refMatches } from './git-format';
               }
             </div>
             <div class="flex items-center gap-2">
-              <span class="text-xs text-muted flex-1">A gone branch that is not merged asks again before it is deleted with force.</span>
+              <span class="text-xs text-muted flex-1">A branch deleted on the remote that is not merged asks again before it is deleted with force.</span>
               <button qButton size="sm" variant="ghost" data-testid="git-cleanup-cancel" (click)="view.set('list')">Cancel</button>
               <button qButton size="sm" variant="danger" [disabled]="!picked().size" [loading]="cleaning()" data-testid="git-cleanup-delete" (click)="cleanUp()">
                 Delete {{ picked().size }} branch{{ picked().size === 1 ? '' : 'es' }}
@@ -105,7 +106,7 @@ import { ago, cleanupCandidates, refMatches } from './git-format';
                 <span qBadge class="text-success shrink-0" title="Its commits are all in the default branch">merged</span>
               }
               @if (b.gone) {
-                <span qBadge class="text-warning shrink-0" title="Its upstream was deleted on the remote">gone</span>
+                <span qBadge class="text-warning shrink-0 gap-1" [title]="b.upstream + ' was deleted on the remote; this local branch is still here'" data-testid="git-branches-gone"><svg [qIcon]="icons.CloudOff" class="size-3"></svg>deleted on remote</span>
               }
               @if (b.worktreePath; as wtPath) {
                 <span qBadge class="shrink-0 gap-1 cursor-pointer hover:text-fg" [title]="'Checked out in the worktree at ' + wtPath + '\nClick to open it as a workspace'" data-testid="git-branches-worktree" (click)="worktrees.open(wtPath)">
@@ -142,6 +143,20 @@ import { ago, cleanupCandidates, refMatches } from './git-format';
             </div>
           } @empty {
             <p class="px-3 py-1 text-xs text-muted">{{ filtering() ? 'No remote branch matches.' : 'No remote branches. Fetch to see them, or add a remote in a terminal.' }}</p>
+          }
+
+          @if (deletedOnRemote().length) {
+            <p class="px-3 pt-4 pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted" title="Branches a local branch still tracks that the last fetch found gone from the remote. Fetch to see the latest." data-testid="git-branches-deleted-title">Deleted on the remote · {{ deletedOnRemote().length }}</p>
+            @for (b of deletedOnRemote(); track b.name) {
+              <div class="group flex items-center gap-2 px-3 h-8 hover:bg-elevated min-w-0" data-testid="git-branches-row" data-kind="deleted" [attr.data-name]="b.upstream" (contextmenu)="branchMenu($event, b)">
+                <svg [qIcon]="icons.CloudOff" class="size-3.5 shrink-0 text-warning"></svg>
+                <span class="text-[13px] truncate max-w-[35%] line-through text-muted" [title]="b.upstream">{{ b.upstream }}</span>
+                <span class="text-[11px] text-muted shrink-0 truncate" [title]="'The local branch ' + b.name + ' is still here'">local: {{ b.name }}</span>
+                <span class="flex-1 truncate text-xs text-muted min-w-0" [title]="b.subject">{{ b.subject }}</span>
+                <span class="text-[11px] text-muted shrink-0" [title]="b.date">{{ ago(b.date) }}</span>
+                <button qIconButton label="Actions" size="sm" data-testid="git-branches-menu" (click)="branchMenu($event, b)"><svg [qIcon]="icons.Ellipsis" class="size-3.5"></svg></button>
+              </div>
+            }
           }
 
           <p class="px-3 pt-4 pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted">Tags · {{ tagList().length }}</p>
@@ -181,7 +196,7 @@ export class GitBranchesTab implements TabComponent {
   readonly scope = input.required<string>();
 
   protected readonly worktrees = inject(GitWorktreeActions);
-  protected readonly icons = { ArrowDown, ArrowUp, Brush, Check, Cloud, Ellipsis, FolderGit2, GitBranchIcon, RefreshCw, Tag };
+  protected readonly icons = { ArrowDown, ArrowUp, Brush, Check, Cloud, CloudOff, Ellipsis, FolderGit2, GitBranchIcon, RefreshCw, Tag };
   protected readonly branches = invokeResource<GitBranch[]>('git.branch.list');
   protected readonly tags = invokeResource<GitTag[]>('git.tag.list');
   protected readonly ago = ago;
@@ -195,6 +210,8 @@ export class GitBranchesTab implements TabComponent {
   protected readonly currentName = computed(() => this.all().find((b) => b.current)?.name ?? null);
   protected readonly local = computed(() => this.all().filter((b) => !b.remote && refMatches(b, this.filter())));
   protected readonly remote = computed(() => this.all().filter((b) => b.remote && refMatches(b, this.filter())));
+  /** What git knows was deleted on the remote: the upstreams of local branches, as of the last fetch that pruned. */
+  protected readonly deletedOnRemote = computed(() => this.local().filter((b) => b.gone && b.upstream));
   protected readonly tagList = computed(() => (this.tags.value() ?? []).filter((t) => refMatches(t, this.filter())));
   protected readonly candidates = computed(() => cleanupCandidates(this.all()));
   /** Ticked in Clean up: every merged branch to begin with; a gone one only when ticked, since it may hold unmerged work. */

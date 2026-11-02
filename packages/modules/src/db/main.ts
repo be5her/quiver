@@ -238,6 +238,54 @@ const connectionTest = defineCommand({
   },
 });
 
+/** PostgreSQL always connects to one database. These are tried in turn when the one named does not exist or refuses this user. */
+const POSTGRES_MAINTENANCE_DATABASES = ['postgres', 'template1'];
+const DATABASE_UNAVAILABLE = new Set(['3D000', '42501']);
+
+const connectionDatabases = defineCommand({
+  id: 'db.connection.databases',
+  title: 'List the databases on a server',
+  description:
+    'Lists the databases on a MySQL or PostgreSQL server, to pick the one a connection should use. Pass a saved id, or an inline connection (with optional password) before saving; its database may be empty or wrong. For PostgreSQL, which has to connect to some database, it tries the one named and then postgres and template1. The server decides what the user may see.',
+  scope: 'workspace',
+  input: z.object({
+    id: z.string().optional(),
+    connection: DbConnectionDraftSchema.optional(),
+    password: z.string().optional(),
+  }),
+  // The same rule as db.connection.test: it connects with the same details.
+  mutating: async ({ connection, password }, ctx) => (connection ? draftNeedsMutations(ws(ctx), connection, password) : false),
+  handler: async (input, ctx): Promise<string[]> => {
+    const w = ws(ctx);
+    let draft: DbConnection;
+    let password: string;
+    if (input.connection) {
+      draft = checkedAccess(DbConnectionSchema.parse({ ...newDbConnection(input.connection.kind), ...input.connection, id: input.connection.id ?? 'draft' }));
+      password = input.password ?? (input.connection.id ? await readPassword(w, ctx.host, input.connection.id) : '');
+    } else if (input.id) {
+      draft = await getConnection(w, input.id);
+      password = await readPassword(w, ctx.host, input.id);
+    } else {
+      throw new QuiverError('INVALID_INPUT', 'Provide id or connection');
+    }
+    if (draft.kind === 'mysql') return withTemporaryDriver({ ...draft, database: '' }, password, w, ctx.host, (d) => d.databases());
+    if (draft.kind !== 'postgres') throw new QuiverError('INVALID_INPUT', `A ${draft.kind} connection has no databases to pick from`);
+    const names = [...new Set([draft.database.trim(), ...POSTGRES_MAINTENANCE_DATABASES].filter(Boolean))];
+    let firstRefusal: unknown;
+    for (const database of names) {
+      try {
+        return await withTemporaryDriver({ ...draft, database }, password, w, ctx.host, (d) => d.serverDatabases!());
+      } catch (err) {
+        const code = err instanceof QuiverError ? (err.details as { code?: unknown } | undefined)?.code : undefined;
+        if (typeof code !== 'string' || !DATABASE_UNAVAILABLE.has(code)) throw err;
+        firstRefusal ??= err;
+      }
+    }
+    // What was asked for says more than "permission denied for template1".
+    throw firstRefusal;
+  },
+});
+
 const connectionDisconnect = defineCommand({
   id: 'db.connection.disconnect',
   title: 'Disconnect database',
@@ -779,6 +827,7 @@ export const dbModule = defineModule({
     connectionSave,
     connectionDelete,
     connectionTest,
+    connectionDatabases,
     connectionDisconnect,
     schemaDatabases,
     schemaTables,

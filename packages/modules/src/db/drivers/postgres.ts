@@ -85,6 +85,12 @@ export class PostgresDriver implements Driver {
     return { serverVersion: /^PostgreSQL\s+\S+/.exec(full)?.[0] ?? full };
   }
 
+  /** The databases on the server one can connect to, whichever this connection is in. */
+  async serverDatabases(): Promise<string[]> {
+    const { rows } = await this.query('SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate ORDER BY datname');
+    return rows.map((r) => String(r[0]));
+  }
+
   /** Schemas of the connected database, system ones left out. */
   async databases(): Promise<string[]> {
     const { rows } = await this.query(

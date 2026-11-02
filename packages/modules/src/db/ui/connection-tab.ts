@@ -13,7 +13,7 @@ import {
   type DbConnectionTest,
   type DbKind,
 } from '@quiver/core';
-import { AppState, Autofocus, Badge, Button, Checkbox, HostBridge, Icon, Input, Label, Select, Spinner, TabsState, Toasts, VariableInput, type Tab, type TabComponent } from '@quiver/ui';
+import { AppState, Autofocus, Badge, Button, Checkbox, ContextMenu, HostBridge, Icon, Input, Label, Select, Spinner, TabsState, Toasts, VariableInput, type Tab, type TabComponent } from '@quiver/ui';
 import { ChevronDown, ChevronRight, FolderOpen, Link2, PlugZap, Save } from 'lucide';
 import { ApiVariables } from '../../api/ui/api-variables';
 import { KindIcon } from './kind-icon';
@@ -64,6 +64,7 @@ export class ConnectionTab implements TabComponent {
   private readonly host = inject(HostBridge);
   private readonly tabs = inject(TabsState);
   private readonly toasts = inject(Toasts);
+  private readonly contextMenu = inject(ContextMenu);
 
   readonly tab = input.required<Tab>();
   readonly scope = input.required<string>();
@@ -101,6 +102,8 @@ export class ConnectionTab implements TabComponent {
   protected readonly secretForm = form(this.secret, (p) => disabled(p.password, ({ valueOf }) => valueOf(p.clearPassword)));
   protected readonly testing = signal(false);
   protected readonly testResult = signal<{ ok: boolean; message: string } | null>(null);
+  protected readonly listingDatabases = signal(false);
+  protected readonly databasesError = signal<string | null>(null);
   /** The URL box at the top; it empties itself once it filled the form. */
   protected readonly url = signal('');
   /** The Access section is folded while the connection is direct. */
@@ -280,6 +283,39 @@ export class ConnectionTab implements TabComponent {
       this.toasts.notify('Connection saved', 'success');
     } catch (err) {
       this.toasts.error(err);
+    }
+  }
+
+  /**
+   * The databases on the server, as a menu under the button. It only connects when asked: dialling on every keystroke
+   * would send the stored password to each half-typed host and start tunnels.
+   */
+  protected async listDatabases(event: MouseEvent): Promise<void> {
+    if (this.listingDatabases()) return;
+    const conn = this.connection();
+    const { password, clearPassword } = this.secret();
+    const button = event.currentTarget as HTMLElement;
+    this.listingDatabases.set(true);
+    this.databasesError.set(null);
+    try {
+      const names = await this.host.invoke<string[]>('db.connection.databases', {
+        connection: this.isNew() ? { ...conn, id: undefined } : conn,
+        password: password || (clearPassword ? '' : undefined),
+      });
+      if (!names.length) {
+        this.databasesError.set('The server lists no databases for this user.');
+        return;
+      }
+      // The answer can take as long as a connection timeout: by then this tab may be closed or behind another.
+      if (!button.offsetParent) return;
+      const { left, bottom } = button.getBoundingClientRect();
+      const at = new MouseEvent('click', { clientX: left, clientY: bottom + 4 });
+      const current = this.connection().database;
+      this.contextMenu.open(at, names.map((name) => ({ label: name, checked: name === current, testId: 'db-database-option', select: () => this.patch({ database: name }) })));
+    } catch (err) {
+      this.databasesError.set(toErrorPayload(err).message);
+    } finally {
+      this.listingDatabases.set(false);
     }
   }
 

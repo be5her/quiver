@@ -44,9 +44,9 @@ export interface ToolDescriptor {
   live?: boolean;
   /**
    * How the tool is drawn: text in the input and output editors (the default); 'qr' draws the QR tool's symbol from its
-   * result in place of the output editor; 'dns' is a view of its own in place of both editors (the DNS lookup's tables).
+   * result in place of the output editor; 'dns' and 'netscan' are views of their own in place of both editors.
    */
-  render?: 'qr' | 'dns';
+  render?: 'qr' | 'dns' | 'netscan';
 }
 
 /** The JWT tab's verdict once a key is given: valid and when it expires, or what is wrong. */
@@ -169,6 +169,7 @@ export const TOOLS: ToolDescriptor[] = [
     live: true,
   },
   { id: 'dns', title: 'DNS lookup', description: 'Every record type, the CNAME chain, any resolver.', commandId: 'tools.dns.lookup', render: 'dns' },
+  { id: 'netscan', title: 'Network scanner', description: 'The machines on a private network and their open ports.', commandId: 'tools.netscan.run', render: 'netscan' },
 ];
 
 /** The option values as the command takes them. */

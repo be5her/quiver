@@ -2,6 +2,7 @@ import { Component, computed, effect, inject, input, linkedSignal, signal, untra
 import { toErrorPayload } from '@quiver/core';
 import { Button, Checkbox, CodeEditor, HostBridge, Select, type Tab, type TabComponent } from '@quiver/ui';
 import { DnsLookup } from './dns-lookup';
+import { NetScan } from './net-scan';
 import { QrOutput, type QrResult } from './qr-output';
 import { TOOLS, coerce, type ToolOption, type ToolSummary } from './tools';
 
@@ -10,7 +11,7 @@ type OptionValue = string | boolean | number;
 /** One converter: the input on the left, the output on the right, options in the header. */
 @Component({
   selector: 'q-tool-tab',
-  imports: [Button, Checkbox, CodeEditor, DnsLookup, QrOutput, Select],
+  imports: [Button, Checkbox, CodeEditor, DnsLookup, NetScan, QrOutput, Select],
   templateUrl: './tool-tab.html',
   host: { class: 'flex flex-col h-full min-h-0' },
 })

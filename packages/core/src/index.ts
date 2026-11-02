@@ -66,3 +66,4 @@ export * from './junit';
 export * from './file-tree';
 export * from './qr';
 export * from './dns-lookup';
+export * from './net-scan';

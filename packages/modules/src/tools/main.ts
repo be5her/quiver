@@ -26,6 +26,7 @@ import {
 } from '@quiver/core';
 import { JWT_ALGORITHMS, jwtParts, verifyJwt } from '@quiver/core/node';
 import { z } from 'zod';
+import { netScanCancel, netScanInterfaces, netScanRun } from './net-scan';
 
 function parseJson(text: string): unknown {
   try {
@@ -433,5 +434,5 @@ const dnsLookup = defineCommand({
 
 export const toolsModule = defineModule({
   id: 'tools',
-  commands: [jsonFormat, jsonMinify, base64Encode, base64Decode, urlEncode, urlDecode, jwtDecode, jwtVerify, uuidGenerate, hashDigest, timestampConvert, qrEncode, dnsLookup],
+  commands: [jsonFormat, jsonMinify, base64Encode, base64Decode, urlEncode, urlDecode, jwtDecode, jwtVerify, uuidGenerate, hashDigest, timestampConvert, qrEncode, dnsLookup, netScanInterfaces, netScanRun, netScanCancel],
 });

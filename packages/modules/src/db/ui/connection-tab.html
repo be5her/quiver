@@ -71,7 +71,13 @@
           @if (conn.kind === 'mysql' || conn.kind === 'postgres') {
             <div>
               <label qLabel>{{ conn.kind === 'postgres' ? 'Database' : 'Default database (optional)' }}</label>
-              <q-variable-input [formField]="connectionForm.database" inputClass="font-mono" [placeholder]="conn.kind === 'postgres' ? 'postgres' : 'app'" />
+              <div class="flex gap-2">
+                <q-variable-input [formField]="connectionForm.database" inputClass="font-mono" [placeholder]="conn.kind === 'postgres' ? 'postgres' : 'app'" />
+                <button qButton variant="secondary" class="shrink-0" [icon]="icons.ChevronDown" [loading]="listingDatabases()" title="Connect with the details above and list the databases on the server" data-testid="db-database-list" (click)="listDatabases($event)">List</button>
+              </div>
+              @if (databasesError(); as error) {
+                <p class="text-xs text-danger mt-1 break-words" role="status" data-testid="db-database-error">{{ error }}</p>
+              }
               @if (conn.kind === 'postgres') {
                 <p class="text-xs text-muted mt-1">The tree lists this database's schemas; queries run with <code class="font-mono">public</code> first on the search path.@if (conn.access.type === 'teleport') {<span> Required through Teleport: tsh passes it as <code class="font-mono">--db-name</code>.</span>}</p>
               }
