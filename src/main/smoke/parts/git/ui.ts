@@ -320,6 +320,10 @@ const section: SmokeSection = async ({ check, run, ws: mainWs }) => ({
 
       // The Branches tab: local branches with their badges, remote branches and tags, a filter, a menu and Clean up.
       await sh('branch', 'ui/merged', 'main');
+      // Tracks a branch origin no longer has: what a fetch that prunes leaves behind.
+      await sh('branch', 'ui/pruned', 'main');
+      await sh('config', 'branch.ui/pruned.remote', 'origin');
+      await sh('config', 'branch.ui/pruned.merge', 'refs/heads/ui/pruned');
       await sh('tag', 'v0.1', 'HEAD~1');
       await click('[data-testid=git-open-branches]');
       const rowsOf = () =>
@@ -331,6 +335,19 @@ const section: SmokeSection = async ({ check, run, ws: mainWs }) => ({
         branchesShown && branchRows.includes('local:ui/ops:current') && branchRows.includes('local:ui/merged:merged') && branchRows.includes('local:main:') && branchRows.includes('tag:v0.1:'),
         branchRows,
       );
+      const deleted = await js(`(() => {
+        const tab = ${visible('[data-testid=git-branches-tab]')};
+        const local = tab?.querySelector('[data-testid=git-branches-row][data-kind=local][data-name="ui/pruned"]');
+        const row = tab?.querySelector('[data-testid=git-branches-row][data-kind=deleted]');
+        return { badge: local?.querySelector('[data-testid=git-branches-gone]')?.textContent.trim() ?? null, gone: local?.getAttribute('data-gone'), upstream: row?.getAttribute('data-name') ?? null, title: tab?.querySelector('[data-testid=git-branches-deleted-title]')?.textContent.trim() ?? null, text: row?.textContent ?? '', rows: tab?.querySelectorAll('[data-testid=git-branches-row][data-kind=deleted]').length };
+      })()`) as { badge: string | null; gone: string; upstream: string | null; title: string | null; text: string; rows: number };
+      check(
+        'git ui: a branch whose upstream was deleted is marked on its local row and listed under Deleted on the remote, naming the local branch left',
+        deleted.badge === 'deleted on remote' && deleted.gone === 'true' && deleted.upstream === 'origin/ui/pruned' && deleted.rows === 1 && /Deleted on the remote · 1/.test(deleted.title ?? '') && deleted.text.includes('local: ui/pruned'),
+        deleted,
+      );
+      const sidebarGone = await waitFor(`Boolean(document.querySelector('[data-testid=git-branch][data-name="ui/pruned"] [data-testid=git-branch-gone]')) && !document.querySelector('[data-testid=git-branch][data-name="ui/merged"] [data-testid=git-branch-gone]')`, 4000);
+      check('git ui: the sidebar marks only the branch deleted on the remote', sidebarGone);
       await shot('32o-git-branches-light');
       await js(`document.documentElement.classList.add('dark')`);
       await wait(150);

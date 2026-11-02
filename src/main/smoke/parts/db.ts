@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { parseConnectionUrl } from '@quiver/core';
 import type { DbConnectionSummary, DbExportResult, DbSchemaMatch, DbTableApplyResult, DbTableColumns, DbConnectionTest, DbHistoryEntry, DbQueryResult, DbTable, DbTableDetail, RedisInfo, DbTableRows, RedisKeyDetail, RedisScanResult, SavedQuery } from '@quiver/core';
+import { startFakePostgres } from '../fake-postgres';
 import { definePart, until } from '../part';
 
 export default definePart({
@@ -398,6 +399,48 @@ export default definePart({
       console.log('SKIP db: postgres (set QUIVER_SMOKE_POSTGRES=postgres://user:pass@host:port/db to run)');
     }
 
+    // ---------- the databases on a server, for the connection form: the fake PostgreSQL ----------
+    const fakePg = await startFakePostgres({ password: 'pg-secret', databases: ['analytics', 'app', 'postgres'], missing: ['nope'], denied: ['locked'] });
+    const pgDraft = (database: string) => ({ kind: 'postgres', name: '', host: '127.0.0.1', port: fakePg.port, user: 'dev', database });
+    const listed = async (input: unknown) => {
+      const before = fakePg.seen.connects.length;
+      const out = await outcome('db.connection.databases', input);
+      return { out, tried: fakePg.seen.connects.slice(before).map((c) => c.database) };
+    };
+    const blank = await listed({ connection: pgDraft(''), password: 'pg-secret' });
+    check(
+      'db: an empty Database lists the server through the postgres database, not one named after the user',
+      blank.out.ok && JSON.stringify(blank.out.value) === JSON.stringify(['analytics', 'app', 'postgres']) && blank.tried.join() === 'postgres',
+      blank,
+    );
+    const mistyped = await listed({ connection: pgDraft('nope'), password: 'pg-secret' });
+    const locked = await listed({ connection: pgDraft('locked'), password: 'pg-secret' });
+    check(
+      'db: a database that does not exist or refuses the user falls back to postgres',
+      mistyped.out.ok && mistyped.tried.join() === 'nope,postgres' && locked.out.ok && locked.tried.join() === 'locked,postgres',
+      { mistyped, locked },
+    );
+    const pgWrongPassword = await listed({ connection: pgDraft('app'), password: 'wrong' });
+    check('db: a wrong password is reported once, not retried on other databases', !pgWrongPassword.out.ok && /password authentication failed/.test(said(pgWrongPassword.out)) && pgWrongPassword.tried.join() === 'app', pgWrongPassword);
+    const pgSaved = await run<DbConnectionSummary>('db.connection.save', { connection: { ...pgDraft('app'), name: 'fake postgres' }, password: 'pg-secret' }, ws.id);
+    const passwordsBefore = fakePg.seen.passwords.length;
+    const byId = await listed({ id: pgSaved.id });
+    const draftOfSaved = await listed({ connection: { ...pgDraft('app'), id: pgSaved.id, name: 'fake postgres' } });
+    check(
+      'db: a saved connection lists with its stored password, by id and from the form',
+      byId.out.ok && draftOfSaved.out.ok && fakePg.seen.passwords.slice(passwordsBefore).every((p) => p === 'pg-secret') && fakePg.seen.passwords.length === passwordsBefore + 2,
+      { byId, draftOfSaved },
+    );
+    const notServer = await outcome('db.connection.databases', { id: sqlite.id });
+    check('db: SQLite has no databases to pick from', !notServer.ok && /no databases to pick/.test(said(notServer)), said(notServer));
+    const agentById = await outcome('db.connection.databases', { id: pgSaved.id }, 'mcp');
+    const agentElsewhere = await outcome('db.connection.databases', { connection: { ...pgDraft('app'), id: pgSaved.id, name: 'fake postgres', host: 'attacker.example' } }, 'mcp');
+    check(
+      'db: agents may list a saved connection, but not send its stored password to another host',
+      names.includes('db_connection_databases') && agentById.ok && !agentElsewhere.ok && agentElsewhere.code === 'MUTATION_BLOCKED',
+      { agentById: said(agentById), agentElsewhere: said(agentElsewhere) },
+    );
+
     check('mcp lists db tools', names.includes('db_query_run') && names.includes('db_redis_keys') && names.includes('db_table_rows'));
     const mcpRead = await rpc('tools/call', { name: 'db_query_run', arguments: { connectionId: sqlite.id, query: 'SELECT name FROM users ORDER BY id' } });
     const mcpRows = JSON.parse(mcpRead.result?.content?.[0]?.text ?? '[]') as DbQueryResult[];
@@ -438,6 +481,7 @@ export default definePart({
     }
 
     return {
+      after: () => fakePg.close(),
       ui: async (u) => {
         const { win, js, wait, shot } = u;
         // Databases module: sidebar tree, table browser, query editor, redis keys.
@@ -739,6 +783,42 @@ export default definePart({
             browser,
           );
           await shot('08c-redis-grafana-keys-dark');
+        }
+        // The connection form lists the server's databases on request and fills the field with the one picked.
+        {
+          await js(`document.documentElement.classList.remove('dark')`);
+          await js(`[...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.title || '').includes('Databases'))?.click()`);
+          await wait(300);
+          await js(`[...document.querySelectorAll('[data-testid=db-connection-row]')].find((r) => r.textContent.includes('fake postgres'))?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 200, clientY: 200 }))`);
+          await wait(150);
+          await js(`[...document.querySelectorAll('[data-testid=context-menu] button')].find((b) => b.textContent.includes('Edit connection'))?.click()`);
+          const button = `[...document.querySelectorAll('[data-testid=db-database-list]')].find((b) => b.offsetParent !== null)`;
+          await until(() => js(`Boolean(${button})`) as Promise<boolean>, 4000);
+          await js(`${button}?.click()`);
+          await until(() => js(`document.querySelectorAll('[data-testid=db-database-option]').length > 0`) as Promise<boolean>, 6000);
+          const options = (await js(`[...document.querySelectorAll('[data-testid=db-database-option]')].map((o) => [o.textContent.trim(), o.getAttribute('aria-checked')])`)) as [string, string][];
+          await shot('08d-db-database-list');
+          await js(`[...document.querySelectorAll('[data-testid=db-database-option]')].find((o) => o.textContent.trim() === 'analytics')?.click()`);
+          await wait(200);
+          const picked = await js(`[...${button}.parentElement.querySelectorAll('input')][0]?.value`);
+          const dirty = await js(`[...document.querySelectorAll('button[title="Ctrl+S"]')].find((b) => b.offsetParent !== null)?.textContent.trim()`);
+          check(
+            'ui: List shows the databases on the server with the current one ticked, and picking one fills the field unsaved',
+            JSON.stringify(options) === JSON.stringify([['analytics', 'false'], ['app', 'true'], ['postgres', 'false']]) && picked === 'analytics' && dirty === 'Save*',
+            { options, picked, dirty },
+          );
+          // A wrong address says why under the field, and no menu opens.
+          const setHost = `(() => { const input = [...document.querySelectorAll('input[type=number]')].find((i) => i.offsetParent !== null); input.value = '1'; input.dispatchEvent(new Event('input', { bubbles: true })); })()`;
+          await js(setHost);
+          await wait(100);
+          await js(`${button}?.click()`);
+          await until(() => js(`Boolean([...document.querySelectorAll('[data-testid=db-database-error]')].find((e) => e.offsetParent !== null))`) as Promise<boolean>, 15000);
+          const listError = await js(`[...document.querySelectorAll('[data-testid=db-database-error]')].find((e) => e.offsetParent !== null)?.textContent.trim() ?? null`);
+          check('ui: a server that cannot be reached says so under the field, with no menu', typeof listError === 'string' && listError.length > 0 && (await js(`document.querySelectorAll('[data-testid=db-database-option]').length`)) === 0, listError);
+          await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+          await wait(300);
+          await js(`[...document.querySelectorAll('[role=dialog] button, [data-testid=dialog] button')].find((b) => /discard|don.t save|close/i.test(b.textContent))?.click()`);
+          await wait(200);
         }
       },
     };

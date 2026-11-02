@@ -334,7 +334,7 @@ export class GitActions {
       await this.dialogs.notice({ title: 'No branch to delete', message: 'The current branch is the only local branch.' });
       return;
     }
-    const picked = await this.pickRef({ title: 'Delete branch', confirmLabel: 'Delete', refs: local.map((b) => ({ name: b.name, label: b.merged ? `${b.name} (merged)` : b.gone ? `${b.name} (gone)` : b.name })) });
+    const picked = await this.pickRef({ title: 'Delete branch', confirmLabel: 'Delete', refs: local.map((b) => ({ name: b.name, label: b.merged ? `${b.name} (merged)` : b.gone ? `${b.name} (deleted on remote)` : b.name })) });
     if (picked) await this.deleteBranch(picked);
   }
 

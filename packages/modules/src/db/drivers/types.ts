@@ -25,6 +25,8 @@ export interface Driver {
   isAlive(): boolean;
   ping(): Promise<{ serverVersion: string }>;
   databases(): Promise<string[]>;
+  /** The databases on the server, for an engine where `databases()` means something narrower (PostgreSQL's schemas). */
+  serverDatabases?(): Promise<string[]>;
   tables(database?: string | null): Promise<DbTable[]>;
   table(name: string, database?: string | null): Promise<DbTableDetail>;
   /** Every table of the database with its columns, in one round trip. */
