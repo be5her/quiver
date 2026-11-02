@@ -1,8 +1,11 @@
 import { createServer, type Socket } from 'node:net';
 
 /**
- * Just enough of PostgreSQL's wire protocol for the database picker: a password check, then `SELECT version()` and the
- * list from pg_database, as plain queries. `missing` databases answer 3D000 (does not exist), `denied` ones 42501.
+ * Just enough of PostgreSQL's wire protocol for the database picker and a table's details: a password check, then
+ * `SELECT version()` and the list from pg_database as plain queries, and the catalog queries behind db.schema.table as
+ * prepared ones, about one table, whichever is asked for. `missing` databases answer 3D000 (does not exist), `denied`
+ * ones 42501. Columns carry the type a real server gives them: `array_agg` of a `name` column is `name[]` unless cast,
+ * which pg leaves as the text `{a,b}`.
  */
 export async function startFakePostgres(options: { password: string; databases: string[]; missing?: string[]; denied?: string[] }) {
   const seen: { connects: { database: string; user: string }[]; passwords: string[] } = { connects: [], passwords: [] };
@@ -22,14 +25,68 @@ export async function startFakePostgres(options: { password: string; databases: 
   const failure = (code: string, text: string) => message('E', Buffer.from(`SFATAL\0C${code}\0M${text}\0\0`, 'utf8'));
   const ready = message('Z', Buffer.from('I'));
 
-  const rows = (column: string, values: string[]) => {
-    const field = Buffer.concat([Buffer.from(`${column}\0`, 'utf8'), int32(0), Buffer.from([0, 0]), int32(25), Buffer.from([0xff, 0xff]), int32(-1), Buffer.from([0, 0])]);
-    const description = message('T', Buffer.concat([Buffer.from([0, 1]), field]));
-    const data = values.map((v) => {
-      const bytes = Buffer.from(v, 'utf8');
-      return message('D', Buffer.concat([Buffer.from([0, 1]), int32(bytes.length), bytes]));
+  const int16 = (n: number) => {
+    const b = Buffer.alloc(2);
+    b.writeInt16BE(n);
+    return b;
+  };
+  const TEXT = 25;
+  const BOOL = 16;
+  const NAME = 19;
+  const CHAR = 18;
+  const NAME_ARRAY = 1003;
+  const TEXT_ARRAY = 1009;
+
+  /** A result set without the ReadyForQuery, which a prepared statement only gets at its Sync. */
+  const resultSet = (columns: [name: string, oid: number][], values: (string | null)[][]) => {
+    const fields = columns.map(([name, oid]) => Buffer.concat([Buffer.from(`${name}\0`, 'utf8'), int32(0), int16(0), int32(oid), int16(-1), int32(-1), int16(0)]));
+    const description = message('T', Buffer.concat([int16(columns.length), ...fields]));
+    const data = values.map((row) => {
+      const cells = row.map((v) => {
+        if (v === null) return int32(-1);
+        const bytes = Buffer.from(v, 'utf8');
+        return Buffer.concat([int32(bytes.length), bytes]);
+      });
+      return message('D', Buffer.concat([int16(row.length), ...cells]));
     });
-    return Buffer.concat([description, ...data, message('C', Buffer.from(`SELECT ${values.length}\0`, 'utf8')), ready]);
+    return Buffer.concat([description, ...data, message('C', Buffer.from(`SELECT ${values.length}\0`, 'utf8'))]);
+  };
+  const rows = (column: string, values: string[]) =>
+    Buffer.concat([
+      resultSet(
+        [[column, TEXT]],
+        values.map((v) => [v]),
+      ),
+      ready,
+    ]);
+
+  /** The catalog's answers for a table with a composite key, an index, a foreign key and a table pointing at it. */
+  const catalog = (sql: string) => {
+    // Each aggregate has its own type, so casting only one of a query's two does not pass for casting both.
+    const arrays = [...sql.matchAll(/array_agg\(a\.attname(::text)?/g)].map((m) => (m[1] ? TEXT_ARRAY : NAME_ARRAY));
+    if (/FROM pg_attribute a LEFT JOIN pg_attrdef/.test(sql)) {
+      const columns: [string, number][] = [['attname', NAME], ['format_type', TEXT], ['attnotnull', BOOL], ['pg_get_expr', TEXT], ['attidentity', CHAR], ['attgenerated', CHAR]];
+      return resultSet(columns, [
+        ['tenant_id', 'integer', 't', null, '', ''],
+        ['id', 'integer', 't', null, '', ''],
+        ['customer_id', 'integer', 'f', null, '', ''],
+      ]);
+    }
+    if (/FROM pg_index ix/.test(sql)) {
+      const columns: [string, number][] = [['relname', NAME], ['indisunique', BOOL], ['indisprimary', BOOL], ['array_agg', arrays[0]]];
+      return resultSet(columns, [
+        ['orders_pkey', 't', 't', '{tenant_id,id}'],
+        ['orders_customer_idx', 'f', 'f', '{customer_id}'],
+      ]);
+    }
+    if (/FROM pg_constraint con/.test(sql)) {
+      const columns: [string, number][] = [['conname', NAME], ['nspname', NAME], ['relname', NAME], ['nspname', NAME], ['relname', NAME], ['array_agg', arrays[0]], ['array_agg', arrays[1]], ['?column?', BOOL]];
+      return resultSet(columns, [
+        ['orders_customer_fk', 'public', 'orders', 'public', 'customers', '{customer_id}', '{id}', 't'],
+        ['items_order_fk', 'public', 'items', 'public', 'orders', '{tenant_id,order_id}', '{tenant_id,id}', 'f'],
+      ]);
+    }
+    return null;
   };
 
   const server = createServer((socket) => {
@@ -39,6 +96,7 @@ export async function startFakePostgres(options: { password: string; databases: 
     let buffer = Buffer.alloc(0);
     let started = false;
     let database = '';
+    let prepared = '';
 
     const startup = (body: Buffer) => {
       const code = body.readInt32BE(0);
@@ -71,8 +129,17 @@ export async function startFakePostgres(options: { password: string; databases: 
         const sql = body.toString('utf8');
         if (/pg_database/.test(sql)) return void socket.write(rows('datname', options.databases));
         if (/version\(\)/.test(sql)) return void socket.write(rows('version', ['PostgreSQL 16.0-fake']));
-        return void socket.write(failure('42601', `The fake does not know: ${sql}`));
+        return void socket.write(Buffer.concat([failure('42601', `The fake does not know: ${sql}`), ready]));
       }
+      // A prepared statement: Parse, Bind, Describe, Execute, Sync. The row description goes out with the rows.
+      if (type === 'P') {
+        const nameEnd = body.indexOf(0);
+        prepared = body.subarray(nameEnd + 1, body.indexOf(0, nameEnd + 1)).toString('utf8');
+        return void socket.write(message('1', Buffer.alloc(0)));
+      }
+      if (type === 'B') return void socket.write(message('2', Buffer.alloc(0)));
+      if (type === 'E') return void socket.write(catalog(prepared) ?? failure('42601', `The fake does not know: ${prepared}`));
+      if (type === 'S') return void socket.write(ready);
       if (type === 'X') socket.end();
     };
 

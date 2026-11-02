@@ -368,9 +368,9 @@ export default definePart({
       const schemas = await run<string[]>('db.schema.databases', { connectionId: pg.id }, ws.id);
       check('db: postgres schemas, public first', schemas[0] === 'public', schemas);
       const table = `quiver_smoke_${Date.now().toString(36)}`;
-      await run('db.query.run', { connectionId: pg.id, query: `CREATE TABLE ${table} (id serial PRIMARY KEY, name text NOT NULL, big bigint, at timestamptz DEFAULT now()); CREATE TABLE ${table}_child (id serial PRIMARY KEY, parent_id int REFERENCES ${table}(id));`, record: false }, ws.id);
+      await run('db.query.run', { connectionId: pg.id, query: `CREATE TABLE ${table} (id serial PRIMARY KEY, name text NOT NULL, big bigint, at timestamptz DEFAULT now()); CREATE TABLE ${table}_child (id serial PRIMARY KEY, parent_id int REFERENCES ${table}(id)); CREATE TABLE ${table}_pair (tenant int, id int, note text, PRIMARY KEY (tenant, id));`, record: false }, ws.id);
       try {
-        const applied = await run<DbTableApplyResult>('db.table.apply', { connectionId: pg.id, table, edits: [{ kind: 'insert', values: { name: 'Ada', big: '12345678901234567890' } }, { kind: 'insert', values: { name: 'Linus' } }] }, ws.id);
+        const applied = await run<DbTableApplyResult>('db.table.apply', { connectionId: pg.id, table, edits: [{ kind: 'insert', values: { name: 'Ada', big: '1234567890123456789' } }, { kind: 'insert', values: { name: 'Linus' } }] }, ws.id);
         const rows = await run<DbTableRows>('db.table.rows', { connectionId: pg.id, table, orderBy: 'id' }, ws.id);
         const pgDetail = await run<DbTableDetail>('db.schema.table', { connectionId: pg.id, table }, ws.id);
         const selected = await run<DbQueryResult[]>('db.query.run', { connectionId: pg.id, query: `SELECT id, name, big FROM ${table} ORDER BY id; UPDATE ${table} SET name = 'Ada L' WHERE id = 1` }, ws.id);
@@ -378,7 +378,7 @@ export default definePart({
           'db: postgres rows, bigints as text, keys, foreign keys and affected counts',
           applied.affectedRows === 2 &&
             rows.rows.length === 2 &&
-            rows.rows[0][2] === '12345678901234567890' &&
+            rows.rows[0][2] === '1234567890123456789' &&
             pgDetail.primaryKey.join() === 'id' &&
             pgDetail.referencedBy.some((k) => k.table === `${table}_child`) &&
             Boolean(pgDetail.ddl?.includes('PRIMARY KEY')) &&
@@ -387,12 +387,23 @@ export default definePart({
             selected[1].affectedRows === 1,
           { applied, rows: rows.rows, detail: pgDetail, selected },
         );
+        // The grid's whole path on a composite key: the key from the catalog, then edits keyed by it.
+        const pair = `${table}_pair`;
+        const pairKey = (await run<DbTableDetail>('db.schema.table', { connectionId: pg.id, table: pair }, ws.id)).primaryKey;
+        await run('db.table.apply', { connectionId: pg.id, table: pair, edits: [{ kind: 'insert', values: { tenant: 1, id: 1, note: 'a' } }, { kind: 'insert', values: { tenant: 1, id: 2, note: 'b' } }, { kind: 'insert', values: { tenant: 2, id: 1, note: 'c' } }] }, ws.id);
+        const pairEdited = await run<DbTableApplyResult>('db.table.apply', { connectionId: pg.id, table: pair, edits: [{ kind: 'update', key: { tenant: 1, id: 1 }, values: { note: 'edited' } }, { kind: 'delete', key: { tenant: 1, id: 2 } }] }, ws.id);
+        const pairRows = await run<DbQueryResult[]>('db.query.run', { connectionId: pg.id, query: `SELECT tenant, id, note FROM ${pair} ORDER BY tenant, id`, record: false }, ws.id);
+        check(
+          'db: postgres edits and deletes a row by its composite key',
+          pairKey.join() === 'tenant,id' && pairEdited.affectedRows === 2 && JSON.stringify(pairRows[0].rows) === JSON.stringify([[1, 1, 'edited'], [2, 1, 'c']]),
+          { pairKey, pairEdited, rows: pairRows[0].rows },
+        );
         const pgColumns = await run<DbTableColumns[]>('db.schema.columns', { connectionId: pg.id }, ws.id);
         check('db: postgres columns overview', pgColumns.find((t) => t.name === table)?.columns.map((c) => c.name).join() === 'id,name,big,at', pgColumns.find((t) => t.name === table));
         const pgCancel = await run<{ supported: boolean; cancelled: boolean }>('db.query.cancel', { connectionId: pg.id }, ws.id);
         check('db: postgres cancel is supported', pgCancel.supported === true, pgCancel);
       } finally {
-        await run('db.query.run', { connectionId: pg.id, query: `DROP TABLE ${table}_child; DROP TABLE ${table}`, record: false }, ws.id);
+        await run('db.query.run', { connectionId: pg.id, query: `DROP TABLE ${table}_pair; DROP TABLE ${table}_child; DROP TABLE ${table}`, record: false }, ws.id);
         await run('db.connection.delete', { id: pg.id }, ws.id);
       }
     } else {
@@ -436,6 +447,19 @@ export default definePart({
       'db: a saved connection lists with its stored password, by id and from the form',
       byId.out.ok && draftOfSaved.out.ok && fakePg.seen.passwords.slice(passwordsBefore).every((p) => p === 'pg-secret') && fakePg.seen.passwords.length === passwordsBefore + 2,
       { byId, draftOfSaved },
+    );
+    // The grid's editing needs this key: catalog names come as name[], which pg does not turn into arrays by itself. The edit itself runs in the live checks above.
+    const pgOrders = await outcome('db.schema.table', { connectionId: pgSaved.id, table: 'orders' });
+    const pgOrdersDetail = pgOrders.ok ? (pgOrders.value as DbTableDetail) : null;
+    check(
+      'db: a postgres table comes back with its composite key, index and foreign key columns as lists',
+      JSON.stringify(pgOrdersDetail?.primaryKey) === JSON.stringify(['tenant_id', 'id']) &&
+        JSON.stringify(pgOrdersDetail?.indexes.map((i) => i.columns)) === JSON.stringify([['tenant_id', 'id'], ['customer_id']]) &&
+        JSON.stringify(pgOrdersDetail?.foreignKeys.map((k) => [k.columns, k.refColumns])) === JSON.stringify([[['customer_id'], ['id']]]) &&
+        JSON.stringify(pgOrdersDetail?.referencedBy.map((k) => [k.columns, k.refColumns])) === JSON.stringify([[['tenant_id', 'order_id'], ['tenant_id', 'id']]]) &&
+        pgOrdersDetail?.columns.map((c) => c.key).join() === 'PRI,PRI,MUL' &&
+        Boolean(pgOrdersDetail?.ddl?.includes('PRIMARY KEY ("tenant_id", "id")')),
+      pgOrders.ok ? pgOrdersDetail : said(pgOrders),
     );
     const notServer = await outcome('db.connection.databases', { id: sqlite.id });
     check('db: SQLite has no databases to pick from', !notServer.ok && /no databases to pick/.test(said(notServer)), said(notServer));
