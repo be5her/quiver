@@ -1,4 +1,4 @@
-import { Component, computed, effect, inject, signal, untracked } from '@angular/core';
+import { Component, DestroyRef, computed, effect, inject, signal, untracked } from '@angular/core';
 import { FormField, form } from '@angular/forms/signals';
 import { DEFAULT_SCAN_PORTS, parsePorts, sortByAddress, toErrorPayload, type NetScanHost, type NetScanSubnet } from '@quiver/core';
 import { Badge, Button, HostBridge, Input, invokeResource, injectHostEvent } from '@quiver/ui';
@@ -121,6 +121,8 @@ export class NetScan {
   });
 
   constructor() {
+    // Without its tab a scan has no Stop button and nowhere to show what it finds.
+    inject(DestroyRef).onDestroy(() => this.stop());
     // The likeliest network to begin with, unless something has been typed.
     effect(() => {
       const first = this.subnets.value()?.[0];

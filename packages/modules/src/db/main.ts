@@ -271,15 +271,18 @@ const connectionDatabases = defineCommand({
     if (draft.kind === 'mysql') return withTemporaryDriver({ ...draft, database: '' }, password, w, ctx.host, (d) => d.databases());
     if (draft.kind !== 'postgres') throw new QuiverError('INVALID_INPUT', `A ${draft.kind} connection has no databases to pick from`);
     const names = [...new Set([draft.database.trim(), ...POSTGRES_MAINTENANCE_DATABASES].filter(Boolean))];
-    for (const [i, database] of names.entries()) {
+    let firstRefusal: unknown;
+    for (const database of names) {
       try {
         return await withTemporaryDriver({ ...draft, database }, password, w, ctx.host, (d) => d.serverDatabases!());
       } catch (err) {
         const code = err instanceof QuiverError ? (err.details as { code?: unknown } | undefined)?.code : undefined;
-        if (i === names.length - 1 || typeof code !== 'string' || !DATABASE_UNAVAILABLE.has(code)) throw err;
+        if (typeof code !== 'string' || !DATABASE_UNAVAILABLE.has(code)) throw err;
+        firstRefusal ??= err;
       }
     }
-    return [];
+    // What was asked for says more than "permission denied for template1".
+    throw firstRefusal;
   },
 });
 

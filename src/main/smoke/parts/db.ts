@@ -420,6 +420,12 @@ export default definePart({
       mistyped.out.ok && mistyped.tried.join() === 'nope,postgres' && locked.out.ok && locked.tried.join() === 'locked,postgres',
       { mistyped, locked },
     );
+    // Nothing could be reached: what is reported is the database asked for, not the last fallback tried.
+    const pgRestricted = await startFakePostgres({ password: 'pg-secret', databases: [], missing: ['typo'], denied: ['postgres', 'template1'] });
+    const restricted = await outcome('db.connection.databases', { connection: { ...pgDraft('typo'), port: pgRestricted.port }, password: 'pg-secret' });
+    const restrictedTried = pgRestricted.seen.connects.map((c) => c.database).join();
+    await pgRestricted.close();
+    check('db: when every database refuses, the error names the one asked for', !restricted.ok && /"typo" does not exist/.test(said(restricted)) && restrictedTried === 'typo,postgres,template1', { said: said(restricted), restrictedTried });
     const pgWrongPassword = await listed({ connection: pgDraft('app'), password: 'wrong' });
     check('db: a wrong password is reported once, not retried on other databases', !pgWrongPassword.out.ok && /password authentication failed/.test(said(pgWrongPassword.out)) && pgWrongPassword.tried.join() === 'app', pgWrongPassword);
     const pgSaved = await run<DbConnectionSummary>('db.connection.save', { connection: { ...pgDraft('app'), name: 'fake postgres' }, password: 'pg-secret' }, ws.id);
@@ -798,6 +804,11 @@ export default definePart({
           await until(() => js(`document.querySelectorAll('[data-testid=db-database-option]').length > 0`) as Promise<boolean>, 6000);
           const options = (await js(`[...document.querySelectorAll('[data-testid=db-database-option]')].map((o) => [o.textContent.trim(), o.getAttribute('aria-checked')])`)) as [string, string][];
           await shot('08d-db-database-list');
+          // A list too long for the window scrolls, and scrolling it must not close it; a scroll anywhere else still does.
+          const scrolled = await js(`(() => { const panel = document.querySelector('[data-testid=context-menu]'); panel.style.maxHeight = '40px'; panel.scrollTop = 30; return panel.scrollTop; })()`);
+          await wait(150);
+          const openAfterScroll = await js(`Boolean(document.querySelector('[data-testid=context-menu]'))`);
+          check('ui: scrolling the list of databases leaves the menu open', (scrolled as number) > 0 && openAfterScroll === true, { scrolled, openAfterScroll });
           await js(`[...document.querySelectorAll('[data-testid=db-database-option]')].find((o) => o.textContent.trim() === 'analytics')?.click()`);
           await wait(200);
           const picked = await js(`[...${button}.parentElement.querySelectorAll('input')][0]?.value`);
@@ -807,6 +818,17 @@ export default definePart({
             JSON.stringify(options) === JSON.stringify([['analytics', 'false'], ['app', 'true'], ['postgres', 'false']]) && picked === 'analytics' && dirty === 'Save*',
             { options, picked, dirty },
           );
+          // The answer may come after the tab was left: no menu then, over whatever is on screen.
+          await js(`(() => { const list = ${button}; list.click(); list.closest('[data-tab-type]').classList.add('hidden'); window.__listedFrom = list; })()`);
+          await wait(800);
+          const menuWhileHidden = await js(`document.querySelectorAll('[data-testid=db-database-option]').length`);
+          await js(`window.__listedFrom.closest('[data-tab-type]').classList.remove('hidden'); delete window.__listedFrom;`);
+          check('ui: List answering after the tab was left opens no menu', menuWhileHidden === 0, menuWhileHidden);
+          await js(`${button}?.click()`);
+          await until(() => js(`document.querySelectorAll('[data-testid=db-database-option]').length > 0`) as Promise<boolean>, 6000);
+          await js(`document.dispatchEvent(new Event('scroll'))`);
+          await wait(100);
+          check('ui: a scroll outside the menu closes it', (await js(`document.querySelectorAll('[data-testid=db-database-option]').length`)) === 0);
           // A wrong address says why under the field, and no menu opens.
           const setHost = `(() => { const input = [...document.querySelectorAll('input[type=number]')].find((i) => i.offsetParent !== null); input.value = '1'; input.dispatchEvent(new Event('input', { bubbles: true })); })()`;
           await js(setHost);

@@ -294,7 +294,7 @@ export class ConnectionTab implements TabComponent {
     if (this.listingDatabases()) return;
     const conn = this.connection();
     const { password, clearPassword } = this.secret();
-    const { left, bottom } = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    const button = event.currentTarget as HTMLElement;
     this.listingDatabases.set(true);
     this.databasesError.set(null);
     try {
@@ -306,6 +306,9 @@ export class ConnectionTab implements TabComponent {
         this.databasesError.set('The server lists no databases for this user.');
         return;
       }
+      // The answer can take as long as a connection timeout: by then this tab may be closed or behind another.
+      if (!button.offsetParent) return;
+      const { left, bottom } = button.getBoundingClientRect();
       const at = new MouseEvent('click', { clientX: left, clientY: bottom + 4 });
       const current = this.connection().database;
       this.contextMenu.open(at, names.map((name) => ({ label: name, checked: name === current, testId: 'db-database-option', select: () => this.patch({ database: name }) })));

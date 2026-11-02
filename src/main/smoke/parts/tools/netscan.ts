@@ -108,8 +108,27 @@ const section: SmokeSection = async ({ host, check, run, toolNames }) => {
       await click('netscan-run');
       await until(async () => Boolean(await text('netscan-error')), 5000);
       check('ui: a public address shows why it is refused, and no rows', /private/.test((await text('netscan-error')) ?? '') && (await js(`${pane}?.querySelectorAll('[data-testid=netscan-row]').length`)) === 0, await text('netscan-error'));
-      await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
-      await wait(200);
+
+      // Closing the tab takes the Stop button with it, so it stops the scan too. Only 127/8, so nothing leaves this machine.
+      const progress = { events: 0, done: 0, total: 0 };
+      const emit = host.emit;
+      host.emit = ((event: string, payload: { done: number; total: number }) => {
+        if (event === 'tools.netscan.progress') Object.assign(progress, { events: progress.events + 1, done: payload.done, total: payload.total });
+        return emit.call(host, event as never, payload as never);
+      }) as typeof host.emit;
+      try {
+        await setInput('netscan-target', '127.0.0.0/20');
+        await wait(100);
+        await click('netscan-run');
+        await until(async () => progress.events > 0, 10000);
+        await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+        await wait(1500);
+        const settled = progress.events;
+        await wait(1500);
+        check('ui: closing the tab stops a scan under way', progress.total === 4094 && progress.done < progress.total && progress.events === settled, { ...progress, settled });
+      } finally {
+        host.emit = emit;
+      }
     },
     after: async () => {
       server.close();
