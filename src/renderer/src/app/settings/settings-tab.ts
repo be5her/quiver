@@ -1,7 +1,7 @@
 import { NgTemplateOutlet } from '@angular/common';
 import { Component, computed, inject, input, linkedSignal, signal, untracked } from '@angular/core';
 import { FormField, form } from '@angular/forms/signals';
-import { PALETTES, isAutoRenewOn, resolvePalette, workspaceRulesFor, type AgentPermissionMode, type AgentPermissionRule, type GlobalConfig, type TeleportStatus, type Variable } from '@quiver/core';
+import { PALETTES, isAutoRenewOn, isInAppSignInOn, resolvePalette, workspaceRulesFor, type AgentPermissionMode, type AgentPermissionRule, type GlobalConfig, type TeleportStatus, type Variable } from '@quiver/core';
 import {
   AppState,
   Button,
@@ -154,6 +154,15 @@ export class SettingsTab implements TabComponent {
   protected toggleAutoRenew(proxy: string, event: Event): void {
     const enabled = (event.target as HTMLInputElement).checked;
     this.host.invoke('teleport.cluster.autoRenew', { proxy, enabled }, null).catch((err) => this.toasts.error(err));
+  }
+
+  protected isInAppSignIn(config: GlobalConfig, proxy: string): boolean {
+    return isInAppSignInOn(config.teleport, proxy);
+  }
+
+  protected toggleInAppSignIn(proxy: string, event: Event): void {
+    const enabled = (event.target as HTMLInputElement).checked;
+    this.host.invoke('teleport.cluster.inAppSignIn', { proxy, enabled }, null).catch((err) => this.toasts.error(err));
   }
 
   protected toggleAgentsOnProtected(config: GlobalConfig, event: Event): void {

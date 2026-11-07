@@ -102,6 +102,12 @@
             <label class="flex items-center gap-1.5 text-xs shrink-0" title="Renew the certificate with tsh login when it is about to expire" data-testid="settings-teleport-auto-renew"
               ><input qCheckbox [checked]="isAutoRenew(config, proxy)" (change)="toggleAutoRenew(proxy, $event)" />Keep me logged in</label
             >
+            <label
+              class="flex items-center gap-1.5 text-xs shrink-0"
+              title="Sign in to the SSO provider in a Quiver window that remembers you, so later logins and renewals need no browser"
+              data-testid="settings-teleport-in-app-sign-in"
+              ><input qCheckbox [checked]="isInAppSignIn(config, proxy)" (change)="toggleInAppSignIn(proxy, $event)" />Sign in inside Quiver</label
+            >
             <button qButton size="sm" variant="ghost" [icon]="icons.X" title="Remove this cluster and its pins" (click)="removeCluster(proxy)">Remove</button>
           </div>
         } @empty {

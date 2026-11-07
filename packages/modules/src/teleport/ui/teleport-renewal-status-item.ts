@@ -1,5 +1,5 @@
 import { Component, DestroyRef, computed, inject } from '@angular/core';
-import { clusterLabel, type TeleportRenewalEvent, type TeleportStatus } from '@quiver/core';
+import { clusterLabel, type TeleportClusterStatus, type TeleportRenewalEvent, type TeleportStatus } from '@quiver/core';
 import { AppState, HostBridge, Icon, Toasts, injectHostEvent, invokeResource } from '@quiver/ui';
 import { RefreshCw } from 'lucide';
 
@@ -32,7 +32,8 @@ export class TeleportRenewalStatusItem {
   protected readonly active = computed(() => {
     const busy = (this.status.value()?.clusters ?? []).filter((c) => c.renewal?.running || c.renewal?.waitingForFocus);
     if (!busy.length) return null;
-    return busy.map((c) => `${clusterLabel(c)}: ${c.renewal?.running ? 'renewing the certificate' : 'waiting for Quiver to be in front to open the browser'}`).join('\n');
+    const waiting = (c: TeleportClusterStatus) => (c.inAppSignIn ? 'waiting for Quiver to be in front to ask you to sign in' : 'waiting for Quiver to be in front to open the browser');
+    return busy.map((c) => `${clusterLabel(c)}: ${c.renewal?.running ? 'renewing the certificate' : waiting(c)}`).join('\n');
   });
 
   constructor() {
@@ -57,12 +58,13 @@ export class TeleportRenewalStatusItem {
   private announce(e: TeleportRenewalEvent): void {
     switch (e.phase) {
       case 'start':
-        // A certificate that is still valid is usually reissued without the browser: nothing to say until it is done.
-        if (!e.browser) return;
+        // A certificate that is still valid is usually reissued without the browser, and a sign-in inside Quiver usually
+        // completes on its saved cookies: nothing to say until it is done, or until its window shows.
+        if (!e.browser || e.inApp) return;
         this.say(e, `Teleport: renewing your certificate for ${e.label}`, 'A browser window opens to sign in.');
         return;
       case 'browser':
-        this.say(e, `Teleport: renewing your certificate for ${e.label}`, 'tsh opened a browser window to sign in.');
+        this.say(e, `Teleport: renewing your certificate for ${e.label}`, e.inApp ? 'Sign in in the window Quiver opened.' : 'tsh opened a browser window to sign in.');
         return;
       case 'ok':
         this.toasts.notify(`Teleport: certificate for ${e.label} renewed`, 'success');

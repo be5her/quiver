@@ -44,7 +44,7 @@ export class TeleportCluster {
   protected readonly remaining = computed(() => formatRemaining(this.cluster().validUntil, this.now()));
   protected readonly title = computed(() => {
     const c = this.cluster();
-    return `${c.proxy}\n${STATE_LABEL[c.state]}${c.validUntil ? `\nValid until ${new Date(c.validUntil).toLocaleString()}` : ''}${c.autoRenew ? '\nRenews automatically (Keep me logged in)' : ''}`;
+    return `${c.proxy}\n${STATE_LABEL[c.state]}${c.validUntil ? `\nValid until ${new Date(c.validUntil).toLocaleString()}` : ''}${c.autoRenew ? '\nRenews automatically (Keep me logged in)' : ''}${c.inAppSignIn ? '\nSigns in inside Quiver' : ''}`;
   });
   protected readonly renewal = computed(() => renewalLine(this.cluster(), this.now()));
   protected readonly autoNote = computed(() => {
@@ -57,11 +57,25 @@ export class TeleportCluster {
     const c = this.cluster();
     this.menu.open(event, [
       { label: 'Keep me logged in', checked: c.autoRenew, testId: 'teleport-menu-auto-renew', select: () => void this.setAutoRenew(!c.autoRenew) },
+      { label: 'Sign in inside Quiver', checked: c.inAppSignIn, testId: 'teleport-menu-in-app-sign-in', select: () => void this.setInAppSignIn(!c.inAppSignIn) },
       'separator',
       { label: this.usable() ? 'Log in again' : 'Log in', disabled: this.loggingIn(), select: () => void this.login() },
       ...(this.usable() ? [{ label: 'Log out', select: () => void this.logout() }] : []),
       ...(c.configured ? [{ label: 'Remove from Quiver', danger: true, select: () => void this.remove() }] : []),
     ]);
+  }
+
+  private async setInAppSignIn(enabled: boolean): Promise<void> {
+    try {
+      await this.host.invoke('teleport.cluster.inAppSignIn', { proxy: this.cluster().proxy, enabled }, null);
+      this.toasts.notify(
+        enabled
+          ? `${this.label()}: logins sign in inside Quiver, which remembers your sign-in for the next ones`
+          : `${this.label()}: logins use your browser again; the sign-in Quiver kept is forgotten`,
+      );
+    } catch (err) {
+      this.toasts.error(err);
+    }
   }
 
   private async setAutoRenew(enabled: boolean): Promise<void> {

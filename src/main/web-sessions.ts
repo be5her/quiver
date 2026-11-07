@@ -1,5 +1,5 @@
 import { BrowserWindow, app, session, type Cookie, type Session } from 'electron';
-import type { WebResponse, WebSessionsApi } from '@quiver/core';
+import type { WebResponse, WebSessionsApi, WebSignInOptions } from '@quiver/core';
 import { iconPath } from './window';
 
 /** Product tokens Chromium itself sends; the rest (Electron, the app's name) are dropped. */
@@ -36,10 +36,11 @@ export class ElectronWebSessions implements WebSessionsApi {
     return ses;
   }
 
-  signIn(options: { partition: string; url: string; title: string; done(url: string): boolean | Promise<boolean> }): Promise<boolean> {
+  signIn(options: WebSignInOptions): Promise<boolean> {
     const open = this.pending.get(options.partition);
     if (open && !open.win.isDestroyed()) {
-      if (this.options.show) {
+      // A window that waits to be revealed stays hidden; whoever started it decides when it shows.
+      if (this.options.show && open.win.isVisible()) {
         open.win.show();
         open.win.focus();
       }
@@ -60,7 +61,8 @@ export class ElectronWebSessions implements WebSessionsApi {
     });
     // The window keeps saying what it is for, whatever page is in it.
     win.on('page-title-updated', (event) => event.preventDefault());
-    if (this.options.show) win.once('ready-to-show', () => win.show());
+    // A hidden-first window shows only when the sign-in waits for the user (see `reveal`).
+    if (this.options.show && !options.reveal) win.once('ready-to-show', () => win.show());
 
     const outcome = new Promise<boolean>((resolve, reject) => {
       let settled = false;
@@ -70,6 +72,8 @@ export class ElectronWebSessions implements WebSessionsApi {
         if (settled) return;
         settled = true;
         clearInterval(poll);
+        if (revealTimer) clearTimeout(revealTimer);
+        options.signal?.removeEventListener('abort', onAbort);
         this.pending.delete(options.partition);
         void this.get(options.partition).cookies.flushStore().catch(() => {});
         if (error) reject(error);
@@ -92,12 +96,38 @@ export class ElectronWebSessions implements WebSessionsApi {
         clearInterval(poll);
         settle(false);
       });
+      const onAbort = () => settle(false);
+      if (options.signal?.aborted) queueMicrotask(onAbort);
+      else options.signal?.addEventListener('abort', onAbort, { once: true });
+      // Not done in time: the page waits for the user. Show it if that is allowed now, else give up quietly.
+      const revealTimer = options.reveal
+        ? setTimeout(() => {
+            if (settled || win.isDestroyed()) return;
+            const reveal = options.reveal!;
+            let allowed = false;
+            try {
+              allowed = reveal.allowed();
+            } catch {
+              allowed = false;
+            }
+            if (!allowed) return settle(false);
+            if (this.options.show) {
+              win.show();
+              win.focus();
+            }
+            try {
+              reveal.onReveal?.();
+            } catch {
+              // the window is shown either way
+            }
+          }, options.reveal.afterMs)
+        : null;
       // Identity providers open popups (Google's sign-in button does) and post the outcome back to the
       // page that opened them, so a popup gets a window of its own, sandboxed the same way and closed with
       // this one; anything but http(s) is refused.
       win.webContents.setWindowOpenHandler(({ url }) => {
         if (!/^https?:/i.test(url)) return { action: 'deny' };
-        return { action: 'allow', overrideBrowserWindowOptions: { parent: win, show: this.options.show, autoHideMenuBar: true, icon: process.platform === 'darwin' ? undefined : iconPath, webPreferences } };
+        return { action: 'allow', overrideBrowserWindowOptions: { parent: win, show: this.options.show && win.isVisible(), autoHideMenuBar: true, icon: process.platform === 'darwin' ? undefined : iconPath, webPreferences } };
       });
       win.webContents.on('did-create-window', (child) => {
         child.on('page-title-updated', (event) => event.preventDefault());

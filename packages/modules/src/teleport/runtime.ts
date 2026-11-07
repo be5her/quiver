@@ -1,4 +1,4 @@
-import type { HostApi } from '@quiver/core';
+import { normalizeProxy, teleportSignInPartition, type HostApi } from '@quiver/core';
 import { KubeRunner } from './kube';
 import { KubeForwards } from './kube-forwards';
 import { TeleportSession } from './session';
@@ -39,6 +39,20 @@ export function getTeleport(host: HostApi): TeleportRuntime {
       forwards.noteRenewal(proxy);
       await tunnels.restartCluster(proxy);
     },
+    // Sign in inside Quiver needs a window to sign in with; the headless CLI has none and keeps the system browser.
+    signInWindow: host.web
+      ? ({ proxy, url, reveal, onReveal, signal }) =>
+          host.web!.signIn({
+            partition: teleportSignInPartition(proxy),
+            url,
+            title: `Sign in to Teleport · ${normalizeProxy(proxy)}`,
+            // tsh finishing is what ends the sign-in (it aborts the signal), whatever page the window ends on.
+            done: () => false,
+            // The smoke shortens how long saved cookies get before the window shows; it sets this in the running process.
+            reveal: { afterMs: Number(process.env.QUIVER_TELEPORT_SIGNIN_REVEAL_MS) || 4_000, allowed: reveal, onReveal },
+            signal,
+          })
+      : undefined,
   });
   const kube = new KubeRunner({
     session,
