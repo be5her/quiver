@@ -15,6 +15,8 @@ export interface FakeTshState {
   lifetimeMs?: number;
   /** How long `tsh login` takes (default 400 ms), so a smoke check can cancel one. */
   loginDelayMs?: number;
+  /** How long the fake identity provider takes to answer (default 0), like a slow network. */
+  idpDelayMs?: number;
 }
 
 export interface FakeTsh {
@@ -30,7 +32,7 @@ export interface FakeTsh {
   /** Move a cluster's certificate expiry, e.g. into the expiring-soon window. */
   setValidUntil(proxy: string, validUntil: Date): Promise<void>;
   /** Change how the next logins behave: certificate lifetime and how long a login takes. */
-  setLogin(options: { lifetimeMs?: number; loginDelayMs?: number }): Promise<void>;
+  setLogin(options: { lifetimeMs?: number; loginDelayMs?: number; idpDelayMs?: number }): Promise<void>;
   /** Every argv the fake was started with, in order (after the script path). */
   calls(): Promise<string[][]>;
   /**
@@ -470,6 +472,10 @@ switch (args[0]) {
       const server = http.createServer((req, res) => {
         const url = new URL(req.url, 'http://127.0.0.1');
         if (url.pathname === '/' + id) { res.writeHead(302, { Location: '/idp/authorize' }); return res.end(); }
+        if (url.pathname === '/idp/authorize' && before.idpDelayMs && !req.headers['x-delayed']) {
+          req.headers['x-delayed'] = '1';
+          return setTimeout(() => server.emit('request', req, res), before.idpDelayMs);
+        }
         if (url.pathname === '/idp/authorize') {
           if (/(^|;\s*)fake_idp=signed-in/.test(req.headers.cookie || '')) { sso('silent'); res.writeHead(302, { Location: '/callback' }); return res.end(); }
           sso('form');

@@ -78,7 +78,12 @@ export class ElectronWebSessions implements WebSessionsApi {
         void this.get(options.partition).cookies.flushStore().catch(() => {});
         if (error) reject(error);
         else resolve(ok);
-        if (!win.isDestroyed()) win.close();
+        // A hidden-first window nobody saw is destroyed, not closed: its page cannot veto that with beforeunload and leave
+        // an invisible window behind. A window the user saw closes normally, letting its page finish what it was doing.
+        if (!win.isDestroyed()) {
+          if (options.reveal && !win.isVisible()) win.destroy();
+          else win.close();
+        }
       };
       const check = async (url: string) => {
         if (settled || checking || !url) return;
@@ -99,9 +104,15 @@ export class ElectronWebSessions implements WebSessionsApi {
       const onAbort = () => settle(false);
       if (options.signal?.aborted) queueMicrotask(onAbort);
       else options.signal?.addEventListener('abort', onAbort, { once: true });
-      // Not done in time: the page waits for the user. Show it if that is allowed now, else give up quietly.
-      const revealTimer = options.reveal
-        ? setTimeout(() => {
+      // Not done in time: the page waits for the user. Show it if that is allowed now, else give up quietly. The time
+      // counts from when a page finished loading, so a slow network or redirect chain is not mistaken for a page that
+      // waits; while a page loads, only a much longer wait (five times as long) counts as waiting.
+      let revealed = false;
+      let revealTimer: ReturnType<typeof setTimeout> | null = null;
+      const armReveal = (ms: number) => {
+        if (!options.reveal || revealed || settled) return;
+        if (revealTimer) clearTimeout(revealTimer);
+        revealTimer = setTimeout(() => {
             if (settled || win.isDestroyed()) return;
             const reveal = options.reveal!;
             let allowed = false;
@@ -111,17 +122,22 @@ export class ElectronWebSessions implements WebSessionsApi {
               allowed = false;
             }
             if (!allowed) return settle(false);
+            revealed = true;
             if (this.options.show) {
               win.show();
               win.focus();
+              // A popup the page opened while hidden is shown with it, or the page would wait for a window nobody sees.
+              for (const child of win.getChildWindows()) child.show();
             }
             try {
               reveal.onReveal?.();
             } catch {
               // the window is shown either way
             }
-          }, options.reveal.afterMs)
-        : null;
+          }, ms);
+      };
+      const loadingMs = (options.reveal?.afterMs ?? 0) * 5;
+      armReveal(loadingMs);
       // Identity providers open popups (Google's sign-in button does) and post the outcome back to the
       // page that opened them, so a popup gets a window of its own, sandboxed the same way and closed with
       // this one; anything but http(s) is refused.
@@ -142,8 +158,19 @@ export class ElectronWebSessions implements WebSessionsApi {
       });
       win.webContents.on('did-navigate', (_event, url) => {
         committed = true;
+        // There is no address bar: the title says which site the page is on, so a look-alike page can be told apart.
+        try {
+          if (!win.isDestroyed()) win.setTitle(`${options.title} — ${new URL(url).host}`);
+        } catch {
+          // not a URL with a host; the title stays
+        }
         void check(url);
       });
+      if (options.reveal) {
+        const idleMs = options.reveal.afterMs;
+        win.webContents.on('did-start-loading', () => armReveal(loadingMs));
+        win.webContents.on('did-stop-loading', () => armReveal(idleMs));
+      }
       win.webContents.on('did-navigate-in-page', (_event, url, isMainFrame) => isMainFrame && void check(url));
       win.webContents.on('did-finish-load', () => void check(win.webContents.getURL()));
       win.webContents.on('did-fail-load', (_event, code, description, url, isMainFrame) => {

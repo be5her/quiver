@@ -332,7 +332,8 @@ describe('sign in inside Quiver', () => {
   });
 
   it('names one persistent cookie jar per cluster', () => {
-    expect(teleportSignInPartition('A.Example.com:443')).toBe('persist:quiver-teleport-a-example-com');
+    expect(teleportSignInPartition('A.Example.com:443')).toBe('persist:quiver-teleport-a_2eexample_2ecom');
+    expect(teleportSignInPartition('a-b.example.com')).not.toBe(teleportSignInPartition('a.b.example.com'));
     expect(teleportSignInPartition('https://a.example.com:443/')).toBe(teleportSignInPartition(a));
     expect(teleportSignInPartition('b.example.com:443')).not.toBe(teleportSignInPartition(a));
   });

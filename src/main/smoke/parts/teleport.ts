@@ -876,6 +876,21 @@ export default definePart({
         { renewal: await renewalOf(first), logins: (await loginArgs(first)).length - renewLogins, events: await ssoSince(since) },
       );
 
+      // A slow identity provider (longer than the reveal time) is not taken for a page that waits for the user.
+      await fakeTsh.setLogin({ idpDelayMs: 2500 });
+      await run('teleport.cluster.autoRenew', { proxy: first, enabled: false }, null);
+      const slowLogins = (await loginArgs(first)).length;
+      await fakeTsh.expire(first);
+      since = await ssoCount();
+      await run('teleport.cluster.autoRenew', { proxy: first, enabled: true }, null);
+      const slowRenewal = await until(async () => (await renewalOf(first))?.lastResult === 'ok', 10_000);
+      check(
+        'teleport sign-in: a slow identity provider in the background still renews quietly, not mistaken for one that needs the user',
+        slowRenewal && (await loginArgs(first)).length === slowLogins + 1 && JSON.stringify(await ssoSince(since)) === JSON.stringify(['silent', 'callback']),
+        { renewal: await renewalOf(first), logins: (await loginArgs(first)).length - slowLogins, events: await ssoSince(since) },
+      );
+      await fakeTsh.setLogin({ idpDelayMs: 0 });
+
       // Turned off: the kept sign-in is forgotten. On again, the identity provider asks once more; in the background
       // that attempt stops without counting as a failure and waits for the window, then shows the form there.
       await run('teleport.cluster.inAppSignIn', { proxy: first, enabled: false }, null);

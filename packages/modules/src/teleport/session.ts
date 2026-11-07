@@ -348,11 +348,14 @@ export class TeleportSession {
       const outcome = await run.promise;
       const after = findCluster(outcome.status.clusters, cluster.proxy);
       const usable = after?.state === 'logged-in' || after?.state === 'expiring';
-      needsUser = run.needsUser && !run.cancelled;
-      if (run.cancelled) result = 'cancelled';
+      // A new certificate is a renewal whatever else happened: tsh may have written it just before it was stopped (the
+      // window closed or was refused between the callback and tsh exiting).
+      const renewed = usable && Boolean(after.validUntil) && after.validUntil !== cluster.validUntil;
+      needsUser = !renewed && run.needsUser && !run.cancelled;
+      if (renewed) result = 'ok';
+      else if (run.cancelled) result = 'cancelled';
       else if (!outcome.ok) error = lastMessage(outcome.output) ?? 'tsh login failed';
-      else if (!usable || after.validUntil === cluster.validUntil) error = 'tsh kept the certificate that is about to expire';
-      else result = 'ok';
+      else error = 'tsh kept the certificate that is about to expire';
     } catch (err) {
       error = (err as Error).message;
     }
@@ -503,6 +506,12 @@ export class TeleportSession {
       if (run.inApp) {
         const url = run.signInOpened ? null : ssoLoginUrl(line);
         if (url) this.openSignIn(run, url, push);
+        else if (!run.signInOpened && !run.browser && /^https?:\/\/\S+$/i.test(line.trim())) {
+          // A link that is not tsh's listener on this machine (a bind address set elsewhere): Quiver does not open it, but
+          // says so, so the login does not sit waiting with nothing to do.
+          run.browser = true;
+          output.push('Quiver opens only links to tsh on this machine; open the link above in your browser to sign in.');
+        }
       } else if (!run.browser && isBrowserLoginLine(line)) {
         run.browser = true;
         run.onBrowser?.();
@@ -558,10 +567,12 @@ export class TeleportSession {
     run.signInOpened = true;
     const controller = new AbortController();
     run.closeSignIn = () => controller.abort();
-    const stop = (reason: 'cancelled' | 'needs-user', note?: string) => {
+    // 'failed': the window could not open; neither a cancel (which would hold off renewals of this certificate) nor a
+    // sign-in that needs the user, so the attempt counts as failed and is retried after the usual spacing.
+    const stop = (reason: 'cancelled' | 'needs-user' | 'failed', note?: string) => {
       if (controller.signal.aborted || this.loginRun !== run || run.child.exitCode !== null) return;
       if (reason === 'cancelled') run.cancelled = true;
-      else run.needsUser = true;
+      else if (reason === 'needs-user') run.needsUser = true;
       if (note) push(note);
       run.child.kill();
     };
@@ -586,7 +597,7 @@ export class TeleportSession {
         if (refused) stop('needs-user');
         else stop('cancelled', 'Sign-in window closed.');
       },
-      (err: Error) => stop('cancelled', `Could not open the sign-in window: ${err.message}`),
+      (err: Error) => stop('failed', `Could not open the sign-in window: ${err.message}`),
     );
   }
 

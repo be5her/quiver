@@ -399,7 +399,8 @@ export function isInAppSignInOn(config: Pick<TeleportConfig, 'inAppSignIn'>, pro
  * the identity provider's own session (GitHub's login cookie), which lets the next login go through without a form.
  */
 export function teleportSignInPartition(proxy: string): string {
-  return `persist:quiver-teleport-${normalizeProxy(proxy).replace(/[^a-z0-9]+/g, '-')}`;
+  // Every other character is spelled out, so two proxies never share a jar (`a-b.x` and `a.b.x` stay apart).
+  return `persist:quiver-teleport-${normalizeProxy(proxy).replace(/[^a-z0-9]/g, (c) => `_${c.charCodeAt(0).toString(16)}`)}`;
 }
 
 /** The user cancelled the last attempt, and the certificate it was for is still the one tsh has. */
