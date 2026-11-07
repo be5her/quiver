@@ -58,7 +58,7 @@
       <div class="mx-2 mt-1 rounded-md border border-edge bg-canvas p-2 flex flex-col gap-1.5">
         <div class="flex items-center gap-2 text-xs">
           <svg qSpinner class="size-3.5"></svg>
-          <span class="flex-1">Waiting for the browser…</span>
+          <span class="flex-1">{{ c.inAppSignIn ? 'Signing in inside Quiver…' : 'Waiting for the browser…' }}</span>
           <button qButton size="sm" variant="ghost" [icon]="icons.X" (click)="cancelLogin()">Cancel</button>
         </div>
         @if (status().loginOutput.length) {
@@ -67,7 +67,7 @@
       </div>
     } @else if (!usable()) {
       <div class="px-3 pt-1.5 pb-1 flex items-center gap-2 flex-wrap">
-        <button qButton size="sm" variant="primary" [icon]="icons.LogIn" [loading]="busy() === 'login'" title="tsh login (opens the browser)" (click)="login()">{{ c.state === 'expired' ? 'Log in again' : 'Log in' }}</button>
+        <button qButton size="sm" variant="primary" [icon]="icons.LogIn" [loading]="busy() === 'login'" [title]="c.inAppSignIn ? 'tsh login (signs in inside Quiver)' : 'tsh login (opens the browser)'" (click)="login()">{{ c.state === 'expired' ? 'Log in again' : 'Log in' }}</button>
         @if (c.state === 'expired' && c.validUntil) {
           <span class="text-[11px] text-muted">expired {{ expiredAt() }}</span>
         }

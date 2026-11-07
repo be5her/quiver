@@ -7,6 +7,7 @@ import {
   findCluster,
   isAutoRenewOn,
   isBrowserLoginLine,
+  isInAppSignInOn,
   nextRenewalAt,
   normalizeProxy,
   nowIso,
@@ -14,6 +15,7 @@ import {
   proxiesToAutoRenew,
   proxyAddress,
   sameProxy,
+  ssoLoginUrl,
   type TeleportClusterStatus,
   type TeleportConfig,
   type TeleportLoginResult,
@@ -33,6 +35,13 @@ export interface SessionOptions {
   pollMs?: number | (() => number);
   /** After an automatic renewal: refresh what still holds the old certificate (tunnels, kubeconfig, port forwards). */
   onRenewed?(proxy: string): Promise<void> | void;
+  /**
+   * Sign in inside Quiver: open the SSO link tsh printed in a Quiver window with the cluster's saved cookies. It starts
+   * hidden and shows itself only when the page waits for the user and `reveal()` allows it; resolves false when it
+   * closed without the sign-in (the user closed it, revealing was refused, `signal` aborted). Absent without a window
+   * (the CLI), where logins use the system browser.
+   */
+  signInWindow?(options: { proxy: string; url: string; reveal(): boolean; onReveal(): void; signal: AbortSignal }): Promise<boolean>;
 }
 
 const LOGIN_TIMEOUT_MS = 5 * 60_000;
@@ -47,9 +56,19 @@ interface LoginRun {
   promise: Promise<TeleportLoginResult>;
   /** The user cancelled it (Cancel in the sidebar, teleport.login.cancel). */
   cancelled: boolean;
-  /** tsh printed the line that sends the user to the browser. */
+  /** tsh printed the line that sends the user to the browser, or the in-app sign-in window showed itself. */
   browser: boolean;
   onBrowser?: () => void;
+  /** Sign in inside Quiver: tsh runs with `--browser=none` and its link opens in a Quiver window. */
+  inApp: boolean;
+  /** Whether the in-app window may show itself now that the sign-in waits for the user. */
+  mayReveal: () => boolean;
+  /** The in-app window was opened for this run. */
+  signInOpened: boolean;
+  /** Closes the in-app window. */
+  closeSignIn: () => void;
+  /** The in-app sign-in needed the user while that was not allowed (no Quiver window in front): tsh was stopped. */
+  needsUser: boolean;
 }
 
 /**
@@ -86,6 +105,11 @@ export class TeleportSession {
   private waitingForFocus: string | null = null;
   /** Whether a Quiver window is in front; hosts without a window never report, and never wait. */
   private focused = true;
+  /**
+   * Certificates (`<proxy>|<validUntil>`) whose quiet in-app renewal needed the user: their next attempt waits for the
+   * window to be in front, like a renewal that opens the system browser.
+   */
+  private readonly needsUser = new Set<string>();
 
   constructor(private readonly opts: SessionOptions) {}
 
@@ -145,7 +169,12 @@ export class TeleportSession {
           waitingForFocus: waiting,
         }
       : null;
-    return { ...c, autoRenew: isAutoRenewOn(config, c.proxy), renewal };
+    return { ...c, autoRenew: isAutoRenewOn(config, c.proxy), inAppSignIn: isInAppSignInOn(config, c.proxy), renewal };
+  }
+
+  /** Logins to this cluster sign in inside Quiver: the setting is on and this host has a window to do it in. */
+  private inAppFor(proxy: string): boolean {
+    return Boolean(this.opts.signInWindow) && isInAppSignInOn(this.opts.getConfig(), proxy);
   }
 
   cluster(proxy: string | null | undefined): TeleportClusterStatus | undefined {
@@ -245,6 +274,18 @@ export class TeleportSession {
     if (this.renewalRun && this.loginRun === this.renewalRun) this.cancelLogin();
   }
 
+  /**
+   * Forget a cluster's renewal attempts (Keep me logged in turned off, the cluster removed): turned on again, it starts
+   * fresh, without the spacing or a cancel of an earlier attempt held against it. A running renewal is given up too.
+   */
+  forgetRenewals(proxy: string): void {
+    this.abandonRenewal(proxy);
+    const key = normalizeProxy(proxy);
+    if (this.renewing !== key) this.renewals.delete(key);
+    for (const k of [...this.needsUser]) if (k.startsWith(`${key}|`)) this.needsUser.delete(k);
+    this.opts.onChange('renewal');
+  }
+
   /** Wait until no `tsh login` runs, automatic or not (e.g. before logging in on launch). */
   async whenLoginDone(): Promise<void> {
     while (this.loginRun) await this.loginRun.promise.catch(() => {});
@@ -265,8 +306,12 @@ export class TeleportSession {
       return;
     }
     // An expired certificate cannot be reissued without SSO: tsh opens the browser, which must not appear behind the user's back.
+    // Signing in inside Quiver is tried quietly first, since the saved cookies usually complete it without a window; one
+    // that needed the user waits for the window to be in front like the browser.
     const browser = cluster.state === 'expired';
-    if (browser && !this.focused) {
+    const inApp = this.inAppFor(cluster.proxy);
+    const waitsForUser = inApp ? this.needsUser.has(certificateKey(cluster)) : browser;
+    if (waitsForUser && !this.focused) {
       this.waitingForFocus = normalizeProxy(cluster.proxy);
       if (waitedFor !== this.waitingForFocus) {
         console.log(`[quiver] teleport certificate for ${clusterLabel(cluster)} expired; renewing when the Quiver window is in front`);
@@ -274,14 +319,14 @@ export class TeleportSession {
       }
       return;
     }
-    void this.renew(cluster, browser);
+    void this.renew(cluster, browser, inApp);
   }
 
-  private async renew(cluster: TeleportClusterStatus, browser: boolean): Promise<void> {
+  private async renew(cluster: TeleportClusterStatus, browser: boolean, inApp: boolean): Promise<void> {
     const key = normalizeProxy(cluster.proxy);
     const label = clusterLabel(cluster);
     const announce = (phase: TeleportRenewalEvent['phase'], extra: Partial<TeleportRenewalEvent> = {}) =>
-      this.opts.onChange('renewal', { proxy: cluster.proxy, label, phase, browser, background: !this.focused, ...extra });
+      this.opts.onChange('renewal', { proxy: cluster.proxy, label, phase, browser, background: !this.focused, ...(inApp ? { inApp: true } : {}), ...extra });
     const record: TeleportRenewalRecord = { lastAttemptAt: nowIso(), lastResult: null, lastError: null, validUntil: cluster.validUntil };
     this.renewing = key;
     this.renewalAbandoned = false;
@@ -291,17 +336,26 @@ export class TeleportSession {
 
     let result: TeleportRenewalResult = 'failed';
     let error: string | null = null;
+    let needsUser = false;
     try {
-      // A still valid certificate is usually reissued without the browser; if tsh opens it anyway, say so at once.
-      const run = this.spawnLogin(cluster.proxy, browser ? undefined : () => announce('browser', { browser: true }));
+      // A still valid certificate is usually reissued without the browser; if tsh opens it anyway, say so at once. In
+      // Quiver, the sign-in window says so when it shows, which it only does while a Quiver window is in front.
+      const run = this.spawnLogin(cluster.proxy, {
+        onBrowser: browser && !inApp ? undefined : () => announce('browser', { browser: true }),
+        mayReveal: () => this.focused,
+      });
       this.renewalRun = run;
       const outcome = await run.promise;
       const after = findCluster(outcome.status.clusters, cluster.proxy);
       const usable = after?.state === 'logged-in' || after?.state === 'expiring';
-      if (run.cancelled) result = 'cancelled';
+      // A new certificate is a renewal whatever else happened: tsh may have written it just before it was stopped (the
+      // window closed or was refused between the callback and tsh exiting).
+      const renewed = usable && Boolean(after.validUntil) && after.validUntil !== cluster.validUntil;
+      needsUser = !renewed && run.needsUser && !run.cancelled;
+      if (renewed) result = 'ok';
+      else if (run.cancelled) result = 'cancelled';
       else if (!outcome.ok) error = lastMessage(outcome.output) ?? 'tsh login failed';
-      else if (!usable || after.validUntil === cluster.validUntil) error = 'tsh kept the certificate that is about to expire';
-      else result = 'ok';
+      else error = 'tsh kept the certificate that is about to expire';
     } catch (err) {
       error = (err as Error).message;
     }
@@ -319,8 +373,19 @@ export class TeleportSession {
       }
       return;
     }
+    if (needsUser) {
+      // Not a failure: the identity provider wants the user (a login form, a consent screen) and no Quiver window was in
+      // front to show it in. The attempt is not counted; the next one waits for the window, then shows it.
+      this.renewals.delete(key);
+      this.needsUser.add(certificateKey(cluster));
+      console.log(`[quiver] teleport renewal for ${label} needs you to sign in; renewing when the Quiver window is in front`);
+      this.opts.onChange('renewal');
+      this.considerRenewal();
+      return;
+    }
     this.renewals.set(key, { ...record, lastResult: result, lastError: result === 'failed' ? error : null });
     if (result === 'ok') {
+      for (const k of [...this.needsUser]) if (k.startsWith(`${key}|`)) this.needsUser.delete(k);
       try {
         await this.opts.onRenewed?.(cluster.proxy);
       } catch (err) {
@@ -402,25 +467,52 @@ export class TeleportSession {
       return Promise.reject(new QuiverError('INVALID_INPUT', `A login to ${this.loginRun.proxy} is already in progress. Finish or cancel it first.`));
     }
     try {
-      return this.spawnLogin(proxy).promise;
+      // The user asked for this login: its sign-in window may show whenever the page waits for them.
+      return this.spawnLogin(proxy, { mayReveal: () => true }).promise;
     } catch (err) {
       return Promise.reject(err);
     }
   }
 
-  /** Spawn `tsh login` for a cluster; the caller checked that no login runs. Throws when tsh is missing. */
-  private spawnLogin(proxy: string, onBrowser?: () => void): LoginRun {
+  /**
+   * Spawn `tsh login` for a cluster; the caller checked that no login runs. Throws when tsh is missing. With Sign in
+   * inside Quiver, tsh gets `--browser=none` and the link it prints opens in a Quiver window instead.
+   */
+  private spawnLogin(proxy: string, options: { onBrowser?: () => void; mayReveal: () => boolean }): LoginRun {
     const tsh = this.discover();
     if (!tsh) throw tshNotFound();
 
+    const inApp = this.inAppFor(proxy);
     const output: string[] = [];
-    const child = spawnTsh(tsh, ['login', `--proxy=${proxy}`]);
-    const run: LoginRun = { proxy, child, output, promise: Promise.resolve(null as unknown as TeleportLoginResult), cancelled: false, browser: false, onBrowser };
+    const child = spawnTsh(tsh, ['login', `--proxy=${proxy}`, ...(inApp ? ['--browser=none'] : [])]);
+    const run: LoginRun = {
+      proxy,
+      child,
+      output,
+      promise: Promise.resolve(null as unknown as TeleportLoginResult),
+      cancelled: false,
+      browser: false,
+      onBrowser: options.onBrowser,
+      inApp,
+      mayReveal: options.mayReveal,
+      signInOpened: false,
+      closeSignIn: () => {},
+      needsUser: false,
+    };
     const push = (line: string) => {
       if (!line.trim()) return;
       output.push(line);
       if (output.length > LOGIN_OUTPUT_TAIL) output.splice(0, output.length - LOGIN_OUTPUT_TAIL);
-      if (!run.browser && isBrowserLoginLine(line)) {
+      if (run.inApp) {
+        const url = run.signInOpened ? null : ssoLoginUrl(line);
+        if (url) this.openSignIn(run, url, push);
+        else if (!run.signInOpened && !run.browser && /^https?:\/\/\S+$/i.test(line.trim())) {
+          // A link that is not tsh's listener on this machine (a bind address set elsewhere): Quiver does not open it, but
+          // says so, so the login does not sit waiting with nothing to do.
+          run.browser = true;
+          output.push('Quiver opens only links to tsh on this machine; open the link above in your browser to sign in.');
+        }
+      } else if (!run.browser && isBrowserLoginLine(line)) {
         run.browser = true;
         run.onBrowser?.();
       }
@@ -436,6 +528,7 @@ export class TeleportSession {
         settled = true;
         clearTimeout(timer);
         if (note) push(note);
+        run.closeSignIn();
         this.loginRun = null;
         this.lastLogin = { proxy, output: [...output] };
         const status = await this.refresh().catch(() => this.getStatus());
@@ -449,12 +542,63 @@ export class TeleportSession {
         void finish(false, `Login timed out after ${LOGIN_TIMEOUT_MS / 60_000} minutes.`);
       }, LOGIN_TIMEOUT_MS);
       child.on('error', (err) => void finish(false, `Could not start tsh: ${err.message}`));
-      child.on('close', (code, signal) => void finish(code === 0, code === 0 ? undefined : run.cancelled ? 'Login cancelled.' : `tsh login exited with ${signal ?? `code ${code}`}.`));
+      child.on('close', (code, signal) => {
+        const note = run.cancelled
+          ? 'Login cancelled.'
+          : run.needsUser
+            ? 'The sign-in needs you; it continues when the Quiver window is in front.'
+            : `tsh login exited with ${signal ?? `code ${code}`}.`;
+        void finish(code === 0, code === 0 ? undefined : note);
+      });
     });
 
     this.loginRun = run;
     this.opts.onChange('login');
     return run;
+  }
+
+  /**
+   * Open tsh's SSO link in the cluster's sign-in window. tsh finishing closes the window; the window closing first stops
+   * tsh: closed by the user it is a cancel, refused because nobody is looking it is `needsUser`.
+   */
+  private openSignIn(run: LoginRun, url: string, push: (line: string) => void): void {
+    const signInWindow = this.opts.signInWindow;
+    if (!signInWindow) return;
+    run.signInOpened = true;
+    const controller = new AbortController();
+    run.closeSignIn = () => controller.abort();
+    // 'failed': the window could not open; neither a cancel (which would hold off renewals of this certificate) nor a
+    // sign-in that needs the user, so the attempt counts as failed and is retried after the usual spacing.
+    const stop = (reason: 'cancelled' | 'needs-user' | 'failed', note?: string) => {
+      if (controller.signal.aborted || this.loginRun !== run || run.child.exitCode !== null) return;
+      if (reason === 'cancelled') run.cancelled = true;
+      else if (reason === 'needs-user') run.needsUser = true;
+      if (note) push(note);
+      run.child.kill();
+    };
+    let refused = false;
+    void signInWindow({
+      proxy: run.proxy,
+      url,
+      signal: controller.signal,
+      reveal: () => {
+        const allowed = run.mayReveal();
+        refused = !allowed;
+        return allowed;
+      },
+      onReveal: () => {
+        run.browser = true;
+        run.onBrowser?.();
+        this.opts.onChange('login');
+      },
+    }).then(
+      (ok) => {
+        if (ok) return;
+        if (refused) stop('needs-user');
+        else stop('cancelled', 'Sign-in window closed.');
+      },
+      (err: Error) => stop('failed', `Could not open the sign-in window: ${err.message}`),
+    );
   }
 
   cancelLogin(): boolean {
@@ -502,6 +646,11 @@ export class TeleportSession {
     }
     return run.stdout;
   }
+}
+
+/** One certificate of one cluster, so a decision about it ends when tsh has a new one. */
+function certificateKey(cluster: Pick<TeleportClusterStatus, 'proxy' | 'validUntil'>): string {
+  return `${normalizeProxy(cluster.proxy)}|${cluster.validUntil ?? ''}`;
 }
 
 /** The line of tsh's output that says why it failed: the last error, else the last line. */

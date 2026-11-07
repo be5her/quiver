@@ -14,6 +14,7 @@ import {
   defineCommand,
   defineModule,
   isAutoRenewOn,
+  isInAppSignInOn,
   isDestructiveKubeAction,
   isKubeProtected,
   isPinned,
@@ -29,7 +30,9 @@ import {
   resolveKubeAction,
   sameProxy,
   setAutoRenew,
+  setProxyListed,
   setKubeProtected,
+  teleportSignInPartition,
   togglePin,
   type Caller,
   type DbConnection,
@@ -142,7 +145,7 @@ const status = defineCommand({
   id: 'teleport.status',
   title: 'Teleport status',
   description:
-    'Where tsh is, every known cluster with its proxy, name, user, certificate expiry and state (logged-out, expired, logged-in, expiring), whether a login is running, pinned resources, and the local tunnels. Per cluster, autoRenew says whether Keep me logged in renews its certificate before it expires, and renewal the last automatic attempt (lastAttemptAt, lastResult ok, failed or cancelled, lastError, nextEligibleAt, running, waitingForFocus). The top-level state is no-tsh or the best cluster state.',
+    'Where tsh is, every known cluster with its proxy, name, user, certificate expiry and state (logged-out, expired, logged-in, expiring), whether a login is running, pinned resources, and the local tunnels. Per cluster, autoRenew says whether Keep me logged in renews its certificate before it expires, inAppSignIn whether its logins sign in inside a Quiver window instead of the system browser, and renewal the last automatic attempt (lastAttemptAt, lastResult ok, failed or cancelled, lastError, nextEligibleAt, running, waitingForFocus). The top-level state is no-tsh or the best cluster state.',
   scope: 'global',
   input: z.object({ refresh: z.boolean().optional().describe('Run tsh status now instead of returning the last poll') }),
   handler: async ({ refresh }, ctx): Promise<TeleportStatus> => {
@@ -155,7 +158,7 @@ const login = defineCommand({
   id: 'teleport.login',
   title: 'Log in to Teleport',
   description:
-    'Runs tsh login --proxy=<addr> for one cluster. The cluster default connector is SSO, so a browser window opens and the call returns when tsh exits (up to five minutes). Output lines are returned so links and MFA prompts are visible.',
+    'Runs tsh login --proxy=<addr> for one cluster. The cluster default connector is SSO, so a browser window opens (a Quiver sign-in window when Sign in inside Quiver is on for the cluster, which shows itself only if the identity provider wants the user) and the call returns when tsh exits (up to five minutes). Output lines are returned so links and MFA prompts are visible.',
   scope: 'global',
   mutating: true,
   input: z.object({ proxy: z.string().optional().describe('Proxy address to log in to; required when several clusters are known') }),
@@ -219,14 +222,14 @@ const clusterRemove = defineCommand({
   id: 'teleport.cluster.remove',
   title: 'Remove Teleport cluster',
   description:
-    'Removes a proxy address from Settings along with its pins and Keep me logged in, and stops its tunnels and Kubernetes port forwards. Protected Kubernetes clusters stay protected. The tsh profile on disk is untouched; use teleport.logout for that.',
+    'Removes a proxy address from Settings along with its pins, Keep me logged in, Sign in inside Quiver and the cookies that sign-in saved, and stops its tunnels and Kubernetes port forwards. Protected Kubernetes clusters stay protected. The tsh profile on disk is untouched; use teleport.logout for that.',
   scope: 'global',
   mutating: true,
   input: z.object({ proxy: z.string() }),
   handler: async ({ proxy }, ctx): Promise<TeleportStatus> => {
     const { session, tunnels, forwards } = getTeleport(ctx.host);
     const teleport = ctx.host.config.get().teleport;
-    session.abandonRenewal(proxy);
+    session.forgetRenewals(proxy);
     await Promise.all([tunnels.stopCluster(proxy), forwards.stopCluster(proxy)]);
     invalidateCaches(proxy);
     await ctx.host.config.update({
@@ -235,8 +238,10 @@ const clusterRemove = defineCommand({
         proxies: teleport.proxies.filter((p) => !sameProxy(p, proxy)),
         pins: teleport.pins.filter((p) => !sameProxy(p.proxy, proxy)),
         autoRenew: setAutoRenew(teleport.autoRenew, proxy, false),
+        inAppSignIn: setProxyListed(teleport.inAppSignIn, proxy, false),
       },
     });
+    await forgetSignIn(ctx.host, proxy);
     return session.refresh();
   },
 });
@@ -245,7 +250,7 @@ const clusterAutoRenew = defineCommand({
   id: 'teleport.cluster.autoRenew',
   title: 'Keep me logged in to a Teleport cluster',
   description:
-    'Turns Keep me logged in on or off for one cluster on this machine. When on, Quiver runs tsh login --proxy=<addr> for the cluster when its certificate is about to expire (less than 30 minutes left) or has expired, at most once per 10 minutes, one cluster at a time, and restarts its tunnels afterwards. An expired certificate needs the browser for SSO, so that renewal waits until the Quiver window is in front. Returns the status.',
+    'Turns Keep me logged in on or off for one cluster on this machine. When on, Quiver runs tsh login --proxy=<addr> for the cluster when its certificate is about to expire (less than 30 minutes left) or has expired, at most once per 10 minutes, one cluster at a time, and restarts its tunnels afterwards. An expired certificate needs the browser for SSO, so that renewal waits until the Quiver window is in front (with Sign in inside Quiver it is tried quietly first, and waits only when the identity provider wants the user). Turning it off forgets the past attempts. Returns the status.',
   scope: 'global',
   // It changes what Quiver does on this machine: logins that may open the browser.
   mutating: true,
@@ -256,9 +261,35 @@ const clusterAutoRenew = defineCommand({
     const teleport = ctx.host.config.get().teleport;
     if (isAutoRenewOn(teleport, addr) !== enabled) await ctx.host.config.update({ teleport: { ...teleport, autoRenew: setAutoRenew(teleport.autoRenew, addr, enabled) } });
     // Turned off while its renewal runs or waits: that tsh login is cancelled, not left to finish.
-    if (!enabled) getTeleport(ctx.host).session.abandonRenewal(addr);
+    if (!enabled) getTeleport(ctx.host).session.forgetRenewals(addr);
     ctx.host.emit('teleport.changed', { reason: 'status' });
     // A certificate that is due already is renewed now rather than on the next poll.
+    return getTeleport(ctx.host).session.refresh();
+  },
+});
+
+/** Forget what a cluster's in-app sign-in window kept (the identity provider's cookies). */
+async function forgetSignIn(host: HostApi, proxy: string): Promise<void> {
+  await host.web?.clear(teleportSignInPartition(proxy)).catch((err) => console.warn(`[quiver] teleport: clearing the sign-in of ${proxy} failed: ${(err as Error).message}`));
+}
+
+const clusterInAppSignIn = defineCommand({
+  id: 'teleport.cluster.inAppSignIn',
+  title: 'Sign in to a Teleport cluster inside Quiver',
+  description:
+    'Turns Sign in inside Quiver on or off for one cluster on this machine. When on, tsh login runs with --browser=none and the SSO link it prints opens in a Quiver window with its own saved cookies, so the identity provider (e.g. GitHub) remembers the user and later logins, Keep me logged in renewals included, finish without a form or a browser. The window starts hidden and shows itself only when the page waits for the user; a renewal in the background that needs the user waits until the Quiver window is in front. Turning it off forgets the saved cookies. Returns the status.',
+  scope: 'global',
+  // It changes how logins on this machine sign in, and turning it off deletes the saved sign-in.
+  mutating: true,
+  input: z.object({ proxy: z.string().describe('Proxy address of the cluster (see teleport.status)'), enabled: z.boolean() }),
+  handler: async ({ proxy, enabled }, ctx): Promise<TeleportStatus> => {
+    const addr = proxyAddress(proxy);
+    if (!addr) throw new QuiverError('INVALID_INPUT', 'Proxy address is empty');
+    if (enabled && !ctx.host.web) throw new QuiverError('INVALID_INPUT', 'Signing in inside Quiver needs the Quiver desktop app');
+    const teleport = ctx.host.config.get().teleport;
+    if (isInAppSignInOn(teleport, addr) !== enabled) await ctx.host.config.update({ teleport: { ...teleport, inAppSignIn: setProxyListed(teleport.inAppSignIn, addr, enabled) } });
+    if (!enabled) await forgetSignIn(ctx.host, addr);
+    ctx.host.emit('teleport.changed', { reason: 'status' });
     return getTeleport(ctx.host).session.refresh();
   },
 });
@@ -814,6 +845,7 @@ export const teleportModule = defineModule({
     clusterAdd,
     clusterRemove,
     clusterAutoRenew,
+    clusterInAppSignIn,
     windowFocus,
     pin,
     dbList,

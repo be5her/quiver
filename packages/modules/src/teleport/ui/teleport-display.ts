@@ -38,7 +38,7 @@ export function renewalLine(cluster: TeleportClusterStatus, now: Date): { text: 
   const r = cluster.renewal;
   if (!r) return null;
   if (r.running) return { text: 'renewing the certificate…', tone: 'text-muted' };
-  if (r.waitingForFocus) return { text: 'renews when Quiver is in front (opens the browser)', tone: 'text-warning' };
+  if (r.waitingForFocus) return { text: cluster.inAppSignIn ? 'renews when Quiver is in front (asks you to sign in)' : 'renews when Quiver is in front (opens the browser)', tone: 'text-warning' };
   if (!r.lastAttemptAt) return null;
   switch (r.lastResult) {
     case 'ok':

@@ -1,5 +1,5 @@
 import { BrowserWindow, app, session, type Cookie, type Session } from 'electron';
-import type { WebResponse, WebSessionsApi } from '@quiver/core';
+import type { WebResponse, WebSessionsApi, WebSignInOptions } from '@quiver/core';
 import { iconPath } from './window';
 
 /** Product tokens Chromium itself sends; the rest (Electron, the app's name) are dropped. */
@@ -36,10 +36,11 @@ export class ElectronWebSessions implements WebSessionsApi {
     return ses;
   }
 
-  signIn(options: { partition: string; url: string; title: string; done(url: string): boolean | Promise<boolean> }): Promise<boolean> {
+  signIn(options: WebSignInOptions): Promise<boolean> {
     const open = this.pending.get(options.partition);
     if (open && !open.win.isDestroyed()) {
-      if (this.options.show) {
+      // A window that waits to be revealed stays hidden; whoever started it decides when it shows.
+      if (this.options.show && open.win.isVisible()) {
         open.win.show();
         open.win.focus();
       }
@@ -60,7 +61,8 @@ export class ElectronWebSessions implements WebSessionsApi {
     });
     // The window keeps saying what it is for, whatever page is in it.
     win.on('page-title-updated', (event) => event.preventDefault());
-    if (this.options.show) win.once('ready-to-show', () => win.show());
+    // A hidden-first window shows only when the sign-in waits for the user (see `reveal`).
+    if (this.options.show && !options.reveal) win.once('ready-to-show', () => win.show());
 
     const outcome = new Promise<boolean>((resolve, reject) => {
       let settled = false;
@@ -70,11 +72,18 @@ export class ElectronWebSessions implements WebSessionsApi {
         if (settled) return;
         settled = true;
         clearInterval(poll);
+        if (revealTimer) clearTimeout(revealTimer);
+        options.signal?.removeEventListener('abort', onAbort);
         this.pending.delete(options.partition);
         void this.get(options.partition).cookies.flushStore().catch(() => {});
         if (error) reject(error);
         else resolve(ok);
-        if (!win.isDestroyed()) win.close();
+        // A hidden-first window nobody saw is destroyed, not closed: its page cannot veto that with beforeunload and leave
+        // an invisible window behind. A window the user saw closes normally, letting its page finish what it was doing.
+        if (!win.isDestroyed()) {
+          if (options.reveal && !win.isVisible()) win.destroy();
+          else win.close();
+        }
       };
       const check = async (url: string) => {
         if (settled || checking || !url) return;
@@ -92,12 +101,49 @@ export class ElectronWebSessions implements WebSessionsApi {
         clearInterval(poll);
         settle(false);
       });
+      const onAbort = () => settle(false);
+      if (options.signal?.aborted) queueMicrotask(onAbort);
+      else options.signal?.addEventListener('abort', onAbort, { once: true });
+      // Not done in time: the page waits for the user. Show it if that is allowed now, else give up quietly. The time
+      // counts from when a page finished loading, so a slow network or redirect chain is not mistaken for a page that
+      // waits; while a page loads, only a much longer wait (five times as long) counts as waiting.
+      let revealed = false;
+      let revealTimer: ReturnType<typeof setTimeout> | null = null;
+      const armReveal = (ms: number) => {
+        if (!options.reveal || revealed || settled) return;
+        if (revealTimer) clearTimeout(revealTimer);
+        revealTimer = setTimeout(() => {
+            if (settled || win.isDestroyed()) return;
+            const reveal = options.reveal!;
+            let allowed = false;
+            try {
+              allowed = reveal.allowed();
+            } catch {
+              allowed = false;
+            }
+            if (!allowed) return settle(false);
+            revealed = true;
+            if (this.options.show) {
+              win.show();
+              win.focus();
+              // A popup the page opened while hidden is shown with it, or the page would wait for a window nobody sees.
+              for (const child of win.getChildWindows()) child.show();
+            }
+            try {
+              reveal.onReveal?.();
+            } catch {
+              // the window is shown either way
+            }
+          }, ms);
+      };
+      const loadingMs = (options.reveal?.afterMs ?? 0) * 5;
+      armReveal(loadingMs);
       // Identity providers open popups (Google's sign-in button does) and post the outcome back to the
       // page that opened them, so a popup gets a window of its own, sandboxed the same way and closed with
       // this one; anything but http(s) is refused.
       win.webContents.setWindowOpenHandler(({ url }) => {
         if (!/^https?:/i.test(url)) return { action: 'deny' };
-        return { action: 'allow', overrideBrowserWindowOptions: { parent: win, show: this.options.show, autoHideMenuBar: true, icon: process.platform === 'darwin' ? undefined : iconPath, webPreferences } };
+        return { action: 'allow', overrideBrowserWindowOptions: { parent: win, show: this.options.show && win.isVisible(), autoHideMenuBar: true, icon: process.platform === 'darwin' ? undefined : iconPath, webPreferences } };
       });
       win.webContents.on('did-create-window', (child) => {
         child.on('page-title-updated', (event) => event.preventDefault());
@@ -112,8 +158,19 @@ export class ElectronWebSessions implements WebSessionsApi {
       });
       win.webContents.on('did-navigate', (_event, url) => {
         committed = true;
+        // There is no address bar: the title says which site the page is on, so a look-alike page can be told apart.
+        try {
+          if (!win.isDestroyed()) win.setTitle(`${options.title} — ${new URL(url).host}`);
+        } catch {
+          // not a URL with a host; the title stays
+        }
         void check(url);
       });
+      if (options.reveal) {
+        const idleMs = options.reveal.afterMs;
+        win.webContents.on('did-start-loading', () => armReveal(loadingMs));
+        win.webContents.on('did-stop-loading', () => armReveal(idleMs));
+      }
       win.webContents.on('did-navigate-in-page', (_event, url, isMainFrame) => isMainFrame && void check(url));
       win.webContents.on('did-finish-load', () => void check(win.webContents.getURL()));
       win.webContents.on('did-fail-load', (_event, code, description, url, isMainFrame) => {

@@ -33,6 +33,8 @@ export interface TeleportClusterStatus {
   configured: boolean;
   /** Keep me logged in: the certificate is renewed when it is about to expire. */
   autoRenew: boolean;
+  /** Sign in inside Quiver: tsh logins open the SSO page in a Quiver window that keeps its cookies, not the system browser. */
+  inAppSignIn: boolean;
   /** The last automatic renewal and when the next may run; null before the first one. */
   renewal: TeleportRenewal | null;
 }
@@ -223,7 +225,7 @@ export function parseTshStatus(stdout: string, now: Date = new Date()): ParsedPr
 
 /** A cluster without a tsh profile. */
 export function loggedOutCluster(proxy: string, configured: boolean): TeleportClusterStatus {
-  return { proxy, cluster: null, user: null, roles: [], validUntil: null, kubeCluster: null, state: 'logged-out', current: false, configured, autoRenew: false, renewal: null };
+  return { proxy, cluster: null, user: null, roles: [], validUntil: null, kubeCluster: null, state: 'logged-out', current: false, configured, autoRenew: false, inAppSignIn: false, renewal: null };
 }
 
 /** Merge configured proxies with the profiles tsh knows: configured first, unknown ones as logged out. */
@@ -233,10 +235,10 @@ export function buildClusters(configuredProxies: string[], profiles: ParsedProfi
     const proxy = proxyAddress(raw);
     if (!proxy || clusters.some((c) => sameProxy(c.proxy, proxy))) continue;
     const profile = profiles.find((p) => sameProxy(p.proxy, proxy));
-    clusters.push(profile ? { ...profile, proxy, configured: true, autoRenew: false, renewal: null } : loggedOutCluster(proxy, true));
+    clusters.push(profile ? { ...profile, proxy, configured: true, autoRenew: false, inAppSignIn: false, renewal: null } : loggedOutCluster(proxy, true));
   }
   for (const profile of profiles) {
-    if (!clusters.some((c) => sameProxy(c.proxy, profile.proxy))) clusters.push({ ...profile, configured: false, autoRenew: false, renewal: null });
+    if (!clusters.some((c) => sameProxy(c.proxy, profile.proxy))) clusters.push({ ...profile, configured: false, autoRenew: false, inAppSignIn: false, renewal: null });
   }
   return clusters;
 }
@@ -379,8 +381,26 @@ export function isAutoRenewOn(config: Pick<TeleportConfig, 'autoRenew'>, proxy: 
 
 /** Turn Keep me logged in on or off for a cluster, keeping the list free of duplicates. */
 export function setAutoRenew(list: string[], proxy: string, on: boolean): string[] {
+  return setProxyListed(list, proxy, on);
+}
+
+/** Add a proxy to a per-cluster setting list or take it out, keeping the list free of duplicates. */
+export function setProxyListed(list: string[], proxy: string, on: boolean): string[] {
   const without = list.filter((p) => !sameProxy(p, proxy));
   return on ? [...without, proxyAddress(proxy) ?? proxy] : without;
+}
+
+export function isInAppSignInOn(config: Pick<TeleportConfig, 'inAppSignIn'>, proxy: string): boolean {
+  return config.inAppSignIn.some((p) => sameProxy(p, proxy));
+}
+
+/**
+ * The cookie jar of a cluster's in-app sign-in window: one per cluster, kept by the app per machine. What it keeps is
+ * the identity provider's own session (GitHub's login cookie), which lets the next login go through without a form.
+ */
+export function teleportSignInPartition(proxy: string): string {
+  // Every other character is spelled out, so two proxies never share a jar (`a-b.x` and `a.b.x` stay apart).
+  return `persist:quiver-teleport-${normalizeProxy(proxy).replace(/[^a-z0-9]/g, (c) => `_${c.charCodeAt(0).toString(16)}`)}`;
 }
 
 /** The user cancelled the last attempt, and the certificate it was for is still the one tsh has. */
@@ -426,7 +446,22 @@ export function proxiesToAutoRenew(
 
 /** Does a line of `tsh login` output mean it is sending the user to the browser? */
 export function isBrowserLoginLine(line: string): boolean {
-  return /open it by clicking on the link|browser window|https?:\/\/(127\.0\.0\.1|localhost):\d+\//i.test(line);
+  return /open it by clicking on the link|browser window|following URL to authenticate|https?:\/\/(127\.0\.0\.1|localhost|\[::1\]):\d+\//i.test(line);
+}
+
+/**
+ * The SSO link `tsh login --browser=none` prints, or null. Only tsh's own listener on this machine counts (it redirects
+ * to the identity provider and receives the callback), so a line can never make Quiver open some other address.
+ */
+export function ssoLoginUrl(line: string): string | null {
+  const match = /\bhttps?:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d{1,5}\/[^\s"'<>]*/i.exec(line);
+  if (!match) return null;
+  try {
+    const url = new URL(match[0]);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
+  } catch {
+    return null;
+  }
 }
 
 // ---------- pins ----------
@@ -451,6 +486,7 @@ export function migrateTeleportConfig(raw: Partial<TeleportConfig> & { proxy?: s
     tshPath: typeof raw.tshPath === 'string' ? raw.tshPath : '',
     loginOnLaunch: Boolean(raw.loginOnLaunch),
     autoRenew: Array.isArray(raw.autoRenew) ? raw.autoRenew.filter((p, i, all): p is string => typeof p === 'string' && p.trim() !== '' && all.findIndex((q) => typeof q === 'string' && sameProxy(q, p)) === i) : [],
+    inAppSignIn: Array.isArray(raw.inAppSignIn) ? raw.inAppSignIn.filter((p, i, all): p is string => typeof p === 'string' && p.trim() !== '' && all.findIndex((q) => typeof q === 'string' && sameProxy(q, p)) === i) : [],
     protectedKubes: Array.isArray(raw.protectedKubes) ? raw.protectedKubes.filter((k) => k && typeof k.proxy === 'string' && typeof k.name === 'string' && k.name !== '') : [],
     agentActionsOnProtected: raw.agentActionsOnProtected === true,
   };

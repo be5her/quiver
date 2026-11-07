@@ -64,6 +64,11 @@ export interface TeleportConfig {
   loginOnLaunch: boolean;
   /** Keep me logged in: proxies whose certificate is renewed with `tsh login` when it is about to expire or has expired. */
   autoRenew: string[];
+  /**
+   * Sign in inside Quiver: proxies whose `tsh login` runs with `--browser=none` and opens the SSO link in a Quiver window
+   * with its own saved cookies, so the identity provider (GitHub) remembers you and later logins need no form.
+   */
+  inAppSignIn: string[];
   /** Kubernetes clusters marked protected: actions need the cluster name typed, and agents are refused. */
   protectedKubes: TeleportKubeRef[];
   /** Let agents run Kubernetes actions and port forwards on protected clusters too. Off by default. */
@@ -80,6 +85,8 @@ export interface TeleportRenewalEvent {
   browser: boolean;
   /** No Quiver window was in front when this happened: the window shows a system notification as well as a toast. */
   background: boolean;
+  /** The sign-in happens in a Quiver window (Sign in inside Quiver), not the system browser. */
+  inApp?: boolean;
   message?: string;
 }
 
@@ -164,13 +171,29 @@ export interface WebResponse {
  * the project). A sign-in happens in a window the user drives; requests then carry its cookies, and
  * cookies the answers set are kept.
  */
+export interface WebSignInOptions {
+  partition: string;
+  url: string;
+  title: string;
+  done(url: string): boolean | Promise<boolean>;
+  /**
+   * Open the window hidden and show it only when the sign-in is not done `afterMs` after it started, i.e. when the page
+   * waits for the user (a login form, a consent screen). A sign-in the saved cookies complete never shows a window.
+   * `allowed` is asked at that moment: false closes the window instead and resolves false. Without this the window
+   * shows as soon as its page is ready.
+   */
+  reveal?: { afterMs: number; allowed(): boolean; onReveal?(): void };
+  /** Aborting closes the window and resolves false (e.g. the process the sign-in was for has ended). */
+  signal?: AbortSignal;
+}
+
 export interface WebSessionsApi {
   /**
    * Open a window on `url` in the partition and resolve true once `done` holds for a page that
    * finished loading, or false when the user closes the window first. A second call for the same
    * partition focuses the open window and shares its outcome.
    */
-  signIn(options: { partition: string; url: string; title: string; done(url: string): boolean | Promise<boolean> }): Promise<boolean>;
+  signIn(options: WebSignInOptions): Promise<boolean>;
   /** A request with the partition's cookies. `binary` answers with `bytes` instead of `text`, for downloads. */
   fetch(partition: string, url: string, init?: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number; binary?: boolean }): Promise<WebResponse>;
   /** A cookie the partition holds for `url`, or null. */

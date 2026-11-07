@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
 import { connect } from 'node:net';
 import path from 'node:path';
+import { BrowserWindow, session } from 'electron';
 import type {
   DbConnectionSummary,
   DbConnectionTest,
@@ -20,6 +21,7 @@ import type {
   TeleportStatus,
   TeleportTunnel,
 } from '@quiver/core';
+import { teleportSignInPartition } from '@quiver/core';
 import { definePart, until, processAlive } from '../part';
 
 /** The operation or action of a history entry. */
@@ -797,6 +799,169 @@ export default definePart({
       await run('teleport.status', { refresh: true }, null);
     }
 
+    // ---------- teleport: Sign in inside Quiver keeps the identity provider's session ----------
+    {
+      process.env.QUIVER_TELEPORT_POLL_MS = '400';
+      // Saved cookies get 1.5 s (instead of 4) to finish the sign-in before its window shows.
+      process.env.QUIVER_TELEPORT_SIGNIN_REVEAL_MS = '1500';
+      const status = () => run<TeleportStatus>('teleport.status', {}, null);
+      const loginArgs = async (proxy: string) => (await fakeTsh.calls()).filter((a) => a[0] === 'login' && a.includes(`--proxy=${proxy}`));
+      const ssoSince = async (n: number) => (await fakeTsh.ssoEvents()).slice(n).map((e) => e.event);
+      const ssoCount = async () => (await fakeTsh.ssoEvents()).length;
+      const signInWindows = () => BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed() && w.getTitle().startsWith('Sign in to Teleport'));
+      const idpCookie = async () => (await session.fromPartition(teleportSignInPartition(first)).cookies.get({ url: 'http://127.0.0.1/', name: 'fake_idp' }))[0]?.value ?? null;
+      const renewalOf = async (proxy: string) => clusterOf(await status(), proxy)?.renewal ?? null;
+      /** Wait for the sign-in window to stop at the identity provider's form, then sign in there as the user would. */
+      const signInAtForm = async (since: number): Promise<boolean> => {
+        const atForm = await until(async () => (await ssoSince(since)).includes('form'), 8000);
+        const win = signInWindows()[0];
+        const loaded = Boolean(win) && (await until(() => !win.isDestroyed() && !win.webContents.isLoading() && win.webContents.getURL().includes('/idp/authorize'), 5000));
+        if (!atForm || !loaded) return false;
+        await win.webContents.executeJavaScript(`document.getElementById('fake-idp-sign-in').click()`);
+        return true;
+      };
+      // The first cluster's Keep me logged in comes back on at the end, for the UI; a manual login comes first.
+      await run('teleport.cluster.autoRenew', { proxy: first, enabled: false }, null);
+
+      check('teleport sign-in: without the setting, tsh login uses the system browser (no --browser=none)', (await loginArgs(first)).length > 0 && (await loginArgs(first)).every((a) => !a.includes('--browser=none')));
+
+      const on = await run<TeleportStatus>('teleport.cluster.inAppSignIn', { proxy: first, enabled: true }, null);
+      check(
+        'teleport sign-in: the setting is saved per cluster and shown in the status',
+        host.config.get().teleport.inAppSignIn.includes(first) && clusterOf(on, first)?.inAppSignIn === true && clusterOf(on, second)?.inAppSignIn === false,
+        host.config.get().teleport.inAppSignIn,
+      );
+
+      // First login: the identity provider asks; the user signs in inside the Quiver window, and its cookie is kept.
+      await fakeTsh.expire(first);
+      await run('teleport.status', { refresh: true }, null);
+      let since = await ssoCount();
+      const firstLogin = run<TeleportLoginResult>('teleport.login', { proxy: first }, null);
+      const signedIn = await signInAtForm(since);
+      const firstResult = await firstLogin;
+      const closedAfterFirst = await until(() => signInWindows().length === 0, 3000);
+      check(
+        'teleport sign-in: tsh login gets --browser=none, its link opens in a Quiver window at the identity provider, and signing in there logs in',
+        signedIn &&
+          firstResult.ok &&
+          clusterOf(firstResult.status, first)?.state === 'logged-in' &&
+          ((await loginArgs(first)).at(-1) ?? []).includes('--browser=none') &&
+          JSON.stringify(await ssoSince(since)) === JSON.stringify(['form', 'signed-in', 'silent', 'callback']) &&
+          closedAfterFirst,
+        { signedIn, ok: firstResult.ok, events: await ssoSince(since), windows: signInWindows().length, output: firstResult.output },
+      );
+      check('teleport sign-in: the identity provider\'s cookie is kept in the cluster\'s own cookie jar', (await idpCookie()) === 'signed-in', await idpCookie());
+
+      // Second login: the kept cookie lets it through with no form and no window shown.
+      await fakeTsh.expire(first);
+      await run('teleport.status', { refresh: true }, null);
+      since = await ssoCount();
+      const quiet = await run<TeleportLoginResult>('teleport.login', { proxy: first }, null);
+      check(
+        'teleport sign-in: the next login goes through on the kept sign-in, without the form, and closes its window',
+        quiet.ok && clusterOf(quiet.status, first)?.state === 'logged-in' && JSON.stringify(await ssoSince(since)) === JSON.stringify(['silent', 'callback']) && (await until(() => signInWindows().length === 0, 3000)),
+        { ok: quiet.ok, events: await ssoSince(since), output: quiet.output },
+      );
+
+      // Keep me logged in with Quiver in the background: an expired certificate renews quietly instead of waiting for the window.
+      await run('teleport.window.focus', { focused: false }, null);
+      const renewLogins = (await loginArgs(first)).length;
+      await fakeTsh.expire(first);
+      since = await ssoCount();
+      await run('teleport.cluster.autoRenew', { proxy: first, enabled: true }, null);
+      const quietRenewal = await until(async () => (await renewalOf(first))?.lastResult === 'ok', 8000);
+      check(
+        'teleport sign-in: in the background, an expired certificate renews on the kept sign-in without waiting for the window',
+        quietRenewal && (await loginArgs(first)).length === renewLogins + 1 && clusterOf(await status(), first)?.state === 'logged-in' && JSON.stringify(await ssoSince(since)) === JSON.stringify(['silent', 'callback']),
+        { renewal: await renewalOf(first), logins: (await loginArgs(first)).length - renewLogins, events: await ssoSince(since) },
+      );
+
+      // A slow identity provider (longer than the reveal time) is not taken for a page that waits for the user.
+      await fakeTsh.setLogin({ idpDelayMs: 2500 });
+      await run('teleport.cluster.autoRenew', { proxy: first, enabled: false }, null);
+      const slowLogins = (await loginArgs(first)).length;
+      await fakeTsh.expire(first);
+      since = await ssoCount();
+      await run('teleport.cluster.autoRenew', { proxy: first, enabled: true }, null);
+      const slowRenewal = await until(async () => (await renewalOf(first))?.lastResult === 'ok', 10_000);
+      check(
+        'teleport sign-in: a slow identity provider in the background still renews quietly, not mistaken for one that needs the user',
+        slowRenewal && (await loginArgs(first)).length === slowLogins + 1 && JSON.stringify(await ssoSince(since)) === JSON.stringify(['silent', 'callback']),
+        { renewal: await renewalOf(first), logins: (await loginArgs(first)).length - slowLogins, events: await ssoSince(since) },
+      );
+      await fakeTsh.setLogin({ idpDelayMs: 0 });
+
+      // Turned off: the kept sign-in is forgotten. On again, the identity provider asks once more; in the background
+      // that attempt stops without counting as a failure and waits for the window, then shows the form there.
+      await run('teleport.cluster.inAppSignIn', { proxy: first, enabled: false }, null);
+      check('teleport sign-in: turning it off forgets the kept sign-in', !host.config.get().teleport.inAppSignIn.includes(first) && (await idpCookie()) === null, await idpCookie());
+      await run('teleport.cluster.inAppSignIn', { proxy: first, enabled: true }, null);
+      // Off and on again forgets the renewal a moment ago, which the ten minutes between attempts would hold against it.
+      await run('teleport.cluster.autoRenew', { proxy: first, enabled: false }, null);
+      const needsLogins = (await loginArgs(first)).length;
+      since = await ssoCount();
+      await fakeTsh.expire(first);
+      await run('teleport.cluster.autoRenew', { proxy: first, enabled: true }, null);
+      const waits = await until(async () => (await renewalOf(first))?.waitingForFocus === true, 10_000);
+      const waiting = await status();
+      check(
+        'teleport sign-in: a renewal in the background that needs the user stops quietly and waits for the window, not counted as a failure',
+        waits &&
+          (await loginArgs(first)).length === needsLogins + 1 &&
+          (await ssoSince(since)).includes('form') &&
+          !(await ssoSince(since)).includes('callback') &&
+          !waiting.loginInProgress &&
+          clusterOf(waiting, first)?.renewal?.lastResult === null &&
+          clusterOf(waiting, first)?.renewal?.lastError === null &&
+          signInWindows().length === 0,
+        { renewal: clusterOf(waiting, first)?.renewal, logins: (await loginArgs(first)).length - needsLogins, events: await ssoSince(since), output: waiting.loginOutput },
+      );
+      since = await ssoCount();
+      await run('teleport.window.focus', { focused: true }, null);
+      const shownAtForm = await signInAtForm(since);
+      const renewedInFront = await until(async () => (await renewalOf(first))?.lastResult === 'ok', 8000);
+      check(
+        'teleport sign-in: once Quiver is in front the renewal runs again and its window waits for the user to sign in',
+        shownAtForm && renewedInFront && (await loginArgs(first)).length === needsLogins + 2 && clusterOf(await status(), first)?.state === 'logged-in' && (await idpCookie()) === 'signed-in',
+        { shownAtForm, renewal: await renewalOf(first), events: await ssoSince(since) },
+      );
+
+      // Closing the window is a cancel of that login.
+      await run('teleport.cluster.autoRenew', { proxy: first, enabled: false }, null);
+      await run('teleport.cluster.inAppSignIn', { proxy: first, enabled: false }, null);
+      await run('teleport.cluster.inAppSignIn', { proxy: first, enabled: true }, null);
+      await fakeTsh.expire(first);
+      await run('teleport.status', { refresh: true }, null);
+      since = await ssoCount();
+      const closing = run<TeleportLoginResult>('teleport.login', { proxy: first }, null);
+      const formUp = await until(async () => (await ssoSince(since)).includes('form') && signInWindows().length === 1, 8000);
+      signInWindows()[0]?.close();
+      const closed = await closing;
+      check(
+        'teleport sign-in: closing the sign-in window cancels that tsh login',
+        formUp && !closed.ok && closed.output.some((l) => l.includes('Sign-in window closed.')) && !(await status()).loginInProgress,
+        { formUp, ok: closed.ok, output: closed.output },
+      );
+      since = await ssoCount();
+      const again = run<TeleportLoginResult>('teleport.login', { proxy: first }, null);
+      await signInAtForm(since);
+      check('teleport sign-in: logging in again after a cancel works', (await again).ok);
+
+      const mcpInApp = await rpc('tools/call', { name: 'teleport_cluster_inAppSignIn', arguments: { proxy: first, enabled: false } });
+      check('mcp blocks teleport_cluster_inAppSignIn by default', mcpInApp.result?.isError === true && (mcpInApp.result.content?.[0]?.text ?? '').includes('MUTATION_BLOCKED') && host.config.get().teleport.inAppSignIn.includes(first));
+
+      // Back to how the UI checks expect it: Keep me logged in on for the first cluster, logins through the system browser.
+      // Turning Keep me logged in off forgot its renewals; one more (through the browser, a valid certificate reissued)
+      // gives the UI its "renewed … ago" line again.
+      await run('teleport.cluster.inAppSignIn', { proxy: first, enabled: false }, null);
+      await fakeTsh.setValidUntil(first, new Date(Date.now() + 10 * 60_000));
+      await run('teleport.cluster.autoRenew', { proxy: first, enabled: true }, null);
+      check('teleport sign-in: back to the browser, Keep me logged in renews the first cluster again', await until(async () => (await renewalOf(first))?.lastResult === 'ok', 8000), await renewalOf(first));
+      delete process.env.QUIVER_TELEPORT_SIGNIN_REVEAL_MS;
+      delete process.env.QUIVER_TELEPORT_POLL_MS;
+      await run('teleport.status', { refresh: true }, null);
+    }
+
     check(
       'mcp lists teleport tools',
       ['teleport_status', 'teleport_db_list', 'teleport_db_connect', 'teleport_kube_list', 'teleport_pin', 'teleport_cluster_add'].every((n) => names.includes(n)) && !names.includes('teleport_login_cancel'),
@@ -918,6 +1083,21 @@ export default definePart({
           await js(`document.querySelector('[data-testid=teleport-menu-auto-renew]')?.click()`);
           const switchedOff = await until(async () => !host.config.get().teleport.autoRenew.includes(second) && (await secondRenews()) === false, 3000);
           check('ui: the same menu turns it off again', checkedNow === 'true' && switchedOff, { checkedNow, switchedOff });
+          // Sign in inside Quiver is a switch in the same menu.
+          await wait(500);
+          await js(`${clusterSel(second)}?.querySelector('[data-testid=teleport-cluster-menu]')?.click()`);
+          await wait(300);
+          const inAppChecked = await js(`document.querySelector('[data-testid=teleport-menu-in-app-sign-in]')?.getAttribute('aria-checked') ?? null`);
+          await js(`document.querySelector('[data-testid=teleport-menu-in-app-sign-in]')?.click()`);
+          const inAppOn = await until(() => host.config.get().teleport.inAppSignIn.includes(second), 3000);
+          check('ui: Sign in inside Quiver is a switch in the cluster menu', inAppChecked === 'false' && inAppOn, { inAppChecked, inAppOn });
+          await wait(500);
+          await js(`${clusterSel(second)}?.querySelector('[data-testid=teleport-cluster-menu]')?.click()`);
+          await wait(300);
+          await shot('10e-teleport-in-app-sign-in-menu');
+          await js(`document.querySelector('[data-testid=teleport-menu-in-app-sign-in]')?.click()`);
+          const inAppOff = await until(() => !host.config.get().teleport.inAppSignIn.includes(second), 3000);
+          check('ui: the same menu turns Sign in inside Quiver off again', inAppOff);
           await wait(500);
           await js(`document.documentElement.classList.remove('dark')`);
         }

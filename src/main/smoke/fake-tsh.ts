@@ -15,6 +15,8 @@ export interface FakeTshState {
   lifetimeMs?: number;
   /** How long `tsh login` takes (default 400 ms), so a smoke check can cancel one. */
   loginDelayMs?: number;
+  /** How long the fake identity provider takes to answer (default 0), like a slow network. */
+  idpDelayMs?: number;
 }
 
 export interface FakeTsh {
@@ -30,9 +32,15 @@ export interface FakeTsh {
   /** Move a cluster's certificate expiry, e.g. into the expiring-soon window. */
   setValidUntil(proxy: string, validUntil: Date): Promise<void>;
   /** Change how the next logins behave: certificate lifetime and how long a login takes. */
-  setLogin(options: { lifetimeMs?: number; loginDelayMs?: number }): Promise<void>;
+  setLogin(options: { lifetimeMs?: number; loginDelayMs?: number; idpDelayMs?: number }): Promise<void>;
   /** Every argv the fake was started with, in order (after the script path). */
   calls(): Promise<string[][]>;
+  /**
+   * What the fake identity provider behind `tsh login --browser=none` saw, in order: `form` (it asked the user to sign
+   * in), `signed-in` (the form was sent and it set its cookie), `silent` (its cookie let the login through without a
+   * form) and `callback` (the browser came back to tsh, which then logs in).
+   */
+  ssoEvents(): Promise<{ event: 'form' | 'signed-in' | 'silent' | 'callback'; proxy: string }[]>;
   /** Stands in for the user's `~/.kube/config`; the smoke points KUBECONFIG at it. */
   homeKubeconfig: string;
   /** Every `tsh kubectl` call the fake received: argv after `kubectl`, the KUBECONFIG it ran with, and the pid of the second process that ran it. */
@@ -55,11 +63,13 @@ export async function writeFakeTsh(dir: string, redisPort: number): Promise<Fake
   const homeKubeconfig = path.join(dir, 'home-kubeconfig.yaml');
   const callsFile = path.join(dir, 'fake-kubectl-calls.jsonl');
   const argvFile = path.join(dir, 'fake-tsh-argv.jsonl');
+  const ssoFile = path.join(dir, 'fake-tsh-sso.jsonl');
   const source = FAKE_TSH_SOURCE.replace('__STATE_FILE__', JSON.stringify(stateFile))
     .replace('__REDIS_PORT__', String(redisPort))
     .replace('__HOME_KUBECONFIG__', JSON.stringify(homeKubeconfig))
     .replace('__CALLS_FILE__', JSON.stringify(callsFile))
-    .replace('__ARGV_FILE__', JSON.stringify(argvFile));
+    .replace('__ARGV_FILE__', JSON.stringify(argvFile))
+    .replace('__SSO_FILE__', JSON.stringify(ssoFile));
   await fs.writeFile(script, source, 'utf8');
   const node = findNode();
   const quote = (p: string) => `"${p.replace(/\\/g, '/')}"`;
@@ -103,6 +113,13 @@ export async function writeFakeTsh(dir: string, redisPort: number): Promise<Fake
         .filter(Boolean)
         .map((l) => JSON.parse(l) as string[]);
     },
+    ssoEvents: async () => {
+      const text = await fs.readFile(ssoFile, 'utf8').catch(() => '');
+      return text
+        .split('\n')
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as { event: 'form' | 'signed-in' | 'silent' | 'callback'; proxy: string });
+    },
     homeKubeconfig,
     kubectlCalls: async () => {
       const text = await fs.readFile(callsFile, 'utf8').catch(() => '');
@@ -137,6 +154,7 @@ const REDIS_PORT = __REDIS_PORT__;
 const HOME_KUBECONFIG = __HOME_KUBECONFIG__;
 const CALLS_FILE = __CALLS_FILE__;
 const ARGV_FILE = __ARGV_FILE__;
+const SSO_FILE = __SSO_FILE__;
 const args = process.argv.slice(2);
 // The second process of tsh kubectl is the same call; only the first one is logged.
 if (!process.env.FAKE_TSH_KUBECTL_CHILD) fs.appendFileSync(ARGV_FILE, JSON.stringify(args) + '\n');
@@ -429,11 +447,8 @@ switch (args[0]) {
     // and the real tsh prints this before it opens the browser.
     const before = read();
     const existing = findProxy(before, proxy);
-    if (!existing || expired(before.profiles[existing])) {
-      err('If browser window does not open automatically, open it by clicking on the link:');
-      err(' http://127.0.0.1:61234/abcd1234');
-    }
-    setTimeout(() => {
+    const needsSso = !existing || expired(before.profiles[existing]);
+    const complete = () => {
       const state = read();
       const key = findProxy(state, proxy) || proxy;
       const previous = state.profiles[key] || {};
@@ -446,7 +461,52 @@ switch (args[0]) {
       out('  Roles:              access, github-dev');
       out('  Valid until:        ' + state.profiles[key].validUntil);
       process.exit(0);
-    }, before.loginDelayMs || 400);
+    };
+    if (needsSso && args.includes('--browser=none')) {
+      // Like tsh --browser=none: it prints the link of a listener of its own, which sends the browser on to the identity
+      // provider and receives its callback. The identity provider (here, on the same listener) asks for a sign-in unless
+      // its cookie says the browser signed in before.
+      const http = require('http');
+      const id = 'sso-' + process.pid;
+      const sso = (event) => fs.appendFileSync(SSO_FILE, JSON.stringify({ event, proxy }) + '\n');
+      const server = http.createServer((req, res) => {
+        const url = new URL(req.url, 'http://127.0.0.1');
+        if (url.pathname === '/' + id) { res.writeHead(302, { Location: '/idp/authorize' }); return res.end(); }
+        if (url.pathname === '/idp/authorize' && before.idpDelayMs && !req.headers['x-delayed']) {
+          req.headers['x-delayed'] = '1';
+          return setTimeout(() => server.emit('request', req, res), before.idpDelayMs);
+        }
+        if (url.pathname === '/idp/authorize') {
+          if (/(^|;\s*)fake_idp=signed-in/.test(req.headers.cookie || '')) { sso('silent'); res.writeHead(302, { Location: '/callback' }); return res.end(); }
+          sso('form');
+          res.writeHead(200, { 'Content-Type': 'text/html' });
+          return res.end('<!doctype html><title>Fake identity provider</title><form method="post" action="/idp/login"><button id="fake-idp-sign-in" type="submit">Sign in</button></form>');
+        }
+        if (url.pathname === '/idp/login' && req.method === 'POST') {
+          sso('signed-in');
+          res.writeHead(302, { 'Set-Cookie': 'fake_idp=signed-in; Max-Age=1209600; Path=/; HttpOnly', Location: '/idp/authorize' });
+          return res.end();
+        }
+        if (url.pathname === '/callback') {
+          sso('callback');
+          res.writeHead(200, { 'Content-Type': 'text/html' });
+          res.end('<!doctype html><title>Login successful</title>Login successful');
+          return setTimeout(complete, 50);
+        }
+        res.writeHead(404);
+        res.end();
+      });
+      server.listen(0, '127.0.0.1', () => {
+        err('Use the following URL to authenticate:');
+        err(' http://127.0.0.1:' + server.address().port + '/' + id);
+      });
+      break;
+    }
+    if (needsSso) {
+      err('If browser window does not open automatically, open it by clicking on the link:');
+      err(' http://127.0.0.1:61234/abcd1234');
+    }
+    setTimeout(complete, before.loginDelayMs || 400);
     break;
   }
   case 'logout': {

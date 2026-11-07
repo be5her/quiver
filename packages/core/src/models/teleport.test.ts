@@ -10,6 +10,7 @@ import {
   TELEPORT_RENEW_SPACING_MS,
   isAutoRenewOn,
   isBrowserLoginLine,
+  isInAppSignInOn,
   isLoginRequiredMessage,
   isPinned,
   loggedOutCluster,
@@ -18,6 +19,9 @@ import {
   normalizeProxy,
   proxiesToAutoRenew,
   setAutoRenew,
+  setProxyListed,
+  ssoLoginUrl,
+  teleportSignInPartition,
   type TeleportClusterStatus,
   type TeleportRenewalRecord,
   parseTshDatabases,
@@ -127,6 +131,7 @@ describe('pins and config', () => {
       tshPath: '',
       loginOnLaunch: true,
       autoRenew: [],
+      inAppSignIn: [],
       protectedKubes: [],
       agentActionsOnProtected: false,
     });
@@ -136,10 +141,11 @@ describe('pins and config', () => {
       tshPath: '',
       loginOnLaunch: false,
       autoRenew: [],
+      inAppSignIn: [],
       protectedKubes: [],
       agentActionsOnProtected: false,
     });
-    expect(migrateTeleportConfig({})).toEqual({ proxies: [], pins: [], tshPath: '', loginOnLaunch: false, autoRenew: [], protectedKubes: [], agentActionsOnProtected: false });
+    expect(migrateTeleportConfig({})).toEqual({ proxies: [], pins: [], tshPath: '', loginOnLaunch: false, autoRenew: [], inAppSignIn: [], protectedKubes: [], agentActionsOnProtected: false });
   });
 
   it('keeps protected Kubernetes clusters and drops malformed ones', () => {
@@ -298,5 +304,37 @@ describe('keep me logged in', () => {
     expect(isBrowserLoginLine('If browser window does not open automatically, open it by clicking on the link:')).toBe(true);
     expect(isBrowserLoginLine(' http://127.0.0.1:61234/abcd1234')).toBe(true);
     expect(isBrowserLoginLine('> Profile URL:        https://teleport.example.com:443')).toBe(false);
+    expect(isBrowserLoginLine('Use the following URL to authenticate:')).toBe(true);
+  });
+});
+
+describe('sign in inside Quiver', () => {
+  const a = 'a.example.com:443';
+
+  it('keeps one entry per cluster and migrates malformed lists', () => {
+    let list = setProxyListed([], a, true);
+    list = setProxyListed(list, 'A.example.com:443', true);
+    expect(list).toEqual(['A.example.com:443']);
+    expect(isInAppSignInOn({ inAppSignIn: list }, a)).toBe(true);
+    expect(setProxyListed(list, a, false)).toEqual([]);
+    expect(migrateTeleportConfig({ inAppSignIn: [a, 'A.example.com', '', 3 as unknown as string] }).inAppSignIn).toEqual([a]);
+  });
+
+  it('takes only the link of the listener of tsh from the login output', () => {
+    expect(ssoLoginUrl(' http://127.0.0.1:61234/abcd1234')).toBe('http://127.0.0.1:61234/abcd1234');
+    expect(ssoLoginUrl('Use the following URL: http://localhost:5000/b2c3?x=1.')).toBe('http://localhost:5000/b2c3?x=1.');
+    expect(ssoLoginUrl(' http://[::1]:61234/abcd')).toBe('http://[::1]:61234/abcd');
+    expect(ssoLoginUrl('> Profile URL:        https://teleport.example.com:443')).toBeNull();
+    expect(ssoLoginUrl('https://github.com/login/oauth/authorize?client_id=x')).toBeNull();
+    expect(ssoLoginUrl('http://127.0.0.1.evil.example:80/x')).toBeNull();
+    expect(ssoLoginUrl('http://127.0.0.1@evil.example:80/x')).toBeNull();
+    expect(ssoLoginUrl('If browser window does not open automatically, open it by clicking on the link:')).toBeNull();
+  });
+
+  it('names one persistent cookie jar per cluster', () => {
+    expect(teleportSignInPartition('A.Example.com:443')).toBe('persist:quiver-teleport-a_2eexample_2ecom');
+    expect(teleportSignInPartition('a-b.example.com')).not.toBe(teleportSignInPartition('a.b.example.com'));
+    expect(teleportSignInPartition('https://a.example.com:443/')).toBe(teleportSignInPartition(a));
+    expect(teleportSignInPartition('b.example.com:443')).not.toBe(teleportSignInPartition(a));
   });
 });
