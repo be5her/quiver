@@ -51,6 +51,12 @@ describe('FileStore external changes', () => {
     expect(changes).toEqual(['requests']);
   });
 
+  it('reload of a collection that has no folder and nothing cached reports nothing', async () => {
+    const { store, changes } = await tempStore();
+    expect(await store.reload('nothing-here')).toBe(false);
+    expect(changes).toEqual([]);
+  });
+
   it('two reloads of a collection at once report nothing when the files did not change', async () => {
     const { store, changes } = await tempStore();
     await store.put('requests', { id: 'a', name: 'one' });
