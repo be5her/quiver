@@ -213,7 +213,9 @@ export class FileStore implements StoreApi {
     const before = this.cache.get(collection);
     this.drop(collection);
     const after = await this.load(collection);
-    if (before && sameEntities(before, after)) return false;
+    // Nothing was known and nothing is there: no change. macOS reports events for the watched
+    // folder itself, which reads as a collection named after the root that has no folder.
+    if (before ? sameEntities(before, after) : after.size === 0) return false;
     this.onChange(collection);
     return true;
   }
