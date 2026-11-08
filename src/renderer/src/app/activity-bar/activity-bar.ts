@@ -1,8 +1,6 @@
 import { Component, ElementRef, computed, inject, untracked, viewChild } from '@angular/core';
 import { arrangeActivityBar, defaultActivityBarLayout, moveInActivityBar, toggleInActivityBar, type ActivityBarLayout } from '@quiver/core';
-import { AppState, ContextMenu, HostBridge, Icon, Toasts, type ContextMenuItem, type ModuleUI } from '@quiver/ui';
-import { DropMarker } from '../drop-marker';
-import { dragReorder } from '../drag-reorder';
+import { AppState, ContextMenu, DropMarker, HostBridge, Icon, Toasts, dragReorder, type ContextMenuItem, type ModuleUI } from '@quiver/ui';
 import { modules } from '../modules';
 
 const moduleIds = modules.map((m) => m.id);

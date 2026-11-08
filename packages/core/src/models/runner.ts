@@ -1,0 +1,111 @@
+import { z } from 'zod';
+import { KeyValueSchema } from './api';
+
+// Process runner contract. Saved tasks are committed under `.quiver/runner/<id>.json`; running processes
+// and their output live only in memory on this machine.
+
+/** A command line saved with the project, run in the workspace folder (or `cwd` relative to it) through the shell. */
+export const RunnerTaskSchema = z.object({
+  id: z.string(),
+  name: z.string().default('Task'),
+  command: z.string().default(''),
+  /** Relative to the workspace folder; empty is the folder itself. */
+  cwd: z.string().default(''),
+  env: z.array(KeyValueSchema).default([]),
+  /** An env file profile whose values are added to the environment. */
+  envProfile: z.string().optional(),
+  autoRestart: z.boolean().default(false),
+  /** A regular expression on the output that marks the process as ready. */
+  readyPattern: z.string().optional(),
+  /** A port that marks the process as ready once it accepts connections, and is shown as a link. */
+  port: z.number().int().min(1).max(65535).optional(),
+  /** Where it came from when it was saved from a discovered script. */
+  source: z.enum(['saved', 'npm', 'make', 'just', 'compose']).default('saved'),
+});
+export type RunnerTask = z.infer<typeof RunnerTaskSchema>;
+
+/** A script found in the project's own files, ready to run or to save as a task. */
+export interface RunnerDiscoveredTask {
+  source: 'npm' | 'make' | 'just' | 'compose';
+  name: string;
+  command: string;
+  /** Relative to the workspace folder. */
+  cwd: string;
+  /** The file it was found in, relative to the workspace folder. */
+  file: string;
+}
+
+export type RunnerProcState = 'starting' | 'ready' | 'running' | 'stopping' | 'exited' | 'crashed';
+
+export interface RunnerProc {
+  taskId: string;
+  runId: string;
+  state: RunnerProcState;
+  pid?: number;
+  startedAt: string;
+  endedAt?: string;
+  exitCode?: number | null;
+  restarts: number;
+  port?: number;
+}
+
+/** A row of `runner.proc.list`: the run with how long its process has been up. */
+export interface RunnerProcInfo extends RunnerProc {
+  /** The task's name when the run started. */
+  name: string;
+  /** Milliseconds since the current process started, while it runs. */
+  uptimeMs?: number;
+  /** When a crashed run starts again by itself, while it waits for that. */
+  restartAt?: string;
+}
+
+/** A row of `runner.task.discover`: a discovered task, with the saved task it was saved as, if any. */
+export interface RunnerDiscoveredRow extends RunnerDiscoveredTask {
+  taskId?: string;
+}
+
+export interface RunnerOutputLine {
+  /** Increasing per run; the cursor for the next read. */
+  seq: number;
+  stream: 'stdout' | 'stderr' | 'system';
+  text: string;
+  at: string;
+}
+
+export interface RunnerOutputChunk {
+  runId: string;
+  lines: RunnerOutputLine[];
+  /** Pass as `after` to read on. */
+  next: number;
+  /** Lines that fell out of the buffer before they were read. */
+  dropped: number;
+}
+
+/** What `runner.proc.wait` returns. */
+export interface RunnerWaitResult {
+  /** True when the task became ready or the pattern matched. */
+  matched: boolean;
+  timedOut: boolean;
+  /** The line that matched the pattern (or the ready pattern). */
+  line?: RunnerOutputLine;
+  proc: RunnerProcInfo | null;
+}
+
+/** A saved task's id, which names its file (`.quiver/runner/<id>.json`); anything else is invalid input. */
+export const RunnerTaskIdSchema = z.string().regex(/^[A-Za-z0-9._-]+$/, 'A task id has only letters, digits, dots, dashes and underscores');
+
+export const RunnerTaskRefInputSchema = z.object({ taskId: RunnerTaskIdSchema });
+export const RunnerOutputInputSchema = z.object({
+  taskId: RunnerTaskIdSchema,
+  /** A past run; default the latest. */
+  runId: z.string().optional(),
+  after: z.number().int().min(0).default(0),
+  limit: z.number().int().min(1).max(5000).default(500),
+});
+export const RunnerWaitInputSchema = z.object({
+  taskId: RunnerTaskIdSchema,
+  /** Wait for this regular expression on the output; default until the task is ready. */
+  pattern: z.string().optional(),
+  timeoutMs: z.number().int().min(100).max(600_000).default(30_000),
+});
+export const RunnerInputInputSchema = z.object({ taskId: RunnerTaskIdSchema, text: z.string() });

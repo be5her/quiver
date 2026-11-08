@@ -1,9 +1,27 @@
 @if (response(); as response) {
   <div class="flex flex-col h-full min-h-0">
-    <div class="flex items-center gap-3 px-3 h-8 border-b border-edge text-xs shrink-0">
-      <span class="font-semibold" [class]="statusColor(response.status)">{{ response.status }} {{ response.statusText }}</span>
-      <span class="text-muted">{{ formatMs(response.timings.total) }}</span>
-      <span class="text-muted">{{ formatBytes(response.size) }}</span>
+    <div class="flex items-center gap-3 px-3 h-8 text-xs shrink-0">
+      <span class="font-semibold" [class]="statusColor(response.status)" data-testid="api-response-status">{{ response.status }} {{ response.statusText }}</span>
+      <span class="text-muted cursor-default" [title]="timing()?.title ?? ''" data-testid="api-response-time">{{ formatMs(response.timings.total) }}</span>
+      @if (!response.streamId) {
+        <span class="text-muted">{{ formatBytes(response.size) }}</span>
+      }
+      @if (response.redirects.length) {
+        <button type="button" class="text-muted hover:text-fg underline decoration-dotted underline-offset-2" data-testid="api-response-redirects" (click)="showHeaders()">
+          {{ response.redirects.length }} {{ response.redirects.length === 1 ? 'redirect' : 'redirects' }}
+        </button>
+      }
+      @if (checkCount(); as count) {
+        <button
+          type="button"
+          class="font-medium underline decoration-dotted underline-offset-2"
+          [class]="count.passed === count.total ? 'text-success' : 'text-danger'"
+          data-testid="api-response-checks-count"
+          (click)="view.set('checks')"
+        >
+          {{ count.passed }}/{{ count.total }} checks
+        </button>
+      }
       @if (response.truncated) {
         <span class="text-warning">truncated</span>
       }
@@ -12,47 +30,191 @@
       }
       <div class="flex-1"></div>
       <q-segmented [(value)]="view" class="border-b-0">
-        <button qSegment="body">Body</button>
-        <button qSegment="headers">Headers ({{ response.headers.length }})</button>
+        <button qSegment="body" data-testid="api-response-body-tab">Body</button>
+        <button qSegment="headers" data-testid="api-response-headers-tab">Headers ({{ response.headers.length }})</button>
+        @if (response.setCookies.length) {
+          <button qSegment="cookies" data-testid="api-response-cookies-tab">Cookies ({{ response.setCookies.length }})</button>
+        }
+        @if (response.checks?.length) {
+          <button qSegment="checks" data-testid="api-response-checks-tab">Checks</button>
+        }
         <button qSegment="request">Request</button>
       </q-segmented>
     </div>
+    @if (timing(); as timing) {
+      <div class="flex h-0.5 shrink-0 bg-edge" [title]="timing.title" data-testid="api-response-timing">
+        <div class="bg-muted/60" [style.width]="timing.redirects"></div>
+        <div class="bg-accent" [style.width]="timing.waiting"></div>
+        <div class="bg-success" [style.width]="timing.download"></div>
+      </div>
+    }
+    @if (response.captured?.length) {
+      <div class="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1 text-xs border-b border-edge/60 shrink-0" data-testid="api-response-captured">
+        <span class="text-muted">Captured</span>
+        @for (c of response.captured; track $index) {
+          <span class="font-mono" [class]="c.ok ? 'text-fg' : 'text-danger'" [title]="c.ok ? 'Written to ' + c.variable + ' in the environment' : (c.error ?? '')" data-testid="api-response-captured-item">
+            @if (c.ok) {
+              {{ c.variable }} <span class="text-muted">=</span> {{ c.secret ? '••••••••' : shorten(c.value) }}
+            } @else {
+              {{ c.variable }}: {{ c.error }}
+            }
+          </span>
+        }
+      </div>
+    }
     <div class="flex-1 min-h-0 p-2">
+      @if (response.streamId && view() === 'body') {
+        <q-stream-view [streamId]="response.streamId" [kind]="response.streamKind ?? 'sse'" />
+      } @else {
       @switch (view()) {
         @case ('body') {
           <div class="flex flex-col h-full gap-1">
-            <div class="flex items-center gap-2 text-xs text-muted">
-              <span class="truncate">{{ response.contentType ?? 'unknown content type' }}</span>
+            <div class="flex items-center gap-2 text-xs text-muted min-h-7">
+              <span class="truncate shrink-0 max-w-[30%]" [title]="response.contentType ?? ''">{{ response.contentType ?? 'unknown content type' }}</span>
+              @if (isJson()) {
+                <div class="flex-1 min-w-0 max-w-sm">
+                  <input
+                    qInput
+                    class="h-7 text-xs font-mono"
+                    data-testid="api-response-filter"
+                    [class.border-danger]="!!filterError()"
+                    [value]="filter()"
+                    [placeholder]="'Filter with a JSON path: ' + filterPlaceholder"
+                    [title]="filterError() ?? 'A JSON path: $.key, [0], [-1], [*], ..key'"
+                    (input)="setFilter($event)"
+                  />
+                </div>
+                @if (filterError(); as message) {
+                  <span class="text-danger truncate" data-testid="api-response-filter-error" [title]="message">{{ message }}</span>
+                } @else if (matchCount() !== null) {
+                  <span class="shrink-0" data-testid="api-response-filter-count">{{ matchCount() }} {{ matchCount() === 1 ? 'match' : 'matches' }}</span>
+                }
+              }
               <div class="flex-1"></div>
-              @if (body().language === 'json') {
+              @if (image()) {
+                <button qButton size="sm" variant="ghost" data-testid="api-response-preview-toggle" (click)="togglePreview()">{{ preview() ? 'Raw' : 'Preview' }}</button>
+              } @else if (isJson() && !filter().trim()) {
                 <button qButton size="sm" variant="ghost" (click)="togglePretty()">{{ pretty() ? 'Raw' : 'Pretty' }}</button>
               }
-              <button qButton size="sm" variant="ghost" [icon]="copyIcon" (click)="copyBody()">Copy</button>
+              <button qButton size="sm" variant="ghost" [icon]="icons.Search" title="Find in the body (Ctrl+F)" data-testid="api-response-search" (click)="search()">Find</button>
+              <button qButton size="sm" variant="ghost" [icon]="icons.Download" title="Save the body to a file" data-testid="api-response-save" (click)="save()">Save</button>
+              <button qButton size="sm" variant="ghost" [icon]="icons.Copy" (click)="copyBody()">Copy</button>
+              @if (compareWith()) {
+                <button qButton size="sm" variant="ghost" title="Compare this request's kept responses side by side" data-testid="api-response-compare" (click)="compare()">Compare</button>
+              }
             </div>
             <div class="flex-1 min-h-0">
-              <q-code-editor [value]="body().text" readonly [language]="body().language" [wrap]="body().language !== 'json'" />
+              @if (showImage()) {
+                <div class="h-full overflow-auto rounded-md border border-edge bg-surface flex items-center justify-center p-3">
+                  <img [src]="image()" alt="Response image" class="max-w-full max-h-full object-contain" data-testid="api-response-image" />
+                </div>
+              } @else {
+                <q-code-editor #bodyEditor [value]="shown().text" readonly searchable [language]="shown().language" [wrap]="shown().language !== 'json'" />
+              }
             </div>
           </div>
         }
         @case ('headers') {
-          <q-header-table [headers]="response.headers" />
+          <div class="h-full overflow-auto flex flex-col gap-3">
+            <q-header-table [headers]="response.headers" fit />
+            @if (response.redirects.length) {
+              <div class="text-xs" data-testid="api-response-redirect-list">
+                <div class="font-medium text-muted mb-1">Redirects followed</div>
+                @for (hop of response.redirects; track $index) {
+                  <details class="border-t border-edge/60 py-1 group">
+                    <summary class="flex items-center gap-2 cursor-pointer list-none font-mono min-w-0">
+                      <svg class="size-3 shrink-0 text-muted transition-transform group-open:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6" /></svg>
+                      <span class="font-semibold shrink-0" [class]="statusColor(hop.status)">{{ hop.status }}</span>
+                      <span class="shrink-0">{{ hop.method }}</span>
+                      <span class="truncate" [title]="hop.url + ' → ' + hop.location">{{ hop.url }} → {{ hop.location }}</span>
+                      <span class="text-muted shrink-0 ml-auto">{{ formatMs(hop.durationMs) }}</span>
+                    </summary>
+                    <div class="pl-5 pt-1">
+                      <q-header-table [headers]="hop.headers" fit />
+                    </div>
+                  </details>
+                }
+              </div>
+            }
+          </div>
+        }
+        @case ('cookies') {
+          <div class="h-full overflow-auto">
+            <table class="w-full text-xs" data-testid="api-response-cookies">
+              <thead class="text-muted text-left">
+                <tr class="border-b border-edge">
+                  <th class="py-1 pr-3 font-medium">Name</th>
+                  <th class="py-1 pr-3 font-medium">Value</th>
+                  <th class="py-1 pr-3 font-medium">Domain</th>
+                  <th class="py-1 pr-3 font-medium">Path</th>
+                  <th class="py-1 pr-3 font-medium">Expires</th>
+                  <th class="py-1 pr-3 font-medium">Flags</th>
+                  <th class="py-1 font-medium">Jar</th>
+                </tr>
+              </thead>
+              <tbody class="font-mono">
+                @for (cookie of cookies(); track $index) {
+                  <tr class="border-b border-edge/60 align-top">
+                    <td class="py-1 pr-3 whitespace-nowrap">{{ cookie.name }}</td>
+                    <td class="py-1 pr-3 break-all">{{ cookie.value }}</td>
+                    <td class="py-1 pr-3 text-muted">{{ cookie.domain ?? 'this host' }}</td>
+                    <td class="py-1 pr-3 text-muted">{{ cookie.path ?? '/' }}</td>
+                    <td class="py-1 pr-3 text-muted whitespace-nowrap">{{ cookie.expiry }}</td>
+                    <td class="py-1 pr-3 text-muted whitespace-nowrap">
+                      {{ cookie.flags }}
+                    </td>
+                    <td class="py-1 whitespace-nowrap font-sans" [class]="cookie.jar === 'kept' ? 'text-success' : cookie.jar === 'refused' ? 'text-danger' : 'text-muted'" [title]="cookie.jarReason" data-testid="api-response-cookie-jar">
+                      {{ cookie.jar }}
+                    </td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+            <button type="button" class="mt-2 text-xs text-accent hover:underline" (click)="openJar()">Open the cookie jar</button>
+          </div>
+        }
+        @case ('checks') {
+          <ul class="flex flex-col gap-1 text-xs" data-testid="api-response-checks">
+            @for (c of response.checks ?? []; track c.id) {
+              <li class="flex items-start gap-2" data-testid="api-response-check">
+                <span
+                  class="shrink-0 rounded px-1.5 py-px text-[10px] font-semibold uppercase"
+                  [class]="c.ok ? 'bg-success/15 text-success' : 'bg-danger/15 text-danger'"
+                  data-testid="api-response-check-badge"
+                  >{{ c.ok ? 'pass' : 'fail' }}</span
+                >
+                <span class="font-mono break-all" [class]="c.ok ? 'text-fg' : 'text-danger'">{{ c.message }}</span>
+              </li>
+            }
+          </ul>
         }
         @case ('request') {
           <div class="flex flex-col h-full gap-2 text-xs">
             <div class="font-mono break-all"><span class="font-semibold">{{ response.sent.method }}</span> {{ response.sent.url }}</div>
+            @if (response.cookieJar?.sent?.length) {
+              <div class="text-muted" data-testid="api-response-jar-sent">From the cookie jar: <span class="font-mono">{{ response.cookieJar!.sent.join(', ') }}</span></div>
+            }
             <q-header-table [headers]="response.sent.headers" />
             @if (response.sent.bodyPreview) {
               <div class="flex-1 min-h-[80px]">
-                <q-code-editor [value]="response.sent.bodyPreview" readonly language="text" wrap />
+                <q-code-editor [value]="response.sent.bodyPreview" readonly searchable language="text" wrap />
               </div>
             }
           </div>
         }
       }
+      }
     </div>
   </div>
 } @else if (sending()) {
-  <div class="flex items-center justify-center h-full gap-2 text-sm text-muted"><svg qSpinner></svg> Sending…</div>
+  <div class="flex items-center justify-center h-full gap-2 text-sm text-muted" data-testid="api-response-sending">
+    <svg qSpinner></svg>
+    @if (received()) {
+      Receiving… {{ formatBytes(received()) }}
+    } @else {
+      Sending…
+    }
+  </div>
 } @else if (error(); as error) {
   <q-empty-state title="Request failed" [hint]="error" />
 } @else {

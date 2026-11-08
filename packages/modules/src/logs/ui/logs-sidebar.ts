@@ -3,7 +3,7 @@ import { describeLogsConnection, type LogsConnectionSummary } from '@quiver/core
 import { Button, Icon, IconButton, SectionHeader, Spinner, invokeResource } from '@quiver/ui';
 import { Plus, Trash2 } from 'lucide';
 import { LogsActions } from './logs-actions';
-import { sessionDot, sessionLabel } from './logs-format';
+import { connectionStateLabel, sessionDot } from './logs-format';
 
 /** One connection: sign-in state, name and data source; delete on hover. */
 @Component({
@@ -13,7 +13,9 @@ import { sessionDot, sessionLabel } from './logs-format';
     @let c = conn();
     <span class="size-2 rounded-full shrink-0" [class]="dot()" [attr.aria-label]="c.session.state"></span>
     <span class="truncate flex-1 min-w-0 text-[13px]">{{ c.name }}</span>
-    @if (c.datasourceName && c.datasourceName !== c.name) {
+    @if (c.kind === 'victorialogs') {
+      <span class="truncate text-[11px] max-w-[45%] group-hover:hidden" [class]="c.session.state === 'signed-out' ? 'text-danger' : 'text-muted'" data-testid="logs-connection-kind">{{ c.session.state === 'signed-out' ? 'unreachable' : 'direct' }}</span>
+    } @else if (c.datasourceName && c.datasourceName !== c.name) {
       <span class="truncate text-[11px] text-muted max-w-[45%] group-hover:hidden">{{ c.datasourceName }}</span>
     }
     <span class="hidden group-hover:flex items-center">
@@ -27,6 +29,7 @@ import { sessionDot, sessionLabel } from './logs-format';
     'data-testid': 'logs-connection',
     '[attr.title]': 'title()',
     '[attr.data-session]': 'conn().session.state',
+    '[attr.data-kind]': 'conn().kind',
     '(click)': 'logs.openConnectionTab(conn())',
     '(keydown.enter)': 'logs.openConnectionTab(conn())',
   },
@@ -38,7 +41,11 @@ export class LogsConnectionRow {
 
   protected readonly icons = { Trash2 };
   protected readonly dot = computed(() => sessionDot(this.conn().session));
-  protected readonly title = computed(() => [describeLogsConnection(this.conn()) || 'No Grafana address yet', sessionLabel(this.conn().session)].join('\n'));
+  protected readonly title = computed(() => {
+    const c = this.conn();
+    const direct = c.kind === 'victorialogs';
+    return [describeLogsConnection(c) || (direct ? 'No VictoriaLogs address yet' : 'No Grafana address yet'), direct ? `Direct · ${connectionStateLabel(c)}` : `Through Grafana · ${connectionStateLabel(c)}`].join('\n');
+  });
 
   protected remove(event: Event): void {
     event.stopPropagation();
@@ -62,7 +69,7 @@ export class LogsConnectionRow {
     }
     @if (connections.value()?.length === 0) {
       <div class="px-3 py-2 flex flex-col gap-2">
-        <p class="text-xs text-muted">Search VictoriaLogs through your Grafana. Sign in once with the account you use in the browser (Google and other SSO work); the session stays on this machine.</p>
+        <p class="text-xs text-muted">Search VictoriaLogs through your Grafana (sign in once with the account you use in the browser; Google and other SSO work), or talk to a VictoriaLogs server directly.</p>
         <div><button qButton size="sm" variant="secondary" [icon]="icons.Plus" (click)="logs.createConnection()">New connection</button></div>
       </div>
     }

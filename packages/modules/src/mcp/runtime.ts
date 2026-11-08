@@ -33,6 +33,7 @@ import {
   type McpToolCallOutcome,
   type McpToolResult,
   type WorkspaceApi,
+  withoutCliToken,
 } from '@quiver/core';
 import { Agent, fetch as undiciFetch, type Dispatcher } from 'undici';
 
@@ -516,7 +517,7 @@ export class McpRuntime {
       return transport;
     }
     const url = new URL(target.url);
-    const headers = Object.fromEntries(target.headers);
+    const headers = Object.fromEntries(withoutCliToken(target.headers));
     const fetchImpl = s.definition.insecure ? insecureFetch : undefined;
     if (target.transport === 'sse') return new SSEClientTransport(url, { requestInit: { headers }, fetch: fetchImpl });
     return new StreamableHTTPClientTransport(url, { requestInit: { headers }, fetch: fetchImpl });

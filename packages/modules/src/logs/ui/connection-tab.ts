@@ -5,6 +5,8 @@ import {
   composeLogsQuery,
   describeLogsConnection,
   logLevelTone,
+  logsConnectionAddress,
+  logsConnectionReady,
   logsFollowRange,
   toErrorPayload,
   type ErrorPayload,
@@ -20,7 +22,7 @@ import { Copy, LogIn, Logs, Pause, Play, Radio, Settings2, X } from 'lucide';
 import { LogsActions } from './logs-actions';
 import { LogsEntryDetail } from './logs-entry-detail';
 import { type LogsScope, LogsFilterPicker } from './logs-filter-picker';
-import { clockTime, dayTime, levelDot, levelText, oneLine, sessionDot, sessionLabel } from './logs-format';
+import { clockTime, connectionStateLabel, dayTime, levelDot, levelText, oneLine, sessionDot } from './logs-format';
 import { LogsHistogram } from './logs-histogram';
 import { LogsSetup } from './logs-setup';
 
@@ -43,7 +45,7 @@ function sameJson(a: unknown, b: unknown): boolean {
 }
 
 /**
- * One VictoriaLogs data source through Grafana: a LogsQL line, filters that are one click from any
+ * One VictoriaLogs data source through Grafana, or a VictoriaLogs server directly: a LogsQL line, filters that are one click from any
  * field, a histogram, the entries newest first and the one picked in full. The query, filters, range
  * and limit live in the tab, so they come back with it.
  */
@@ -76,8 +78,10 @@ export class LogsConnectionTab implements TabComponent {
   protected readonly loadError = computed(() => this.summary.error()?.message ?? null);
   protected readonly configured = computed(() => {
     const c = this.summary.value();
-    return Boolean(c?.grafanaUrl && c.datasourceUid);
+    return Boolean(c && logsConnectionReady(c));
   });
+  /** A VictoriaLogs server queried directly: no sign-in, so no Sign in buttons. */
+  protected readonly direct = computed(() => this.summary.value()?.kind === 'victorialogs');
   protected readonly settingsOpen = signal(false);
   protected readonly showSetup = computed(() => this.settingsOpen() || (this.summary.value() !== undefined && !this.configured()));
   protected readonly where = computed(() => describeLogsConnection(this.summary.value() ?? { grafanaUrl: '', datasourceName: '' }));
@@ -87,7 +91,7 @@ export class LogsConnectionTab implements TabComponent {
   });
   protected readonly sessionText = computed(() => {
     const c = this.summary.value();
-    return c ? sessionLabel(c.session) : '';
+    return c ? connectionStateLabel(c) : '';
   });
 
   // What the controls hold, restored from the tab once it is known.
@@ -135,11 +139,11 @@ export class LogsConnectionTab implements TabComponent {
   constructor() {
     injectHostEvent('logs.changed', (p) => p.reason === 'session' && this.summary.reload());
 
-    // Ask Grafana once whether this machine is signed in; the answer comes back as a session event.
+    // Ask Grafana once whether this machine is signed in (or a direct server whether it answers); the answer comes back as a session event.
     let checked = false;
     effect(() => {
       const c = this.summary.value();
-      if (checked || !c?.grafanaUrl) return;
+      if (checked || !c || !logsConnectionAddress(c)) return;
       checked = true;
       untracked(() => void this.host.invoke('logs.session', { id: c.id }).catch(() => {}));
     });
@@ -249,7 +253,7 @@ export class LogsConnectionTab implements TabComponent {
   }
 
   protected setupSaved(saved: LogsConnectionSummary): void {
-    const first = !this.configured() && Boolean(saved.grafanaUrl && saved.datasourceUid);
+    const first = !this.configured() && logsConnectionReady(saved);
     this.summary.reload();
     // The first data source picked makes the connection usable: it runs once the summary has it.
     if (first) this.autoRan = false;

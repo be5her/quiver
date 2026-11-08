@@ -1,0 +1,47 @@
+<div class="flex items-center justify-between px-3 h-10 border-b border-edge">
+  <span class="text-[11px] font-semibold uppercase tracking-wide text-muted">Port forwards</span>
+  <button qIconButton [label]="adding() ? 'Close the form' : 'Forward a port'" size="sm" data-testid="kube-forward-new" (click)="adding.set(!adding())"
+    ><svg [qIcon]="adding() ? icons.X : icons.Plus" class="size-3.5"></svg
+  ></button>
+</div>
+@if (adding()) {
+  @let f = form();
+  <form class="px-3 py-2 flex flex-col gap-1.5 border-b border-edge" data-testid="kube-forward-form" (submit)="$event.preventDefault(); start()">
+    <div class="flex gap-1.5">
+      <select qSelect class="w-28 h-7 text-xs" aria-label="Target type" data-testid="kube-forward-kind" (change)="set('kind', $event)">
+        @for (k of kinds; track k) {
+          <option [value]="k" [selected]="k === f.kind">{{ k }}</option>
+        }
+      </select>
+      <input qInput class="flex-1 min-w-0 h-7 text-xs font-mono" list="kube-forward-names" placeholder="name" aria-label="Name" [value]="f.name" data-testid="kube-forward-name" (input)="set('name', $event)" />
+      <datalist id="kube-forward-names">
+        @for (n of names(); track n) {
+          <option [value]="n"></option>
+        }
+      </datalist>
+    </div>
+    <div class="flex gap-1.5">
+      <input qInput class="flex-1 min-w-0 h-7 text-xs font-mono" [placeholder]="namespace()" aria-label="Namespace" [value]="f.namespace" (input)="set('namespace', $event)" />
+      <input qInput class="w-16 h-7 text-xs font-mono" placeholder="port" inputmode="numeric" aria-label="Remote port" [value]="f.remotePort" data-testid="kube-forward-remote" (input)="set('remotePort', $event)" />
+      <input qInput class="w-16 h-7 text-xs font-mono" placeholder="local" inputmode="numeric" aria-label="Local port (optional)" title="Local port on 127.0.0.1; empty for a free one" [value]="f.localPort" (input)="set('localPort', $event)" />
+    </div>
+    <button qButton size="sm" variant="primary" type="submit" [icon]="icons.ArrowRightLeft" [loading]="starting()" [disabled]="!valid()" data-testid="kube-forward-start">Start on 127.0.0.1</button>
+  </form>
+}
+<div class="max-h-40 overflow-y-auto">
+  @for (fw of forwards.value() ?? []; track fw.id) {
+    <div class="group flex items-center gap-1.5 px-3 h-7 min-w-0 text-xs" [title]="title(fw)" data-testid="kube-forward" [attr.data-state]="fw.state">
+      <span class="size-1.5 rounded-full shrink-0" [class]="fw.state === 'running' ? 'bg-success' : fw.state === 'starting' ? 'bg-muted' : 'bg-danger'"></span>
+      <span class="truncate flex-1 font-mono">{{ label(fw) }}</span>
+      <span class="font-mono text-muted shrink-0" [class.line-through]="fw.state === 'exited'">:{{ fw.localPort }}</span>
+      <span class="hidden group-hover:flex items-center shrink-0">
+        <button qIconButton label="Copy 127.0.0.1 address" size="sm" (click)="copy(fw)"><svg [qIcon]="icons.Copy" class="size-3"></svg></button>
+        <button qIconButton [label]="fw.state === 'exited' ? 'Remove' : 'Stop'" size="sm" data-testid="kube-forward-stop" (click)="stop(fw)"><svg [qIcon]="icons.X" class="size-3"></svg></button>
+      </span>
+    </div>
+  } @empty {
+    @if (!adding()) {
+      <p class="px-3 py-2 text-[11px] text-muted">Forward a pod or service port to 127.0.0.1. Forwards keep running until stopped.</p>
+    }
+  }
+</div>

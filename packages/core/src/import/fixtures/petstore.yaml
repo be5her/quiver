@@ -1,0 +1,118 @@
+openapi: 3.0.3
+info:
+  title: Swagger Petstore
+  description: A sample pet store.
+  version: 1.0.0
+servers:
+  - url: https://{region}.petstore.test/v1
+    variables:
+      region:
+        default: eu
+tags:
+  - name: pet
+    description: Everything about your pets
+  - name: store
+  - name: unused
+security:
+  - api_key: []
+paths:
+  /pets:
+    get:
+      tags: [pet]
+      summary: List all pets
+      operationId: listPets
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, maximum: 100, example: 20 }
+        - name: status
+          in: query
+          required: true
+          schema: { type: string, enum: [available, sold] }
+      responses:
+        '200': { description: ok }
+    post:
+      tags: [pet]
+      summary: Create a pet
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NewPet' }
+      responses:
+        '201': { description: created }
+  /pets/{petId}:
+    parameters:
+      - name: petId
+        in: path
+        required: true
+        schema: { type: string }
+      - name: X-Request-Id
+        in: header
+        schema: { type: string, format: uuid }
+    get:
+      tags: [pet]
+      operationId: showPetById
+      security: []
+      responses:
+        '200': { description: ok }
+    delete:
+      tags: [pet]
+      summary: Delete a pet
+      deprecated: true
+      security:
+        - oauth: [write:pets]
+      responses:
+        '204': { description: gone }
+  /store/order:
+    post:
+      tags: [store]
+      summary: Place an order
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                petId: { type: integer, example: 7 }
+                quantity: { type: integer }
+      responses:
+        '200': { description: ok }
+  /pets/{petId}/photo:
+    put:
+      summary: Upload a photo
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                caption: { type: string }
+                file: { type: string, format: binary }
+      responses:
+        '200': { description: ok }
+components:
+  securitySchemes:
+    api_key:
+      type: apiKey
+      in: header
+      name: X-API-Key
+    oauth:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: https://auth.petstore.test/token
+          scopes: { write:pets: modify pets }
+  schemas:
+    NewPet:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, example: Rex }
+        tag: { type: string }
+        born: { type: string, format: date }
+        owner: { $ref: '#/components/schemas/Owner' }
+    Owner:
+      type: object
+      properties:
+        email: { type: string, format: email }
+        pets: { type: array, items: { $ref: '#/components/schemas/NewPet' } }

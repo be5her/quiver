@@ -1,4 +1,5 @@
 import { defaultActivityBarLayout } from './activity-bar';
+import { defaultNetworkConfig } from './network';
 import { DEFAULT_PALETTE } from './palettes';
 import type { GlobalConfig } from './types';
 
@@ -11,10 +12,11 @@ export function defaultGlobalConfig(): GlobalConfig {
     recentWorkspaces: [],
     openWorkspaces: [],
     globalVariables: [],
-    mcp: { enabled: true, port: DEFAULT_MCP_PORT, allowMutating: false },
-    teleport: { proxies: [], pins: [], tshPath: '', loginOnLaunch: false },
+    mcp: { enabled: true, port: DEFAULT_MCP_PORT, allowMutating: false, permissions: { mode: 'read-only', rules: [] }, workspaceRules: {}, paused: false },
+    teleport: { proxies: [], pins: [], tshPath: '', loginOnLaunch: false, autoRenew: [], inAppSignIn: [], protectedKubes: [], agentActionsOnProtected: false },
     mock: { ports: [] },
     updates: { channel: 'stable' },
     activityBar: defaultActivityBarLayout(),
+    network: defaultNetworkConfig(),
   };
 }

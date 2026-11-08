@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { promises as fs, watch, type FSWatcher } from 'node:fs';
 import path from 'node:path';
-import { QuiverError, isEnvFileName, newId, normalizeEnvPath, nowIso, type EnvBackup, type EnvGitStatus, type HostApi, type WorkspaceApi } from '@quiver/core';
+import { QuiverError, envPathDir, envPathName, isEnvFileName, newId, normalizeEnvPath, nowIso, type EnvBackup, type EnvGitStatus, type HostApi, type WorkspaceApi } from '@quiver/core';
 
 /** Folders never entered while looking for env files. */
 const SKIP_DIRS = new Set([
@@ -72,6 +72,42 @@ export function resolveEnvPath(w: WorkspaceApi, rel: string): { abs: string; rel
   if (!back || back.startsWith('..') || path.isAbsolute(back)) throw new QuiverError('INVALID_INPUT', 'The file must be inside the project folder');
   if (!isEnvFileName(path.basename(abs))) throw new QuiverError('INVALID_INPUT', `"${normalized}" is not an env file name (.env, .env.<name> or <name>.env)`);
   return { abs, rel: normalizeEnvPath(back) };
+}
+
+/**
+ * The env file a profile names, for whoever loads a profile by name (the runner's `envProfile`). A name with a slash,
+ * or one that is itself an env file name (`.env.staging`, `staging.env`), is a project-relative path and goes through
+ * `resolveEnvPath`. A bare name is `.env.<name>` or `<name>.env` in `fromDir` (project-relative, `''` for the folder
+ * itself), else in the nearest folder above it up to the project folder, `.env.<name>` before `<name>.env` in each.
+ * Those folders are read directly, so the scan's depth, skipped folders and file limit do not apply to them. A file in
+ * any other folder is never used: it may belong to another app of the project. `abs` is null when there is none, and
+ * `candidates` lists the files of that name `scanEnvFiles` finds elsewhere, for the message.
+ */
+export async function findProfileFile(w: WorkspaceApi, profile: string, fromDir = ''): Promise<{ abs: string; rel: string } | { abs: null; candidates: string[] }> {
+  const name = profile.trim();
+  if (!name) throw new QuiverError('INVALID_INPUT', 'A profile name is required');
+  if (/[\\/]/.test(name) || isEnvFileName(name)) return resolveEnvPath(w, name);
+  // Names compare the way the file system does: a profile `Staging` finds `.env.staging` on Windows and macOS, as
+  // reading the file directly would, and the file's own name is the one given back.
+  const fold = process.platform === 'win32' || process.platform === 'darwin' ? (s: string) => s.toLowerCase() : (s: string) => s;
+  const names = [`.env.${name}`, `${name}.env`].map(fold);
+  for (let dir = normalizeEnvPath(fromDir); ; dir = envPathDir(dir)) {
+    let entries: import('node:fs').Dirent[] = [];
+    try {
+      entries = await fs.readdir(path.join(w.path, dir), { withFileTypes: true });
+    } catch {
+      // A folder that is not there has no profile; the folders above it still may.
+    }
+    for (const file of names) {
+      const entry = entries.find((e) => (e.isFile() || e.isSymbolicLink()) && fold(e.name) === file);
+      if (entry) {
+        const rel = dir ? `${dir}/${entry.name}` : entry.name;
+        return { abs: path.join(w.path, rel), rel };
+      }
+    }
+    if (!dir) break;
+  }
+  return { abs: null, candidates: (await scanEnvFiles(w.path)).filter((rel) => names.includes(fold(envPathName(rel)))) };
 }
 
 // ---------- git ----------

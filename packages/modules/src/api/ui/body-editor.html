@@ -1,5 +1,5 @@
 <div class="flex items-center gap-2">
-  <select qSelect class="h-7 text-xs" (change)="setType($event)">
+  <select qSelect class="h-7 text-xs" data-testid="api-body-type" (change)="setType($event)">
     @for (t of types; track t.value) {
       <option [value]="t.value" [selected]="t.value === value().type">{{ t.label }}</option>
     }
@@ -10,8 +10,59 @@
     <q-code-editor [value]="body.content" (valueChange)="setContent(body, $event)" [language]="language()" [placeholder]="body.type === 'json' ? jsonPlaceholder : ''" />
   </div>
 }
-@if (fields(); as body) {
-  <q-key-value-editor [value]="body.fields" (valueChange)="setFields(body, $event)" keyPlaceholder="Field" />
+@if (urlencoded(); as body) {
+  <q-key-value-editor [value]="body.fields" (valueChange)="setUrlencoded(body, $event)" keyPlaceholder="Field" />
+}
+@if (form(); as body) {
+  <q-key-value-editor [value]="body.fields" (valueChange)="setForm(body, $event)" keyPlaceholder="Field" valuePlaceholder="Value, or a file path" extraHeader="File">
+    <ng-template let-row let-update="update">
+      <div class="flex items-center gap-1" data-testid="api-form-file-cell">
+        <input qCheckbox [checked]="row.kind === 'file'" title="Send a file: the value is its path" data-testid="api-form-file-toggle" (change)="setKind({ $implicit: row, update }, $event)" />
+        @if (row.kind === 'file') {
+          <button qIconButton label="Choose a file" size="sm" data-testid="api-form-file-browse" (click)="browseField({ $implicit: row, update })"><svg [qIcon]="icons.FolderOpen" class="size-3.5"></svg></button>
+        }
+      </div>
+    </ng-template>
+  </q-key-value-editor>
+  <p class="text-xs text-muted px-1">Tick File to send a file; its path is relative to the project folder when the file is inside it, so the request works for everyone.</p>
+}
+@if (binary(); as body) {
+  <div class="flex flex-col gap-2 max-w-2xl" data-testid="api-binary-body">
+    <div class="flex items-center gap-2">
+      <input
+        class="flex-1 h-8 rounded-md border border-edge bg-surface px-2.5 text-sm font-mono text-fg placeholder:text-muted/70 focus:outline-none focus:border-accent"
+        placeholder="path/to/file, relative to the project folder"
+        spellcheck="false"
+        data-testid="api-binary-path"
+        [value]="body.path"
+        (change)="setBinaryPath(body, $event)"
+      />
+      <button qButton size="sm" [icon]="icons.FolderOpen" data-testid="api-binary-browse" (click)="browseBinary(body)">Choose…</button>
+    </div>
+    @if (body.path.trim()) {
+      @if (binaryFile.value(); as file) {
+        <p class="text-xs" [class]="file.exists ? 'text-muted' : 'text-danger'" data-testid="api-binary-info">
+          @if (file.exists) {
+            {{ formatBytes(file.size ?? 0) }}{{ file.relative ? ' · in the project' : ' · outside the project, so only on this machine' }}
+          } @else {
+            No file at {{ file.abs }}
+          }
+        </p>
+      }
+    }
+    <div class="flex items-center gap-2">
+      <label for="api-binary-type" class="text-xs font-medium text-muted w-24">Content type</label>
+      <input
+        id="api-binary-type"
+        class="w-72 h-7 rounded-md border border-edge bg-surface px-2 text-xs font-mono text-fg placeholder:text-muted/70 focus:outline-none focus:border-accent"
+        spellcheck="false"
+        [placeholder]="binaryTypePlaceholder()"
+        [value]="body.contentType ?? ''"
+        (change)="setBinaryType(body, $event)"
+      />
+    </div>
+    <p class="text-xs text-muted">The file is sent as the body as it is, read while it is sent. A Content-Type header on the request wins over this.</p>
+  </div>
 }
 @if (graphql(); as body) {
   <div class="flex-1 min-h-0">

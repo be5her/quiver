@@ -1,5 +1,10 @@
+import type { NetScanHost } from './net-scan';
+import type { NetworkConfig } from './network';
 import type { ActivityBarLayout } from './activity-bar';
-import type { McpRecordingStatus } from './models/mcp-recording';
+import type { McpAgent, McpRecordingStatus } from './models/mcp-recording';
+import type { AgentCallDecision, ApprovalOutcome, ApprovalRequest, PendingApproval } from './approvals';
+import type { AgentPermissionRule, AgentPermissions } from './permissions';
+import type { LogsSession } from './models/logs';
 import type { z } from 'zod';
 
 export type Caller = 'ui' | 'mcp' | 'cli' | 'system';
@@ -30,8 +35,14 @@ export interface Variable {
 export interface McpConfig {
   enabled: boolean;
   port: number;
-  /** When false, commands flagged `mutating` are refused for MCP callers. */
+  /** Mirrors `permissions.mode === 'allow'` for older builds. Setting it alone switches the mode between `read-only` and `allow`. */
   allowMutating: boolean;
+  /** What agents may call: the mode for mutating calls no rule matches, and the rules for every workspace. */
+  permissions: AgentPermissions;
+  /** Each workspace's own rules, by workspace id, which come before `permissions.rules`. Per machine, never in the project. */
+  workspaceRules: Record<string, AgentPermissionRule[]>;
+  /** Every MCP call is refused while true; the tool list stays as it is. */
+  paused: boolean;
 }
 
 /** A favourite Teleport resource, shown at the top of the Teleport sidebar. */
@@ -49,8 +60,41 @@ export interface TeleportConfig {
   pins: TeleportPin[];
   /** Optional explicit tsh binary (or wrapper command). Empty means discover it. */
   tshPath: string;
-  /** Start `tsh login` on launch for every cluster whose certificate has expired. */
+  /** Start `tsh login` on launch for every cluster whose certificate has expired: the startup half of `autoRenew`. */
   loginOnLaunch: boolean;
+  /** Keep me logged in: proxies whose certificate is renewed with `tsh login` when it is about to expire or has expired. */
+  autoRenew: string[];
+  /**
+   * Sign in inside Quiver: proxies whose `tsh login` runs with `--browser=none` and opens the SSO link in a Quiver window
+   * with its own saved cookies, so the identity provider (GitHub) remembers you and later logins need no form.
+   */
+  inAppSignIn: string[];
+  /** Kubernetes clusters marked protected: actions need the cluster name typed, and agents are refused. */
+  protectedKubes: TeleportKubeRef[];
+  /** Let agents run Kubernetes actions and port forwards on protected clusters too. Off by default. */
+  agentActionsOnProtected: boolean;
+}
+
+/** A certificate renewal (Keep me logged in) started, opened the browser, or ended. Sent with `teleport.changed` reason `renewal`. */
+export interface TeleportRenewalEvent {
+  proxy: string;
+  /** Short name of the cluster, for messages. */
+  label: string;
+  phase: 'start' | 'browser' | 'ok' | 'failed' | 'cancelled';
+  /** The attempt opens (or opened) a browser window for SSO. */
+  browser: boolean;
+  /** No Quiver window was in front when this happened: the window shows a system notification as well as a toast. */
+  background: boolean;
+  /** The sign-in happens in a Quiver window (Sign in inside Quiver), not the system browser. */
+  inApp?: boolean;
+  message?: string;
+}
+
+/** A Kubernetes cluster of a Teleport cluster. */
+export interface TeleportKubeRef {
+  /** Proxy address of the Teleport cluster. */
+  proxy: string;
+  name: string;
 }
 
 /** A port Quiver handed to a mock server on this machine. New servers in any project avoid every recorded port. */
@@ -80,6 +124,8 @@ export interface GlobalConfig {
   updates: UpdatesConfig;
   /** The user's order of the activity bar and the modules hidden from it. */
   activityBar: ActivityBarLayout;
+  /** How the API client, realtime connections and GraphQL introspection reach the network: the proxy. */
+  network: NetworkConfig;
 }
 
 /** Which releases the in-app updater follows. `beta` adds the Windows prereleases built from every merge to main. */
@@ -101,6 +147,8 @@ export interface StoreApi {
   /** Append-only JSON lines logs under `.quiver/local`. */
   appendLog(name: string, entry: unknown): Promise<void>;
   readLog<T>(name: string, limit: number): Promise<T[]>;
+  /** Replaces a log with these entries, oldest first, in one step: a reader sees the old log or the new one, never part of either. */
+  writeLog(name: string, entries: unknown[]): Promise<void>;
   clearLog(name: string): Promise<void>;
 }
 
@@ -114,6 +162,8 @@ export interface WebResponse {
   status: number;
   headers: Record<string, string>;
   text: string;
+  /** The body as bytes, only when the request asked for `binary` (a file export); `text` is then empty. */
+  bytes?: Uint8Array;
 }
 
 /**
@@ -121,16 +171,39 @@ export interface WebResponse {
  * the project). A sign-in happens in a window the user drives; requests then carry its cookies, and
  * cookies the answers set are kept.
  */
+export interface WebSignInOptions {
+  partition: string;
+  url: string;
+  title: string;
+  done(url: string): boolean | Promise<boolean>;
+  /**
+   * Open the window hidden and show it only when the sign-in is not done `afterMs` after it started, i.e. when the page
+   * waits for the user (a login form, a consent screen). A sign-in the saved cookies complete never shows a window.
+   * `allowed` is asked at that moment: false closes the window instead and resolves false. Without this the window
+   * shows as soon as its page is ready.
+   */
+  reveal?: { afterMs: number; allowed(): boolean; onReveal?(): void };
+  /** Aborting closes the window and resolves false (e.g. the process the sign-in was for has ended). */
+  signal?: AbortSignal;
+}
+
 export interface WebSessionsApi {
   /**
    * Open a window on `url` in the partition and resolve true once `done` holds for a page that
    * finished loading, or false when the user closes the window first. A second call for the same
    * partition focuses the open window and shares its outcome.
    */
-  signIn(options: { partition: string; url: string; title: string; done(url: string): boolean | Promise<boolean> }): Promise<boolean>;
-  fetch(partition: string, url: string, init?: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number }): Promise<WebResponse>;
+  signIn(options: WebSignInOptions): Promise<boolean>;
+  /** A request with the partition's cookies. `binary` answers with `bytes` instead of `text`, for downloads. */
+  fetch(partition: string, url: string, init?: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number; binary?: boolean }): Promise<WebResponse>;
   /** A cookie the partition holds for `url`, or null. */
   cookie(partition: string, url: string, name: string): Promise<string | null>;
+  /**
+   * Keep a cookie the server set for the browser session only (no expiry, so it is gone when the app
+   * quits) for `maxAgeS` seconds instead. A cookie that has an expiry is left as it is. Answers
+   * whether the partition holds the cookie.
+   */
+  keepCookie(partition: string, url: string, name: string, maxAgeS: number): Promise<boolean>;
   /** Forget everything the partition stored: cookies, storage and cache. */
   clear(partition: string): Promise<void>;
 }
@@ -139,6 +212,11 @@ export interface SecretsApi {
   readonly available: boolean;
   encrypt(plain: string): string;
   decrypt(cipher: string): string;
+  /**
+   * A secret the host hands in by name, which wins over what this machine stores: the headless CLI reads
+   * `QUIVER_SECRET_<NAME>` variables and its `--secrets` file. Absent in the app. Such a value is never written down.
+   */
+  lookup?(name: string): string | undefined;
 }
 
 /** What the host (Electron main process, or a CLI) gives to commands. */
@@ -150,6 +228,8 @@ export interface HostApi {
   dialogs?: {
     pickFile(options?: { title?: string; filters?: { name: string; extensions: string[] }[]; defaultPath?: string }): Promise<string | undefined>;
   };
+  /** Opens a folder in the system's file manager; present when the host has a window. */
+  revealFolder?(folder: string): Promise<void>;
   config: {
     get(): GlobalConfig;
     update(patch: Partial<GlobalConfig>): Promise<GlobalConfig>;
@@ -165,6 +245,11 @@ export interface HostApi {
   secrets: SecretsApi;
   /** Browser sessions for services that sign in through a web page. Present when the host has windows. */
   web?: WebSessionsApi;
+  /** Asks the user about an agent's call the permissions say to ask about. Absent in hosts without a UI, where such calls are refused. */
+  approvals?: {
+    /** `signal` aborts when the agent goes away, which refuses the call instead of leaving it waiting. */
+    request(request: ApprovalRequest, signal?: AbortSignal): Promise<ApprovalOutcome>;
+  };
   /** Broadcast an event to every UI surface. */
   emit<E extends HostEventName>(event: E, payload: HostEvents[E]): void;
 }
@@ -173,6 +258,10 @@ export interface CommandContext {
   caller: Caller;
   workspace?: WorkspaceApi;
   host: HostApi;
+  /** The agent behind an `mcp` call, as the MCP layer identified it. */
+  agent?: McpAgent;
+  /** Aborts when the caller goes away: an MCP client's connection closed or it cancelled the call. */
+  signal?: AbortSignal;
 }
 
 export type AnyZodObject = z.ZodObject<z.ZodRawShape>;
@@ -189,10 +278,41 @@ export interface CommandDefinition<S extends AnyZodObject = AnyZodObject, O = un
    * A function decides per call (after input validation), e.g. a query runner that lets reads through.
    */
   mutating?: boolean | ((input: z.infer<S>, ctx: CommandContext) => boolean | Promise<boolean>);
+  /**
+   * For an agent's call the permissions say to ask about: the refusals the handler would make whatever the user
+   * answers (a protected cluster), checked first, so the user is never asked about a call that is refused anyway.
+   * Throws to refuse the call without asking.
+   */
+  beforeApproval?(input: z.infer<S>, ctx: CommandContext): Promise<void>;
+  /**
+   * What one call does, for a command that does several things (a query runner runs a SELECT or a DROP TABLE), so an
+   * agent rule can name it: `db.query.run#ddl`. Optional; a command without it is matched by its id alone.
+   */
+  actions?: CommandActions<z.infer<S>>;
   /** Hidden commands are plumbing: not listed in the palette or exposed over MCP. */
   hidden?: boolean;
   input: S;
   handler(input: z.infer<S>, ctx: CommandContext): Promise<O>;
+}
+
+/** The actions a command declares, for agent rules (`CommandDefinition.actions`). */
+export interface CommandActions<I = unknown> {
+  /** Every action a call can have, e.g. `select`, `insert`, `ddl`. */
+  list: readonly string[];
+  /**
+   * The action of one call, from its validated input: one of `list`. Total and cheap (no network). When it throws,
+   * the call's action counts as unknown and only the rules for the whole command apply to it.
+   */
+  of(input: I, ctx: CommandContext): string | Promise<string>;
+  /** One line per action, for the rules editor. */
+  describe?: Record<string, string>;
+}
+
+/** A command's actions as `mcp.permissions.actions` lists them. */
+export interface CommandActionsInfo {
+  commandId: string;
+  actions: string[];
+  describe: Record<string, string>;
 }
 
 export interface CommandMeta {
@@ -213,6 +333,12 @@ export interface CommandMeta {
 export interface ModuleMain {
   id: string;
   commands: CommandDefinition[];
+  /**
+   * The committed collections this module keeps in the workspace store, with the schema of their items. A save into
+   * one keeps the fields of the stored item that the schema does not know, so a file a newer Quiver wrote loses
+   * nothing when this version saves it.
+   */
+  collections?: Record<string, z.ZodType>;
   /** Called once when the host has loaded its config, before workspaces reopen. Use for app-wide pollers. */
   onStart?(host: HostApi): Promise<void> | void;
   /** Called once on shutdown, after workspaces closed. Kill child processes here. */
@@ -265,13 +391,22 @@ export interface HostEvents {
   'store.changed': { workspaceId: string; collection: string };
   'state.changed': { workspaceId: string; key: string };
   'mcp.status': { running: boolean; port: number; error?: string };
-  'mcp.call': { tool: string; workspaceId?: string; ok: boolean; durationMs: number; at: string };
+  'mcp.call': { tool: string; workspaceId?: string; ok: boolean; durationMs: number; at: string; agent?: string; decision?: AgentCallDecision | null; action?: string | null };
+  /** An agent's call waits for the user to allow or deny it. */
+  'mcp.approval.requested': PendingApproval;
+  /** The agent activity feed got a call (`call`), or approvals were asked, answered or timed out (`approvals`). */
+  'mcp.activity': { reason: 'call' | 'approvals'; pending: number };
   /** The recording of agent calls started, paused, ended or was dropped, or a call was recorded. Bursts of calls arrive as one event. */
   'mcp.recording': McpRecordingStatus;
   /** Teleport session status, login progress, pins or tunnel list changed. Fetch teleport.status for details. */
-  'teleport.changed': { reason: 'status' | 'tunnels' | 'login' | 'pins' };
-  /** Kubernetes queries: the local history changed, or a followed log stream has new lines or ended. */
-  'teleport.kube.changed': { reason: 'history' | 'stream'; runId?: string };
+  'teleport.changed': { reason: 'status' | 'tunnels' | 'login' | 'pins' | 'protected' | 'renewal'; renewal?: TeleportRenewalEvent };
+  /** Kubernetes: the local history changed, a followed log stream has new lines or ended, or a port forward started, stopped or exited. */
+  'teleport.kube.changed': { reason: 'history' | 'stream' | 'forwards'; runId?: string };
+  /**
+   * API client: a collection run started, moved on or finished (`runId`; fetch api.run.get), a streamed response got items or
+   * ended (`streamId`; read api.request.stream.read), or a download of a send given a `sendId` got further (`received` bytes).
+   */
+  'api.changed': { workspaceId: string; reason: 'run' | 'stream' | 'progress'; runId?: string; streamId?: string; sendId?: string; received?: number };
   /** A mock server started or stopped, its definition changed, or it captured requests. */
   'mock.changed': { workspaceId: string; serverId: string; reason: 'status' | 'requests' | 'servers' };
   /** A WebSocket or SSE connection changed state, its definition changed, or messages arrived. */
@@ -282,8 +417,20 @@ export interface HostEvents {
   'env.changed': { workspaceId: string; reason: 'files'; path?: string };
   /** Logs: a Grafana sign-in started, finished or ended (`session`, for every connection on that address), or the query history grew. */
   'logs.changed': { reason: 'session' | 'history'; grafanaUrl?: string; workspaceId?: string };
+  /** The Grafana session for an address changed (signed in, out, or the check failed); Logs and Redis through Grafana share it. */
+  'grafana.changed': { grafanaUrl: string; state: LogsSession['state'] };
+  /** Metabase: a sign-in or key check for an address changed (`session`), an API key was stored or cleared on this machine (`secret`), or the query history grew (`history`). */
+  'metabase.changed': { reason: 'session' | 'secret' | 'history'; url?: string; connectionId?: string; workspaceId?: string };
   /** The workspace's todo list changed. */
   'todo.changed': { workspaceId: string };
+  /** Git: the working tree, index or HEAD changed (`status`), branches or refs moved (`branches`), the stashes changed (`stashes`), the pull request list was refreshed (`prs`), or worktrees were added, removed, locked or switched (`worktrees`). */
+  'git.changed': { workspaceId: string; reason: 'status' | 'branches' | 'stashes' | 'prs' | 'worktrees' };
+  /** Process runner: saved tasks changed (`tasks`), a process changed state (`state`), or a run printed output (`output`, throttled). */
+  'runner.changed': { workspaceId: string; reason: 'tasks' | 'state' | 'output'; taskId?: string; runId?: string };
+  /** Queues: connections changed (`connections`), messages were produced or purged (`messages`), or a live consumer got messages or ended (`consumer`); `destination` when one topic or queue was touched. */
+  'queues.changed': { workspaceId: string; reason: 'connections' | 'messages' | 'consumer'; connectionId?: string; consumerId?: string; destination?: string };
+  /** Tools: a network scan got through more addresses (`done` of `total`), with the host just found, if any. */
+  'tools.netscan.progress': { scanId: string; done: number; total: number; host?: NetScanHost };
   /** The in-app updater moved: checking, a version found, download progress, downloaded, or an error. */
   'app.update': UpdateState;
 }

@@ -37,6 +37,7 @@ import { Check, CircleStop, GitBranch, Play, Save, Undo2 } from 'lucide';
 import { ApiVariables } from '../../api/ui/api-variables';
 import { DbActions, type DbConnectionRow } from './db-actions';
 import { DbError } from './db-error';
+import { AccessBadge } from './kind-icon';
 import { ExportMenu, type ExportSource } from './export-menu';
 import { firstLine, formatCount, formatDuration } from './db-format';
 import { KindIcon } from './kind-icon';
@@ -87,7 +88,7 @@ function completionSchema(tables: DbTableColumns[] | undefined, kind: SqlKind): 
  */
 @Component({
   selector: 'q-query-tab',
-  imports: [ApiVariables, Badge, Button, CodeEditor, DbError, ExportMenu, KindIcon, QueryResultView, Segment, Segmented, Select],
+  imports: [AccessBadge, ApiVariables, Badge, Button, CodeEditor, DbError, ExportMenu, KindIcon, QueryResultView, Segment, Segmented, Select],
   templateUrl: './query-tab.html',
   host: { class: 'flex flex-col h-full min-h-0', '(keydown)': 'shortcut($event)' },
 })

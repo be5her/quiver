@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { parseCurl, toCurl, tokenizeShell } from './curl';
+import { parseCurl, toCurl, tokenizeShell, type CurlInput } from './curl';
+import { detectShellDialect } from './shell';
 import type { ApiRequest } from './models/api';
 
 describe('tokenizeShell', () => {
@@ -39,7 +40,7 @@ describe('parseCurl', () => {
   it('parses basic auth and form fields', () => {
     const req = parseCurl(`curl -u me:secret -F 'file=@a.txt' -F 'note=hi' https://x.test/upload`);
     expect(req.auth).toEqual({ type: 'basic', username: 'me', password: 'secret' });
-    expect(req.body).toMatchObject({ type: 'form', fields: [{ key: 'file', value: '@a.txt' }, { key: 'note', value: 'hi' }] });
+    expect(req.body).toMatchObject({ type: 'form', fields: [{ key: 'file', value: 'a.txt', kind: 'file' }, { key: 'note', value: 'hi' }] });
   });
 
   it('names requests whose URL starts with a variable by path', () => {
@@ -199,11 +200,88 @@ describe('parseCurl: shell dialects', () => {
     ['an unterminated ^"', 'curl ^"https://x.test/a ^\n  -H ^"a: b^"', /cmd\.exe: unterminated quote/],
     ["an unterminated '", "curl 'https://x.test/a \\\n  -H 'a: b'", /bash\/zsh: unterminated ' quote starting at line 2, column 11/],
     ['a second URL', 'curl https://x.test/a https://x.test/b', /second URL/],
-    ['a body read from a file', 'curl x.test -d @body.json', /reads the body from a file/],
+    ['a body read from standard input', 'curl x.test -d @-', /standard input/],
+    ['a file joined with other data', 'curl x.test -d a=1 -d @body.json', /joins a file with other data/],
+    ['-F reading a field from a file as text', "curl x.test -F 'note=<note.txt'", /reads the field's text from a file/],
+    ['-G with a file body', 'curl -G x.test -d @q.txt', /-G puts the data in the query string/],
     ['an unknown option', 'curl x.test --frobnicate', /unknown curl option --frobnicate/],
     ['malformed percent-encoding in the query', "curl 'x.test/?a=%E0%A4%A'", /malformed %-encoding/],
   ])('fails on %s', (_name, command, error) => {
     expect(() => parseCurl(command)).toThrow(error);
+  });
+});
+
+describe('parseCurl: files', () => {
+  it('turns -d @file, --data-binary @file and --json @file into a binary body', () => {
+    expect(parseCurl('curl x.test/up -d @body.json').body).toEqual({ type: 'binary', path: 'body.json' });
+    const put = parseCurl("curl -X PUT x.test/up --data-binary '@C:\\data\\in.bin'");
+    expect(put.method).toBe('PUT');
+    expect(put.body).toEqual({ type: 'binary', path: 'C:\\data\\in.bin' });
+    const json = parseCurl('curl x.test/up --json @payload.json');
+    expect(json.body).toEqual({ type: 'binary', path: 'payload.json' });
+    expect(json.headers.find((h) => h.key === 'Content-Type')?.value).toBe('application/json');
+  });
+
+  it('turns -F name=@file into a file field, with type and filename', () => {
+    const req = parseCurl('curl x.test/up -F "doc=@reports/q3.pdf;type=application/pdf;filename=report.pdf" -F note=hi --form-string "raw=@kept"');
+    expect(req.method).toBe('POST');
+    expect(req.body.type).toBe('form');
+    const fields = req.body.type === 'form' ? req.body.fields : [];
+    expect(fields.map((f) => ({ key: f.key, value: f.value, kind: f.kind, contentType: f.contentType, fileName: f.fileName }))).toEqual([
+      { key: 'doc', value: 'reports/q3.pdf', kind: 'file', contentType: 'application/pdf', fileName: 'report.pdf' },
+      { key: 'note', value: 'hi', kind: undefined, contentType: undefined, fileName: undefined },
+      { key: 'raw', value: '@kept', kind: undefined, contentType: undefined, fileName: undefined },
+    ]);
+  });
+
+  it('reads a quoted file name holding ; and refuses standard input', () => {
+    const fields = parseCurl('curl x.test -F \'f=@"a;b.txt";type=text/plain\'').body;
+    expect(fields.type === 'form' ? fields.fields[0] : null).toMatchObject({ value: 'a;b.txt', kind: 'file', contentType: 'text/plain' });
+    expect(() => parseCurl('curl x.test -F f=@-')).toThrow(/standard input/);
+  });
+
+  it('reads quoted attribute values, with ; inside and \\" and \\\\ escapes, as curl does', () => {
+    const quoted = parseCurl('curl x.test -F \'doc=@a.pdf;filename="x;headers=X-Evil: 1";type="text/plain;charset=utf-8"\'').body;
+    expect(quoted.type === 'form' ? quoted.fields[0] : null).toMatchObject({ value: 'a.pdf', kind: 'file', fileName: 'x;headers=X-Evil: 1', contentType: 'text/plain;charset=utf-8' });
+    const escaped = parseCurl('curl x.test -F \'doc=@"q\\"uote.pdf";filename="n\\"a\\\\me"; type = text/plain \'').body;
+    expect(escaped.type === 'form' ? escaped.fields[0] : null).toMatchObject({ value: 'q"uote.pdf', kind: 'file', fileName: 'n"a\\me', contentType: 'text/plain' });
+    expect(() => parseCurl('curl x.test -F \'doc=@a.pdf;filename="open\'')).toThrow(/unterminated quote/);
+  });
+
+  it('round-trips through toCurl', () => {
+    const out = toCurl({
+      method: 'POST',
+      url: 'https://x.test/up',
+      headers: [],
+      body: null,
+      bodyType: 'form',
+      formFields: [['note', 'hi'], { name: 'doc', file: 'a;b.pdf', type: 'application/pdf', fileName: 'r.pdf' }, ['at', '@not-a-file']],
+    });
+    expect(out).toContain(`-F 'doc=@"a;b.pdf";type=application/pdf;filename=r.pdf'`);
+    // Text fields go as --form-string, so a value starting with @ stays text instead of naming a file.
+    expect(out).toContain("--form-string 'note=hi'");
+    expect(out).toContain("--form-string 'at=@not-a-file'");
+    const back = parseCurl(out).body;
+    expect(back.type === 'form' ? back.fields[1] : null).toMatchObject({ key: 'doc', value: 'a;b.pdf', kind: 'file', contentType: 'application/pdf', fileName: 'r.pdf' });
+    expect(back.type === 'form' ? back.fields[2] : null).toMatchObject({ key: 'at', value: '@not-a-file' });
+    expect(back.type === 'form' ? back.fields[2].kind : 'file').not.toBe('file');
+    const binary = toCurl({ method: 'PUT', url: 'https://x.test/up', headers: [['Content-Type', 'image/png']], body: null, bodyFile: 'img/logo.png' });
+    expect(binary).toContain("--data-binary '@img/logo.png'");
+    expect(parseCurl(binary).body).toEqual({ type: 'binary', path: 'img/logo.png' });
+  });
+
+  it('quotes a file name or type that could add a part header, and reads it back', () => {
+    const evil = { name: 'doc', file: 'a.pdf', fileName: 'x;headers=X-Evil: 1', type: 'text/plain;charset=utf-8' };
+    const out = toCurl({ method: 'POST', url: 'https://x.test/up', headers: [], body: null, bodyType: 'form', formFields: [evil, { name: 'q', file: 'q"uo\\te.pdf', fileName: 'n"a\\me' }, { name: 'nl', file: 'a.txt', fileName: 'two\r\nlines' }] });
+    expect(out).toContain(`-F 'doc=@a.pdf;type="text/plain;charset=utf-8";filename="x;headers=X-Evil: 1"'`);
+    expect(out).toContain(`-F 'q=@"q\\"uo\\\\te.pdf";filename="n\\"a\\\\me"'`);
+    expect(out).toContain(`-F 'nl=@a.txt;filename=two lines'`);
+    const back = parseCurl(out).body;
+    expect(back.type === 'form' ? back.fields.map((f) => [f.value, f.fileName, f.contentType]) : null).toEqual([
+      ['a.pdf', 'x;headers=X-Evil: 1', 'text/plain;charset=utf-8'],
+      ['q"uo\\te.pdf', 'n"a\\me', undefined],
+      ['a.txt', 'two lines', undefined],
+    ]);
   });
 });
 
@@ -237,8 +315,29 @@ describe('parseCurl: curl options', () => {
 });
 
 describe('toCurl', () => {
+  it('renders how the request is sent: -L, -k and --max-time', () => {
+    const out = toCurl({ method: 'GET', url: 'https://x.test/', headers: [], body: null, options: { followRedirects: true, insecure: true, timeoutMs: 1500 } });
+    expect(out.split(' \\\n  ')[1]).toBe('-L -k --max-time 1.5');
+    expect(toCurl({ method: 'GET', url: 'https://x.test/', headers: [], body: null, options: { followRedirects: false } })).toBe("curl -X GET 'https://x.test/'");
+  });
+
   it('quotes safely', () => {
     const out = toCurl({ method: 'POST', url: "https://x.test/it's", headers: [['A', 'b']], body: '{"q":1}' });
     expect(out).toBe(`curl -X POST 'https://x.test/it'\\''s' \\\n  -H 'A: b' \\\n  --data-raw '{"q":1}'`);
+  });
+
+  it('writes the command for cmd.exe and PowerShell as those shells read it, and parseCurl reads each back', () => {
+    const input: CurlInput = { method: 'POST', url: 'https://x.test/a?b=1&c=2', headers: [['X-Note', 'it\'s "quoted" 100%']], body: '{"a":"it\'s"}', options: { followRedirects: true } };
+    const cmd = toCurl({ ...input, shell: 'cmd' });
+    expect(cmd).toBe(['curl -X POST ^"https://x.test/a?b=1^&c=2^"', '-L', '-H ^"X-Note: it\'s ^\\^"quoted^\\^" 100^%^"', '--data-raw ^"^{^\\^"a^\\^":^\\^"it\'s^\\^"^}^"'].join(' ^\n  '));
+    const powershell = toCurl({ ...input, shell: 'powershell' });
+    expect(powershell).toBe(["curl.exe -X POST 'https://x.test/a?b=1&c=2'", '-L', "-H 'X-Note: it''s \"quoted\" 100%'", "--data-raw '{\"a\":\"it''s\"}'"].join(' `\n  '));
+    for (const command of [toCurl(input), cmd, powershell]) {
+      const req = parseCurl(command);
+      expect(shape(req), command).toEqual({ method: 'POST', url: 'https://x.test/a', params: [['b', '1'], ['c', '2']], headers: [['X-Note', 'it\'s "quoted" 100%']], auth: { type: 'none' }, body: { type: 'json', content: '{"a":"it\'s"}' } });
+    }
+    // One for another shell is not mistaken for bash.
+    expect(detectShellDialect(cmd)).toBe('cmd');
+    expect(detectShellDialect(powershell)).toBe('powershell');
   });
 });

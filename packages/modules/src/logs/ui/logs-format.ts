@@ -48,6 +48,23 @@ export function sessionLabel(session: LogsSession): string {
   }
 }
 
+/** A direct connection's last check, which stands in for a sign-in: it needs none. */
+export function directLabel(session: LogsSession): string {
+  switch (session.state) {
+    case 'signed-in':
+      return 'Reachable';
+    case 'signed-out':
+      return session.error ?? 'Not reachable';
+    default:
+      return 'Not checked yet';
+  }
+}
+
+/** The state line of any connection: who is signed in to Grafana, or how the direct server last answered. */
+export function connectionStateLabel(conn: { kind?: string; session: LogsSession }): string {
+  return conn.kind === 'victorialogs' ? directLabel(conn.session) : sessionLabel(conn.session);
+}
+
 /** `14:03:27.118`, in local time. */
 export function clockTime(iso: string): string {
   const d = new Date(iso);

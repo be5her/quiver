@@ -1,6 +1,7 @@
 import { Component, DestroyRef, ElementRef, afterNextRender, booleanAttribute, computed, effect, inject, input, model, output, untracked, viewChild } from '@angular/core';
 import type { FormValueControl } from '@angular/forms/signals';
-import { Annotation, EditorState, StateEffect } from '@codemirror/state';
+import { Annotation, EditorState, StateEffect, type Extension } from '@codemirror/state';
+import { openSearchPanel } from '@codemirror/search';
 import { EditorView } from '@codemirror/view';
 import type { GraphQLSchema } from 'graphql';
 import { cn } from '../class-names';
@@ -8,6 +9,7 @@ import { AppState } from '../state/app-state';
 import { VariableHover } from '../variables/variable-hover';
 import { injectVariables } from '../variables/variables';
 import { editorExtensions, type CodeLanguage, type SQLNamespace, type SqlDialect } from './code-editor-extensions';
+import { lineMarkerGutter, type LineMarker, type LineMarkerEvent } from './line-markers';
 
 /** Marks the editor's own updates when the value is set from outside, so they do not echo back as edits. */
 const External = Annotation.define<boolean>();
@@ -31,6 +33,8 @@ export class CodeEditor implements FormValueControl<string> {
   readonly value = model('');
   readonly language = input<CodeLanguage>('text');
   readonly readonly = input(false, { transform: booleanAttribute });
+  /** With `readonly`: keep the view focusable so Mod-F searches it and text can be selected. */
+  readonly searchable = input(false, { transform: booleanAttribute });
   readonly placeholder = input('');
   /** Fill the parent instead of growing with content. */
   readonly fill = input(true, { transform: booleanAttribute });
@@ -53,6 +57,12 @@ export class CodeEditor implements FormValueControl<string> {
   readonly run = output<void>();
   /** Mod+Shift+Enter inside the editor: run the statement under the cursor. */
   readonly runCurrent = output<void>();
+  /** A gutter left of the line numbers with one marker per line (a blame), `[0]` for line 1. */
+  readonly lineMarkers = input<readonly (LineMarker | null)[] | null>(null);
+  /** A click on a line marker. */
+  readonly lineMarkerClick = output<LineMarkerEvent>();
+  /** A right-click on a line marker; the browser's menu is left to the handler to prevent. */
+  readonly lineMarkerMenu = output<LineMarkerEvent>();
   readonly touch = output<void>();
 
   protected readonly filled = computed(() => this.fill() && !this.singleLine());
@@ -73,6 +83,7 @@ export class CodeEditor implements FormValueControl<string> {
     ...editorExtensions({
       language: this.language(),
       readOnly: this.readonly(),
+      searchable: this.searchable(),
       placeholder: this.placeholder(),
       filled: this.filled(),
       wrap: this.wrap(),
@@ -87,7 +98,14 @@ export class CodeEditor implements FormValueControl<string> {
       run: () => this.run.emit(),
       runCurrent: () => this.runCurrent.emit(),
     }),
+    ...this.markerGutter(),
   ]);
+
+  private markerGutter(): Extension[] {
+    const markers = this.lineMarkers();
+    if (!markers) return [];
+    return [lineMarkerGutter(markers, { click: (e) => this.lineMarkerClick.emit(e), menu: (e) => this.lineMarkerMenu.emit(e) })];
+  }
 
   constructor() {
     afterNextRender(() => {
@@ -117,6 +135,13 @@ export class CodeEditor implements FormValueControl<string> {
   focus(options?: FocusOptions): void {
     if (options?.preventScroll) this.view?.contentDOM.focus(options);
     else this.view?.focus();
+  }
+
+  /** Open CodeMirror's find panel, as Mod-F inside the editor does. */
+  openSearch(): void {
+    if (!this.view) return;
+    this.view.focus();
+    openSearchPanel(this.view);
   }
 
   /** Offset of the cursor (the main selection's head) in the document. */

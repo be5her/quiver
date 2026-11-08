@@ -1,0 +1,35 @@
+<div class="flex items-center gap-2 text-xs text-muted min-h-7 shrink-0">
+  @if (done()) {
+    <span data-testid="api-stream-state">{{ error() === 'Stopped' ? 'Stopped' : error() ? 'Ended: ' + error() : 'Ended' }}</span>
+  } @else {
+    <span class="flex items-center gap-1.5 text-accent" data-testid="api-stream-state"><span class="size-1.5 rounded-full bg-accent animate-pulse"></span>Streaming</span>
+  }
+  <span data-testid="api-stream-count">{{ items().length }} {{ kind() === 'sse' ? (items().length === 1 ? 'event' : 'events') : items().length === 1 ? 'line' : 'lines' }} · {{ size() }}</span>
+  @if (dropped()) {
+    <span class="text-warning">{{ dropped() }} dropped</span>
+  }
+  <div class="flex-1"></div>
+  <label class="flex items-center gap-1.5">
+    <input qCheckbox [checked]="follow()" data-testid="api-stream-follow" (change)="setFollow($any($event.target).checked)" />
+    Follow
+  </label>
+  @if (!done()) {
+    <button qButton size="sm" variant="ghost" [icon]="icons.Square" data-testid="api-stream-stop" (click)="stop()">Stop</button>
+  }
+</div>
+<div #list class="flex-1 min-h-0 overflow-auto rounded-md border border-edge font-mono text-xs" data-testid="api-stream-list" (scroll)="scrolled($event)">
+  @for (item of items(); track item.seq) {
+    <div class="flex items-start gap-2 px-2 py-1 border-b border-edge/50" data-testid="api-stream-item">
+      <span class="text-muted w-14 shrink-0 text-right">{{ time(item.at) }}</span>
+      @if (kind() === 'sse') {
+        <span class="text-accent shrink-0 max-w-[25%] truncate" [title]="item.event ?? ''" data-testid="api-stream-event">{{ item.event }}</span>
+      }
+      <span class="flex-1 whitespace-pre-wrap break-all" data-testid="api-stream-data">{{ item.data }}</span>
+      @if (item.id) {
+        <span class="text-muted shrink-0">#{{ item.id }}</span>
+      }
+    </div>
+  } @empty {
+    <div class="p-3 text-muted">{{ done() ? 'Nothing arrived.' : 'Waiting for the first item…' }}</div>
+  }
+</div>

@@ -1,0 +1,56 @@
+@let p = preview();
+<div class="fixed inset-0 z-50 flex items-start justify-center bg-black/40 pt-[14vh]" (mousedown)="cancelled.emit()">
+  <form
+    class="w-[560px] max-w-[92vw] rounded-lg border border-edge bg-canvas shadow-xl p-4 flex flex-col gap-3"
+    role="dialog"
+    aria-modal="true"
+    [attr.aria-label]="title()"
+    data-testid="kube-action-confirm"
+    [attr.data-destructive]="p.destructive"
+    [attr.data-protected]="p.protected"
+    (mousedown)="$event.stopPropagation()"
+    (keydown.escape)="cancelled.emit()"
+    (submit)="submit($event)"
+  >
+    <div>
+      <h2 class="text-sm font-semibold">{{ title() }}</h2>
+      <p class="text-xs text-muted mt-0.5">
+        On <span class="text-fg font-medium">{{ cluster() }}</span> via {{ proxy() }}@if (p.target.namespace) {, namespace <span class="text-fg font-medium">{{ p.target.namespace }}</span>}. This changes the cluster.
+      </p>
+    </div>
+    <div class="flex flex-col gap-1">
+      <span class="text-[11px] font-medium text-muted">Runs exactly</span>
+      <code class="block text-[11px] font-mono bg-surface border border-edge rounded-md px-2 py-1.5 break-all select-all max-h-32 overflow-auto" data-testid="kube-confirm-command">{{ p.command }}</code>
+      @if (p.setup) {
+        <span class="text-[11px] text-muted">after preparing the private kubeconfig once with <code class="font-mono break-all">{{ p.setup }}</code></span>
+      }
+    </div>
+    @if (p.protected) {
+      <label class="flex flex-col gap-1">
+        <span class="flex items-center gap-1 text-xs text-warning"
+          ><svg [qIcon]="icons.ShieldAlert" class="size-3.5 shrink-0"></svg>{{ cluster() }} is protected. Type its name to confirm.</span
+        >
+        <input qInput qAutofocus class="font-mono text-xs" autocomplete="off" spellcheck="false" [placeholder]="cluster()" data-testid="kube-confirm-cluster" (input)="typed('cluster', $event)" />
+      </label>
+    }
+    @if (p.destructive) {
+      <label class="flex flex-col gap-1">
+        <span class="flex items-center gap-1 text-xs text-danger"
+          ><svg [qIcon]="icons.TriangleAlert" class="size-3.5 shrink-0"></svg>This is hard to take back. Type {{ p.target.name }} to confirm.</span
+        >
+        <input qInput [qAutofocus]="!p.protected" class="font-mono text-xs" autocomplete="off" spellcheck="false" [placeholder]="p.target.name" data-testid="kube-confirm-name" (input)="typed('name', $event)" />
+      </label>
+    }
+    <div class="flex justify-end gap-2 mt-1">
+      <button qButton type="button" variant="ghost" [qAutofocus]="!p.protected && !p.destructive" (click)="cancelled.emit()">Cancel</button>
+      <button
+        qButton
+        type="submit"
+        [variant]="p.destructive || p.protected ? 'danger' : 'primary'"
+        [class]="p.destructive || p.protected ? 'border-danger/40' : ''"
+        [disabled]="!ready()"
+        data-testid="kube-confirm-run"
+      >Run action</button>
+    </div>
+  </form>
+</div>

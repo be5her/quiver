@@ -1,6 +1,7 @@
 import { Injector, Service, inject, runInInjectionContext, untracked } from '@angular/core';
 import type { WorkspaceInfo } from '@quiver/core';
 import { AppState, Dialogs, HostBridge, TabsState, Theme, Toasts, UiActions, type UIAction } from '@quiver/ui';
+import { AgentsState } from './agents/agents-state';
 import { modules } from './modules';
 import { Updates } from './updates';
 
@@ -16,6 +17,7 @@ export class ShellActions {
   private readonly updates = inject(Updates);
   private readonly actions = inject(UiActions);
   private readonly injector = inject(Injector);
+  private readonly agents = inject(AgentsState);
 
   private readonly shellActions: UIAction[] = [
     { id: 'palette.open', title: 'Command palette', group: 'App', shortcut: 'Ctrl+K', run: () => this.app.paletteOpen.set(true) },
@@ -32,6 +34,9 @@ export class ShellActions {
     },
     { id: 'settings.open', title: 'Settings', group: 'App', shortcut: 'Ctrl+,', run: () => this.openSettings() },
     { id: 'theme.toggle', title: 'Toggle light / dark theme', group: 'App', run: () => this.toggleTheme() },
+    { id: 'agents.activity', title: 'Agent activity', group: 'Agents', keywords: ['mcp', 'approvals', 'calls'], run: () => this.agents.openTab() },
+    { id: 'agents.pause', title: 'Pause agents', group: 'Agents', keywords: ['mcp', 'stop'], run: () => this.agents.setPaused(true), when: () => !untracked(this.agents.paused) },
+    { id: 'agents.resume', title: 'Resume agents', group: 'Agents', keywords: ['mcp'], run: () => this.agents.setPaused(false), when: () => untracked(this.agents.paused) },
     { id: 'app.update.check', title: 'Check for updates', group: 'App', run: () => this.updates.check() },
     {
       id: 'tab.close',

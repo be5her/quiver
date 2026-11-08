@@ -1,0 +1,19 @@
+<div class="flex items-center gap-2 px-3 h-9 border-b border-edge shrink-0 text-xs">
+  <span class="font-semibold">Code</span>
+  <select qSelect class="h-7 text-xs" data-testid="api-code-target" (change)="setTarget($event)">
+    @for (t of targets; track t.value) {
+      <option [value]="t.value" [selected]="t.value === target()">{{ t.label }}</option>
+    }
+  </select>
+  @if (snippet.error(); as error) {
+    <span class="text-danger truncate">{{ error.message }}</span>
+  } @else {
+    <span class="text-muted truncate">For the request as it stands, with variables resolved; files are read from their paths.</span>
+  }
+  <div class="flex-1"></div>
+  <button qButton size="sm" variant="ghost" [icon]="icons.Copy" data-testid="api-code-copy" (click)="copy()">Copy</button>
+  <button qIconButton label="Back to the response" size="sm" data-testid="api-code-close" (click)="closed.emit()"><svg [qIcon]="icons.X" class="size-3.5"></svg></button>
+</div>
+<div class="flex-1 min-h-0 p-2">
+  <q-code-editor [value]="snippet.value()?.code ?? ''" readonly searchable [language]="language()" data-testid="api-code-editor" />
+</div>

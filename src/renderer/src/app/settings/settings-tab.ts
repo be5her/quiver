@@ -1,7 +1,7 @@
 import { NgTemplateOutlet } from '@angular/common';
-import { Component, computed, inject, input, linkedSignal, signal } from '@angular/core';
+import { Component, computed, inject, input, linkedSignal, signal, untracked } from '@angular/core';
 import { FormField, form } from '@angular/forms/signals';
-import { PALETTES, resolvePalette, type GlobalConfig, type TeleportStatus, type Variable } from '@quiver/core';
+import { PALETTES, isAutoRenewOn, isInAppSignInOn, resolvePalette, workspaceRulesFor, type AgentPermissionMode, type AgentPermissionRule, type GlobalConfig, type TeleportStatus, type Variable } from '@quiver/core';
 import {
   AppState,
   Button,
@@ -18,14 +18,25 @@ import {
   type TabComponent,
 } from '@quiver/ui';
 import { Copy, X } from 'lucide';
+import { AgentRulesEditor, type AgentRuleChange } from '../agents/rules-editor';
 import { AboutPanel } from './about-panel';
+import { CliPanel } from './cli-panel';
 
 type ThemePreference = GlobalConfig['theme'];
 
-/** Settings: appearance, the MCP server, Teleport, global variables and About. Saved in the global config. */
+/** The proxy settings as api.network.get gives them: the password only as whether one is kept. */
+interface NetworkView {
+  proxy: 'none' | 'system' | 'manual';
+  url: string;
+  noProxy: string[];
+  username: string;
+  hasPassword: boolean;
+}
+
+/** Settings: appearance, the MCP server and agent permissions, the command line, Teleport, the network, global variables and About. Saved in the global config. */
 @Component({
   selector: 'q-settings-tab',
-  imports: [AboutPanel, Button, Checkbox, FormField, Input, KeyValueEditor, Label, NgTemplateOutlet, Select],
+  imports: [AboutPanel, AgentRulesEditor, Button, CliPanel, Checkbox, FormField, Input, KeyValueEditor, Label, NgTemplateOutlet, Select],
   templateUrl: './settings-tab.html',
   host: { class: 'flex-1 overflow-auto p-6' },
 })
@@ -43,6 +54,9 @@ export class SettingsTab implements TabComponent {
   protected readonly variableSyntax = '{{name}}';
   protected readonly config = this.app.config;
   protected readonly mcp = this.app.mcpStatus;
+  protected readonly workspace = this.app.activeWorkspace;
+  /** The active workspace's own agent rules, kept in the global config on this machine. */
+  protected readonly workspaceRules = computed<AgentPermissionRule[]>(() => workspaceRulesFor(this.config()?.mcp ?? { workspaceRules: {} }, this.workspace()?.id));
   protected readonly teleport = invokeResource<TeleportStatus>('teleport.status', () => ({}), { workspaceId: null, refreshOnEvents: ['teleport.changed'] });
 
   /** Fields saved when they lose focus; they follow the stored values whenever the config changes. */
@@ -58,6 +72,16 @@ export class SettingsTab implements TabComponent {
     source: () => this.config()?.globalVariables,
     computation: (stored, previous) => (!previous || JSON.stringify(previous.value) === JSON.stringify(previous.source) ? (stored ?? []) : previous.value),
   });
+  private readonly storedNetwork = invokeResource<NetworkView>('api.network.get', () => ({}), { workspaceId: null, refreshOnEvents: ['config.changed'] });
+  /** The proxy settings being edited; they follow the stored ones until changed. */
+  protected readonly network = linkedSignal<NetworkView | undefined, NetworkView>({
+    source: () => this.storedNetwork.value(),
+    computation: (stored, previous) =>
+      !previous || previous.source === undefined || JSON.stringify(previous.value) === JSON.stringify(previous.source) ? (stored ??{ proxy: 'none', url: '', noProxy: [], username: '', hasPassword: false }) : previous.value,
+  });
+  /** Typed only to change it; the stored one is never shown. */
+  protected readonly proxyPassword = signal('');
+  protected readonly networkChanged = computed(() => Boolean(this.proxyPassword()) || JSON.stringify(this.network()) !== JSON.stringify(this.storedNetwork.value()));
   protected readonly globalsChanged = computed(() => JSON.stringify(this.globals()) !== JSON.stringify(this.config()?.globalVariables));
   protected readonly selectedPalette = computed(() => resolvePalette(this.config()?.palette).key);
   protected readonly httpUrl = computed(() => `http://127.0.0.1:${this.config()?.mcp.port}/mcp`);
@@ -87,13 +111,31 @@ export class SettingsTab implements TabComponent {
     void this.update({ palette: key });
   }
 
-  protected toggleMcp(config: GlobalConfig, event: Event, key: 'enabled' | 'allowMutating'): void {
-    void this.update({ mcp: { ...config.mcp, [key]: (event.target as HTMLInputElement).checked } });
+  protected toggleMcp(config: GlobalConfig, event: Event): void {
+    // Only the field that changed: the host merges it, so a rule or a pause written since this view last read the
+    // config is not undone by an older copy of the section.
+    void this.update({ mcp: { enabled: (event.target as HTMLInputElement).checked } } as Partial<GlobalConfig>);
+  }
+
+  // The host applies each change to the permissions it holds, so two quick changes (a rule added, then the mode
+  // picked) never undo one another the way a whole section written back from this view could.
+  protected setMode(mode: AgentPermissionMode): void {
+    this.host.invoke('mcp.permissions.setMode', { mode }, null).catch((err) => this.toasts.error(err));
+  }
+
+  protected setRule(level: 'global' | 'workspace', change: AgentRuleChange): void {
+    this.host
+      .invoke('mcp.permissions.setRule', { level, ...change }, level === 'global' ? null : (untracked(this.workspace)?.id ?? null))
+      .catch((err) => this.toasts.error(err));
+  }
+
+  protected setPaused(event: Event): void {
+    this.host.invoke('mcp.pause', { paused: (event.target as HTMLInputElement).checked }, null).catch((err) => this.toasts.error(err));
   }
 
   protected savePort(config: GlobalConfig): void {
     const port = Number(this.fields().port);
-    if (port !== config.mcp.port) void this.update({ mcp: { ...config.mcp, port } });
+    if (port !== config.mcp.port) void this.update({ mcp: { port } } as Partial<GlobalConfig>);
   }
 
   protected saveTshPath(config: GlobalConfig): void {
@@ -103,6 +145,28 @@ export class SettingsTab implements TabComponent {
 
   protected toggleLoginOnLaunch(config: GlobalConfig, event: Event): void {
     void this.update({ teleport: { ...config.teleport, loginOnLaunch: (event.target as HTMLInputElement).checked } });
+  }
+
+  protected isAutoRenew(config: GlobalConfig, proxy: string): boolean {
+    return isAutoRenewOn(config.teleport, proxy);
+  }
+
+  protected toggleAutoRenew(proxy: string, event: Event): void {
+    const enabled = (event.target as HTMLInputElement).checked;
+    this.host.invoke('teleport.cluster.autoRenew', { proxy, enabled }, null).catch((err) => this.toasts.error(err));
+  }
+
+  protected isInAppSignIn(config: GlobalConfig, proxy: string): boolean {
+    return isInAppSignInOn(config.teleport, proxy);
+  }
+
+  protected toggleInAppSignIn(proxy: string, event: Event): void {
+    const enabled = (event.target as HTMLInputElement).checked;
+    this.host.invoke('teleport.cluster.inAppSignIn', { proxy, enabled }, null).catch((err) => this.toasts.error(err));
+  }
+
+  protected toggleAgentsOnProtected(config: GlobalConfig, event: Event): void {
+    void this.update({ teleport: { ...config.teleport, agentActionsOnProtected: (event.target as HTMLInputElement).checked } });
   }
 
   protected async addCluster(): Promise<void> {
@@ -123,6 +187,29 @@ export class SettingsTab implements TabComponent {
   protected async saveGlobals(): Promise<void> {
     await this.update({ globalVariables: this.globals() });
     this.toasts.notify('Global variables saved', 'success');
+  }
+
+  protected splitHosts(text: string): string[] {
+    return text
+      .split(',')
+      .map((h) => h.trim())
+      .filter(Boolean);
+  }
+
+  protected setNetwork(patch: Partial<NetworkView>): void {
+    this.network.update((n) => ({ ...n, ...patch }));
+  }
+
+  protected async saveNetwork(): Promise<void> {
+    const n = this.network();
+    try {
+      await this.host.invoke('api.network.save', { proxy: n.proxy, url: n.url, noProxy: n.noProxy.map((h) => h.trim()).filter(Boolean), username: n.username, ...(this.proxyPassword() ? { password: this.proxyPassword() } : {}) }, null);
+      this.proxyPassword.set('');
+      this.storedNetwork.reload();
+      this.toasts.notify('Network settings saved', 'success');
+    } catch (err) {
+      this.toasts.error(err);
+    }
   }
 
   protected copy(text: string): void {

@@ -3,11 +3,11 @@ import { cn } from '@quiver/ui';
 
 /**
  * A sidebar row: `<div qApiRow [label]="name" (click)="open()">`. An element marked `rowPrefix` goes
- * before the label; other content is the actions shown on hover.
+ * before the label, one marked `rowSuffix` after it (hidden on hover); other content is the actions shown on hover.
  */
 @Component({
   selector: 'div[qApiRow]',
-  template: `<ng-content select="[rowPrefix]" /><span class="truncate flex-1 text-[13px]" [class.font-medium]="bold()">{{ label() }}</span><span class="hidden group-hover:flex items-center"><ng-content /></span>`,
+  template: `<ng-content select="[rowPrefix]" /><span class="truncate flex-1 text-[13px]" [class.font-medium]="bold()">{{ label() }}</span><span class="flex items-center group-hover:hidden"><ng-content select="[rowSuffix]" /></span><span class="hidden group-hover:flex items-center"><ng-content /></span>`,
   host: {
     role: 'button',
     tabindex: '0',
@@ -21,5 +21,5 @@ export class ApiRow {
   readonly bold = input(false, { transform: booleanAttribute });
   readonly active = input(false, { transform: booleanAttribute });
 
-  protected readonly classes = computed(() => cn('group flex items-center gap-1.5 pr-1 h-7 cursor-pointer hover:bg-elevated min-w-0', this.active() && 'bg-elevated'));
+  protected readonly classes = computed(() => cn('group flex items-center gap-1.5 pr-1 h-7 cursor-pointer select-none hover:bg-elevated min-w-0', this.active() && 'bg-elevated'));
 }

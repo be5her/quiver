@@ -10,11 +10,16 @@
     class="group flex items-center gap-2 pl-4 pr-2 h-7 hover:bg-elevated cursor-pointer min-w-0"
     [title]="title(kube)"
     data-testid="teleport-kube"
+    [attr.data-protected]="kube.protected"
     (click)="actions.openKubeQuery(kube.proxy, kube.name)"
+    (contextmenu)="openMenu($event, kube)"
     (keydown.enter)="actions.openKubeQuery(kube.proxy, kube.name)"
   >
     <svg [qIcon]="icons.Boxes" class="size-3.5 text-muted shrink-0"></svg>
     <span class="truncate text-[13px] flex-1">{{ kube.name }}</span>
+    @if (kube.protected) {
+      <svg [qIcon]="icons.ShieldAlert" class="size-3 text-warning shrink-0" aria-label="protected"></svg>
+    }
     @if (kube.pinned) {
       <svg [qIcon]="icons.Pin" class="size-3 text-muted shrink-0 group-hover:hidden" aria-label="pinned"></svg>
     }

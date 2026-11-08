@@ -1,0 +1,72 @@
+<div class="flex items-center gap-2 px-3 py-2 border-b border-edge shrink-0">
+  <div class="relative flex-1 max-w-md">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-3.5 text-muted absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></svg>
+    <input
+      type="text"
+      class="w-full h-8 rounded-md border border-edge bg-surface pl-7 pr-2 text-sm text-fg placeholder:text-muted/70 focus:outline-none focus:border-accent focus:ring-2 focus:ring-accent/30"
+      placeholder="Search URL, name, method or status"
+      spellcheck="false"
+      autocomplete="off"
+      data-testid="api-history-search"
+      [value]="search()"
+      (input)="search.set(text($event))"
+    />
+  </div>
+  <select qSelect class="text-xs" data-testid="api-history-method" (change)="method.set(text($event))">
+    <option value="all" [selected]="method() === 'all'">Any method</option>
+    @for (m of methods; track m) {
+      <option [value]="m" [selected]="method() === m">{{ m }}</option>
+    }
+  </select>
+  <select qSelect class="text-xs" data-testid="api-history-status" (change)="setStatus($event)">
+    @for (s of statusFilters; track s.value) {
+      <option [value]="s.value" [selected]="status() === s.value">{{ s.label }}</option>
+    }
+  </select>
+  <span class="text-xs text-muted" data-testid="api-history-count">{{ entries().length }} of {{ total() }}</span>
+  <div class="flex-1"></div>
+  @if (total()) {
+    <button qButton size="sm" variant="ghost" [icon]="icons.Trash2" (click)="clear()">Clear</button>
+  }
+</div>
+
+<div class="flex-1 min-h-0 overflow-auto">
+  @if (history.value() === undefined) {
+    <div class="flex items-center justify-center h-full"><svg qSpinner></svg></div>
+  } @else if (!total()) {
+    <q-empty-state title="No requests sent yet" hint="Every send from this workspace is kept here, with credentials masked." />
+  } @else if (!entries().length) {
+    <q-empty-state title="Nothing matches" hint="Change the search or the filters." />
+  } @else {
+    <table class="w-full text-xs" data-testid="api-history-table">
+      <thead class="sticky top-0 bg-canvas text-muted text-left">
+        <tr class="border-b border-edge">
+          <th class="py-1.5 pl-3 pr-2 font-medium w-14">When</th>
+          <th class="py-1.5 pr-2 font-medium w-16">Method</th>
+          <th class="py-1.5 pr-2 font-medium">URL</th>
+          <th class="py-1.5 pr-2 font-medium w-40">Request</th>
+          <th class="py-1.5 pr-2 font-medium w-14">Status</th>
+          <th class="py-1.5 pr-2 font-medium w-16 text-right">Time</th>
+          <th class="py-1.5 pr-3 w-36"></th>
+        </tr>
+      </thead>
+      <tbody>
+        @for (entry of entries(); track entry.id) {
+          <tr class="border-b border-edge/60 hover:bg-elevated cursor-pointer group" data-testid="api-history-row" (click)="api.openHistoryEntry(entry)">
+            <td class="py-1 pl-3 pr-2 text-muted tabular-nums" [title]="time(entry)">{{ age(entry) }}</td>
+            <td class="py-1 pr-2 font-bold text-[10px]" [class]="methodColors[entry.method]">{{ entry.method }}</td>
+            <td class="py-1 pr-2 font-mono truncate max-w-0" [title]="entry.url">{{ entry.url }}</td>
+            <td class="py-1 pr-2 truncate max-w-0" [title]="entry.request.name">{{ entry.request.name }}</td>
+            <td class="py-1 pr-2 font-mono" [class]="entry.status ? statusColor(entry.status) : entry.error === 'Cancelled' ? 'text-muted' : 'text-danger'" [title]="entry.error ?? ''">
+              {{ statusLabel(entry) }}
+            </td>
+            <td class="py-1 pr-2 text-right text-muted tabular-nums">{{ entry.durationMs === null ? '' : formatMs(entry.durationMs) }}</td>
+            <td class="py-1 pr-3 text-right">
+              <button qButton size="sm" variant="ghost" [icon]="icons.Save" class="invisible group-hover:visible" data-testid="api-history-save-row" (click)="save($event, entry)">Save as request</button>
+            </td>
+          </tr>
+        }
+      </tbody>
+    </table>
+  }
+</div>

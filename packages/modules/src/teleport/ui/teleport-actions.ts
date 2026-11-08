@@ -1,5 +1,5 @@
 import { Service, inject, untracked } from '@angular/core';
-import { clusterLabel, type DbConnectionSummary, type TeleportPin, type TeleportStatus, type TeleportTunnel } from '@quiver/core';
+import { clusterLabel, toErrorPayload, type DbConnectionSummary, type TeleportPin, type TeleportStatus, type TeleportTunnel } from '@quiver/core';
 import { AppState, Dialogs, HostBridge, TabsState, Toasts } from '@quiver/ui';
 import { DbActions, TeleportLogin } from '../../db/ui';
 import { connectionFor } from './teleport-display';
@@ -39,7 +39,17 @@ export class TeleportActions {
         dbUser = picked.trim();
       }
     }
-    const result = await this.host.invoke<ConnectResult>('teleport.db.connect', { proxy, database: name, dbUser: dbUser || undefined });
+    let result: ConnectResult;
+    try {
+      result = await this.host.invoke<ConnectResult>('teleport.db.connect', { proxy, database: name, dbUser: dbUser || undefined });
+    } catch (err) {
+      // PostgreSQL: tsh needs the database inside the server too.
+      const details = toErrorPayload(err).details as { needs?: string } | undefined;
+      if (details?.needs !== 'dbName') throw err;
+      const dbName = await this.dialogs.prompt({ title: `Database name on ${name}`, label: 'tsh proxy db passes it as --db-name', placeholder: 'postgres', confirmLabel: 'Connect' });
+      if (!dbName?.trim()) return;
+      result = await this.host.invoke<ConnectResult>('teleport.db.connect', { proxy, database: name, dbUser: dbUser || undefined, dbName: dbName.trim() });
+    }
     if (result.connection) {
       this.toasts.notify(`Tunnel to ${name} on 127.0.0.1:${result.tunnel.port}`, 'success');
       this.db.revealConnection(result.connection);
@@ -60,7 +70,7 @@ export class TeleportActions {
     await this.host.invoke('teleport.db.disconnect', { tunnelId: tunnel.id }, null);
   }
 
-  /** Open the read-only query view of a Kubernetes cluster. */
+  /** Open the query view of a Kubernetes cluster. */
   openKubeQuery(proxy: string, name: string): void {
     this.tabs.openTab(untracked(this.app.scope), { type: 'teleport.kube', title: name, data: { id: `${proxy}|${name}`, proxy, cluster: name } }, { singletonKey: `teleport.kube:${proxy}|${name}` });
   }
@@ -69,6 +79,12 @@ export class TeleportActions {
   async setTerminalKubeContext(proxy: string, name: string): Promise<void> {
     await this.host.invoke('teleport.kube.login', { proxy, cluster: name }, null);
     this.toasts.notify(`kubectl in your terminals now points at ${name}`, 'success');
+  }
+
+  /** Protected clusters ask for their name before an action, and refuse agents. */
+  async setKubeProtected(proxy: string, name: string, on: boolean): Promise<void> {
+    await this.host.invoke('teleport.kube.protect', { proxy, cluster: name, protected: on }, null);
+    this.toasts.notify(on ? `${name} is protected: actions need its name typed, agents may not run them` : `${name} is no longer protected`, on ? 'success' : 'info');
   }
 
   async setPin(pin: TeleportPin, pinned: boolean): Promise<void> {

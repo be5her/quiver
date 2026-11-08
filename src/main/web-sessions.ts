@@ -1,5 +1,5 @@
-import { BrowserWindow, app, session, type Session } from 'electron';
-import type { WebResponse, WebSessionsApi } from '@quiver/core';
+import { BrowserWindow, app, session, type Cookie, type Session } from 'electron';
+import type { WebResponse, WebSessionsApi, WebSignInOptions } from '@quiver/core';
 import { iconPath } from './window';
 
 /** Product tokens Chromium itself sends; the rest (Electron, the app's name) are dropped. */
@@ -36,10 +36,11 @@ export class ElectronWebSessions implements WebSessionsApi {
     return ses;
   }
 
-  signIn(options: { partition: string; url: string; title: string; done(url: string): boolean | Promise<boolean> }): Promise<boolean> {
+  signIn(options: WebSignInOptions): Promise<boolean> {
     const open = this.pending.get(options.partition);
     if (open && !open.win.isDestroyed()) {
-      if (this.options.show) {
+      // A window that waits to be revealed stays hidden; whoever started it decides when it shows.
+      if (this.options.show && open.win.isVisible()) {
         open.win.show();
         open.win.focus();
       }
@@ -47,6 +48,7 @@ export class ElectronWebSessions implements WebSessionsApi {
     }
 
     const parent = BrowserWindow.getFocusedWindow() ?? undefined;
+    const webPreferences = { session: this.get(options.partition), sandbox: true, contextIsolation: true, nodeIntegration: false, spellcheck: false };
     const win = new BrowserWindow({
       width: 520,
       height: 720,
@@ -55,11 +57,12 @@ export class ElectronWebSessions implements WebSessionsApi {
       parent,
       autoHideMenuBar: true,
       icon: process.platform === 'darwin' ? undefined : iconPath,
-      webPreferences: { session: this.get(options.partition), sandbox: true, contextIsolation: true, nodeIntegration: false, spellcheck: false },
+      webPreferences,
     });
     // The window keeps saying what it is for, whatever page is in it.
     win.on('page-title-updated', (event) => event.preventDefault());
-    if (this.options.show) win.once('ready-to-show', () => win.show());
+    // A hidden-first window shows only when the sign-in waits for the user (see `reveal`).
+    if (this.options.show && !options.reveal) win.once('ready-to-show', () => win.show());
 
     const outcome = new Promise<boolean>((resolve, reject) => {
       let settled = false;
@@ -68,14 +71,22 @@ export class ElectronWebSessions implements WebSessionsApi {
       const settle = (ok: boolean, error?: Error) => {
         if (settled) return;
         settled = true;
+        clearInterval(poll);
+        if (revealTimer) clearTimeout(revealTimer);
+        options.signal?.removeEventListener('abort', onAbort);
         this.pending.delete(options.partition);
         void this.get(options.partition).cookies.flushStore().catch(() => {});
         if (error) reject(error);
         else resolve(ok);
-        if (!win.isDestroyed()) win.close();
+        // A hidden-first window nobody saw is destroyed, not closed: its page cannot veto that with beforeunload and leave
+        // an invisible window behind. A window the user saw closes normally, letting its page finish what it was doing.
+        if (!win.isDestroyed()) {
+          if (options.reveal && !win.isVisible()) win.destroy();
+          else win.close();
+        }
       };
       const check = async (url: string) => {
-        if (settled || checking) return;
+        if (settled || checking || !url) return;
         checking = true;
         try {
           if (await options.done(url)) settle(true);
@@ -86,37 +97,107 @@ export class ElectronWebSessions implements WebSessionsApi {
         }
       };
 
-      win.on('closed', () => settle(false));
-      // Identity providers sometimes open a popup; it loads in this window instead, and only over http(s).
+      win.on('closed', () => {
+        clearInterval(poll);
+        settle(false);
+      });
+      const onAbort = () => settle(false);
+      if (options.signal?.aborted) queueMicrotask(onAbort);
+      else options.signal?.addEventListener('abort', onAbort, { once: true });
+      // Not done in time: the page waits for the user. Show it if that is allowed now, else give up quietly. The time
+      // counts from when a page finished loading, so a slow network or redirect chain is not mistaken for a page that
+      // waits; while a page loads, only a much longer wait (five times as long) counts as waiting.
+      let revealed = false;
+      let revealTimer: ReturnType<typeof setTimeout> | null = null;
+      const armReveal = (ms: number) => {
+        if (!options.reveal || revealed || settled) return;
+        if (revealTimer) clearTimeout(revealTimer);
+        revealTimer = setTimeout(() => {
+            if (settled || win.isDestroyed()) return;
+            const reveal = options.reveal!;
+            let allowed = false;
+            try {
+              allowed = reveal.allowed();
+            } catch {
+              allowed = false;
+            }
+            if (!allowed) return settle(false);
+            revealed = true;
+            if (this.options.show) {
+              win.show();
+              win.focus();
+              // A popup the page opened while hidden is shown with it, or the page would wait for a window nobody sees.
+              for (const child of win.getChildWindows()) child.show();
+            }
+            try {
+              reveal.onReveal?.();
+            } catch {
+              // the window is shown either way
+            }
+          }, ms);
+      };
+      const loadingMs = (options.reveal?.afterMs ?? 0) * 5;
+      armReveal(loadingMs);
+      // Identity providers open popups (Google's sign-in button does) and post the outcome back to the
+      // page that opened them, so a popup gets a window of its own, sandboxed the same way and closed with
+      // this one; anything but http(s) is refused.
       win.webContents.setWindowOpenHandler(({ url }) => {
-        if (/^https?:/i.test(url)) void win.loadURL(url);
-        return { action: 'deny' };
+        if (!/^https?:/i.test(url)) return { action: 'deny' };
+        return { action: 'allow', overrideBrowserWindowOptions: { parent: win, show: this.options.show && win.isVisible(), autoHideMenuBar: true, icon: process.platform === 'darwin' ? undefined : iconPath, webPreferences } };
+      });
+      win.webContents.on('did-create-window', (child) => {
+        child.on('page-title-updated', (event) => event.preventDefault());
+        child.webContents.on('will-navigate', (event, url) => {
+          if (!/^https?:/i.test(url)) event.preventDefault();
+        });
+        // A popup that signs the page in without the page navigating (a posted message) is still noticed.
+        child.on('closed', () => void check(win.isDestroyed() ? '' : win.webContents.getURL()));
       });
       win.webContents.on('will-navigate', (event, url) => {
         if (!/^https?:/i.test(url)) event.preventDefault();
       });
       win.webContents.on('did-navigate', (_event, url) => {
         committed = true;
+        // There is no address bar: the title says which site the page is on, so a look-alike page can be told apart.
+        try {
+          if (!win.isDestroyed()) win.setTitle(`${options.title} — ${new URL(url).host}`);
+        } catch {
+          // not a URL with a host; the title stays
+        }
         void check(url);
       });
+      if (options.reveal) {
+        const idleMs = options.reveal.afterMs;
+        win.webContents.on('did-start-loading', () => armReveal(loadingMs));
+        win.webContents.on('did-stop-loading', () => armReveal(idleMs));
+      }
       win.webContents.on('did-navigate-in-page', (_event, url, isMainFrame) => isMainFrame && void check(url));
+      win.webContents.on('did-finish-load', () => void check(win.webContents.getURL()));
       win.webContents.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
         // Only an address that never loads is an error; -3 is an aborted load, which redirects produce.
         if (isMainFrame && !committed && code !== -3) settle(false, new Error(`Could not open ${url}: ${description}`));
       });
+      // A sign-in that finishes without a navigation this window sees (a single-page app that only
+      // swaps its view, a popup that posted back) is caught by looking again every couple of seconds.
+      const poll = setInterval(() => {
+        if (settled || win.isDestroyed()) return clearInterval(poll);
+        if (committed) void check(win.webContents.getURL());
+      }, 2000);
       void win.loadURL(options.url).catch(() => {});
     });
     this.pending.set(options.partition, { win, outcome });
     return outcome;
   }
 
-  async fetch(partition: string, url: string, init: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number } = {}): Promise<WebResponse> {
+  async fetch(partition: string, url: string, init: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number; binary?: boolean } = {}): Promise<WebResponse> {
     const controller = new AbortController();
     const timeoutMs = init.timeoutMs ?? 60_000;
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await this.get(partition).fetch(url, { method: init.method ?? 'GET', headers: init.headers, body: init.body, signal: controller.signal });
-      return { status: res.status, headers: Object.fromEntries(res.headers), text: await res.text() };
+      const headers = Object.fromEntries(res.headers);
+      if (init.binary) return { status: res.status, headers, text: '', bytes: new Uint8Array(await res.arrayBuffer()) };
+      return { status: res.status, headers, text: await res.text() };
     } catch (err) {
       if (controller.signal.aborted) throw new Error(`${url} did not answer within ${Math.round(timeoutMs / 1000)} s`);
       throw err;
@@ -128,6 +209,35 @@ export class ElectronWebSessions implements WebSessionsApi {
   async cookie(partition: string, url: string, name: string): Promise<string | null> {
     const [found] = await this.get(partition).cookies.get({ url, name });
     return found?.value ?? null;
+  }
+
+  async keepCookie(partition: string, url: string, name: string, maxAgeS: number): Promise<boolean> {
+    const cookies = this.get(partition).cookies;
+    // A server that upgrades http to https sets a Secure cookie, which Chromium only matches on the https address.
+    const urls = url.startsWith('http:') ? [url, `https:${url.slice('http:'.length)}`] : [url];
+    let at = url;
+    let found: Cookie | undefined;
+    for (const candidate of urls) {
+      [found] = await cookies.get({ url: candidate, name });
+      at = candidate;
+      if (found) break;
+    }
+    if (!found) return false;
+    if (!found.session) return true;
+    // Set again with an expiry, which is what makes Chromium write it to disk; a host-only cookie stays host-only.
+    await cookies.set({
+      url: at,
+      name: found.name,
+      value: found.value,
+      domain: found.hostOnly ? undefined : found.domain,
+      path: found.path,
+      secure: found.secure,
+      httpOnly: found.httpOnly,
+      sameSite: found.sameSite,
+      expirationDate: Date.now() / 1000 + maxAgeS,
+    });
+    await cookies.flushStore();
+    return true;
   }
 
   async clear(partition: string): Promise<void> {

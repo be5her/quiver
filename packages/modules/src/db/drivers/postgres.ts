@@ -85,6 +85,12 @@ export class PostgresDriver implements Driver {
     return { serverVersion: /^PostgreSQL\s+\S+/.exec(full)?.[0] ?? full };
   }
 
+  /** The databases on the server one can connect to, whichever this connection is in. */
+  async serverDatabases(): Promise<string[]> {
+    const { rows } = await this.query('SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate ORDER BY datname');
+    return rows.map((r) => String(r[0]));
+  }
+
   /** Schemas of the connected database, system ones left out. */
   async databases(): Promise<string[]> {
     const { rows } = await this.query(
@@ -154,7 +160,7 @@ export class PostgresDriver implements Driver {
 
     const idx = await this.query(
       `SELECT i.relname, ix.indisunique, ix.indisprimary,
-              (SELECT array_agg(a.attname ORDER BY k.ord) FROM unnest(ix.indkey) WITH ORDINALITY k(attnum, ord) JOIN pg_attribute a ON a.attrelid = ix.indrelid AND a.attnum = k.attnum)
+              (SELECT array_agg(a.attname::text ORDER BY k.ord) FROM unnest(ix.indkey) WITH ORDINALITY k(attnum, ord) JOIN pg_attribute a ON a.attrelid = ix.indrelid AND a.attnum = k.attnum)
        FROM pg_index ix JOIN pg_class i ON i.oid = ix.indexrelid WHERE ix.indrelid = $1::regclass ORDER BY ix.indisprimary DESC, i.relname`,
       [target],
     );
@@ -180,8 +186,8 @@ export class PostgresDriver implements Driver {
 
     const fk = await this.query(
       `SELECT con.conname, n.nspname, c.relname, nf.nspname, cf.relname,
-              (SELECT array_agg(a.attname ORDER BY k.ord) FROM unnest(con.conkey) WITH ORDINALITY k(attnum, ord) JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum),
-              (SELECT array_agg(a.attname ORDER BY k.ord) FROM unnest(con.confkey) WITH ORDINALITY k(attnum, ord) JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.attnum),
+              (SELECT array_agg(a.attname::text ORDER BY k.ord) FROM unnest(con.conkey) WITH ORDINALITY k(attnum, ord) JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum),
+              (SELECT array_agg(a.attname::text ORDER BY k.ord) FROM unnest(con.confkey) WITH ORDINALITY k(attnum, ord) JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.attnum),
               con.conrelid = $1::regclass
        FROM pg_constraint con
        JOIN pg_class c ON c.oid = con.conrelid JOIN pg_namespace n ON n.oid = c.relnamespace

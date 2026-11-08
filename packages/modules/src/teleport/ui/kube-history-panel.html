@@ -12,18 +12,22 @@
         role="button"
         tabindex="0"
         class="group flex flex-col gap-0.5 px-3 py-1.5 hover:bg-elevated cursor-pointer min-w-0"
-        title="Fill the form with this query"
+        [title]="entry.kind === 'action' ? 'Fill the form with this action' : 'Fill the form with this query'"
         data-testid="kube-history-entry"
-        [attr.data-operation]="entry.query.operation"
+        [attr.data-operation]="operation(entry)"
+        [attr.data-kind]="entry.kind"
         (click)="fill.emit(entry)"
         (keydown.enter)="fill.emit(entry)"
       >
         <div class="flex items-center gap-1.5 min-w-0">
           <span class="size-1.5 rounded-full shrink-0" [class]="dotClass(entry)" [title]="'exit ' + (entry.exitCode ?? '–')"></span>
           <span class="text-[13px] truncate flex-1">{{ title(entry) }}</span>
+          @if (entry.kind === 'action') {
+            <span class="text-[10px] font-medium uppercase tracking-wide text-warning shrink-0" title="Changed the cluster">action</span>
+          }
           <span class="text-[10px] text-muted shrink-0 group-hover:hidden">{{ ago(entry.at) }}</span>
           <span class="hidden group-hover:flex items-center shrink-0">
-            <button qIconButton label="Run again" size="sm" [disabled]="busy()" (click)="runAgain($event, entry)"><svg [qIcon]="icons.Play" class="size-3"></svg></button>
+            <button qIconButton [label]="entry.kind === 'action' ? 'Run again (asks first)' : 'Run again'" size="sm" [disabled]="busy()" (click)="runAgain($event, entry)"><svg [qIcon]="icons.Play" class="size-3"></svg></button>
             <button qIconButton [label]="entry.pinned ? 'Remove from favourites' : 'Add to favourites'" size="sm" (click)="togglePin($event, entry)"
               ><svg [qIcon]="icons.Star" class="size-3" [class]="entry.pinned ? 'fill-current text-warning' : ''"></svg
             ></button>
@@ -37,6 +41,6 @@
     }
   }
   @if (!entries().length && !loading()) {
-    <p class="px-3 py-4 text-xs text-muted">Queries you run on {{ cluster() }} show up here. Stored on this machine only.</p>
+    <p class="px-3 py-4 text-xs text-muted">Queries and actions you run on {{ cluster() }} show up here. Stored on this machine only.</p>
   }
 </div>

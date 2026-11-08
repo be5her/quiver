@@ -38,6 +38,8 @@ export function defaultPort(kind: DbKind): number {
  * How the driver reaches the server. `direct` uses host and port as saved. `teleport` starts
  * `tsh proxy db --tunnel` (app-wide, shared by every workspace) and connects to its local port.
  * `command` runs any tunnel command with a `{port}` placeholder, e.g. `ssh -N -L {port}:db:3306 bastion`.
+ * `grafana` (Redis only) sends every command through a Grafana Redis data source's CLI mode, with the
+ * Grafana session of this machine: nothing is dialled and no credential is stored, so it is committable.
  */
 export const DbAccessSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('direct') }),
@@ -55,8 +57,25 @@ export const DbAccessSchema = z.discriminatedUnion('type', [
     /** Shell-like command line; `{port}` is replaced by a free local port. Run without a shell. */
     command: z.string(),
   }),
+  z.object({
+    type: z.literal('grafana'),
+    /** The Grafana that holds the data source; may hold {{variables}}. */
+    grafanaUrl: z.string().default(''),
+    /** The data source's uid, which commands are sent to. */
+    datasourceUid: z.string().default(''),
+    /** Its name when picked: an admin who reprovisions a data source can change the uid, and the name finds it again. */
+    datasourceName: z.string().default(''),
+  }),
 ]);
 export type DbAccess = z.infer<typeof DbAccessSchema>;
+
+/** Why a connection's access does not fit its kind, or null. */
+export function dbAccessProblem(connection: Pick<DbConnection, 'kind' | 'access' | 'dbIndex'>): string | null {
+  if (connection.access.type !== 'grafana') return null;
+  if (connection.kind !== 'redis') return `A Grafana data source can only reach Redis, not ${DB_KIND_LABELS[connection.kind]}`;
+  if (connection.dbIndex !== 0) return 'Through Grafana the data source address picks the Redis database: leave the database index at 0 (Quiver cannot SELECT on the connections Grafana shares with dashboards)';
+  return null;
+}
 
 /**
  * One saved connection. Kind-specific fields are all present with defaults so the
@@ -315,7 +334,9 @@ export function resolveConnectionTemplate(connection: DbConnection, vars: Record
       ? { ...connection.access, proxy: r(connection.access.proxy), database: r(connection.access.database), dbUser: r(connection.access.dbUser) }
       : connection.access.type === 'command'
         ? { ...connection.access, command: r(connection.access.command) }
-        : connection.access;
+        : connection.access.type === 'grafana'
+          ? { ...connection.access, grafanaUrl: r(connection.access.grafanaUrl) }
+          : connection.access;
   return { ...connection, host: r(connection.host), user: r(connection.user), database: r(connection.database), file: r(connection.file), access };
 }
 

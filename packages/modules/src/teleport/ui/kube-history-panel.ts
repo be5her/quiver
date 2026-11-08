@@ -1,18 +1,18 @@
 import { Component, booleanAttribute, computed, inject, input, output } from '@angular/core';
-import { kubeOperationInfo, type ErrorPayload, type KubeHistoryEntry } from '@quiver/core';
+import type { ErrorPayload, KubeHistoryEntry } from '@quiver/core';
 import { Dialogs, HostBridge, Icon, IconButton, Toasts } from '@quiver/ui';
 import { Play, Star, Trash2 } from 'lucide';
 import { DbError } from '../../db/ui';
-import { ago, summarizeQuery } from './kube-query-model';
+import { ago, describeEntry } from './kube-query-model';
 
 type HistoryItem = { key: string; heading: string; entry?: undefined } | { key: string; entry: KubeHistoryEntry; heading?: undefined };
 
-/** The queries run on this cluster, favourites first; click one to fill the form, or run it again. */
+/** The queries and actions run on this cluster, favourites first; click one to fill the form, or run it again (an action asks again). */
 @Component({
   selector: 'aside[qKubeHistory]',
   imports: [DbError, Icon, IconButton],
   templateUrl: './kube-history-panel.html',
-  host: { class: 'w-72 shrink-0 border-l border-edge flex flex-col min-h-0', 'data-testid': 'kube-history' },
+  host: { class: 'flex-1 flex flex-col min-h-0', 'data-testid': 'kube-history' },
 })
 export class KubeHistoryPanel {
   private readonly host = inject(HostBridge);
@@ -46,11 +46,15 @@ export class KubeHistoryPanel {
   });
 
   protected title(entry: KubeHistoryEntry): string {
-    return kubeOperationInfo(entry.query.operation)?.title ?? entry.query.operation;
+    return describeEntry(entry).title;
   }
 
   protected summary(entry: KubeHistoryEntry): string {
-    return summarizeQuery(entry.query) || '—';
+    return describeEntry(entry).summary || '—';
+  }
+
+  protected operation(entry: KubeHistoryEntry): string {
+    return entry.kind === 'action' ? entry.action.action : entry.query.operation;
   }
 
   protected dotClass(entry: KubeHistoryEntry): string {

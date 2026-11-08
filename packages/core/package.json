@@ -9,6 +9,7 @@
     "./node": "./src/node/index.ts"
   },
   "dependencies": {
+    "yaml": "^2.9.1",
     "zod": "^4.6.5"
   }
 }

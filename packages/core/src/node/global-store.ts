@@ -2,19 +2,33 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { defaultGlobalConfig } from '../defaults';
 import { migrateTeleportConfig } from '../models/teleport';
+import { migrateMcpConfig } from '../permissions';
 import type { ActivityBarLayout } from '../activity-bar';
+import type { NetworkConfig } from '../network';
 import type { GlobalConfig, UpdatesConfig } from '../types';
 
-/** Shallow merge with the nested sections merged one level deeper, so a partial `mcp`, `teleport`, `mock`, `updates` or `activityBar` patch keeps the other keys. */
-function mergeConfig(base: GlobalConfig, patch: Partial<GlobalConfig>): GlobalConfig {
+/** Shallow merge with the nested sections merged one level deeper, so a partial `mcp`, `teleport`, `mock`, `updates`, `activityBar` or `network` patch keeps the other keys. */
+function mergeConfig(base: GlobalConfig, patch: Partial<GlobalConfig>, loaded = false): GlobalConfig {
   return {
     ...base,
     ...patch,
-    mcp: { ...base.mcp, ...(patch.mcp ?? {}) },
+    mcp: migrateMcpConfig({ ...base.mcp, ...(patch.mcp ?? {}) }, base.mcp, loaded),
     teleport: migrateTeleportConfig({ ...base.teleport, ...(patch.teleport ?? {}) }),
     mock: { ...base.mock, ...(patch.mock ?? {}) },
     updates: normalizeUpdates({ ...base.updates, ...(patch.updates ?? {}) }),
     activityBar: normalizeActivityBar({ ...base.activityBar, ...(patch.activityBar ?? {}) }),
+    network: normalizeNetwork({ ...base.network, ...(patch.network ?? {}) }),
+  };
+}
+
+/** A hand-edited file may hold an unknown mode or a list that is not one. */
+function normalizeNetwork(network: NetworkConfig): NetworkConfig {
+  return {
+    proxy: network.proxy === 'system' || network.proxy === 'manual' ? network.proxy : 'none',
+    url: typeof network.url === 'string' ? network.url : '',
+    noProxy: Array.isArray(network.noProxy) ? network.noProxy.filter((x): x is string => typeof x === 'string') : [],
+    username: typeof network.username === 'string' ? network.username : '',
+    passwordCipher: typeof network.passwordCipher === 'string' ? network.passwordCipher : '',
   };
 }
 
@@ -42,7 +56,7 @@ export class GlobalStore {
   async load(): Promise<GlobalConfig> {
     try {
       const raw = JSON.parse(await fs.readFile(this.file, 'utf8')) as Partial<GlobalConfig>;
-      this.config = mergeConfig(defaultGlobalConfig(), raw);
+      this.config = mergeConfig(defaultGlobalConfig(), raw, true);
     } catch {
       this.config = defaultGlobalConfig();
     }

@@ -1,4 +1,4 @@
-import type { TeleportConfig, TeleportPin } from '../types';
+import type { TeleportConfig, TeleportKubeRef, TeleportPin } from '../types';
 
 /**
  * Teleport (goteleport.com) models and the pure parsers for `tsh --format=json` output.
@@ -31,6 +31,27 @@ export interface TeleportClusterStatus {
   current: boolean;
   /** Listed in Settings, as opposed to only known from a tsh profile on disk. */
   configured: boolean;
+  /** Keep me logged in: the certificate is renewed when it is about to expire. */
+  autoRenew: boolean;
+  /** Sign in inside Quiver: tsh logins open the SSO page in a Quiver window that keeps its cookies, not the system browser. */
+  inAppSignIn: boolean;
+  /** The last automatic renewal and when the next may run; null before the first one. */
+  renewal: TeleportRenewal | null;
+}
+
+/** What the status says about a cluster's automatic certificate renewal. */
+export interface TeleportRenewal {
+  lastAttemptAt: string | null;
+  /** null while the attempt runs or waits. */
+  lastResult: TeleportRenewalResult | null;
+  /** Why the last attempt failed, in tsh's words where it said. */
+  lastError: string | null;
+  /** When the next attempt may start; null when none is due (renewed, cancelled for this certificate). */
+  nextEligibleAt: string | null;
+  /** An attempt is running now. */
+  running: boolean;
+  /** An attempt that would open the browser is waiting for the Quiver window to be in front. */
+  waitingForFocus: boolean;
 }
 
 export interface TeleportStatus {
@@ -78,6 +99,8 @@ export interface TeleportKubeCluster {
   /** True for the cluster `tsh kube login` last selected in this profile. */
   selected: boolean;
   pinned: boolean;
+  /** Marked protected in Settings: actions need the cluster name typed, agents are refused. */
+  protected: boolean;
 }
 
 export interface TeleportTunnel {
@@ -88,6 +111,8 @@ export interface TeleportTunnel {
   /** Teleport database name, or the command line for command tunnels. */
   target: string;
   dbUser: string | null;
+  /** The database name handed to `--db-name` (PostgreSQL needs one); null otherwise. */
+  dbName: string | null;
   port: number;
   pid: number | null;
   startedAt: string;
@@ -198,6 +223,11 @@ export function parseTshStatus(stdout: string, now: Date = new Date()): ParsedPr
   return out;
 }
 
+/** A cluster without a tsh profile. */
+export function loggedOutCluster(proxy: string, configured: boolean): TeleportClusterStatus {
+  return { proxy, cluster: null, user: null, roles: [], validUntil: null, kubeCluster: null, state: 'logged-out', current: false, configured, autoRenew: false, inAppSignIn: false, renewal: null };
+}
+
 /** Merge configured proxies with the profiles tsh knows: configured first, unknown ones as logged out. */
 export function buildClusters(configuredProxies: string[], profiles: ParsedProfile[]): TeleportClusterStatus[] {
   const clusters: TeleportClusterStatus[] = [];
@@ -205,14 +235,10 @@ export function buildClusters(configuredProxies: string[], profiles: ParsedProfi
     const proxy = proxyAddress(raw);
     if (!proxy || clusters.some((c) => sameProxy(c.proxy, proxy))) continue;
     const profile = profiles.find((p) => sameProxy(p.proxy, proxy));
-    clusters.push(
-      profile
-        ? { ...profile, proxy, configured: true }
-        : { proxy, cluster: null, user: null, roles: [], validUntil: null, kubeCluster: null, state: 'logged-out', current: false, configured: true },
-    );
+    clusters.push(profile ? { ...profile, proxy, configured: true, autoRenew: false, inAppSignIn: false, renewal: null } : loggedOutCluster(proxy, true));
   }
   for (const profile of profiles) {
-    if (!clusters.some((c) => sameProxy(c.proxy, profile.proxy))) clusters.push({ ...profile, configured: false });
+    if (!clusters.some((c) => sameProxy(c.proxy, profile.proxy))) clusters.push({ ...profile, configured: false, autoRenew: false, inAppSignIn: false, renewal: null });
   }
   return clusters;
 }
@@ -267,7 +293,7 @@ interface TshKubeJson {
   selected?: boolean;
 }
 
-export type ParsedKubeCluster = Omit<TeleportKubeCluster, 'proxy' | 'pinned'>;
+export type ParsedKubeCluster = Omit<TeleportKubeCluster, 'proxy' | 'pinned' | 'protected'>;
 
 export function parseTshKubeClusters(stdout: string): ParsedKubeCluster[] {
   return parseJsonArray<TshKubeJson>(stdout)
@@ -305,10 +331,13 @@ export function tshSettingToArgv(setting: string, exists: (file: string) => bool
 }
 
 /** Map a Teleport database protocol to a Quiver database kind, or null when Quiver has no client for it. */
-export function dbKindForProtocol(protocol: string): 'mysql' | 'redis' | null {
+export function dbKindForProtocol(protocol: string): 'mysql' | 'postgres' | 'redis' | null {
   switch (protocol.toLowerCase()) {
     case 'mysql':
       return 'mysql';
+    case 'postgres':
+    case 'postgresql':
+      return 'postgres';
     case 'redis':
       return 'redis';
     default:
@@ -320,6 +349,119 @@ export function dbKindForProtocol(protocol: string): 'mysql' | 'redis' | null {
 export function proxiesToAutoLogin(config: Pick<TeleportConfig, 'loginOnLaunch'>, clusters: TeleportClusterStatus[]): string[] {
   if (!config.loginOnLaunch) return [];
   return clusters.filter((c) => c.state === 'expired').map((c) => c.proxy);
+}
+
+// ---------- keep me logged in ----------
+
+/** At most one automatic renewal per cluster in this long, so a failing SSO is not reopened every minute. */
+export const TELEPORT_RENEW_SPACING_MS = 10 * 60 * 1000;
+
+export type TeleportRenewalResult = 'ok' | 'failed' | 'cancelled';
+
+/** What the session remembers about a cluster's last automatic renewal (in memory, per app run). */
+export interface TeleportRenewalRecord {
+  lastAttemptAt: string;
+  /** null while it runs. */
+  lastResult: TeleportRenewalResult | null;
+  lastError: string | null;
+  /** The certificate the attempt set out to renew: a cancel holds until a different one is issued. */
+  validUntil: string | null;
+}
+
+export interface TeleportRenewalState {
+  /** A `tsh login` is running, automatic or not: nothing else starts meanwhile. */
+  loginRunning: boolean;
+  /** Keyed by `normalizeProxy`. */
+  records: Record<string, TeleportRenewalRecord>;
+}
+
+export function isAutoRenewOn(config: Pick<TeleportConfig, 'autoRenew'>, proxy: string): boolean {
+  return config.autoRenew.some((p) => sameProxy(p, proxy));
+}
+
+/** Turn Keep me logged in on or off for a cluster, keeping the list free of duplicates. */
+export function setAutoRenew(list: string[], proxy: string, on: boolean): string[] {
+  return setProxyListed(list, proxy, on);
+}
+
+/** Add a proxy to a per-cluster setting list or take it out, keeping the list free of duplicates. */
+export function setProxyListed(list: string[], proxy: string, on: boolean): string[] {
+  const without = list.filter((p) => !sameProxy(p, proxy));
+  return on ? [...without, proxyAddress(proxy) ?? proxy] : without;
+}
+
+export function isInAppSignInOn(config: Pick<TeleportConfig, 'inAppSignIn'>, proxy: string): boolean {
+  return config.inAppSignIn.some((p) => sameProxy(p, proxy));
+}
+
+/**
+ * The cookie jar of a cluster's in-app sign-in window: one per cluster, kept by the app per machine. What it keeps is
+ * the identity provider's own session (GitHub's login cookie), which lets the next login go through without a form.
+ */
+export function teleportSignInPartition(proxy: string): string {
+  // Every other character is spelled out, so two proxies never share a jar (`a-b.x` and `a.b.x` stay apart).
+  return `persist:quiver-teleport-${normalizeProxy(proxy).replace(/[^a-z0-9]/g, (c) => `_${c.charCodeAt(0).toString(16)}`)}`;
+}
+
+/** The user cancelled the last attempt, and the certificate it was for is still the one tsh has. */
+function cancelledForThisCertificate(record: TeleportRenewalRecord | undefined, cluster: Pick<TeleportClusterStatus, 'validUntil'>): boolean {
+  return record?.lastResult === 'cancelled' && record.validUntil === cluster.validUntil;
+}
+
+/** When the next automatic attempt may start, or null when none is due. */
+export function nextRenewalAt(record: TeleportRenewalRecord | undefined, cluster: Pick<TeleportClusterStatus, 'validUntil' | 'state'>): string | null {
+  if (!record || record.lastResult === null || record.lastResult === 'ok') return null;
+  if (cancelledForThisCertificate(record, cluster)) return null;
+  if (record.lastResult === 'cancelled') return record.lastAttemptAt;
+  return new Date(new Date(record.lastAttemptAt).getTime() + TELEPORT_RENEW_SPACING_MS).toISOString();
+}
+
+/**
+ * Clusters whose certificate the session should renew now with `tsh login --proxy`: Keep me logged in on, the
+ * certificate expiring soon or expired (a logged-out cluster has nothing to renew), no other login running, no
+ * attempt on that cluster in the last ten minutes (a cancel is not counted against the spacing), and not cancelled by
+ * the user for this very certificate. One at a time, so one browser window at most: the one that expires first.
+ */
+export function proxiesToAutoRenew(
+  config: Pick<TeleportConfig, 'autoRenew'>,
+  clusters: TeleportClusterStatus[],
+  state: TeleportRenewalState,
+  now: Date = new Date(),
+): string[] {
+  if (state.loginRunning) return [];
+  const due = clusters.filter((c) => {
+    if (c.state !== 'expiring' && c.state !== 'expired') return false;
+    if (!isAutoRenewOn(config, c.proxy)) return false;
+    const record = state.records[normalizeProxy(c.proxy)];
+    if (!record) return true;
+    if (record.lastResult === null) return false;
+    if (cancelledForThisCertificate(record, c)) return false;
+    if (record.lastResult === 'cancelled') return true;
+    return now.getTime() - new Date(record.lastAttemptAt).getTime() >= TELEPORT_RENEW_SPACING_MS;
+  });
+  const expiry = (c: TeleportClusterStatus) => (c.validUntil ? new Date(c.validUntil).getTime() : Number.POSITIVE_INFINITY);
+  due.sort((a, b) => expiry(a) - expiry(b));
+  return due.slice(0, 1).map((c) => c.proxy);
+}
+
+/** Does a line of `tsh login` output mean it is sending the user to the browser? */
+export function isBrowserLoginLine(line: string): boolean {
+  return /open it by clicking on the link|browser window|following URL to authenticate|https?:\/\/(127\.0\.0\.1|localhost|\[::1\]):\d+\//i.test(line);
+}
+
+/**
+ * The SSO link `tsh login --browser=none` prints, or null. Only tsh's own listener on this machine counts (it redirects
+ * to the identity provider and receives the callback), so a line can never make Quiver open some other address.
+ */
+export function ssoLoginUrl(line: string): string | null {
+  const match = /\bhttps?:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d{1,5}\/[^\s"'<>]*/i.exec(line);
+  if (!match) return null;
+  try {
+    const url = new URL(match[0]);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
+  } catch {
+    return null;
+  }
 }
 
 // ---------- pins ----------
@@ -343,7 +485,23 @@ export function migrateTeleportConfig(raw: Partial<TeleportConfig> & { proxy?: s
     pins: Array.isArray(raw.pins) ? raw.pins.filter((p) => p && typeof p.proxy === 'string' && typeof p.name === 'string' && (p.kind === 'db' || p.kind === 'kube')) : [],
     tshPath: typeof raw.tshPath === 'string' ? raw.tshPath : '',
     loginOnLaunch: Boolean(raw.loginOnLaunch),
+    autoRenew: Array.isArray(raw.autoRenew) ? raw.autoRenew.filter((p, i, all): p is string => typeof p === 'string' && p.trim() !== '' && all.findIndex((q) => typeof q === 'string' && sameProxy(q, p)) === i) : [],
+    inAppSignIn: Array.isArray(raw.inAppSignIn) ? raw.inAppSignIn.filter((p, i, all): p is string => typeof p === 'string' && p.trim() !== '' && all.findIndex((q) => typeof q === 'string' && sameProxy(q, p)) === i) : [],
+    protectedKubes: Array.isArray(raw.protectedKubes) ? raw.protectedKubes.filter((k) => k && typeof k.proxy === 'string' && typeof k.name === 'string' && k.name !== '') : [],
+    agentActionsOnProtected: raw.agentActionsOnProtected === true,
   };
+}
+
+// ---------- protected Kubernetes clusters ----------
+
+export function isKubeProtected(protectedKubes: TeleportKubeRef[], proxy: string, name: string): boolean {
+  return protectedKubes.some((k) => k.name === name && sameProxy(k.proxy, proxy));
+}
+
+/** Mark or unmark a Kubernetes cluster as protected, keeping the list free of duplicates. */
+export function setKubeProtected(protectedKubes: TeleportKubeRef[], ref: TeleportKubeRef, on: boolean): TeleportKubeRef[] {
+  const without = protectedKubes.filter((k) => !(k.name === ref.name && sameProxy(k.proxy, ref.proxy)));
+  return on ? [...without, { proxy: proxyAddress(ref.proxy) ?? ref.proxy, name: ref.name }] : without;
 }
 
 /** Human-readable time left, e.g. "11h 42m", "9m", "expired". */

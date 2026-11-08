@@ -1,0 +1,49 @@
+# OpenAPI sample for the smoke: __ECHO__ is replaced with the echo server's origin before the import.
+openapi: 3.1.0
+info:
+  title: Smoke Shop
+  version: '1'
+servers:
+  - url: __ECHO__/{version}
+    variables:
+      version:
+        default: v1
+security:
+  - bearer: []
+tags:
+  - name: items
+paths:
+  /items:
+    post:
+      tags: [items]
+      summary: Create item
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Item' }
+      responses:
+        '201': { description: created }
+  /items/{itemId}:
+    get:
+      tags: [items]
+      summary: Get item
+      parameters:
+        - { name: itemId, in: path, required: true, schema: { type: string } }
+        - { name: verbose, in: query, required: true, schema: { type: boolean } }
+      responses:
+        '200': { description: ok }
+  /health:
+    get:
+      summary: Health
+      security: []
+      responses:
+        '200': { description: ok }
+components:
+  securitySchemes:
+    bearer: { type: http, scheme: bearer }
+  schemas:
+    Item:
+      type: object
+      properties:
+        name: { type: string, example: Widget }
+        price: { type: number, example: 9.5 }

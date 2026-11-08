@@ -7,10 +7,17 @@ import {
   DbTableEditSchema,
   EXPORT_EXTENSIONS,
   QuiverError,
+  REDIS_ACTIONS,
+  REDIS_ACTION_DESCRIPTIONS,
+  SQL_ACTIONS,
+  SQL_ACTION_DESCRIPTIONS,
   SavedQueryDraftSchema,
+  TABLE_EDITS_ACTIONS,
   SavedQuerySchema,
   buildTableEdits,
+  dbAccessProblem,
   dbDataCollection,
+  defaultPort,
   defineCommand,
   defineModule,
   formatRows,
@@ -18,12 +25,17 @@ import {
   newDbConnection,
   newId,
   newSavedQuery,
+  normalizeGrafanaUrl,
   nowIso,
   redisCommandIsReadOnly,
+  redisCommandsAction,
   redisScriptIsReadOnly,
+  scriptAction,
   scriptIsReadOnly,
+  tableEditsAction,
   type CommandContext,
   type DbConnection,
+  type DbConnectionDraft,
   type DbConnectionSummary,
   type DbConnectionTest,
   type DbExportFormat,
@@ -34,12 +46,15 @@ import {
   type DbTableApplyResult,
   type DbTableColumns,
   type DbTableEdit,
+  type GrafanaRedisDatasource,
+  type LogsSession,
   type SavedQuery,
   type WorkspaceApi,
 } from '@quiver/core';
 import { z } from 'zod';
-import { COLLECTIONS, DriverPool, HISTORY_LOG, explainAccessError, getConnection, listConnections, readPassword, withTemporaryDriver, writePassword } from './connections';
-import type { Driver, RedisDriverApi } from './drivers';
+import { COLLECTIONS, DriverPool, HISTORY_LOG, explainAccessError, getConnection, hasPassword, listConnections, readPassword, withTemporaryDriver, writePassword } from './connections';
+import { grafanaSessions } from '../grafana/sessions';
+import { grafanaRedisDatasources, type Driver, type RedisDriverApi } from './drivers';
 
 const pool = new DriverPool();
 
@@ -80,6 +95,42 @@ function announceData(ctx: CommandContext, connectionId: string): void {
   ctx.host.emit('store.changed', { workspaceId: ws(ctx).id, collection: dbDataCollection(connectionId) });
 }
 
+/**
+ * A connection whose access fits its kind, with the Grafana address normalised (unless it holds
+ * {{variables}}, which resolve when the connection opens).
+ */
+function checkedAccess<T extends DbConnection>(connection: T): T {
+  const problem = dbAccessProblem(connection);
+  if (problem) throw new QuiverError('INVALID_INPUT', problem);
+  const { access } = connection;
+  if (access.type !== 'grafana' || access.grafanaUrl.includes('{{') || !access.grafanaUrl.trim()) return connection;
+  const grafanaUrl = normalizeGrafanaUrl(access.grafanaUrl);
+  if (!grafanaUrl) throw new QuiverError('INVALID_INPUT', `"${access.grafanaUrl}" is not an http(s) address`);
+  return { ...connection, access: { ...access, grafanaUrl } };
+}
+
+/** Where a connection sends its password: the kind, the address, TLS and the way in (a tunnel, a Grafana). */
+function passwordTarget(c: DbConnection): string {
+  return JSON.stringify([c.kind, c.host.trim().toLowerCase(), c.port || defaultPort(c.kind), c.ssl, c.access]);
+}
+
+/**
+ * Whether saving or testing `draft` would do what agents need mutations for: run a tunnel command
+ * that is not the one already saved (it starts any process), or point a connection whose password
+ * is stored at another place without giving a password of its own (the stored one would be sent there).
+ */
+async function draftNeedsMutations(w: WorkspaceApi, draft: DbConnectionDraft, password: string | undefined, clearPassword = false): Promise<boolean> {
+  const stored = draft.id ? await w.store.get<DbConnection>(COLLECTIONS.connections, draft.id) : undefined;
+  const existing = stored ? DbConnectionSchema.parse(stored) : undefined;
+  const parsed = DbConnectionSchema.safeParse({ ...(existing ?? newDbConnection(draft.kind)), ...draft, id: draft.id ?? 'draft', createdAt: 'draft', updatedAt: 'draft' });
+  // The handler refuses what does not parse.
+  if (!parsed.success) return false;
+  const next = parsed.data;
+  if (next.access.type === 'command' && !(existing?.access.type === 'command' && existing.access.command === next.access.command)) return true;
+  if (!draft.id || password !== undefined || clearPassword || !(await hasPassword(w, draft.id))) return false;
+  return !existing || passwordTarget(existing) !== passwordTarget(next);
+}
+
 const ConnectionIdInput = z.object({ connectionId: z.string().describe('Id of a saved connection (see db.connection.list)') });
 
 // ---------- connections ----------
@@ -88,7 +139,7 @@ const connectionList = defineCommand({
   id: 'db.connection.list',
   title: 'List database connections',
   description:
-    'Lists saved MySQL, PostgreSQL, SQLite and Redis connections. Passwords are never returned; hasPassword says whether one is stored on this machine, connected whether a driver is open, inTransaction whether db.transaction began one.',
+    'Lists saved MySQL, PostgreSQL, SQLite and Redis connections. Passwords are never returned; hasPassword says whether one is stored on this machine, connected whether a driver is open, inTransaction whether db.transaction began one. access says how the server is reached; a Redis connection with access.type grafana goes through a Grafana Redis data source, and its commands run with the permissions of the Grafana user signed in on this machine.',
   scope: 'workspace',
   input: z.object({ kind: DbKindSchema.optional() }),
   handler: async ({ kind }, ctx) => {
@@ -111,24 +162,28 @@ const connectionSave = defineCommand({
   id: 'db.connection.save',
   title: 'Save database connection',
   description:
-    'Creates or updates a connection. Omit id to create. A password given here is encrypted with the OS keychain and stored only on this machine; omit it to keep the stored one, pass clearPassword to remove it. Host, user, database, file and tunnel fields may hold {{variables}} resolved from the API variables and the workspace .env when the connection opens.',
+    'Creates or updates a connection. Omit id to create. A password given here is encrypted with the OS keychain and stored only on this machine; omit it to keep the stored one, pass clearPassword to remove it. Host, user, database, file and tunnel fields may hold {{variables}} resolved from the API variables and the workspace .env when the connection opens. access is direct, teleport (tsh proxy db), command (a tunnel command with {port}) or, for Redis only, grafana: { type: "grafana", grafanaUrl, datasourceUid, datasourceName } sends every command through that Grafana Redis data source with the Grafana user signed in on this machine (db.grafana.redis.datasources lists them; no password, database index 0).',
   scope: 'workspace',
   input: z.object({
     connection: DbConnectionDraftSchema,
     password: z.string().optional(),
     clearPassword: z.boolean().optional(),
   }),
+  // A new tunnel command starts a process, and repointing a connection with a stored password would send it elsewhere.
+  mutating: async ({ connection, password, clearPassword }, ctx) => draftNeedsMutations(ws(ctx), connection, password, clearPassword),
   handler: async ({ connection, password, clearPassword }, ctx): Promise<DbConnectionSummary> => {
     const w = ws(ctx);
     const existing = connection.id ? await w.store.get<DbConnection>(COLLECTIONS.connections, connection.id) : undefined;
     const ts = nowIso();
-    const merged: DbConnection = DbConnectionSchema.parse({
-      ...(existing ?? newDbConnection(connection.kind)),
-      ...connection,
-      id: connection.id ?? newId(),
-      createdAt: existing?.createdAt ?? connection.createdAt ?? ts,
-      updatedAt: ts,
-    });
+    const merged: DbConnection = checkedAccess(
+      DbConnectionSchema.parse({
+        ...(existing ?? newDbConnection(connection.kind)),
+        ...connection,
+        id: connection.id ?? newId(),
+        createdAt: existing?.createdAt ?? connection.createdAt ?? ts,
+        updatedAt: ts,
+      }),
+    );
     if (!merged.name.trim()) merged.name = `${merged.kind} connection`;
     await w.store.put(COLLECTIONS.connections, merged);
     if (clearPassword) await writePassword(w, ctx.host, merged.id, null);
@@ -163,12 +218,14 @@ const connectionTest = defineCommand({
     connection: DbConnectionDraftSchema.optional(),
     password: z.string().optional(),
   }),
+  // An inline connection with a saved id reuses the stored password, and a tunnel command in it runs: the same rule as a save.
+  mutating: async ({ connection, password }, ctx) => (connection ? draftNeedsMutations(ws(ctx), connection, password) : false),
   handler: async (input, ctx): Promise<DbConnectionTest> => {
     const w = ws(ctx);
     const started = performance.now();
     let serverVersion: string;
     if (input.connection) {
-      const draft = DbConnectionSchema.parse({ ...newDbConnection(input.connection.kind), ...input.connection, id: input.connection.id ?? 'draft' });
+      const draft = checkedAccess(DbConnectionSchema.parse({ ...newDbConnection(input.connection.kind), ...input.connection, id: input.connection.id ?? 'draft' }));
       // Reuse the stored password when editing an existing connection and the field was left untouched.
       const password = input.password ?? (input.connection.id ? await readPassword(w, ctx.host, input.connection.id) : '');
       serverVersion = (await withTemporaryDriver(draft, password, w, ctx.host, (d) => d.ping())).serverVersion;
@@ -178,6 +235,54 @@ const connectionTest = defineCommand({
       throw new QuiverError('INVALID_INPUT', 'Provide id or connection');
     }
     return { ok: true, serverVersion, latencyMs: Math.round(performance.now() - started) };
+  },
+});
+
+/** PostgreSQL always connects to one database. These are tried in turn when the one named does not exist or refuses this user. */
+const POSTGRES_MAINTENANCE_DATABASES = ['postgres', 'template1'];
+const DATABASE_UNAVAILABLE = new Set(['3D000', '42501']);
+
+const connectionDatabases = defineCommand({
+  id: 'db.connection.databases',
+  title: 'List the databases on a server',
+  description:
+    'Lists the databases on a MySQL or PostgreSQL server, to pick the one a connection should use. Pass a saved id, or an inline connection (with optional password) before saving; its database may be empty or wrong. For PostgreSQL, which has to connect to some database, it tries the one named and then postgres and template1. The server decides what the user may see.',
+  scope: 'workspace',
+  input: z.object({
+    id: z.string().optional(),
+    connection: DbConnectionDraftSchema.optional(),
+    password: z.string().optional(),
+  }),
+  // The same rule as db.connection.test: it connects with the same details.
+  mutating: async ({ connection, password }, ctx) => (connection ? draftNeedsMutations(ws(ctx), connection, password) : false),
+  handler: async (input, ctx): Promise<string[]> => {
+    const w = ws(ctx);
+    let draft: DbConnection;
+    let password: string;
+    if (input.connection) {
+      draft = checkedAccess(DbConnectionSchema.parse({ ...newDbConnection(input.connection.kind), ...input.connection, id: input.connection.id ?? 'draft' }));
+      password = input.password ?? (input.connection.id ? await readPassword(w, ctx.host, input.connection.id) : '');
+    } else if (input.id) {
+      draft = await getConnection(w, input.id);
+      password = await readPassword(w, ctx.host, input.id);
+    } else {
+      throw new QuiverError('INVALID_INPUT', 'Provide id or connection');
+    }
+    if (draft.kind === 'mysql') return withTemporaryDriver({ ...draft, database: '' }, password, w, ctx.host, (d) => d.databases());
+    if (draft.kind !== 'postgres') throw new QuiverError('INVALID_INPUT', `A ${draft.kind} connection has no databases to pick from`);
+    const names = [...new Set([draft.database.trim(), ...POSTGRES_MAINTENANCE_DATABASES].filter(Boolean))];
+    let firstRefusal: unknown;
+    for (const database of names) {
+      try {
+        return await withTemporaryDriver({ ...draft, database }, password, w, ctx.host, (d) => d.serverDatabases!());
+      } catch (err) {
+        const code = err instanceof QuiverError ? (err.details as { code?: unknown } | undefined)?.code : undefined;
+        if (typeof code !== 'string' || !DATABASE_UNAVAILABLE.has(code)) throw err;
+        firstRefusal ??= err;
+      }
+    }
+    // What was asked for says more than "permission denied for template1".
+    throw firstRefusal;
   },
 });
 
@@ -192,6 +297,41 @@ const connectionDisconnect = defineCommand({
     ctx.host.emit('store.changed', { workspaceId: ws(ctx).id, collection: COLLECTIONS.connections });
     return { closed };
   },
+});
+
+// ---------- Redis through Grafana ----------
+
+const GrafanaUrlInput = z.object({ grafanaUrl: z.string().min(1).describe('The Grafana address, e.g. https://grafana.example.com') });
+
+const grafanaSession = defineCommand({
+  id: 'db.grafana.session',
+  title: 'Check Grafana sign-in for Redis',
+  description:
+    "Asks a Grafana whether this machine is signed in, and as whom. The session is the one the Logs module uses: one per Grafana, shared. Agents cannot sign in; when state is signed-out, ask the user to sign in from Quiver (the connection's Access section, or the Logs view).",
+  scope: 'workspace',
+  input: GrafanaUrlInput,
+  handler: async ({ grafanaUrl }, ctx): Promise<LogsSession> => grafanaSessions.check(ctx.host, grafanaUrl),
+});
+
+const grafanaSignIn = defineCommand({
+  id: 'db.grafana.signin',
+  title: 'Sign in to Grafana for Redis',
+  description: "Opens Grafana's login page in a window and resolves once the user is signed in or closes it.",
+  scope: 'workspace',
+  // A window on the user's screen that only the user can complete: the UI's to open, not an agent's.
+  hidden: true,
+  input: GrafanaUrlInput,
+  handler: async ({ grafanaUrl }, ctx): Promise<LogsSession> => grafanaSessions.signIn(ctx.host, grafanaUrl),
+});
+
+const grafanaRedisSources = defineCommand({
+  id: 'db.grafana.redis.datasources',
+  title: 'List Grafana Redis data sources',
+  description:
+    'The Redis data sources (redis-datasource plugin) the signed-in Grafana user can query, with uid and name for a connection whose access is grafana. cliDisabled means the admin turned the CLI off: such a connection only reads (key browser, info).',
+  scope: 'workspace',
+  input: GrafanaUrlInput,
+  handler: async ({ grafanaUrl }, ctx): Promise<GrafanaRedisDatasource[]> => grafanaRedisDatasources(ctx.host, grafanaUrl),
 });
 
 // ---------- schema ----------
@@ -297,6 +437,11 @@ const tableApply = defineCommand({
     'Inserts, updates and deletes rows of a table, each edit keyed by the primary key, inside one transaction. Pass preview to get the statements without running them. An update or delete that matches anything but exactly one row rolls everything back.',
   scope: 'workspace',
   mutating: ({ preview }) => !preview,
+  actions: {
+    list: TABLE_EDITS_ACTIONS,
+    of: ({ edits }) => tableEditsAction(edits),
+    describe: { insert: 'Only inserts rows', update: 'Only updates rows', delete: 'Only deletes rows', mixed: 'Edits of more than one kind (deny it too when denying delete)' },
+  },
   input: ConnectionIdInput.extend({
     table: z.string(),
     database: z.string().nullable().optional(),
@@ -376,7 +521,18 @@ const queryRun = defineCommand({
   mutating: async ({ connectionId, query }, ctx) => {
     const conn = await ws(ctx).store.get<DbConnection>(COLLECTIONS.connections, connectionId);
     if (!conn) return false;
-    return conn.kind === 'redis' ? !redisScriptIsReadOnly(query) : !scriptIsReadOnly(query);
+    return conn.kind === 'redis' ? !redisScriptIsReadOnly(query) : scriptAction(query) !== 'select';
+  },
+  // SQL by its most severe statement. Redis commands through the query runner are select when they only read and
+  // other otherwise; db.redis.command names their actions finely.
+  actions: {
+    list: SQL_ACTIONS,
+    of: async ({ connectionId, query }, ctx) => {
+      const conn = await ws(ctx).store.get<DbConnection>(COLLECTIONS.connections, connectionId);
+      if (conn?.kind === 'redis') return redisScriptIsReadOnly(query) ? 'select' : 'other';
+      return scriptAction(query);
+    },
+    describe: { ...SQL_ACTION_DESCRIPTIONS, other: `${SQL_ACTION_DESCRIPTIONS.other}; a Redis command that writes` },
   },
   input: RunInput,
   handler: async (input, ctx): Promise<DbQueryResult[]> => {
@@ -644,6 +800,7 @@ const redisCommand = defineCommand({
     'Runs Redis commands given as argument lists (no quoting rules: a value may hold spaces, quotes or line breaks), e.g. [["SET", "k", "v", "KEEPTTL"]]. Read-only commands always work; anything that writes is gated. The key browser uses it for its edits.',
   scope: 'workspace',
   mutating: ({ commands }) => !commands.every(redisCommandIsReadOnly),
+  actions: { list: REDIS_ACTIONS, of: ({ commands }) => redisCommandsAction(commands), describe: REDIS_ACTION_DESCRIPTIONS },
   input: ConnectionIdInput.extend({ commands: z.array(z.array(z.string()).min(1)).min(1).max(100) }),
   handler: async ({ connectionId, commands }, ctx): Promise<DbQueryResult[]> => {
     const results = await withDriver(ctx, connectionId, (d) => requireRedis(d).exec(commands));
@@ -663,12 +820,14 @@ const redisInfo = defineCommand({
 
 export const dbModule = defineModule({
   id: 'db',
+  collections: { [COLLECTIONS.connections]: DbConnectionSchema, [COLLECTIONS.queries]: SavedQuerySchema },
   commands: [
     connectionList,
     connectionGet,
     connectionSave,
     connectionDelete,
     connectionTest,
+    connectionDatabases,
     connectionDisconnect,
     schemaDatabases,
     schemaTables,
@@ -691,6 +850,9 @@ export const dbModule = defineModule({
     redisKey,
     redisCommand,
     redisInfo,
+    grafanaSession,
+    grafanaSignIn,
+    grafanaRedisSources,
   ],
   onWorkspaceClose: (workspace, host) => pool.closeWorkspace(workspace.id, host),
 });

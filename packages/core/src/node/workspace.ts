@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import type { z } from 'zod';
 import type { WorkspaceApi, WorkspaceInfo } from '../types';
 import { FileStore } from './file-store';
 
@@ -27,11 +28,17 @@ export class WorkspaceSession implements WorkspaceApi {
     private readonly events: {
       onStoreChange(workspaceId: string, collection: string): void;
       onStateChange(workspaceId: string, key: string): void;
+      /** The schema of a committed collection's items, so saves keep the fields this version does not know. */
+      schemaOf?(collection: string): z.ZodType | undefined;
     },
   ) {
     this.id = workspaceIdFor(path);
     this.name = pathBasename(path);
-    this.store = new FileStore(pathJoin(path, WORKSPACE_DIR), (collection) => events.onStoreChange(this.id, collection));
+    this.store = new FileStore(
+      pathJoin(path, WORKSPACE_DIR),
+      (collection) => events.onStoreChange(this.id, collection),
+      (collection) => events.schemaOf?.(collection),
+    );
   }
 
   async init(): Promise<void> {
@@ -76,6 +83,7 @@ export class WorkspaceManager {
       onListChange(workspaces: WorkspaceInfo[]): void;
       onStoreChange(workspaceId: string, collection: string): void;
       onStateChange(workspaceId: string, key: string): void;
+      schemaOf?(collection: string): z.ZodType | undefined;
       onOpen?(ws: WorkspaceSession): Promise<void> | void;
       onClose?(ws: WorkspaceSession): Promise<void> | void;
     },

@@ -29,6 +29,10 @@ publish:
 win:
   target:
     - nsis
+  # The `quiver` command line (docs/cli.md): a shim in resources/cli that runs Quiver.exe as Node on out/main/cli.js.
+  extraResources:
+    - from: resources/cli/quiver.cmd
+      to: cli/quiver.cmd
   artifactName: ${productName}-${version}-setup.${ext}
 nsis:
   oneClick: false
@@ -42,6 +46,9 @@ mac:
     - target: zip
       arch: [x64, arm64]
   category: public.app-category.developer-tools
+  extraResources:
+    - from: resources/cli/quiver
+      to: cli/quiver
   artifactName: ${productName}-${version}-mac-${arch}.${ext}
   # Unsigned until an Apple Developer certificate is added; see docs/releasing.md.
   identity: null
@@ -51,5 +58,8 @@ linux:
     - AppImage
     - deb
   category: Development
+  extraResources:
+    - from: resources/cli/quiver
+      to: cli/quiver
   maintainer: Besher Karam <besher.karam.1998@gmail.com>
   artifactName: ${productName}-${version}-linux-${arch}.${ext}

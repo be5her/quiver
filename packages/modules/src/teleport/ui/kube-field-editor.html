@@ -12,6 +12,30 @@
       </select>
     </q-kube-field-box>
   }
+  @case ('workload') {
+    <q-kube-field-box [label]="f.label" [error]="error()">
+      <select qSelect class="w-40" [attr.data-testid]="testId()" (change)="pickedVerb($event)">
+        @for (o of options(); track o) {
+          <option [value]="o" [selected]="o === value()">{{ o }}</option>
+        }
+      </select>
+    </q-kube-field-box>
+  }
+  @case ('count') {
+    <q-kube-field-box [label]="f.label" [error]="error()">
+      <input qInput class="w-24" [class]="inputClass()" [value]="text()" [placeholder]="countPlaceholder()" inputmode="numeric" [attr.aria-invalid]="!!error()" [attr.data-testid]="testId()" (input)="typed($event)" />
+    </q-kube-field-box>
+  }
+  @case ('text') {
+    <q-kube-field-box [label]="f.label" [error]="error()">
+      <input qInput class="w-44" [class]="inputClass()" [value]="text()" [placeholder]="f.kind === 'jobName' ? '<cronjob>-manual-<time>' : 'container'" [attr.aria-invalid]="!!error()" [attr.data-testid]="testId()" (input)="typed($event)" />
+    </q-kube-field-box>
+  }
+  @case ('image') {
+    <q-kube-field-box [label]="f.label" [error]="error()">
+      <input qInput class="w-72" [class]="inputClass()" [value]="text()" placeholder="registry/app:1.2.3" [attr.aria-invalid]="!!error()" [attr.data-testid]="testId()" (input)="typed($event)" />
+    </q-kube-field-box>
+  }
   @case ('verb') {
     <q-kube-field-box [label]="f.label" [error]="error()">
       <select qSelect class="w-36" [attr.data-testid]="testId()" (change)="pickedVerb($event)">
@@ -55,7 +79,7 @@
         [class]="inputClass()"
         [value]="text()"
         [attr.list]="listId()"
-        [placeholder]="f.kind === 'pod' ? 'pod name' : 'name'"
+        [placeholder]="f.kind === 'pod' ? 'pod name' : f.kind === 'node' ? 'node name' : 'name'"
         [attr.aria-invalid]="!!error()"
         [attr.data-testid]="testId()"
         (input)="typed($event)"

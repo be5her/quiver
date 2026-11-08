@@ -6,6 +6,7 @@ import path from 'node:path';
 import {
   QuiverError,
   addKubeHistory,
+  buildKubeActionArgs,
   buildKubectlArgs,
   formatCommandLine,
   isLoginRequiredMessage,
@@ -16,6 +17,8 @@ import {
   nowIso,
   sanitizeKubeHistory,
   type Caller,
+  type KubeAction,
+  type KubeActionResult,
   type KubeHistoryEntry,
   type KubePreview,
   type KubeQuery,
@@ -55,6 +58,30 @@ export interface KubeRunRequest {
   record: boolean;
 }
 
+/** A write action: always recorded, never streamed. Whether the caller may run it is decided before this. */
+export interface KubeActionRequest {
+  proxy: string;
+  cluster: string;
+  /** Resolved already (`resolveKubeAction`), so it is exactly what the preview showed. */
+  action: KubeAction;
+  caller: Caller;
+  runId?: string;
+  timeoutMs: number;
+}
+
+/** What one run is: a query from the read catalogue or an action from the write catalogue. */
+type Subject = { kind: 'query'; query: KubeQuery } | { kind: 'action'; action: KubeAction };
+
+interface Executed {
+  runId: string;
+  proxy: string;
+  argv: string[];
+  setup: string | null;
+  live: LiveRun;
+  durationMs: number;
+  startedAt: string;
+}
+
 interface LiveRun {
   runId: string;
   child: ChildProcess;
@@ -80,9 +107,12 @@ interface Prepared {
 }
 
 const WINDOWS = process.platform === 'win32';
+/** kubectl's errors for a private kubeconfig that is gone or lacks its context, all raised before it reaches the cluster. */
+const KUBECONFIG_MISSING =
+  /context "?[^"\n]*"? (does not exist|not found)|no context exists with the name|no configuration has been provided|error loading config file|\.kubeconfig[^\n]*(no such file or directory|cannot find the file)/i;
 
 /**
- * Runs catalogue queries with `tsh kubectl`, which embeds kubectl, so no kubectl install is needed.
+ * Runs catalogue queries and actions with `tsh kubectl`, which embeds kubectl, so no kubectl install is needed.
  *
  * Each (cluster, Kubernetes cluster) pair gets a private kubeconfig under the app data folder,
  * written once by `tsh kube login` with KUBECONFIG pointing at it. Every query then runs
@@ -169,7 +199,15 @@ export class KubeRunner {
 
   /** What a query would spawn, without spawning anything. */
   async preview(proxy: string, cluster: string, query: KubeQuery): Promise<KubePreview> {
-    const args = buildKubectlArgs(query.operation, query.params);
+    return this.previewArgs(proxy, cluster, buildKubectlArgs(query.operation, query.params));
+  }
+
+  /** What an action would spawn, without spawning anything. */
+  async previewAction(proxy: string, cluster: string, action: KubeAction): Promise<KubePreview> {
+    return this.previewArgs(proxy, cluster, buildKubeActionArgs(action.action, action.params));
+  }
+
+  private async previewArgs(proxy: string, cluster: string, args: string[]): Promise<KubePreview> {
     const tsh = await this.opts.session.tshCommand();
     const resolved = this.opts.session.cluster(proxy)?.proxy ?? proxy;
     const prepared = this.ready.get(this.key(resolved, cluster));
@@ -184,6 +222,79 @@ export class KubeRunner {
     const info = kubeOperationInfo(req.query.operation);
     // Validates again: the catalogue is the only way to an argv, whoever the caller is.
     const args = buildKubectlArgs(req.query.operation, req.query.params);
+    const done = await this.execute(req, args, Boolean(info?.streaming), req.record, { kind: 'query', query: req.query });
+    const { live } = done;
+    const result: KubeRunResult = {
+      runId: done.runId,
+      proxy: done.proxy,
+      cluster: req.cluster,
+      query: req.query,
+      command: formatCommandLine(done.argv, { windows: WINDOWS }),
+      argv: done.argv,
+      setup: done.setup,
+      stdout: live.lines.join('\n'),
+      stderr: live.stderr,
+      exitCode: live.exitCode,
+      durationMs: done.durationMs,
+      truncated: live.dropped > 0,
+      cancelled: live.cancelled,
+      timedOut: this.timedOut.has(done.runId),
+      streaming: live.running,
+      historyId: live.historyId,
+      startedAt: done.startedAt,
+    };
+    this.timedOut.delete(done.runId);
+    if (!live.streaming) this.runs.delete(done.runId);
+    return result;
+  }
+
+  /** One write action from the separate catalogue, through its own builder. Always recorded, as an action. */
+  async runAction(req: KubeActionRequest): Promise<KubeActionResult> {
+    // Validates again: the action catalogue is the only way to a write argv, whoever the caller is.
+    const args = buildKubeActionArgs(req.action.action, req.action.params);
+    const done = await this.execute(req, args, false, true, { kind: 'action', action: req.action });
+    const { live } = done;
+    const result: KubeActionResult = {
+      runId: done.runId,
+      proxy: done.proxy,
+      cluster: req.cluster,
+      action: req.action,
+      command: formatCommandLine(done.argv, { windows: WINDOWS }),
+      argv: done.argv,
+      setup: done.setup,
+      stdout: live.lines.join('\n'),
+      stderr: live.stderr,
+      exitCode: live.exitCode,
+      durationMs: done.durationMs,
+      truncated: live.dropped > 0,
+      cancelled: live.cancelled,
+      timedOut: this.timedOut.has(done.runId),
+      historyId: live.historyId,
+      startedAt: done.startedAt,
+    };
+    this.timedOut.delete(done.runId);
+    this.runs.delete(done.runId);
+    return result;
+  }
+
+  /**
+   * The full argv for a long-running kubectl process managed elsewhere (port forwards): the
+   * session is checked and the private kubeconfig prepared as for a query.
+   */
+  async commandFor(proxy: string, cluster: string, args: string[]): Promise<{ tsh: TshCommand; argv: string[]; proxy: string }> {
+    const session = await this.opts.session.requireSession(proxy);
+    const tsh = await this.opts.session.tshCommand();
+    const { prepared } = await this.ensureContext(session.proxy, cluster);
+    return { tsh, argv: this.queryArgv(tsh, args, prepared), proxy: session.proxy };
+  }
+
+  private async execute(
+    req: { proxy: string; cluster: string; caller: Caller; runId?: string; timeoutMs: number },
+    args: string[],
+    streaming: boolean,
+    record: boolean,
+    subject: Subject,
+  ): Promise<Executed> {
     const runId = req.runId ?? newId();
     if (this.runs.get(runId)?.running) throw new QuiverError('INVALID_INPUT', `Run ${runId} is already running`);
     const cluster = await this.opts.session.requireSession(req.proxy);
@@ -197,13 +308,15 @@ export class KubeRunner {
         setup = formatCommandLine(cmd.argv, { windows: WINDOWS, env: cmd.env });
       }
       const argv = this.queryArgv(tsh, args, prepared);
-      return { argv, live: await this.spawnRun(runId, tsh, argv, Boolean(info?.streaming), req.timeoutMs) };
+      return { argv, live: await this.spawnRun(runId, tsh, argv, streaming, req.timeoutMs) };
     };
 
     const startedAt = nowIso();
     let { argv, live } = await attempt(false);
     // The private kubeconfig vanished or lost its context (data folder cleaned, tsh upgraded): log in again once.
-    if (!live.running && live.exitCode !== 0 && /context .*(does not exist|not found)|no configuration has been provided|kubeconfig/i.test(live.stderr)) {
+    // kubectl stops on these before it reaches the API server, so only these errors are retried, never a run that was
+    // cancelled or timed out (exit code null), which may have been applied: an action is never applied twice.
+    if (!live.running && live.exitCode !== null && live.exitCode !== 0 && KUBECONFIG_MISSING.test(live.stderr)) {
       this.runs.delete(runId);
       ({ argv, live } = await attempt(true));
     }
@@ -213,41 +326,19 @@ export class KubeRunner {
       throw new QuiverError('TELEPORT_LOGIN_REQUIRED', `Teleport session for ${cluster.proxy} is not usable: ${live.stderr.trim().split(/\r?\n/).pop()}`, { proxy: cluster.proxy });
     }
 
-    const entry: KubeHistoryEntry = {
+    const base = {
       id: live.historyId,
       proxy: cluster.proxy,
       cluster: req.cluster,
-      query: req.query,
       at: startedAt,
       exitCode: live.exitCode,
       durationMs: (live.endedAt ?? Date.now()) - live.startedAt,
       pinned: false,
       caller: req.caller,
     };
-    if (req.record) await this.record(entry);
-
-    const result: KubeRunResult = {
-      runId,
-      proxy: cluster.proxy,
-      cluster: req.cluster,
-      query: req.query,
-      command: formatCommandLine(argv, { windows: WINDOWS }),
-      argv,
-      setup,
-      stdout: live.lines.join('\n'),
-      stderr: live.stderr,
-      exitCode: live.exitCode,
-      durationMs: entry.durationMs,
-      truncated: live.dropped > 0,
-      cancelled: live.cancelled,
-      timedOut: this.timedOut.has(runId),
-      streaming: live.running,
-      historyId: live.historyId,
-      startedAt,
-    };
-    this.timedOut.delete(runId);
-    if (!live.streaming) this.runs.delete(runId);
-    return result;
+    const entry: KubeHistoryEntry = subject.kind === 'action' ? { ...base, kind: 'action', action: subject.action } : { ...base, kind: 'query', query: subject.query };
+    if (record) await this.record(entry);
+    return { runId, proxy: cluster.proxy, argv, setup, live, durationMs: base.durationMs, startedAt };
   }
 
   /**

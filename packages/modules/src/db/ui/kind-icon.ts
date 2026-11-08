@@ -34,19 +34,32 @@ export class KindIcon {
   }
 }
 
-/** Small marker for connections that go through a tunnel; nothing for direct ones. */
+/** What the "via Grafana" marker says on hover. */
+export function grafanaAccessTitle(access: Extract<DbAccess, { type: 'grafana' }>): string {
+  return `Through Grafana data source ${access.datasourceName || access.datasourceUid || '…'} at ${access.grafanaUrl || '…'}: commands run with the permissions of the Grafana user signed in on this machine`;
+}
+
+/** Small marker for connections that go through a tunnel or Grafana; nothing for direct ones. */
 @Component({
   selector: 'q-access-badge',
   imports: [Icon],
-  template: `@if (badge(); as badge) {<svg [qIcon]="badge.icon" class="size-3 shrink-0 text-muted" [attr.aria-label]="badge.title"></svg>}`,
+  template: `@if (grafana(); as title) {
+      <span class="text-[9px] text-muted border border-edge rounded px-1 leading-4 shrink-0 whitespace-nowrap" data-testid="db-via-grafana" [title]="title">via Grafana</span>
+    } @else if (badge(); as badge) {
+      <svg [qIcon]="badge.icon" class="size-3 shrink-0 text-muted" [attr.aria-label]="badge.title"></svg>
+    }`,
   host: { class: 'contents' },
 })
 export class AccessBadge {
   readonly access = input.required<DbAccess>();
 
+  protected readonly grafana = computed(() => {
+    const access = this.access();
+    return access.type === 'grafana' ? grafanaAccessTitle(access) : null;
+  });
   protected readonly badge = computed(() => {
     const access = this.access();
-    if (access.type === 'direct') return null;
+    if (access.type === 'direct' || access.type === 'grafana') return null;
     return access.type === 'teleport'
       ? { icon: ShieldCheck, title: `Teleport tunnel: ${access.database} as ${access.dbUser}` }
       : { icon: Cable, title: `Tunnel command: ${access.command}` };

@@ -1,18 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import { keyValue, newApiRequest, type ApiRequest, type HistoryEntry } from './models/api';
-import { REDACTED, isSecretName, redactHistoryEntry, redactLiteral, redactRequest, redactSent, redactUrl, requestSecretValues, scrubSecrets } from './redact';
+import { REDACTED, isSecretName, redactHistoryEntry, redactLiteral, redactRequest, redactSent, redactUrl, requestSecretValues, scrubResponse, scrubSecrets } from './redact';
 
 const M = REDACTED;
 
 describe('isSecretName', () => {
   it('knows credential headers and parameters', () => {
-    for (const name of ['Authorization', 'proxy-authorization', ' Cookie ', 'X-API-Key', 'apikey', 'api_key', 'X-Auth-Token', 'access_token', 'client_secret', 'password', 'passwd', 'key', 'sig', 'X-Amz-Signature', 'X-Access-Key']) {
+    for (const name of [
+      'Authorization', 'proxy-authorization', ' Cookie ', 'X-API-Key', 'apikey', 'api_key', 'X-Auth-Token', 'access_token', 'client_secret', 'password', 'passwd', 'key', 'sig', 'X-Amz-Signature', 'X-Access-Key',
+      'X-Auth', 'auth', 'sid', 'X-Session-Id', 'session', 'PHPSESSID', 'pass', 'pwd', 'passphrase', 'private_key', 'Ocp-Apim-Subscription-Key', 'client-key', 'app_key', 'license_key', 'jwt', 'otp', 'pin',
+    ]) {
       expect(isSecretName(name), name).toBe(true);
     }
   });
 
   it('leaves ordinary names alone', () => {
-    for (const name of ['Content-Type', 'Accept', 'X-Request-Id', 'page', 'keyword', 'author', 'monkey', 'q']) expect(isSecretName(name), name).toBe(false);
+    for (const name of ['Content-Type', 'Accept', 'X-Request-Id', 'page', 'keyword', 'author', 'monkey', 'q', 'pinned', 'passenger', 'keynote', 'authored', 'code']) expect(isSecretName(name), name).toBe(false);
   });
 });
 
@@ -38,6 +41,16 @@ describe('scrubSecrets', () => {
     expect(scrubSecrets('a=p%40ss%20word&b=1', ['p@ss word'])).toBe(`a=${M}&b=1`);
     expect(scrubSecrets('a=p%40ss+word&b=1', ['p@ss word'])).toBe(`a=${M}&b=1`);
     expect(scrubSecrets('token token', ['token'])).toBe(`${M} ${M}`);
+  });
+
+  it('masks a secret as a JSON encoder writes it inside a string, with / escaped or not', () => {
+    const secret = 'a"b\\c/d';
+    expect(scrubSecrets('{"t":"a\\"b\\\\c/d","u":1}', [secret])).toBe(`{"t":"${M}","u":1}`);
+    expect(scrubSecrets('{"t":"a\\"b\\\\c\\/d"}', [secret])).toBe(`{"t":"${M}"}`);
+    expect(scrubSecrets('{"t":"line\\nbreak\\u0001"}', ['line\nbreak\u0001'])).toBe(`{"t":"${M}"}`);
+    expect(scrubSecrets('plain a"b\\c/d too', [secret])).toBe(`plain ${M} too`);
+    // A secret with nothing to escape has one JSON form, its own.
+    expect(scrubSecrets('{"t":"s3cret"}', ['s3cret'])).toBe(`{"t":"${M}"}`);
   });
 
   it('takes the longest secret first, skips short ones and leaves the rest of the text', () => {
@@ -234,5 +247,34 @@ describe('redactHistoryEntry', () => {
     expect(JSON.stringify(clean)).not.toContain('eyJhbGciOi');
     expect(clean.url).toBe(`https://merchant.example.com/auth/v1/login?api_key=${M}`);
     expect(JSON.stringify(redactHistoryEntry(clean))).toBe(JSON.stringify(clean));
+  });
+});
+
+describe('scrubResponse', () => {
+  const response = {
+    headers: [
+      ['X-Auth-Token', 'tok-secret-1'],
+      ['Location', 'https://api.test/next?access_token=other-2&page=1'],
+      ['Set-Cookie', 'sid=tok-secret-1; Path=/'],
+      ['X-Note', 'plain'],
+    ] as [string, string][],
+    body: '{"token":"tok-secret-1","other":"other-2"}',
+    bodyEncoding: 'utf8' as const,
+  };
+
+  it('scrubs the known secrets from headers and body and masks a Location as a URL', () => {
+    const out = scrubResponse(response, { values: ['tok-secret-1'] });
+    expect(out.headers).toEqual([
+      ['X-Auth-Token', M],
+      ['Location', `https://api.test/next?access_token=${M}&page=1`],
+      ['Set-Cookie', `sid=${M}; Path=/`],
+      ['X-Note', 'plain'],
+    ]);
+    expect(out.body).toBe(`{"token":"${M}","other":"other-2"}`);
+  });
+
+  it('leaves a binary body alone, and the response as it is when nothing is known', () => {
+    expect(scrubResponse({ ...response, bodyEncoding: 'base64' as const }, { values: ['tok-secret-1'] }).body).toBe(response.body);
+    expect(scrubResponse(response)).toBe(response);
   });
 });

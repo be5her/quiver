@@ -1,5 +1,9 @@
 import { z } from 'zod';
 import { QuiverError } from '../errors';
+import { KubeActionSchema } from './kube-actions';
+import { DNS1123_LABEL, DNS1123_SUBDOMAIN, KUBE_CLUSTER_NAME, kubePattern as pattern } from './kube-patterns';
+
+export { DNS1123_LABEL, DNS1123_SUBDOMAIN, KUBE_CLUSTER_NAME } from './kube-patterns';
 
 /**
  * Read-only Kubernetes queries for clusters reached through Teleport.
@@ -8,7 +12,8 @@ import { QuiverError } from '../errors';
  * one operation from this fixed catalogue and fills in its typed parameters; `buildKubectlArgs`
  * turns that into an argv from a hard-coded template per operation. Every flag name comes from
  * the template, every value is validated and lands in its own argv element, so the only argv
- * that can ever be produced is one of the templates below, and none of them writes.
+ * that can ever be produced is one of the templates below, and none of them writes. The write
+ * actions are a separate catalogue with their own builder, in `kube-actions.ts`.
  */
 
 // ---------- parameter types ----------
@@ -44,11 +49,6 @@ export const KUBE_CAN_I_VERBS = ['get', 'list', 'watch', 'create', 'update', 'pa
 
 export const KUBE_TAIL_MAX = 100_000;
 
-/** DNS-1123 label: namespaces and container names. */
-export const DNS1123_LABEL = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
-/** DNS-1123 subdomain: object names (pods, deployments, nodes, ...). */
-export const DNS1123_SUBDOMAIN = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
-
 const LABEL_KEY = String.raw`(?:[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*\/)?[A-Za-z0-9](?:[-A-Za-z0-9_.]*[A-Za-z0-9])?`;
 const LABEL_VALUE = String.raw`(?:[A-Za-z0-9](?:[-A-Za-z0-9_.]*[A-Za-z0-9])?)?`;
 const LABEL_REQUIREMENT = String.raw`${LABEL_KEY}(?:(?:=|==|!=)${LABEL_VALUE}| (?:in|notin) \(${LABEL_VALUE}(?:, ?${LABEL_VALUE})*\))`;
@@ -56,19 +56,6 @@ const LABEL_REQUIREMENT = String.raw`${LABEL_KEY}(?:(?:=|==|!=)${LABEL_VALUE}| (
 export const LABEL_SELECTOR = new RegExp(`^${LABEL_REQUIREMENT}(?:,${LABEL_REQUIREMENT})*$`);
 /** Durations for `--since`: a number and s, m or h. */
 export const KUBE_DURATION = /^\d{1,6}[smh]$/;
-/** Teleport Kubernetes cluster names as `tsh kube ls` prints them. */
-export const KUBE_CLUSTER_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-
-const noDash = (v: string) => !v.startsWith('-');
-
-function pattern(re: RegExp, max: number, what: string) {
-  return z
-    .string()
-    .min(1, `${what} is empty`)
-    .max(max, `${what} is longer than ${max} characters`)
-    .refine(noDash, `${what} must not start with "-"`)
-    .regex(re, `${what} is not valid`);
-}
 
 const Namespace = pattern(DNS1123_LABEL, 63, 'Namespace').describe('Namespace (DNS-1123 label). Omit for the default namespace of the cluster.');
 const ObjectName = pattern(DNS1123_SUBDOMAIN, 253, 'Name').describe('Object name (DNS-1123 subdomain)');
@@ -401,25 +388,37 @@ export interface KubeStreamRead {
   durationMs: number;
 }
 
-export const KubeHistoryEntrySchema = z.object({
+const HistoryBase = {
   id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
   proxy: z.string().min(1).max(255),
   cluster: z.string().max(253).regex(KUBE_CLUSTER_NAME),
-  query: KubeQuerySchema,
   at: z.string(),
   exitCode: z.number().int().nullable(),
   durationMs: z.number().nonnegative(),
   pinned: z.boolean().default(false),
   caller: z.enum(['ui', 'mcp', 'cli', 'system']).default('ui'),
-});
+};
 
+/** A read-only query. Entries written before actions existed have no `kind` and are queries. */
+export const KubeQueryHistoryEntrySchema = z.object({ ...HistoryBase, kind: z.literal('query').default('query'), query: KubeQuerySchema });
+/** A write action from the separate catalogue; running one again is gated like the action itself. */
+export const KubeActionHistoryEntrySchema = z.object({ ...HistoryBase, kind: z.literal('action'), action: KubeActionSchema });
+export const KubeHistoryEntrySchema = z.union([KubeQueryHistoryEntrySchema, KubeActionHistoryEntrySchema]);
+
+export type KubeQueryHistoryEntry = z.infer<typeof KubeQueryHistoryEntrySchema>;
+export type KubeActionHistoryEntry = z.infer<typeof KubeActionHistoryEntrySchema>;
 export type KubeHistoryEntry = z.infer<typeof KubeHistoryEntrySchema>;
+
+/** The parameters of an entry, whichever catalogue it came from. */
+export function kubeHistoryParams(entry: KubeHistoryEntry): Record<string, unknown> {
+  return (entry.kind === 'action' ? entry.action.params : entry.query.params) as Record<string, unknown>;
+}
 
 export const KUBE_HISTORY_MAX = 200;
 
 /**
- * Load history from an untrusted file: every entry goes through the same query validation as
- * a live call, so a hand-edited file cannot smuggle arguments in. Returns the valid entries and
+ * Load history from an untrusted file: every entry goes through the same query or action
+ * validation as a live call, so a hand-edited file cannot smuggle arguments in. Returns the valid entries and
  * how many were dropped.
  */
 export function sanitizeKubeHistory(raw: unknown): { entries: KubeHistoryEntry[]; dropped: number } {
@@ -445,8 +444,8 @@ export function addKubeHistory(entries: KubeHistoryEntry[], entry: KubeHistoryEn
 export function lastKubeNamespace(entries: KubeHistoryEntry[], proxy: string, cluster: string): string | null {
   for (const e of entries) {
     if (e.proxy !== proxy || e.cluster !== cluster) continue;
-    const ns = (e.query.params as { namespace?: string }).namespace;
-    if (ns) return ns;
+    const ns = kubeHistoryParams(e).namespace;
+    if (typeof ns === 'string' && ns) return ns;
   }
   return null;
 }

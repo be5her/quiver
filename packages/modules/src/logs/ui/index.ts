@@ -18,6 +18,6 @@ export const logsModuleUI = defineModuleUI({
   actions: () => {
     const logs = inject(LogsActions);
     const app = inject(AppState);
-    return [{ id: 'logs.connection.new', title: 'New logs connection (Grafana)', group: 'Logs', run: () => logs.createConnection(), when: () => untracked(app.hasWorkspace) }];
+    return [{ id: 'logs.connection.new', title: 'New logs connection (Grafana or VictoriaLogs)', group: 'Logs', run: () => logs.createConnection(), when: () => untracked(app.hasWorkspace) }];
   },
 });

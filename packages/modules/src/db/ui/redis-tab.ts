@@ -1,8 +1,9 @@
 import { Component, computed, effect, inject, input, signal, untracked } from '@angular/core';
-import { dbDataCollection, toErrorPayload, type ErrorPayload, type RedisInfo, type RedisKeyInfo, type RedisScanResult } from '@quiver/core';
+import { dbDataCollection, toErrorPayload, type DbConnectionSummary, type ErrorPayload, type RedisInfo, type RedisKeyInfo, type RedisScanResult } from '@quiver/core';
 import { Button, Dialogs, HostBridge, Icon, IconButton, Input, Spinner, Toasts, injectHostEvent, invokeResource, type Tab, type TabComponent } from '@quiver/ui';
 import { Plus, RefreshCw, Search } from 'lucide';
 import { DbError } from './db-error';
+import { AccessBadge } from './kind-icon';
 import { formatCount, formatTtl, formatUptime } from './db-format';
 import { RedisKeyDetail } from './redis-key-detail';
 import { RedisTypeBadge } from './redis-type-badge';
@@ -29,7 +30,7 @@ const FIRST_VALUE: Record<string, (key: string) => string[]> = {
 /** A Redis connection's keys, scanned by pattern a page at a time, the server's vitals, and the selected key's value. */
 @Component({
   selector: 'q-redis-tab',
-  imports: [Button, DbError, Icon, IconButton, Input, RedisKeyDetail, RedisTypeBadge, Spinner],
+  imports: [AccessBadge, Button, DbError, Icon, IconButton, Input, RedisKeyDetail, RedisTypeBadge, Spinner],
   templateUrl: './redis-tab.html',
   host: { class: 'flex h-full min-h-0' },
 })
@@ -51,7 +52,12 @@ export class RedisTab implements TabComponent {
   protected readonly scanError = signal<ErrorPayload | null>(null);
   protected readonly selected = signal<string | null>(null);
   protected readonly count = computed(() => `${formatCount(this.keys().length)} keys${this.cursor() ? '+' : ''}`);
-  protected readonly info = invokeResource<RedisInfo>('db.redis.info', () => ({ connectionId: this.connectionId() }), { refreshOn: () => [dbDataCollection(this.connectionId())] });
+  protected readonly connection = invokeResource<DbConnectionSummary>('db.connection.get', () => ({ id: this.connectionId() }), { refreshOn: ['db-connections'] });
+  protected readonly info = invokeResource<RedisInfo>('db.redis.info', () => ({ connectionId: this.connectionId() }), {
+    refreshOn: () => [dbDataCollection(this.connectionId())],
+    // Through Grafana, signing in (here, in another tab or in Logs) makes the info readable.
+    refreshOnEvents: ['grafana.changed'],
+  });
   /** The vitals as one line: version, uptime, clients, memory, keys, throughput, hit rate. */
   protected readonly vitals = computed(() => {
     const i = this.info.value();

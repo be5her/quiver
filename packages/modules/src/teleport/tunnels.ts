@@ -3,10 +3,12 @@ import { connect, createServer } from 'node:net';
 import { QuiverError, isLoginRequiredMessage, newId, normalizeProxy, nowIso, sameProxy, tokenizeShell, type TeleportTunnel } from '@quiver/core';
 import { lineSplitter, type TshCommand } from './tsh';
 
-export type TunnelSpec = { kind: 'teleport'; proxy: string; database: string; dbUser: string } | { kind: 'command'; command: string };
+/** `dbName` is the database inside the server, which tsh needs (`--db-name`) for PostgreSQL. */
+export type TunnelSpec = { kind: 'teleport'; proxy: string; database: string; dbUser: string; dbName?: string | null } | { kind: 'command'; command: string };
 
 interface LiveTunnel {
   key: string;
+  spec: TunnelSpec;
   info: Omit<TeleportTunnel, 'users' | 'output'>;
   users: Set<string>;
   output: string[];
@@ -31,7 +33,7 @@ export interface TunnelManagerOptions {
 const OUTPUT_TAIL = 60;
 
 export function tunnelKey(spec: TunnelSpec): string {
-  return spec.kind === 'teleport' ? `teleport:${normalizeProxy(spec.proxy)}:${spec.database}:${spec.dbUser}` : `command:${spec.command.trim()}`;
+  return spec.kind === 'teleport' ? `teleport:${normalizeProxy(spec.proxy)}:${spec.database}:${spec.dbUser}:${spec.dbName ?? ''}` : `command:${spec.command.trim()}`;
 }
 
 /**
@@ -85,17 +87,24 @@ export class TunnelManager {
     for (const live of this.tunnels.values()) {
       if (!live.users.delete(user)) continue;
       if (live.users.size > 0) continue;
-      if (options.immediate || !this.opts.graceMs) {
-        await this.kill(live);
-      } else if (!live.graceTimer) {
-        live.graceTimer = setTimeout(() => {
-          live.graceTimer = null;
-          if (live.users.size === 0) void this.kill(live);
-        }, this.opts.graceMs);
-        live.graceTimer.unref?.();
-      }
+      if (options.immediate || !this.opts.graceMs) await this.kill(live);
+      else this.scheduleGrace(live);
     }
     this.opts.onChange();
+  }
+
+  /** Stop a tunnel nobody uses once the grace period has passed, unless someone takes it up again. */
+  private scheduleGrace(live: LiveTunnel): void {
+    if (live.graceTimer) return;
+    if (!this.opts.graceMs) {
+      void this.kill(live);
+      return;
+    }
+    live.graceTimer = setTimeout(() => {
+      live.graceTimer = null;
+      if (live.users.size === 0) void this.kill(live);
+    }, this.opts.graceMs);
+    live.graceTimer.unref?.();
   }
 
   async stop(id: string): Promise<boolean> {
@@ -126,21 +135,63 @@ export class TunnelManager {
       await this.kill(live);
       n++;
     }
+    this.stopStarting((key) => key.startsWith(`teleport:${normalizeProxy(proxy)}:`));
     return n;
   }
 
   async stopAll(): Promise<void> {
+    this.stopStarting(() => true);
     await Promise.all([...this.tunnels.values()].map((t) => this.kill(t)));
   }
 
-  private async start(spec: TunnelSpec, key: string): Promise<LiveTunnel> {
-    const port = await freePort();
+  /** A tunnel still starting (e.g. restarted after a renewal) when its cluster or the app stops is stopped once it is up. */
+  private stopStarting(match: (key: string) => boolean): void {
+    for (const [key, pending] of this.starting) {
+      if (match(key)) void pending.then((live) => this.kill(live), () => {});
+    }
+  }
+
+  /**
+   * Restart every tunnel of one cluster, e.g. after its certificate was renewed: `tsh proxy db` holds the
+   * certificate it started with. Each comes back on the same port when it is still free, with the same users,
+   * so connections reconnect through it on their next query. Returns how many came back.
+   */
+  async restartCluster(proxy: string): Promise<number> {
+    let n = 0;
+    for (const live of [...this.tunnels.values()]) {
+      if (live.info.kind !== 'teleport' || !sameProxy(live.info.proxy, proxy) || live.exited) continue;
+      const { key, spec } = live;
+      const users = [...live.users];
+      const port = live.info.port;
+      if (this.starting.has(key)) continue;
+      // Registered before the old process is gone, so a connection asking for this tunnel meanwhile waits for the
+      // restarted one instead of starting a second tunnel on another port.
+      const pending = this.kill(live)
+        .then(() => this.start(spec, key, port))
+        .finally(() => this.starting.delete(key));
+      this.starting.set(key, pending);
+      try {
+        const fresh = await pending;
+        for (const user of users) fresh.users.add(user);
+        // One that was in its grace period gets a fresh one rather than living forever.
+        if (!fresh.users.size) this.scheduleGrace(fresh);
+        n++;
+      } catch (err) {
+        console.warn(`[quiver] teleport: restarting the tunnel for ${spec.kind === 'teleport' ? spec.database : 'a command'} failed: ${(err as Error).message}`);
+      }
+    }
+    if (n) this.opts.onChange();
+    return n;
+  }
+
+  private async start(spec: TunnelSpec, key: string, preferredPort?: number): Promise<LiveTunnel> {
+    const port = preferredPort && (await portIsFree(preferredPort)) ? preferredPort : await freePort();
     let argv: string[];
     let proxy = '';
     if (spec.kind === 'teleport') {
       proxy = await this.opts.requireSession(spec.proxy);
       const tsh = await this.opts.tsh();
-      argv = [...tsh.argv, 'proxy', 'db', spec.database, '--tunnel', `--db-user=${spec.dbUser}`, `--port=${port}`, `--proxy=${proxy}`];
+      argv = [...tsh.argv, 'proxy', 'db', spec.database, '--tunnel', `--db-user=${spec.dbUser}`, ...(spec.dbName ? [`--db-name=${spec.dbName}`] : []), `--port=${port}`, `--proxy=${proxy}`];
     } else {
       argv = tokenizeShell(spec.command.replaceAll('{port}', String(port)));
       if (!argv.length) throw new QuiverError('INVALID_INPUT', 'Tunnel command is empty');
@@ -156,12 +207,14 @@ export class TunnelManager {
 
     const live: LiveTunnel = {
       key,
+      spec,
       info: {
         id: newId(),
         kind: spec.kind,
         proxy,
         target: spec.kind === 'teleport' ? spec.database : spec.command,
         dbUser: spec.kind === 'teleport' ? spec.dbUser : null,
+        dbName: spec.kind === 'teleport' ? (spec.dbName ?? null) : null,
         port,
         pid: child.pid ?? null,
         startedAt: nowIso(),
@@ -256,6 +309,15 @@ export function freePort(): Promise<number> {
       const { port } = server.address() as { port: number };
       server.close(() => resolve(port));
     });
+  });
+}
+
+/** Whether 127.0.0.1:<port> can be listened on right now. */
+function portIsFree(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = createServer();
+    server.once('error', () => resolve(false));
+    server.listen(port, '127.0.0.1', () => server.close(() => resolve(true)));
   });
 }
 

@@ -6,16 +6,31 @@ import {
   dbKindForProtocol,
   findCluster,
   formatRemaining,
+  isKubeProtected,
+  TELEPORT_RENEW_SPACING_MS,
+  isAutoRenewOn,
+  isBrowserLoginLine,
+  isInAppSignInOn,
   isLoginRequiredMessage,
   isPinned,
+  loggedOutCluster,
   migrateTeleportConfig,
+  nextRenewalAt,
   normalizeProxy,
+  proxiesToAutoRenew,
+  setAutoRenew,
+  setProxyListed,
+  ssoLoginUrl,
+  teleportSignInPartition,
+  type TeleportClusterStatus,
+  type TeleportRenewalRecord,
   parseTshDatabases,
   parseTshKubeClusters,
   parseTshStatus,
   proxiesToAutoLogin,
   proxyAddress,
   sameProxy,
+  setKubeProtected,
   togglePin,
   tshSettingToArgv,
 } from './teleport';
@@ -110,14 +125,47 @@ describe('pins and config', () => {
   });
 
   it('migrates the old single proxy setting', () => {
-    expect(migrateTeleportConfig({ proxy: 'a.example.com:443', tshPath: '', loginOnLaunch: true })).toEqual({ proxies: ['a.example.com:443'], pins: [], tshPath: '', loginOnLaunch: true });
+    expect(migrateTeleportConfig({ proxy: 'a.example.com:443', tshPath: '', loginOnLaunch: true })).toEqual({
+      proxies: ['a.example.com:443'],
+      pins: [],
+      tshPath: '',
+      loginOnLaunch: true,
+      autoRenew: [],
+      inAppSignIn: [],
+      protectedKubes: [],
+      agentActionsOnProtected: false,
+    });
     expect(migrateTeleportConfig({ proxies: ['a.example.com:443'], proxy: 'A.example.com', pins: [{ proxy: 'x', kind: 'db', name: 'y' }] })).toEqual({
       proxies: ['a.example.com:443'],
       pins: [{ proxy: 'x', kind: 'db', name: 'y' }],
       tshPath: '',
       loginOnLaunch: false,
+      autoRenew: [],
+      inAppSignIn: [],
+      protectedKubes: [],
+      agentActionsOnProtected: false,
     });
-    expect(migrateTeleportConfig({})).toEqual({ proxies: [], pins: [], tshPath: '', loginOnLaunch: false });
+    expect(migrateTeleportConfig({})).toEqual({ proxies: [], pins: [], tshPath: '', loginOnLaunch: false, autoRenew: [], inAppSignIn: [], protectedKubes: [], agentActionsOnProtected: false });
+  });
+
+  it('keeps protected Kubernetes clusters and drops malformed ones', () => {
+    const raw = { protectedKubes: [{ proxy: 'a.example.com:443', name: 'prod' }, { proxy: 'a.example.com:443', name: '' }, { name: 'x' }, null], agentActionsOnProtected: 'yes' };
+    const migrated = migrateTeleportConfig(raw as unknown as Parameters<typeof migrateTeleportConfig>[0]);
+    expect(migrated.protectedKubes).toEqual([{ proxy: 'a.example.com:443', name: 'prod' }]);
+    // Only a real true lets agents act on protected clusters.
+    expect(migrated.agentActionsOnProtected).toBe(false);
+  });
+
+  it('marks and unmarks protected clusters per Teleport cluster', () => {
+    let list = setKubeProtected([], { proxy: 'A.example.com', name: 'prod' }, true);
+    list = setKubeProtected(list, { proxy: 'a.example.com:443', name: 'prod' }, true);
+    list = setKubeProtected(list, { proxy: 'b.example.com', name: 'prod' }, true);
+    expect(list).toHaveLength(2);
+    expect(isKubeProtected(list, 'a.example.com:443', 'prod')).toBe(true);
+    expect(isKubeProtected(list, 'a.example.com', 'dev')).toBe(false);
+    list = setKubeProtected(list, { proxy: 'a.example.com', name: 'prod' }, false);
+    expect(isKubeProtected(list, 'a.example.com', 'prod')).toBe(false);
+    expect(isKubeProtected(list, 'b.example.com:443', 'prod')).toBe(true);
   });
 });
 
@@ -170,10 +218,123 @@ describe('helpers', () => {
 
   it('maps protocols and formats time left', () => {
     expect(dbKindForProtocol('MySQL')).toBe('mysql');
-    expect(dbKindForProtocol('postgres')).toBeNull();
+    expect(dbKindForProtocol('postgres')).toBe('postgres');
+    expect(dbKindForProtocol('mongodb')).toBeNull();
     expect(formatRemaining('2026-09-25T21:42:00Z', now)).toBe('11h 42m');
     expect(formatRemaining('2026-09-25T10:09:30Z', now)).toBe('9m');
     expect(formatRemaining('2026-09-27T12:00:00Z', now)).toBe('2d 2h');
     expect(formatRemaining('2026-09-25T09:00:00Z', now)).toBe('expired');
+  });
+});
+
+describe('keep me logged in', () => {
+  const at = (minutes: number) => new Date(now.getTime() + minutes * 60_000).toISOString();
+  const defaultExpiry = (state: TeleportClusterStatus['state']) => (state === 'logged-out' ? null : at(state === 'expired' ? -5 : state === 'expiring' ? 10 : 600));
+  const cluster = (proxy: string, state: TeleportClusterStatus['state'], validUntil: string | null = defaultExpiry(state)): TeleportClusterStatus => ({
+    ...loggedOutCluster(proxy, true),
+    cluster: proxy.replace(/:443$/, ''),
+    user: state === 'logged-out' ? null : 'alice',
+    validUntil,
+    state,
+  });
+  const a = 'a.example.com:443';
+  const b = 'b.example.com:443';
+  const config = { autoRenew: [a, b] };
+  const none = { loginRunning: false, records: {} };
+  const record = (lastResult: TeleportRenewalRecord['lastResult'], minutesAgo: number, validUntil: string | null = null): TeleportRenewalRecord => ({ lastAttemptAt: at(-minutesAgo), lastResult, lastError: null, validUntil });
+
+  it('picks expiring and expired clusters, never logged-in or logged-out ones', () => {
+    expect(proxiesToAutoRenew(config, [cluster(a, 'expiring')], none, now)).toEqual([a]);
+    expect(proxiesToAutoRenew(config, [cluster(a, 'expired')], none, now)).toEqual([a]);
+    expect(proxiesToAutoRenew(config, [cluster(a, 'logged-in'), cluster(b, 'logged-out')], none, now)).toEqual([]);
+  });
+
+  it('never picks a cluster with the setting off, matching proxies loosely', () => {
+    expect(proxiesToAutoRenew({ autoRenew: [] }, [cluster(a, 'expired')], none, now)).toEqual([]);
+    expect(proxiesToAutoRenew({ autoRenew: ['B.example.com'] }, [cluster(a, 'expired'), cluster(b, 'expiring')], none, now)).toEqual([b]);
+  });
+
+  it('runs one at a time, the certificate that expires first', () => {
+    const clusters = [cluster(a, 'expiring', at(20)), cluster(b, 'expired', at(-1))];
+    expect(proxiesToAutoRenew(config, clusters, none, now)).toEqual([b]);
+  });
+
+  it('waits while any login is running', () => {
+    expect(proxiesToAutoRenew(config, [cluster(a, 'expired')], { loginRunning: true, records: {} }, now)).toEqual([]);
+  });
+
+  it('spaces attempts on a cluster ten minutes apart, and not while one runs', () => {
+    const clusters = [cluster(a, 'expiring')];
+    const recent = { loginRunning: false, records: { [normalizeProxy(a)]: record('failed', 9) } };
+    const older = { loginRunning: false, records: { [normalizeProxy(a)]: record('failed', TELEPORT_RENEW_SPACING_MS / 60_000) } };
+    const running = { loginRunning: false, records: { [normalizeProxy(a)]: record(null, 30) } };
+    expect(proxiesToAutoRenew(config, clusters, recent, now)).toEqual([]);
+    expect(proxiesToAutoRenew(config, clusters, older, now)).toEqual([a]);
+    expect(proxiesToAutoRenew(config, clusters, running, now)).toEqual([]);
+    expect(nextRenewalAt(recent.records[normalizeProxy(a)], clusters[0])).toBe(at(1));
+  });
+
+  it('a spaced cluster does not hold back another one', () => {
+    const clusters = [cluster(a, 'expired', at(-5)), cluster(b, 'expiring', at(10))];
+    const state = { loginRunning: false, records: { [normalizeProxy(a)]: record('failed', 2) } };
+    expect(proxiesToAutoRenew(config, clusters, state, now)).toEqual([b]);
+  });
+
+  it('a cancel holds until the certificate changes, then the new one gets an attempt at once', () => {
+    const cert = at(10);
+    const cancelled = { loginRunning: false, records: { [normalizeProxy(a)]: record('cancelled', 1, cert) } };
+    expect(proxiesToAutoRenew(config, [cluster(a, 'expiring', cert)], cancelled, now)).toEqual([]);
+    // Still the same certificate after it expired: still cancelled.
+    expect(proxiesToAutoRenew(config, [cluster(a, 'expired', cert)], cancelled, now)).toEqual([]);
+    expect(nextRenewalAt(cancelled.records[normalizeProxy(a)], cluster(a, 'expiring', cert))).toBeNull();
+    // Another certificate (logged in elsewhere, then expiring again): not held back, not even by the spacing.
+    expect(proxiesToAutoRenew(config, [cluster(a, 'expiring', at(15))], cancelled, now)).toEqual([a]);
+  });
+
+  it('turns the setting on and off without duplicates', () => {
+    let list = setAutoRenew([], 'a.example.com', true);
+    list = setAutoRenew(list, 'A.example.com:443', true);
+    expect(list).toEqual(['A.example.com:443']);
+    expect(isAutoRenewOn({ autoRenew: list }, a)).toBe(true);
+    expect(setAutoRenew(list, a, false)).toEqual([]);
+    expect(migrateTeleportConfig({ autoRenew: [a, 'A.example.com', '', 3 as unknown as string] }).autoRenew).toEqual([a]);
+  });
+
+  it('recognises the line tsh prints when it sends the user to the browser', () => {
+    expect(isBrowserLoginLine('If browser window does not open automatically, open it by clicking on the link:')).toBe(true);
+    expect(isBrowserLoginLine(' http://127.0.0.1:61234/abcd1234')).toBe(true);
+    expect(isBrowserLoginLine('> Profile URL:        https://teleport.example.com:443')).toBe(false);
+    expect(isBrowserLoginLine('Use the following URL to authenticate:')).toBe(true);
+  });
+});
+
+describe('sign in inside Quiver', () => {
+  const a = 'a.example.com:443';
+
+  it('keeps one entry per cluster and migrates malformed lists', () => {
+    let list = setProxyListed([], a, true);
+    list = setProxyListed(list, 'A.example.com:443', true);
+    expect(list).toEqual(['A.example.com:443']);
+    expect(isInAppSignInOn({ inAppSignIn: list }, a)).toBe(true);
+    expect(setProxyListed(list, a, false)).toEqual([]);
+    expect(migrateTeleportConfig({ inAppSignIn: [a, 'A.example.com', '', 3 as unknown as string] }).inAppSignIn).toEqual([a]);
+  });
+
+  it('takes only the link of the listener of tsh from the login output', () => {
+    expect(ssoLoginUrl(' http://127.0.0.1:61234/abcd1234')).toBe('http://127.0.0.1:61234/abcd1234');
+    expect(ssoLoginUrl('Use the following URL: http://localhost:5000/b2c3?x=1.')).toBe('http://localhost:5000/b2c3?x=1.');
+    expect(ssoLoginUrl(' http://[::1]:61234/abcd')).toBe('http://[::1]:61234/abcd');
+    expect(ssoLoginUrl('> Profile URL:        https://teleport.example.com:443')).toBeNull();
+    expect(ssoLoginUrl('https://github.com/login/oauth/authorize?client_id=x')).toBeNull();
+    expect(ssoLoginUrl('http://127.0.0.1.evil.example:80/x')).toBeNull();
+    expect(ssoLoginUrl('http://127.0.0.1@evil.example:80/x')).toBeNull();
+    expect(ssoLoginUrl('If browser window does not open automatically, open it by clicking on the link:')).toBeNull();
+  });
+
+  it('names one persistent cookie jar per cluster', () => {
+    expect(teleportSignInPartition('A.Example.com:443')).toBe('persist:quiver-teleport-a_2eexample_2ecom');
+    expect(teleportSignInPartition('a-b.example.com')).not.toBe(teleportSignInPartition('a.b.example.com'));
+    expect(teleportSignInPartition('https://a.example.com:443/')).toBe(teleportSignInPartition(a));
+    expect(teleportSignInPartition('b.example.com:443')).not.toBe(teleportSignInPartition(a));
   });
 });

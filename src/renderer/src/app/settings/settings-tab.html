@@ -30,18 +30,15 @@
       </div>
     </section>
 
-    <section>
+    <section data-testid="settings-mcp">
       <h2 class="text-sm font-semibold mb-3 pb-1 border-b border-edge">MCP server</h2>
       <p class="text-xs text-muted mb-3">
         Every non-hidden command is exposed as an MCP tool over Streamable HTTP. Add <code class="font-mono">?workspace=&lt;folder&gt;</code> to the URL to bind a client to a
         specific project, otherwise it follows the workspace you are viewing.
       </p>
       <div class="flex items-center gap-4 flex-wrap">
-        <label class="flex items-center gap-2 text-sm"><input qCheckbox [checked]="config.mcp.enabled" (change)="toggleMcp(config, $event, 'enabled')" />Enabled</label>
+        <label class="flex items-center gap-2 text-sm"><input qCheckbox [checked]="config.mcp.enabled" (change)="toggleMcp(config, $event)" />Enabled</label>
         <label class="flex items-center gap-2 text-sm">Port<input qInput type="number" class="w-24" [formField]="fieldsForm.port" (blur)="savePort(config)" /></label>
-        <label class="flex items-center gap-2 text-sm" title="Lets agents run commands that delete data or send mutating database statements"
-          ><input qCheckbox [checked]="config.mcp.allowMutating" (change)="toggleMcp(config, $event, 'allowMutating')" />Allow mutating commands</label
-        >
         <span class="text-xs" [class]="mcp()?.running ? 'text-success' : 'text-danger'">{{ mcp()?.running ? 'running on ' + mcp()?.port : (mcp()?.error ?? 'stopped') }}</span>
       </div>
       <div class="mt-3">
@@ -52,6 +49,43 @@
         <label qLabel>Generic HTTP endpoint</label>
         <ng-container *ngTemplateOutlet="copyRow; context: { $implicit: httpUrl() }" />
       </div>
+
+      <h3 class="text-xs font-semibold mt-5 mb-2">Agent permissions</h3>
+      <p class="text-xs text-muted mb-3">
+        Commands that only read are open to agents; the mode decides what commands that delete, write or change shared state get. Rules come first: a command id
+        (<code class="font-mono">db.query.run</code>), one action of it (<code class="font-mono">db.query.run#ddl</code>, for the tools that say what a call does), a
+        module (<code class="font-mono">git.*</code>) or <code class="font-mono">*</code>, for every agent or one by name. A deny anywhere wins (on a whole tool it hides the
+        tool from agents), then the most specific rule (an action before its tool, a rule for the agent before one for every agent), workspace rules before these. The command line and this window are you, so none of this applies to them.
+      </p>
+      <div class="flex items-center gap-4 flex-wrap">
+        <label class="flex items-center gap-2 text-sm"
+          >Mutating commands
+          <select qSelect class="w-56" data-testid="mcp-mode" [value]="config.mcp.permissions.mode" (change)="setMode($any($event.target).value)">
+            <option value="read-only">Refused (read-only)</option>
+            <option value="ask">Ask me each time</option>
+            <option value="allow">Allowed</option>
+          </select>
+        </label>
+        <label class="flex items-center gap-2 text-sm" [class.text-warning]="config.mcp.paused" title="Refuses every MCP call until resumed; agents still see their tools"
+          ><input qCheckbox data-testid="mcp-paused" [checked]="config.mcp.paused" (change)="setPaused($event)" />Pause agents</label
+        >
+      </div>
+      <label qLabel class="mt-3">Rules for every workspace</label>
+      <q-agent-rules-editor
+        testId="mcp-rules-global"
+        emptyText="No rules: read-only commands are allowed and the mode decides the rest."
+        [rules]="config.mcp.permissions.rules"
+        (changed)="setRule('global', $event)"
+      />
+      @if (workspace(); as ws) {
+        <label qLabel class="mt-3">Rules for {{ ws.name }} only <span class="font-normal text-muted">(on this machine, never in the project)</span></label>
+        <q-agent-rules-editor testId="mcp-rules-workspace" emptyText="No rules for this workspace." [rules]="workspaceRules()" (changed)="setRule('workspace', $event)" />
+      }
+    </section>
+
+    <section>
+      <h2 class="text-sm font-semibold mb-3 pb-1 border-b border-edge">Command line</h2>
+      <q-cli-panel />
     </section>
 
     <section>
@@ -65,6 +99,15 @@
         @for (proxy of config.teleport.proxies; track proxy) {
           <div class="flex items-center gap-2" data-testid="teleport-proxy">
             <code class="flex-1 text-xs font-mono bg-surface border border-edge rounded-md px-2 py-1.5 truncate">{{ proxy }}</code>
+            <label class="flex items-center gap-1.5 text-xs shrink-0" title="Renew the certificate with tsh login when it is about to expire" data-testid="settings-teleport-auto-renew"
+              ><input qCheckbox [checked]="isAutoRenew(config, proxy)" (change)="toggleAutoRenew(proxy, $event)" />Keep me logged in</label
+            >
+            <label
+              class="flex items-center gap-1.5 text-xs shrink-0"
+              title="Sign in to the SSO provider in a Quiver window that remembers you, so later logins and renewals need no browser"
+              data-testid="settings-teleport-in-app-sign-in"
+              ><input qCheckbox [checked]="isInAppSignIn(config, proxy)" (change)="toggleInAppSignIn(proxy, $event)" />Sign in inside Quiver</label
+            >
             <button qButton size="sm" variant="ghost" [icon]="icons.X" title="Remove this cluster and its pins" (click)="removeCluster(proxy)">Remove</button>
           </div>
         } @empty {
@@ -84,8 +127,59 @@
       <p class="text-[11px] text-muted mt-1 font-mono truncate" [title]="teleport.value()?.tsh?.join(' ') ?? ''">{{ tshNote() }}</p>
       <label class="flex items-center gap-2 text-sm mt-3"
         ><input qCheckbox [checked]="config.teleport.loginOnLaunch" (change)="toggleLoginOnLaunch(config, $event)" />Log in on launch to every cluster whose certificate has
-        expired (opens the browser, one cluster at a time)</label
+        expired (opens the browser, one cluster at a time). Keep me logged in on a cluster also renews it while Quiver runs.</label
       >
+      <label class="flex items-center gap-2 text-sm mt-2" data-testid="settings-kube-agents-protected"
+        ><input qCheckbox [checked]="config.teleport.agentActionsOnProtected" (change)="toggleAgentsOnProtected(config, $event)" />Let agents run Kubernetes actions and port
+        forwards on protected clusters (mark a cluster protected from its context menu in the Teleport module)</label
+      >
+    </section>
+
+    <section data-testid="settings-network">
+      <h2 class="text-sm font-semibold mb-3 pb-1 border-b border-edge">Network</h2>
+      <p class="text-xs text-muted mb-3">
+        How the API client, realtime connections and GraphQL introspection reach servers, on this machine. Client certificates are per project, in the API client's
+        Certificates tab.
+      </p>
+      @let net = network();
+      <div class="grid grid-cols-[8rem_1fr] items-center gap-x-3 gap-y-2 max-w-xl">
+        <label qLabel class="mb-0" for="settings-proxy">Proxy</label>
+        <select qSelect id="settings-proxy" class="w-56" data-testid="settings-proxy" [value]="net.proxy" (change)="setNetwork({ proxy: $any($event.target).value })">
+          <option value="none">None</option>
+          <option value="system">System (HTTPS_PROXY, HTTP_PROXY, NO_PROXY)</option>
+          <option value="manual">Manual</option>
+        </select>
+        @if (net.proxy === 'manual') {
+          <label qLabel class="mb-0" for="settings-proxy-url">Proxy URL</label>
+          <input qInput id="settings-proxy-url" data-testid="settings-proxy-url" placeholder="http://proxy.example.com:3128" [value]="net.url" (input)="setNetwork({ url: $any($event.target).value })" />
+          <label qLabel class="mb-0" for="settings-proxy-user">User name</label>
+          <input qInput id="settings-proxy-user" autocomplete="off" [value]="net.username" (input)="setNetwork({ username: $any($event.target).value })" />
+          <label qLabel class="mb-0" for="settings-proxy-password">Password</label>
+          <input
+            qInput
+            id="settings-proxy-password"
+            type="password"
+            autocomplete="new-password"
+            [placeholder]="net.hasPassword ? 'kept, encrypted on this machine' : ''"
+            [value]="proxyPassword()"
+            (input)="proxyPassword.set($any($event.target).value)"
+          />
+        }
+        @if (net.proxy !== 'none') {
+          <label qLabel class="mb-0" for="settings-no-proxy">Bypass for</label>
+          <input
+            qInput
+            id="settings-no-proxy"
+            data-testid="settings-no-proxy"
+            placeholder="localhost, .internal.example.com"
+            [value]="net.noProxy.join(', ')"
+            (change)="setNetwork({ noProxy: splitHosts($any($event.target).value) })"
+          />
+        }
+      </div>
+      <div class="mt-2 flex items-center gap-3">
+        <button qButton size="sm" variant="primary" [disabled]="!networkChanged()" data-testid="settings-network-save" (click)="saveNetwork()">Save network settings</button>
+      </div>
     </section>
 
     <section>

@@ -1,0 +1,21 @@
+{
+  "_type": "export",
+  "__export_format": 4,
+  "__export_source": "insomnia.desktop.app:v8.6.1",
+  "resources": [
+    { "_id": "wrk_smoke", "_type": "workspace", "parentId": null, "name": "Smoke Insomnia" },
+    { "_id": "fld_ping", "_type": "request_group", "parentId": "wrk_smoke", "name": "Ping" },
+    {
+      "_id": "req_ping",
+      "_type": "request",
+      "parentId": "fld_ping",
+      "name": "Ping",
+      "method": "GET",
+      "url": "{{ _.host }}/ins/ping",
+      "headers": [{ "name": "X-Env", "value": "{{ _.stage }}" }],
+      "parameters": [{ "name": "q", "value": "1" }]
+    },
+    { "_id": "env_base", "_type": "environment", "parentId": "wrk_smoke", "name": "Base Environment", "data": { "host": "__ECHO__" } },
+    { "_id": "env_dev", "_type": "environment", "parentId": "env_base", "name": "Smoke dev", "data": { "stage": "dev" } }
+  ]
+}

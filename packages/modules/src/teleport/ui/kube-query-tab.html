@@ -2,6 +2,14 @@
   <div class="flex items-center gap-2 px-3 h-10 border-b border-edge shrink-0">
     <svg [qIcon]="icons.Boxes" class="size-4 text-accent shrink-0"></svg>
     <span class="font-medium text-sm shrink-0">{{ cluster() }}</span>
+    @if (isProtected()) {
+      <span
+        class="flex items-center gap-0.5 text-[11px] text-warning shrink-0"
+        title="Protected: actions need the cluster name typed, and agents may not run them. Change it in the cluster's context menu."
+        data-testid="kube-protected"
+        ><svg [qIcon]="icons.ShieldAlert" class="size-3.5"></svg>protected</span
+      >
+    }
     <span class="text-xs text-muted truncate min-w-0" [title]="proxy()">via {{ proxy() }}</span>
     <div class="flex-1"></div>
     <button
@@ -15,19 +23,39 @@
     >Set as kubectl context for my terminal</button>
   </div>
 
-  <div class="px-3 pt-3 pb-2 border-b border-edge shrink-0 flex flex-col gap-2.5">
+  <div class="px-3 pt-3 pb-2 border-b border-edge shrink-0 flex flex-col gap-2.5 border-l-2" [class]="isAction() ? 'border-l-warning bg-warning/5' : 'border-l-transparent'">
     <div class="flex items-end gap-3 flex-wrap">
       <q-kube-field-box label="Operation">
         <select qSelect class="w-48" data-testid="kube-operation" (change)="pickOperation($event)">
-          @for (o of operations; track o.id) {
-            <option [value]="o.id" [selected]="o.id === operation()">{{ o.title }}</option>
-          }
+          <optgroup label="Read">
+            @for (o of operations; track o.id) {
+              <option [value]="o.id" [selected]="o.id === operation()">{{ o.title }}</option>
+            }
+          </optgroup>
+          <optgroup label="Actions (change the cluster)" data-testid="kube-actions-group">
+            @for (a of actions; track a.id) {
+              <option [value]="a.id" [selected]="a.id === operation()">{{ a.title }}</option>
+            }
+          </optgroup>
         </select>
       </q-kube-field-box>
-      @for (field of info().fields; track operation() + ':' + field.key) {
-        <q-kube-field-editor [field]="field" [values]="values()" [error]="fieldError(field.key)" [lookups]="lookups" [namespace]="namespace()" (changed)="setField(field.key, $event)" />
+      @for (field of fields(); track operation() + ':' + field.key) {
+        <q-kube-field-editor
+          [field]="field"
+          [values]="values()"
+          [error]="fieldError(field.key)"
+          [lookups]="lookups"
+          [namespace]="namespace()"
+          [nameKind]="nameKind()"
+          (changed)="setField(field.key, $event)"
+        />
       }
     </div>
+    @if (isAction()) {
+      <p class="flex items-center gap-1 text-[11px] text-warning -mt-1" data-testid="kube-action-banner">
+        <svg [qIcon]="icons.Zap" class="size-3 shrink-0"></svg>Action: changes the cluster. Run shows the exact command and asks you to confirm{{ isProtected() ? ' with the cluster name' : '' }}.
+      </p>
+    }
     <div class="flex items-center gap-2">
       <div class="flex-1 min-w-0 flex items-center gap-1 rounded-md border border-edge bg-canvas pl-2.5 pr-1 h-8">
         <code class="flex-1 min-w-0 truncate text-xs font-mono text-muted" [attr.title]="preview()?.command ?? null" data-testid="kube-preview">{{ shortCommand() ?? 'Fill in the required fields to see the command' }}</code>
@@ -46,8 +74,10 @@
         <button qButton size="md" variant="danger" [icon]="stopping() ? undefined : icons.Square" [disabled]="stopping()" data-testid="kube-stop" (click)="stop()">
           @if (stopping()) {<svg qSpinner class="size-3.5"></svg>}{{ stopping() ? 'Stopping…' : running.streaming ? 'Stop' : 'Cancel' }}
         </button>
+      } @else if (isAction()) {
+        <button qButton size="md" variant="danger" class="border-danger/40" [icon]="icons.Zap" [disabled]="!valid() || !!confirming()" data-testid="kube-run" (click)="go()">Run action…</button>
       } @else {
-        <button qButton size="md" variant="primary" [icon]="icons.Play" [disabled]="!valid()" data-testid="kube-run" (click)="run()">Run</button>
+        <button qButton size="md" variant="primary" [icon]="icons.Play" [disabled]="!valid()" data-testid="kube-run" (click)="go()">Run</button>
       }
     </div>
   </div>
@@ -62,19 +92,26 @@
     [error]="error()"
     [ran]="ran()"
     [hasResult]="hasResult()"
-    (retry)="run()"
+    (retry)="go()"
   />
 </div>
 
-<aside
-  qKubeHistory
-  [entries]="history.value()?.entries ?? []"
-  [error]="history.error()"
-  [loading]="history.isLoading()"
-  [proxy]="proxy()"
-  [cluster]="cluster()"
-  [busy]="!!running()"
-  (fill)="fillFrom($event)"
-  (rerun)="rerun($event)"
-  (reload)="history.reload()"
-></aside>
+<div class="w-72 shrink-0 border-l border-edge flex flex-col min-h-0">
+  <q-kube-forwards-panel [proxy]="proxy()" [cluster]="cluster()" [namespace]="namespace()" [lookups]="lookups" />
+  <aside
+    qKubeHistory
+    [entries]="history.value()?.entries ?? []"
+    [error]="history.error()"
+    [loading]="history.isLoading()"
+    [proxy]="proxy()"
+    [cluster]="cluster()"
+    [busy]="!!running()"
+    (fill)="fillFrom($event)"
+    (rerun)="rerun($event)"
+    (reload)="history.reload()"
+  ></aside>
+</div>
+
+@if (confirming(); as preview) {
+  <q-kube-action-confirm [preview]="preview" [cluster]="cluster()" [proxy]="proxy()" (confirmed)="runAction($event)" (cancelled)="confirming.set(null)" />
+}

@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
-import { QuiverError, SendOptionsSchema, type ApiRequest, type GraphqlSchemaDoc, type WorkspaceApi } from '@quiver/core';
+import { QuiverError, effectiveSendOptions, type ApiRequest, type GraphqlSchemaDoc, type WorkspaceApi } from '@quiver/core';
 import { buildClientSchema, getIntrospectionQuery, printSchema, type IntrospectionQuery } from 'graphql';
 import { prepareRequest, sendPrepared } from './http';
+import type { NetworkContext } from './network';
 
 /** Schemas are cached per endpoint; the query string (which may carry an API key) is not part of the key. */
 export function graphqlEndpoint(url: string): string {
@@ -21,15 +22,16 @@ export async function readSchema(ws: WorkspaceApi, endpoint: string): Promise<Gr
  * POST the standard introspection query with the request's URL, headers and auth (its own body is
  * ignored), then cache the schema as SDL under `.quiver/local` for editors, the explorer and agents.
  */
-export async function introspect(ws: WorkspaceApi, resolved: ApiRequest): Promise<GraphqlSchemaDoc> {
+export async function introspect(ws: WorkspaceApi, resolved: ApiRequest, network?: NetworkContext): Promise<GraphqlSchemaDoc> {
   const probe: ApiRequest = {
     ...resolved,
     method: 'POST',
     body: { type: 'json', content: JSON.stringify({ query: getIntrospectionQuery({ descriptions: true, specifiedByUrl: true, directiveIsRepeatable: true }) }) },
   };
-  const prepared = prepareRequest(probe);
+  const prepared = await prepareRequest(probe);
   const endpoint = graphqlEndpoint(prepared.url);
-  const response = await sendPrepared(prepared, SendOptionsSchema.parse({ maxBodyBytes: 64 * 1024 * 1024 }));
+  // The request's own timeout and TLS choice apply; schemas get a larger body cap than responses.
+  const response = await sendPrepared(prepared, effectiveSendOptions(resolved.options, { maxBodyBytes: 64 * 1024 * 1024 }), undefined, undefined, undefined, network);
   if (response.bodyEncoding !== 'utf8') {
     throw new QuiverError('REQUEST_FAILED', `Introspection returned a binary body (${response.contentType ?? 'unknown content type'})`, { status: response.status });
   }

@@ -19,3 +19,19 @@ export function prettyJson(text: string, indent = 2): string | null {
     return null;
   }
 }
+
+/** JSON with keys sorted at every depth and two-space indents, so two bodies compare by content; null when it is not JSON. */
+export function normalizeJson(text: string): string | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const sort = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(sort);
+    if (v && typeof v === 'object') return Object.fromEntries(Object.keys(v).sort().map((k) => [k, sort((v as Record<string, unknown>)[k])]));
+    return v;
+  };
+  return JSON.stringify(sort(value), null, 2);
+}

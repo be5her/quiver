@@ -1,13 +1,13 @@
 import { Component, inject, input, signal } from '@angular/core';
 import type { TeleportClusterStatus, TeleportKubeCluster } from '@quiver/core';
-import { Dialogs, HostBridge, Icon, IconButton, Spinner, Toasts, invokeResource } from '@quiver/ui';
-import { Boxes, Pin, PinOff, Terminal } from 'lucide';
+import { ContextMenu, Dialogs, HostBridge, Icon, IconButton, Spinner, Toasts, invokeResource } from '@quiver/ui';
+import { Boxes, Pin, PinOff, ShieldAlert, Terminal } from 'lucide';
 import { DbError } from '../../db/ui';
 import { TeleportActions } from './teleport-actions';
 import { isTerminalKube } from './teleport-display';
 import { TeleportSubHeader } from './teleport-sub-header';
 
-/** The Kubernetes clusters of one Teleport cluster: open the read-only query view, pin, or point the terminal at one. */
+/** The Kubernetes clusters of one Teleport cluster: open the query view, pin, protect, or point the terminal at one. */
 @Component({
   selector: 'q-teleport-kubes',
   imports: [DbError, Icon, IconButton, Spinner, TeleportSubHeader],
@@ -18,11 +18,12 @@ export class TeleportKubes {
   private readonly host = inject(HostBridge);
   private readonly dialogs = inject(Dialogs);
   private readonly toasts = inject(Toasts);
+  private readonly menu = inject(ContextMenu);
   protected readonly actions = inject(TeleportActions);
 
   readonly cluster = input.required<TeleportClusterStatus>();
 
-  protected readonly icons = { Boxes, Pin, PinOff, Terminal };
+  protected readonly icons = { Boxes, Pin, PinOff, ShieldAlert, Terminal };
   protected readonly busy = signal<string | null>(null);
   protected readonly kubes = invokeResource<TeleportKubeCluster[]>('teleport.kube.list', () => ({ proxy: this.cluster().proxy }), { workspaceId: null, refreshOnEvents: ['teleport.changed'] });
 
@@ -31,7 +32,41 @@ export class TeleportKubes {
   }
 
   protected title(kube: TeleportKubeCluster): string {
-    return [`Query ${kube.name} (read-only)`, ...Object.entries(kube.labels).map(([a, b]) => `${a}=${b}`)].join('\n');
+    return [
+      `Query ${kube.name}, or run an action on it`,
+      ...(kube.protected ? ['Protected: actions need its name typed, and agents may not run them'] : []),
+      ...Object.entries(kube.labels).map(([a, b]) => `${a}=${b}`),
+    ].join('\n');
+  }
+
+  protected openMenu(event: MouseEvent, kube: TeleportKubeCluster): void {
+    this.menu.open(event, [
+      { label: 'Open', select: () => this.actions.openKubeQuery(kube.proxy, kube.name) },
+      { label: kube.pinned ? 'Unpin' : 'Pin', select: () => this.actions.setPin({ proxy: kube.proxy, kind: 'kube', name: kube.name }, !kube.pinned).catch((err) => this.toasts.error(err)) },
+      { label: 'Set as kubectl context for my terminal', disabled: this.isActive(kube), select: () => void this.useInTerminal(event, kube) },
+      'separator',
+      { label: 'Protected', checked: kube.protected, testId: 'kube-menu-protect', select: () => void this.toggleProtected(kube) },
+    ]);
+  }
+
+  /** Protecting asks nothing; unprotecting says what it turns off. */
+  private async toggleProtected(kube: TeleportKubeCluster): Promise<void> {
+    if (
+      kube.protected &&
+      !(await this.dialogs.confirm({
+        title: `Stop protecting ${kube.name}?`,
+        message: 'Actions on it will no longer ask for its name, and agents with mutations allowed can run them.',
+        confirmLabel: 'Stop protecting',
+        danger: true,
+      }))
+    )
+      return;
+    try {
+      await this.actions.setKubeProtected(kube.proxy, kube.name, !kube.protected);
+      this.kubes.reload();
+    } catch (err) {
+      this.toasts.error(err);
+    }
   }
 
   protected refresh(): void {
