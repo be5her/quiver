@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { connect, createServer } from 'node:net';
-import { QuiverError, isLoginRequiredMessage, newId, normalizeProxy, nowIso, sameProxy, tokenizeShell, type TeleportTunnel } from '@quiver/core';
+import { QuiverError, isBrowserLoginLine, isLoginRequiredMessage, newId, normalizeProxy, nowIso, sameProxy, tokenizeShell, type TeleportTunnel } from '@quiver/core';
 import { lineSplitter, type TshCommand } from './tsh';
 
 /** `dbName` is the database inside the server, which tsh needs (`--db-name`) for PostgreSQL. */
@@ -17,6 +17,8 @@ interface LiveTunnel {
   /** Resolves once the port accepts TCP, rejects when the process dies first. */
   ready: Promise<void>;
   graceTimer: ReturnType<typeof setTimeout> | null;
+  /** tsh started a login of its own (its certificate ended under it) and was stopped for it. */
+  loginPrompted: boolean;
 }
 
 export interface TunnelManagerOptions {
@@ -25,6 +27,11 @@ export interface TunnelManagerOptions {
   /** Throws TELEPORT_LOGIN_REQUIRED when the cluster cannot back a tunnel; returns the canonical proxy. */
   requireSession(proxy: string): Promise<string>;
   onChange(): void;
+  /**
+   * A Teleport tunnel's tsh started a login of its own: its certificate ended while it ran, which the certificate guard
+   * is there to prevent. The tunnel is stopped; this lets the session read the status again.
+   */
+  onLoginPrompt?(proxy: string): void;
   /** How long a tunnel outlives its last user before it is stopped. */
   graceMs?: number;
   readyTimeoutMs?: number;
@@ -225,11 +232,20 @@ export class TunnelManager {
       exited: false,
       ready: Promise.resolve(),
       graceTimer: null,
+      loginPrompted: false,
     };
     const push = (line: string) => {
       if (!line.trim()) return;
       live.output.push(line);
       if (live.output.length > OUTPUT_TAIL) live.output.splice(0, live.output.length - OUTPUT_TAIL);
+      // tsh logging in by itself has already opened the system browser; stopping it keeps that from repeating on every
+      // connection, and the next use goes through Quiver's login instead.
+      if (spec.kind === 'teleport' && !live.loginPrompted && isBrowserLoginLine(line)) {
+        live.loginPrompted = true;
+        console.warn(`[quiver] teleport: the tunnel for ${live.info.target} started a login of its own; stopping it`);
+        if (!live.exited) live.child.kill();
+        this.opts.onLoginPrompt?.(proxy);
+      }
     };
     child.stdout?.on('data', lineSplitter(push));
     child.stderr?.on('data', lineSplitter(push));
@@ -244,7 +260,7 @@ export class TunnelManager {
         const text = live.output.join('\n');
         const detail = live.output.findLast((l) => /error/i.test(l)) ?? live.output[live.output.length - 1] ?? `exited with code ${code ?? 'null'}`;
         const message = detail.replace(/^ERROR:\s*/i, '');
-        exitError = isLoginRequiredMessage(text)
+        exitError = live.loginPrompted || isLoginRequiredMessage(text)
           ? new QuiverError('TELEPORT_LOGIN_REQUIRED', `Teleport tunnel for ${live.info.target} could not start: ${message}`, { output: live.output, proxy })
           : new QuiverError('REQUEST_FAILED', `Tunnel for ${live.info.target} exited: ${message}`, { output: live.output, code, proxy });
         reject(exitError);

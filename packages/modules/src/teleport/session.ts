@@ -3,6 +3,7 @@ import {
   QuiverError,
   aggregateState,
   buildClusters,
+  certificateEnding,
   clusterLabel,
   findCluster,
   isAutoRenewOn,
@@ -42,12 +43,20 @@ export interface SessionOptions {
    * (the CLI), where logins use the system browser.
    */
   signInWindow?(options: { proxy: string; url: string; reveal(): boolean; onReveal(): void; signal: AbortSignal }): Promise<boolean>;
+  /**
+   * A cluster's certificate is about to end (see `TELEPORT_CERT_GUARD_MS`): stop what runs tsh on it (database tunnels),
+   * before that tsh finds it expired and logs in by itself in the system browser. Called once per certificate.
+   */
+  onCertificateEnding?(proxy: string): Promise<void> | void;
+  /** How often the certificate guard looks at the clock (default 10 s); read again for every look. */
+  guardMs?: number | (() => number | undefined);
 }
 
 const LOGIN_TIMEOUT_MS = 5 * 60_000;
 const LOGIN_OUTPUT_TAIL = 40;
 const STATUS_FRESH_MS = 20_000;
 const DEFAULT_POLL_MS = 60_000;
+const DEFAULT_GUARD_MS = 10_000;
 
 interface LoginRun {
   proxy: string;
@@ -110,11 +119,19 @@ export class TeleportSession {
    * window to be in front, like a renewal that opens the system browser.
    */
   private readonly needsUser = new Set<string>();
+  /** Certificates (`<proxy>|<validUntil>`) whose end the guard already acted on. */
+  private readonly guarded = new Set<string>();
+  /**
+   * Looks at the clock, not at `tsh status`: a certificate ends at its time even when no poll runs then (timers run
+   * late after the computer slept, so the guard checks often rather than once at the end).
+   */
+  private guardTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private readonly opts: SessionOptions) {}
 
   async start(): Promise<TeleportStatus> {
     this.started = true;
+    this.scheduleGuard();
     return this.refresh();
   }
 
@@ -122,7 +139,56 @@ export class TeleportSession {
     this.started = false;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
+    if (this.guardTimer) clearTimeout(this.guardTimer);
+    this.guardTimer = null;
     this.cancelLogin();
+  }
+
+  private scheduleGuard(): void {
+    if (!this.started || this.guardTimer) return;
+    const configured = typeof this.opts.guardMs === 'function' ? this.opts.guardMs() : this.opts.guardMs;
+    const ms = configured && configured >= 100 ? configured : DEFAULT_GUARD_MS;
+    this.guardTimer = setTimeout(() => {
+      this.guardTimer = null;
+      this.guardCertificates();
+      this.scheduleGuard();
+    }, ms);
+    this.guardTimer.unref?.();
+  }
+
+  /**
+   * Act once on every certificate within the guard of its end: whatever runs tsh on it is stopped before that tsh finds
+   * it expired and opens the system browser. The next use goes through `requireSession`, which refuses it, so the login
+   * is Quiver's own (Sign in inside Quiver when that is on). Returns whether a certificate of `proxy` is ending.
+   */
+  private guardCertificates(proxy?: string): boolean {
+    const now = Date.now();
+    const current = new Set<string>();
+    let ending = false;
+    for (const cluster of this.status.clusters) {
+      if (!cluster.validUntil) continue;
+      const key = certificateKey(cluster);
+      current.add(key);
+      if (!certificateEnding(cluster.validUntil, now)) continue;
+      if (proxy !== undefined && sameProxy(cluster.proxy, proxy)) ending = true;
+      if (this.guarded.has(key)) continue;
+      this.guarded.add(key);
+      console.log(`[quiver] teleport certificate for ${clusterLabel(cluster)} ends ${cluster.validUntil}; stopping what uses it`);
+      void Promise.resolve()
+        .then(() => this.opts.onCertificateEnding?.(cluster.proxy))
+        .catch((err: Error) => console.warn(`[quiver] teleport: stopping what uses ${cluster.proxy} failed: ${err.message}`));
+    }
+    for (const key of this.guarded) if (!current.has(key)) this.guarded.delete(key);
+    return ending;
+  }
+
+  /**
+   * Throw TELEPORT_LOGIN_REQUIRED when the cluster's certificate is within the guard of its end, from what the last
+   * status read said, without running tsh (cheap enough for every query). A cluster not known is left to the caller.
+   */
+  assertCertificate(proxy: string): void {
+    const cluster = findCluster(this.status.clusters, proxy);
+    if (cluster && this.guardCertificates(cluster.proxy)) throw certificateEndingError(cluster);
   }
 
   private pollInterval(): number {
@@ -232,6 +298,7 @@ export class TeleportSession {
     }
     if (signature(this.status) !== before) this.opts.onChange('status');
     this.scheduleNext();
+    this.guardCertificates();
     this.considerRenewal();
     return this.getStatus();
   }
@@ -429,6 +496,9 @@ export class TeleportSession {
     switch (cluster.state) {
       case 'logged-in':
       case 'expiring':
+        // The status said valid, but the clock decides: tsh started on a certificate this close to its end would log in
+        // by itself in the system browser once it ends.
+        if (this.guardCertificates(cluster.proxy)) throw certificateEndingError(cluster);
         return cluster;
       case 'expired':
         throw new QuiverError('TELEPORT_LOGIN_REQUIRED', `Your Teleport certificate for ${clusterLabel(cluster)} has expired. Log in again.`, { proxy: cluster.proxy });
@@ -646,6 +716,15 @@ export class TeleportSession {
     }
     return run.stdout;
   }
+}
+
+function certificateEndingError(cluster: TeleportClusterStatus): QuiverError {
+  const ended = cluster.validUntil !== null && Date.parse(cluster.validUntil) <= Date.now();
+  return new QuiverError(
+    'TELEPORT_LOGIN_REQUIRED',
+    ended ? `Your Teleport certificate for ${clusterLabel(cluster)} has expired. Log in again.` : `Your Teleport certificate for ${clusterLabel(cluster)} ends in under a minute. Log in again.`,
+    { proxy: cluster.proxy },
+  );
 }
 
 /** One certificate of one cluster, so a decision about it ends when tsh has a new one. */

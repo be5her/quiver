@@ -1,4 +1,4 @@
-import { normalizeProxy, teleportSignInPartition, type HostApi } from '@quiver/core';
+import { QuiverError, isInAppSignInOn, normalizeProxy, teleportSignInPartition, type Caller, type HostApi } from '@quiver/core';
 import { KubeRunner } from './kube';
 import { KubeForwards } from './kube-forwards';
 import { TeleportSession } from './session';
@@ -24,6 +24,7 @@ export function getTeleport(host: HostApi): TeleportRuntime {
     tsh: () => session.tshCommand(),
     requireSession: async (proxy) => (await session.requireSession(proxy)).proxy,
     onChange: () => host.emit('teleport.changed', { reason: 'tunnels' }),
+    onLoginPrompt: () => void session.refresh().catch(() => {}),
     graceMs: 30_000,
   });
   const session = new TeleportSession({
@@ -39,6 +40,14 @@ export function getTeleport(host: HostApi): TeleportRuntime {
       forwards.noteRenewal(proxy);
       await tunnels.restartCluster(proxy);
     },
+    // A database tunnel whose certificate ends logs in by itself in the system browser on its next connection, so it
+    // stops first; the next query asks for a login through Quiver (see loginForUse). kubectl gets no such guard of its
+    // own: every kube query and port forward starts through requireSession, which refuses an ending certificate.
+    onCertificateEnding: async (proxy) => {
+      await tunnels.stopCluster(proxy);
+    },
+    // The smoke shortens the guard to see a certificate end; it sets this in the running process.
+    guardMs: () => Number(process.env.QUIVER_TELEPORT_GUARD_MS) || undefined,
     // Sign in inside Quiver needs a window to sign in with; the headless CLI has none and keeps the system browser.
     signInWindow: host.web
       ? ({ proxy, url, reveal, onReveal, signal }) =>
@@ -63,4 +72,22 @@ export function getTeleport(host: HostApi): TeleportRuntime {
   const forwards = new KubeForwards({ runner: kube, onChange: () => host.emit('teleport.kube.changed', { reason: 'forwards' }) });
   runtime = { session, tunnels, kube, forwards };
   return runtime;
+}
+
+/**
+ * Something the user reached for (a database query) found its cluster's certificate ended: log in through Quiver's own
+ * login and say whether to try once more. Only for the user's own requests, where a sign-in window may show, and only
+ * with Sign in inside Quiver on for that cluster, where the login is usually silent; a login in the system browser
+ * stays the user's click ("Log in again"). Everything else (agents, other errors) resolves false at once.
+ */
+export async function loginForUse(host: HostApi, caller: Caller, err: unknown): Promise<boolean> {
+  if (caller !== 'ui' || !host.web) return false;
+  if (!(err instanceof QuiverError) || err.code !== 'TELEPORT_LOGIN_REQUIRED') return false;
+  const proxy = (err.details as { proxy?: unknown } | undefined)?.proxy;
+  if (typeof proxy !== 'string' || !proxy.trim() || !isInAppSignInOn(host.config.get().teleport, proxy)) return false;
+  try {
+    return (await getTeleport(host).session.login(proxy)).ok;
+  } catch {
+    return false;
+  }
 }

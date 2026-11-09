@@ -54,6 +54,7 @@ import {
 import { z } from 'zod';
 import { COLLECTIONS, DriverPool, HISTORY_LOG, explainAccessError, getConnection, hasPassword, listConnections, readPassword, withTemporaryDriver, writePassword } from './connections';
 import { grafanaSessions } from '../grafana/sessions';
+import { loginForUse } from '../teleport/runtime';
 import { grafanaRedisDatasources, type Driver, type RedisDriverApi } from './drivers';
 
 const pool = new DriverPool();
@@ -62,9 +63,28 @@ function ws(ctx: CommandContext): WorkspaceApi {
   return ctx.workspace!;
 }
 
+/**
+ * Run `fn`, and once more when it stopped on an ended Teleport certificate that Quiver could log in again for (the
+ * user's own request with Sign in inside Quiver on, see `loginForUse`). Only opening a connection goes through here,
+ * never a statement, so nothing runs twice.
+ */
+async function retryAfterLogin<T>(ctx: CommandContext, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (!(await loginForUse(ctx.host, ctx.caller, err))) throw err;
+    return fn();
+  }
+}
+
+/** The pooled driver, logging in through Quiver first when its Teleport certificate ended (see `retryAfterLogin`). */
+function acquire(ctx: CommandContext, connectionId: string): ReturnType<DriverPool['acquire']> {
+  return retryAfterLogin(ctx, () => pool.acquire(ws(ctx), ctx.host, connectionId));
+}
+
 /** Acquire the pooled driver and translate tunnel/certificate failures into TELEPORT_LOGIN_REQUIRED. */
 async function withDriver<T>(ctx: CommandContext, connectionId: string, fn: (driver: Driver, connection: DbConnectionSummary) => Promise<T>): Promise<T> {
-  const { connection, driver } = await pool.acquire(ws(ctx), ctx.host, connectionId);
+  const { connection, driver } = await acquire(ctx, connectionId);
   try {
     return await fn(driver, connection);
   } catch (err) {
@@ -228,7 +248,7 @@ const connectionTest = defineCommand({
       const draft = checkedAccess(DbConnectionSchema.parse({ ...newDbConnection(input.connection.kind), ...input.connection, id: input.connection.id ?? 'draft' }));
       // Reuse the stored password when editing an existing connection and the field was left untouched.
       const password = input.password ?? (input.connection.id ? await readPassword(w, ctx.host, input.connection.id) : '');
-      serverVersion = (await withTemporaryDriver(draft, password, w, ctx.host, (d) => d.ping())).serverVersion;
+      serverVersion = (await retryAfterLogin(ctx, () => withTemporaryDriver(draft, password, w, ctx.host, (d) => d.ping()))).serverVersion;
     } else if (input.id) {
       serverVersion = (await withDriver(ctx, input.id, (d) => d.ping())).serverVersion;
     } else {
@@ -268,13 +288,13 @@ const connectionDatabases = defineCommand({
     } else {
       throw new QuiverError('INVALID_INPUT', 'Provide id or connection');
     }
-    if (draft.kind === 'mysql') return withTemporaryDriver({ ...draft, database: '' }, password, w, ctx.host, (d) => d.databases());
+    if (draft.kind === 'mysql') return retryAfterLogin(ctx, () => withTemporaryDriver({ ...draft, database: '' }, password, w, ctx.host, (d) => d.databases()));
     if (draft.kind !== 'postgres') throw new QuiverError('INVALID_INPUT', `A ${draft.kind} connection has no databases to pick from`);
     const names = [...new Set([draft.database.trim(), ...POSTGRES_MAINTENANCE_DATABASES].filter(Boolean))];
     let firstRefusal: unknown;
     for (const database of names) {
       try {
-        return await withTemporaryDriver({ ...draft, database }, password, w, ctx.host, (d) => d.serverDatabases!());
+        return await retryAfterLogin(ctx, () => withTemporaryDriver({ ...draft, database }, password, w, ctx.host, (d) => d.serverDatabases!()));
       } catch (err) {
         const code = err instanceof QuiverError ? (err.details as { code?: unknown } | undefined)?.code : undefined;
         if (typeof code !== 'string' || !DATABASE_UNAVAILABLE.has(code)) throw err;
@@ -449,7 +469,7 @@ const tableApply = defineCommand({
     preview: z.boolean().default(false),
   }),
   handler: async ({ connectionId, table, database, edits, preview }, ctx): Promise<DbTableApplyResult> => {
-    const { connection, driver } = await pool.acquire(ws(ctx), ctx.host, connectionId);
+    const { connection, driver } = await acquire(ctx, connectionId);
     requireSql(connection);
     const kind = connection.kind as 'mysql' | 'postgres' | 'sqlite';
     const planned = edits.map((edit) => ({ edit, statement: buildTableEdits(kind, table, database, [edit])[0] ?? null })).filter((p): p is { edit: DbTableEdit; statement: string } => p.statement !== null);
@@ -537,7 +557,7 @@ const queryRun = defineCommand({
   input: RunInput,
   handler: async (input, ctx): Promise<DbQueryResult[]> => {
     const w = ws(ctx);
-    const { connection, driver } = await pool.acquire(w, ctx.host, input.connectionId);
+    const { connection, driver } = await acquire(ctx, input.connectionId);
     const started = performance.now();
     const entry: DbHistoryEntry = {
       id: newId(),
@@ -599,7 +619,7 @@ const transaction = defineCommand({
   input: ConnectionIdInput.extend({ action: z.enum(['begin', 'commit', 'rollback']) }),
   handler: async ({ connectionId, action }, ctx): Promise<{ inTransaction: boolean }> => {
     const w = ws(ctx);
-    const { connection, driver } = await pool.acquire(w, ctx.host, connectionId);
+    const { connection, driver } = await acquire(ctx, connectionId);
     requireSql(connection);
     const inTransaction = pool.isInTransaction(w.id, connection.id);
     if (action === 'begin' && inTransaction) return { inTransaction: true };
@@ -694,7 +714,7 @@ const exportRows = defineCommand({
   }),
   handler: async (input, ctx): Promise<DbExportResult> => {
     const w = ws(ctx);
-    const { connection, driver } = await pool.acquire(w, ctx.host, input.connectionId);
+    const { connection, driver } = await acquire(ctx, input.connectionId);
     requireSql(connection);
     const kind = connection.kind as 'mysql' | 'postgres' | 'sqlite';
     let columns: { name: string }[];

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { tokenizeShell } from '../curl';
 import {
   aggregateState,
+  certificateEnding,
   buildClusters,
   dbKindForProtocol,
   findCluster,
@@ -336,5 +337,20 @@ describe('sign in inside Quiver', () => {
     expect(teleportSignInPartition('a-b.example.com')).not.toBe(teleportSignInPartition('a.b.example.com'));
     expect(teleportSignInPartition('https://a.example.com:443/')).toBe(teleportSignInPartition(a));
     expect(teleportSignInPartition('b.example.com:443')).not.toBe(teleportSignInPartition(a));
+  });
+});
+
+describe('certificate guard', () => {
+  const now = Date.parse('2026-11-09T12:00:00Z');
+  it('counts a certificate within the guard of its end, or past it, as ending', () => {
+    expect(certificateEnding('2026-11-09T12:00:30Z', now)).toBe(true);
+    expect(certificateEnding('2026-11-09T11:00:00Z', now)).toBe(true);
+    expect(certificateEnding('2026-11-09T12:01:00Z', now)).toBe(true);
+    expect(certificateEnding('2026-11-09T12:01:01Z', now)).toBe(false);
+    expect(certificateEnding('2026-11-09T20:00:00Z', now)).toBe(false);
+  });
+  it('does not guess without an expiry', () => {
+    expect(certificateEnding(null, now)).toBe(false);
+    expect(certificateEnding('soon', now)).toBe(false);
   });
 });

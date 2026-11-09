@@ -200,6 +200,8 @@ export class DriverPool {
     const pool = this.poolFor(ws.id);
     const existing = pool.get(connectionId);
     if (existing && existing.updatedAt === connection.updatedAt && existing.driver.isAlive()) {
+      // Its tunnel's tsh must not meet an ended certificate: it would log in by itself in the system browser.
+      if (connection.access.type === 'teleport') getTeleport(host).session.assertCertificate(connection.access.proxy);
       return { connection, driver: existing.driver };
     }
     if (existing) {

@@ -19,6 +19,8 @@ export interface FakeTshState {
   idpDelayMs?: number;
 }
 
+export type SsoEvent = 'form' | 'signed-in' | 'silent' | 'callback' | 'tunnel-relogin';
+
 export interface FakeTsh {
   /** Value for the `tshPath` setting: `"<node>" "<script>"`, tokenized by Quiver into argv. */
   command: string;
@@ -38,9 +40,10 @@ export interface FakeTsh {
   /**
    * What the fake identity provider behind `tsh login --browser=none` saw, in order: `form` (it asked the user to sign
    * in), `signed-in` (the form was sent and it set its cookie), `silent` (its cookie let the login through without a
-   * form) and `callback` (the browser came back to tsh, which then logs in).
+   * form) and `callback` (the browser came back to tsh, which then logs in). `tunnel-relogin`: a `proxy db` tunnel got a
+   * connection after its certificate expired and logged in by itself, which with the real tsh opens the system browser.
    */
-  ssoEvents(): Promise<{ event: 'form' | 'signed-in' | 'silent' | 'callback'; proxy: string }[]>;
+  ssoEvents(): Promise<{ event: SsoEvent; proxy: string }[]>;
   /** Stands in for the user's `~/.kube/config`; the smoke points KUBECONFIG at it. */
   homeKubeconfig: string;
   /** Every `tsh kubectl` call the fake received: argv after `kubectl`, the KUBECONFIG it ran with, and the pid of the second process that ran it. */
@@ -118,7 +121,7 @@ export async function writeFakeTsh(dir: string, redisPort: number): Promise<Fake
       return text
         .split('\n')
         .filter(Boolean)
-        .map((l) => JSON.parse(l) as { event: 'form' | 'signed-in' | 'silent' | 'callback'; proxy: string });
+        .map((l) => JSON.parse(l) as { event: SsoEvent; proxy: string });
     },
     homeKubeconfig,
     kubectlCalls: async () => {
@@ -415,8 +418,9 @@ function kubectl(argv) {
   process.exit(1);
 }
 
-function forward(port, target, onListen) {
+function forward(port, target, onListen, refuse) {
   const server = net.createServer((sock) => {
+    if (refuse && refuse()) { sock.destroy(); return; }
     const up = net.connect(target, '127.0.0.1');
     sock.pipe(up).pipe(sock);
     sock.on('error', () => up.destroy());
@@ -562,7 +566,17 @@ switch (args[0]) {
     if (!entry || db === 'broken-db') { err('ERROR: database "' + db + '" not found, use tsh db ls'); process.exit(1); }
     if (!port || !user || !args.includes('--tunnel')) { err('ERROR: --tunnel, --port and --db-user are required'); process.exit(1); }
     if (entry.spec.protocol === 'postgres' && !flag('db-name')) { err('ERROR: please provide the database name using the --db-name flag, allowed database names for ' + db + ': [*]'); process.exit(1); }
-    forward(port, REDIS_PORT, () => out('Started authenticated tunnel for the ' + entry.spec.protocol + ' database "' + db + '" in cluster "' + sel.p.cluster + '" on 127.0.0.1:' + port + '.'));
+    // Like the real tsh: a connection after the certificate expired makes the tunnel log in by itself, which opens the
+    // system browser. Quiver must never let a tunnel get there; the smoke counts these as 'tunnel-relogin'.
+    const relogin = () => {
+      const now = read().profiles[sel.proxy];
+      if (now && !expired(now)) return false;
+      fs.appendFileSync(SSO_FILE, JSON.stringify({ event: 'tunnel-relogin', proxy: sel.proxy }) + '\n');
+      err('If browser window does not open automatically, open it by clicking on the link:');
+      err(' http://127.0.0.1:61234/relogin');
+      return true;
+    };
+    forward(port, REDIS_PORT, () => out('Started authenticated tunnel for the ' + entry.spec.protocol + ' database "' + db + '" in cluster "' + sel.p.cluster + '" on 127.0.0.1:' + port + '.'), relogin);
     break;
   }
   case 'kubectl':

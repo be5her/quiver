@@ -15,6 +15,21 @@ export type TeleportState = 'no-tsh' | TeleportClusterState;
 /** Certificates with less than this left count as "expiring soon". */
 export const TELEPORT_EXPIRING_SOON_MS = 30 * 60 * 1000;
 
+/**
+ * How long before a certificate ends Quiver stops using it. A tsh that Quiver started for something else (a database
+ * tunnel, kubectl's credentials) and that finds its certificate expired logs in by itself, which opens the system
+ * browser and bypasses Sign in inside Quiver. So tunnels stop and nothing new starts on a certificate this close to
+ * its end; the next use asks for a login through Quiver's own.
+ */
+export const TELEPORT_CERT_GUARD_MS = 60 * 1000;
+
+/** Whether a certificate is within the guard of its end (or past it). No expiry known: not ending. */
+export function certificateEnding(validUntil: string | null | undefined, now: number = Date.now(), guardMs: number = TELEPORT_CERT_GUARD_MS): boolean {
+  if (!validUntil) return false;
+  const end = Date.parse(validUntil);
+  return Number.isFinite(end) && end - guardMs <= now;
+}
+
 export interface TeleportClusterStatus {
   /** Proxy address, the cluster's identity in Quiver (settings, pins, connections, tunnels). */
   proxy: string;
