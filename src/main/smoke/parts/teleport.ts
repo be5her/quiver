@@ -1015,6 +1015,38 @@ export default definePart({
       process.env.QUIVER_TELEPORT_POLL_MS = '400';
       await run('teleport.status', { refresh: true }, null);
       check('teleport sign-in db: after that the next query logs in and runs again', pong(await ping('ui')) && clusterOf(await status(), first)?.state === 'logged-in');
+
+      // A connection whose proxy is a {{variable}}: the guard and the errors go by the cluster it resolves to, since no
+      // cluster is known by the variable's name. The query goes right after the status read, while its tunnel is still
+      // being stopped and the pooled driver may still look alive.
+      const envFile = path.join(t.folder, '.env');
+      const envBefore = await fs.readFile(envFile, 'utf8').catch(() => null);
+      await fs.writeFile(envFile, `TELEPORT_PROXY=${first}\n`, 'utf8');
+      const templated = await run<DbConnectionSummary>(
+        'db.connection.save',
+        { connection: { kind: 'redis', name: 'templated teleport', access: { type: 'teleport', proxy: '{{TELEPORT_PROXY}}', database: 'smoke-redis', dbUser: 'default' } } },
+        ws.id,
+      );
+      const pingTemplated = (caller: 'ui' | 'mcp') => host.invoke('db.query.run', { connectionId: templated.id, query: 'PING', record: false }, { caller, workspaceId: ws.id });
+      const templatedUp = pong(await pingTemplated('ui'));
+      await fakeTsh.expire(first);
+      await run('teleport.status', { refresh: true }, null);
+      const templatedAgent = await pingTemplated('mcp');
+      check(
+        'teleport sign-in db: a connection whose proxy is a {{variable}} is refused on an expired certificate naming the cluster it resolves to',
+        templatedUp && !templatedAgent.ok && templatedAgent.error.code === 'TELEPORT_LOGIN_REQUIRED' && (templatedAgent.error.details as { proxy?: unknown } | undefined)?.proxy === first,
+        { templatedUp, error: templatedAgent.ok ? 'ok?' : templatedAgent.error },
+      );
+      logins = (await loginArgs(first)).length;
+      const templatedUser = await pingTemplated('ui');
+      check(
+        'teleport sign-in db: a query on it logs in through Quiver for that cluster and runs',
+        pong(templatedUser) && (await loginArgs(first)).length === logins + 1 && (await relogins()) === reloginsBefore + 1,
+        { query: templatedUser.ok || templatedUser.error, logins: (await loginArgs(first)).length - logins, relogins: (await relogins()) - reloginsBefore },
+      );
+      await run('db.connection.delete', { id: templated.id }, ws.id);
+      if (envBefore === null) await fs.rm(envFile, { force: true });
+      else await fs.writeFile(envFile, envBefore, 'utf8');
       delete process.env.QUIVER_TELEPORT_GUARD_MS;
 
       const mcpInApp = await rpc('tools/call', { name: 'teleport_cluster_inAppSignIn', arguments: { proxy: first, enabled: false } });
