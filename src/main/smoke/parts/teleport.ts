@@ -947,6 +947,108 @@ export default definePart({
       await signInAtForm(since);
       check('teleport sign-in: logging in again after a cancel works', (await again).ok);
 
+      // Databases: a tunnel's own tsh that meets an ended certificate logs in by itself in the system browser, outside
+      // Sign in inside Quiver. Quiver stops the tunnel first, and the next query logs in through Quiver's login.
+      process.env.QUIVER_TELEPORT_GUARD_MS = '200';
+      const redisTunnel = async () => (await status()).tunnels.find((t) => t.target === 'smoke-redis' && t.proxy === first) ?? null;
+      const relogins = async () => (await fakeTsh.ssoEvents()).filter((e) => e.event === 'tunnel-relogin').length;
+      const ping = (caller: 'ui' | 'mcp') => host.invoke('db.query.run', { connectionId: teleportConn.id, query: 'PING', record: false }, { caller, workspaceId: ws.id });
+      const pong = (out: Awaited<ReturnType<typeof ping>>) => out.ok && (out.result as DbQueryResult[])[0]?.value === 'PONG';
+      const reloginsBefore = await relogins();
+      check('teleport sign-in db: a query through the first cluster runs with its tunnel up', pong(await ping('ui')) && (await redisTunnel()) !== null);
+
+      // Thirty seconds left: inside the guard, so the tunnel stops; the query logs in again (a valid certificate is reissued).
+      await fakeTsh.setValidUntil(first, new Date(Date.now() + 30_000));
+      await run('teleport.status', { refresh: true }, null);
+      const guardStopped = await until(async () => (await redisTunnel()) === null, 3000);
+      let logins = (await loginArgs(first)).length;
+      const nearEnd = await ping('ui');
+      check(
+        'teleport sign-in db: a certificate about to end stops its database tunnel, and the next query logs in through Quiver and runs',
+        guardStopped && pong(nearEnd) && (await loginArgs(first)).length === logins + 1 && (await relogins()) === reloginsBefore,
+        { guardStopped, query: nearEnd.ok || nearEnd.error, logins: (await loginArgs(first)).length - logins, relogins: (await relogins()) - reloginsBefore },
+      );
+
+      // Expired: the query's login goes through the Quiver window on the kept sign-in, without a form or the system browser.
+      await fakeTsh.expire(first);
+      await run('teleport.status', { refresh: true }, null);
+      await until(async () => (await redisTunnel()) === null, 3000);
+      logins = (await loginArgs(first)).length;
+      since = await ssoCount();
+      const afterExpiry = await ping('ui');
+      check(
+        'teleport sign-in db: a query on an expired certificate signs in inside Quiver (kept sign-in, no form) and then runs',
+        pong(afterExpiry) &&
+          ((await loginArgs(first)).at(-1) ?? []).includes('--browser=none') &&
+          (await loginArgs(first)).length === logins + 1 &&
+          JSON.stringify(await ssoSince(since)) === JSON.stringify(['silent', 'callback']) &&
+          (await relogins()) === reloginsBefore &&
+          (await until(() => signInWindows().length === 0, 3000)),
+        { query: afterExpiry.ok || afterExpiry.error, events: await ssoSince(since), logins: (await loginArgs(first)).length - logins },
+      );
+
+      // An agent's query does not start a login: it gets TELEPORT_LOGIN_REQUIRED, as before.
+      await fakeTsh.expire(first);
+      await run('teleport.status', { refresh: true }, null);
+      logins = (await loginArgs(first)).length;
+      const agentQuery = await ping('mcp');
+      check(
+        'teleport sign-in db: a query from an agent on an expired certificate is refused with TELEPORT_LOGIN_REQUIRED and starts no login',
+        !agentQuery.ok && agentQuery.error.code === 'TELEPORT_LOGIN_REQUIRED' && (await loginArgs(first)).length === logins,
+        agentQuery.ok ? 'ok?' : agentQuery.error,
+      );
+
+      // A tunnel whose tsh logs in by itself anyway (its certificate ended before Quiver saw it) is stopped at once.
+      await run<TeleportLoginResult>('teleport.login', { proxy: first }, null);
+      check('teleport sign-in db: the query brings its tunnel back once logged in', pong(await ping('ui')) && (await redisTunnel()) !== null);
+      process.env.QUIVER_TELEPORT_POLL_MS = '60000';
+      await run('teleport.status', { refresh: true }, null);
+      const running = await redisTunnel();
+      await fakeTsh.expire(first);
+      await readBanner(running?.port ?? 0);
+      const backstop = await until(async () => (await redisTunnel()) === null, 3000);
+      check(
+        'teleport sign-in db: a tunnel whose tsh starts a login of its own is stopped at once',
+        Boolean(running) && backstop && (await relogins()) === reloginsBefore + 1,
+        { running: Boolean(running), backstop, relogins: (await relogins()) - reloginsBefore },
+      );
+      process.env.QUIVER_TELEPORT_POLL_MS = '400';
+      await run('teleport.status', { refresh: true }, null);
+      check('teleport sign-in db: after that the next query logs in and runs again', pong(await ping('ui')) && clusterOf(await status(), first)?.state === 'logged-in');
+
+      // A connection whose proxy is a {{variable}}: the guard and the errors go by the cluster it resolves to, since no
+      // cluster is known by the variable's name. The query goes right after the status read, while its tunnel is still
+      // being stopped and the pooled driver may still look alive.
+      const envFile = path.join(t.folder, '.env');
+      const envBefore = await fs.readFile(envFile, 'utf8').catch(() => null);
+      await fs.writeFile(envFile, `TELEPORT_PROXY=${first}\n`, 'utf8');
+      const templated = await run<DbConnectionSummary>(
+        'db.connection.save',
+        { connection: { kind: 'redis', name: 'templated teleport', access: { type: 'teleport', proxy: '{{TELEPORT_PROXY}}', database: 'smoke-redis', dbUser: 'default' } } },
+        ws.id,
+      );
+      const pingTemplated = (caller: 'ui' | 'mcp') => host.invoke('db.query.run', { connectionId: templated.id, query: 'PING', record: false }, { caller, workspaceId: ws.id });
+      const templatedUp = pong(await pingTemplated('ui'));
+      await fakeTsh.expire(first);
+      await run('teleport.status', { refresh: true }, null);
+      const templatedAgent = await pingTemplated('mcp');
+      check(
+        'teleport sign-in db: a connection whose proxy is a {{variable}} is refused on an expired certificate naming the cluster it resolves to',
+        templatedUp && !templatedAgent.ok && templatedAgent.error.code === 'TELEPORT_LOGIN_REQUIRED' && (templatedAgent.error.details as { proxy?: unknown } | undefined)?.proxy === first,
+        { templatedUp, error: templatedAgent.ok ? 'ok?' : templatedAgent.error },
+      );
+      logins = (await loginArgs(first)).length;
+      const templatedUser = await pingTemplated('ui');
+      check(
+        'teleport sign-in db: a query on it logs in through Quiver for that cluster and runs',
+        pong(templatedUser) && (await loginArgs(first)).length === logins + 1 && (await relogins()) === reloginsBefore + 1,
+        { query: templatedUser.ok || templatedUser.error, logins: (await loginArgs(first)).length - logins, relogins: (await relogins()) - reloginsBefore },
+      );
+      await run('db.connection.delete', { id: templated.id }, ws.id);
+      if (envBefore === null) await fs.rm(envFile, { force: true });
+      else await fs.writeFile(envFile, envBefore, 'utf8');
+      delete process.env.QUIVER_TELEPORT_GUARD_MS;
+
       const mcpInApp = await rpc('tools/call', { name: 'teleport_cluster_inAppSignIn', arguments: { proxy: first, enabled: false } });
       check('mcp blocks teleport_cluster_inAppSignIn by default', mcpInApp.result?.isError === true && (mcpInApp.result.content?.[0]?.text ?? '').includes('MUTATION_BLOCKED') && host.config.get().teleport.inAppSignIn.includes(first));
 

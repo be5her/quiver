@@ -182,6 +182,7 @@ interface PooledDriver {
   updatedAt: string;
   /** Tunnel user key, when the connection goes through one. */
   accessUser: string | null;
+  /** The access the driver was opened with, its `{{variables}}` resolved: the cluster and tunnel it really runs on. */
   access: DbConnection['access'];
   /** Set by `db.transaction begin`, cleared by commit, rollback or a reopen. */
   inTransaction: boolean;
@@ -195,12 +196,19 @@ export class DriverPool {
   private readonly pools = new Map<string, Map<string, PooledDriver>>();
   private readonly opening = new Map<string, Promise<PooledDriver>>();
 
+  /**
+   * The pooled driver and its connection, whose access comes back as the driver was opened with (`{{variables}}`
+   * resolved), so a failure on it is explained against the cluster and tunnel it really uses, not the template.
+   */
   async acquire(ws: WorkspaceApi, host: HostApi, connectionId: string): Promise<{ connection: DbConnectionSummary; driver: Driver }> {
     const connection = await getConnection(ws, connectionId);
     const pool = this.poolFor(ws.id);
     const existing = pool.get(connectionId);
     if (existing && existing.updatedAt === connection.updatedAt && existing.driver.isAlive()) {
-      return { connection, driver: existing.driver };
+      // Its tunnel's tsh must not meet an ended certificate: it would log in by itself in the system browser. The pooled
+      // access names the cluster the tunnel runs on; the stored one may be a {{variable}} no cluster is known by.
+      if (existing.access.type === 'teleport') getTeleport(host).session.assertCertificate(existing.access.proxy);
+      return { connection: { ...connection, access: existing.access }, driver: existing.driver };
     }
     if (existing) {
       pool.delete(connectionId);
@@ -213,22 +221,23 @@ export class DriverPool {
       pending = (async () => {
         const password = await readPassword(ws, host, connectionId);
         const accessUser = connection.access.type === 'direct' || connection.access.type === 'grafana' ? null : key;
-        const effective = await resolveAccess(await resolvedConnection(connection, ws, host), host, key);
+        const resolved = await resolvedConnection(connection, ws, host);
+        const effective = await resolveAccess(resolved, host, key);
         const driver = createDriver(effective, password, ws.path, host);
         try {
           await driver.connect();
         } catch (err) {
           if (accessUser) await releaseAccess(connection, host, accessUser, false);
-          throw await explainAccessError(host, connection, err);
+          throw await explainAccessError(host, resolved, err);
         }
-        const pooled: PooledDriver = { driver, updatedAt: connection.updatedAt, accessUser, access: connection.access, inTransaction: false };
+        const pooled: PooledDriver = { driver, updatedAt: connection.updatedAt, accessUser, access: resolved.access, inTransaction: false };
         pool.set(connectionId, pooled);
         return pooled;
       })().finally(() => this.opening.delete(key));
       this.opening.set(key, pending);
     }
     const pooled = await pending;
-    return { connection, driver: pooled.driver };
+    return { connection: { ...connection, access: pooled.access }, driver: pooled.driver };
   }
 
   /** Close the live driver. `immediate` also stops its tunnel now instead of after the grace period. */
@@ -289,13 +298,15 @@ export class DriverPool {
 export async function withTemporaryDriver<T>(connection: DbConnection, password: string, ws: WorkspaceApi, host: HostApi, fn: (driver: Driver) => Promise<T>): Promise<T> {
   const user = `temp/${newId()}`;
   const workspacePath = ws.path;
-  const effective = await resolveAccess(await resolvedConnection(connection, ws, host), host, user);
+  const resolved = await resolvedConnection(connection, ws, host);
+  const effective = await resolveAccess(resolved, host, user);
   const driver = createDriver(effective, password, workspacePath, host);
   try {
     await driver.connect();
     return await fn(driver);
   } catch (err) {
-    throw await explainAccessError(host, connection, err);
+    // The resolved connection, so the error names the cluster and tunnel, not a {{variable}}.
+    throw await explainAccessError(host, resolved, err);
   } finally {
     await driver.close().catch(() => {});
     // Keep the tunnel around briefly: Test is usually followed by Save and a first query.
