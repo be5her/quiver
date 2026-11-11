@@ -314,6 +314,17 @@ export class GrafanaRedisDriver implements RedisDriverApi {
     return { cursor: next, done: next === '0', keys: infos };
   }
 
+  /** Names only: SCAN in CLI mode, the plugin's TMSCAN (which also sends types, left unused) when the CLI is off. */
+  async scanNames(pattern: string, cursor: string, count: number): Promise<{ cursor: string; keys: string[] }> {
+    if (this.readOnly) {
+      const frames = await this.fixedOne({ command: 'tmscan', cursor: cursor || '0', match: pattern || '*', count });
+      return { cursor: String(grafanaFrameColumns(frames[1]).get('cursor')?.[0] ?? '0'), keys: (grafanaFrameColumns(frames[0]).get('key') ?? []).map(String) };
+    }
+    const reply = await this.cli(['SCAN', cursor || '0', 'MATCH', pattern || '*', 'COUNT', String(count)]);
+    if (!Array.isArray(reply) || typeof reply[0] !== 'string' || !Array.isArray(reply[1])) throw new QuiverError('REQUEST_FAILED', 'SCAN through Grafana gave an unexpected reply');
+    return { cursor: reply[0], keys: reply[1].map(String) };
+  }
+
   async keyDetail(key: string, limit: number): Promise<RedisKeyDetail> {
     return this.readOnly ? this.keyDetailReadOnly(key, limit) : this.keyDetailCli(key, limit);
   }

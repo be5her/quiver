@@ -38,6 +38,8 @@ export * from './pr-draft';
 export * from './runner-discover';
 export * from './ring-buffer';
 export * from './grafana-redis';
+export * from './redis-commands';
+export * from './redis-completion';
 export * from './sql';
 export * from './db-url';
 export * from './db-export';

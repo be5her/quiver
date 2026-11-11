@@ -172,6 +172,27 @@ export default definePart({
     check('db: redis.info boils INFO and DBSIZE down', redisInfo.version === '7.2.0-fake' && redisInfo.connectedClients === 3 && redisInfo.hitRate === 0.9 && (redisInfo.keys ?? 0) >= 6 && redisInfo.uptimeSeconds === 4242, redisInfo);
     const exact = await run<DbQueryResult[]>('db.redis.command', { connectionId: redis.id, commands: [['SET', 'smoke:multi', 'line one\nline "two"', 'EX', '120'], ['GET', 'smoke:multi'], ['TTL', 'smoke:multi']] }, ws.id);
     check('db: redis.command passes arguments exactly, line breaks and quotes included', exact[1].value === 'line one\nline "two"' && Number(exact[2].value) > 100, exact.map((r) => r.value));
+    // Key completion: names by SCAN MATCH <escaped prefix>*, capped.
+    {
+      const many = Array.from({ length: 12 }, (_, i) => ['SET', `smoke:many:${String(i).padStart(2, '0')}`, 'x']);
+      await run('db.redis.command', { connectionId: redis.id, commands: [['SET', 'smoke:glob*[1]?\\', 'x'], ['SET', 'smoke:globzz', 'x'], ...many] }, ws.id);
+      type Suggest = { keys: string[]; complete: boolean };
+      const users = await run<Suggest>('db.redis.suggest', { connectionId: redis.id, prefix: 'user:' }, ws.id);
+      const glob = await run<Suggest>('db.redis.suggest', { connectionId: redis.id, prefix: 'smoke:glob*[' }, ws.id);
+      const capped = await run<Suggest>('db.redis.suggest', { connectionId: redis.id, prefix: 'smoke:many:', limit: 5 }, ws.id);
+      const none = await run<Suggest>('db.redis.suggest', { connectionId: redis.id, prefix: 'nothing:' }, ws.id);
+      const agent = await host.invoke('db.redis.suggest', { connectionId: redis.id, prefix: 'user:' }, { caller: 'mcp', workspaceId: ws.id });
+      check(
+        'db: redis.suggest lists the keys starting with a prefix, escapes glob characters, stops at the limit and is open to agents',
+        users.complete && users.keys.join() === 'user:1,user:2' &&
+          glob.complete && glob.keys.join() === 'smoke:glob*[1]?\\' &&
+          !capped.complete && capped.keys.join() === 'smoke:many:00,smoke:many:01,smoke:many:02,smoke:many:03,smoke:many:04' &&
+          none.complete && none.keys.length === 0 &&
+          agent.ok,
+        { users, glob, capped, none, agent: agent.ok ? 'ok' : agent.error.message },
+      );
+      await run('db.redis.command', { connectionId: redis.id, commands: [['DEL', 'smoke:glob*[1]?\\', 'smoke:globzz', ...many.map((c) => c[1])]] }, ws.id);
+    }
     await fs.writeFile(path.join(folder, '.env'), `REDIS_HOST=127.0.0.1\n`, 'utf8');
     const templated = await run<DbConnectionSummary>('db.connection.save', { connection: { kind: 'redis', name: 'templated redis', host: '{{REDIS_HOST}}', port: fakeRedis.port }, password: 'hunter2' }, ws.id);
     const templatedTest = await run<DbConnectionTest>('db.connection.test', { id: templated.id }, ws.id);
@@ -314,6 +335,20 @@ export default definePart({
     const readOnlyHash = await run<RedisKeyDetail>('db.redis.key', { connectionId: readOnly.id, key: 'user:2' }, ws.id);
     const readOnlyInfo = await run<RedisInfo>('db.redis.info', { connectionId: readOnly.id }, ws.id);
     const readOnlyWrite = await outcome('db.redis.command', { connectionId: readOnly.id, commands: [['GET', 'user:1']] });
+    {
+      // Key completion through Grafana: SCAN in CLI mode, the plugin's TMSCAN with the CLI off.
+      type Suggest = { keys: string[]; complete: boolean };
+      await run('db.redis.command', { connectionId: grafanaRedis.id, commands: [['SET', 'smoke:g*lob', 'x'], ['SET', 'smoke:gxlob', 'x']] }, ws.id);
+      const cli = await run<Suggest>('db.redis.suggest', { connectionId: grafanaRedis.id, prefix: 'user:' }, ws.id);
+      const cliGlob = await run<Suggest>('db.redis.suggest', { connectionId: grafanaRedis.id, prefix: 'smoke:g*' }, ws.id);
+      const fixed = await run<Suggest>('db.redis.suggest', { connectionId: readOnly.id, prefix: 'smoke:g*' }, ws.id);
+      await run('db.redis.command', { connectionId: grafanaRedis.id, commands: [['DEL', 'smoke:g*lob', 'smoke:gxlob']] }, ws.id);
+      check(
+        'db: redis.suggest works through Grafana, with the CLI and with only the fixed commands, glob characters escaped',
+        cli.complete && cli.keys.join() === 'user:1,user:2' && cliGlob.keys.join() === 'smoke:g*lob' && fixed.complete && fixed.keys.join() === 'smoke:g*lob',
+        { cli, cliGlob, fixed },
+      );
+    }
     check(
       "db: with the data source's CLI turned off the key browser reads through the plugin's fixed commands and commands are refused",
       readOnlyTest.serverVersion === 'Redis 7.2.0-fake via Grafana (Redis-ReadOnly), read-only: CLI turned off' &&
@@ -768,6 +803,48 @@ export default definePart({
           await wait(500);
         }
         await shot('08-redis-dark');
+        // The Redis console completes command names with their syntax, and keys in a key position; picking one inserts it.
+        {
+          await js(`(() => { const rows = [...document.querySelectorAll('[role=button]')]; const at = rows.findIndex((r) => r.textContent.includes('smoke redis')); rows.slice(at).find((r) => r.textContent.trim() === 'Console')?.click(); })()`);
+          const consoleEditor = `[...document.querySelectorAll('.cm-content')].find((c) => c.offsetParent !== null && c.closest('q-query-tab'))`;
+          await until(async () => Boolean(await js(`Boolean(${consoleEditor})`)), 4000);
+          await js(`(${consoleEditor})?.focus()`);
+          const options = () => js(`[...document.querySelectorAll('.cm-tooltip-autocomplete li')].map((li) => [li.querySelector('.cm-completionLabel')?.textContent, li.querySelector('.cm-completionDetail')?.textContent ?? ''])`) as Promise<[string, string][]>;
+          const hint = () => js(`(() => { const el = document.querySelector('[data-testid=db-redis-hint]'); return el ? [...el.children].map((c) => c.textContent.trim()).join('|') : null; })()`);
+          const consoleText = () => js(`(${consoleEditor})?.textContent ?? null`);
+          typeText('hgetal');
+          await until(async () => (await options()).length > 0, 3000);
+          const commandOptions = await options();
+          await shot('08e-redis-console-command-dark');
+          pressEnter();
+          await wait(200);
+          const pickedCommand = await consoleText();
+          typeText(' ');
+          await wait(200);
+          const commandHint = await hint();
+          await js(`document.execCommand('selectAll'); document.execCommand('delete')`);
+          await js(`document.documentElement.classList.remove('dark')`);
+          typeText('GET us');
+          await until(async () => (await options()).some((o) => o[0] === 'user:1'), 4000);
+          const keyOptions = await options();
+          const keyHint = await hint();
+          await shot('08f-redis-console-keys-light');
+          pressEnter();
+          await wait(200);
+          const pickedKey = await consoleText();
+          check(
+            'ui: the Redis console completes commands with their syntax and keys after GET, and Enter inserts the pick',
+            commandOptions[0]?.[0] === 'HGETALL' &&
+              commandOptions[0]?.[1] === 'key' &&
+              pickedCommand === 'HGETALL' &&
+              commandHint === 'HGETALL key|Every field and value of a hash.' &&
+              keyOptions.map((o) => o[0]).join() === 'user:1,user:2' &&
+              keyHint === 'GET key|Get the value of a key.' &&
+              pickedKey === 'GET user:1',
+            { commandOptions: commandOptions.slice(0, 5), pickedCommand, commandHint, keyOptions, keyHint, pickedKey },
+          );
+          await js(`document.execCommand('selectAll'); document.execCommand('delete')`);
+        }
         // Redis through Grafana: the connection's Access section with the sign-in state and the data source picker, then the key browser over Grafana.
         {
           // Run alone, the host checks above end signed out; a full run leaves the Logs part's session behind.

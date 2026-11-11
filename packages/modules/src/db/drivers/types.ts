@@ -42,6 +42,8 @@ export interface Driver {
 
 export interface RedisDriverApi extends Driver {
   scanKeys(pattern: string, cursor: string, count: number): Promise<RedisScanResult>;
+  /** One SCAN page of key names only (no TYPE or TTL), for completion. */
+  scanNames(pattern: string, cursor: string, count: number): Promise<{ cursor: string; keys: string[] }>;
   keyDetail(key: string, limit: number): Promise<RedisKeyDetail>;
   info(): Promise<RedisInfo>;
   /** Commands as argument lists; see `run` for the console syntax. */
