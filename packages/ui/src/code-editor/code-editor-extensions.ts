@@ -1,4 +1,4 @@
-import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete';
+import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap, type CompletionSource } from '@codemirror/autocomplete';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import { html } from '@codemirror/lang-html';
 import { javascript } from '@codemirror/lang-javascript';
@@ -34,6 +34,7 @@ import { lookupVariable, type VariableContext } from '../variables/variables';
 export type CodeLanguage = 'json' | 'javascript' | 'html' | 'xml' | 'sql' | 'graphql' | 'text';
 export type SqlDialect = 'mysql' | 'postgres' | 'sqlite' | 'standard';
 export type { SQLNamespace };
+export type { Completion, CompletionContext, CompletionResult, CompletionSource } from '@codemirror/autocomplete';
 
 export interface EditorOptions {
   language: CodeLanguage;
@@ -48,6 +49,8 @@ export interface EditorOptions {
   sqlSchema?: SQLNamespace;
   sqlDefaultTable?: string;
   graphqlSchema?: GraphQLSchema | null;
+  /** Completion for a language without its own (a console): replaces nothing, since 'text' completes nothing else. */
+  completions?: CompletionSource | null;
   theme: 'light' | 'dark';
   variables: VariableContext | null;
   hover: VariableHover;
@@ -75,14 +78,15 @@ function languageExtension({ language, sqlDialect, sqlSchema, sqlDefaultTable, g
 }
 
 /** CodeMirror's basic setup, with the parts a one-line field or a read-only view does not want switched off. */
-function basicSetup({ language, readOnly, singleLine }: EditorOptions): Extension[] {
+function basicSetup({ language, readOnly, singleLine, completions }: EditorOptions): Extension[] {
   const keys: KeyBinding[] = [...closeBracketsKeymap, ...defaultKeymap, ...(singleLine ? [] : searchKeymap), ...historyKeymap, ...(singleLine ? [] : foldKeymap), ...completionKeymap, ...lintKeymap];
   const extensions: Extension[] = [];
   if (!singleLine) extensions.push(lineNumbers());
   extensions.push(highlightSpecialChars(), history());
   if (!singleLine) extensions.push(foldGutter());
   extensions.push(drawSelection(), dropCursor(), EditorState.allowMultipleSelections.of(true), indentOnInput(), syntaxHighlighting(defaultHighlightStyle, { fallback: true }), bracketMatching(), closeBrackets());
-  if ((language === 'sql' || language === 'graphql') && !readOnly) extensions.push(autocompletion());
+  if (completions && !readOnly) extensions.push(autocompletion({ override: [completions] }));
+  else if ((language === 'sql' || language === 'graphql') && !readOnly) extensions.push(autocompletion());
   extensions.push(rectangularSelection());
   if (!readOnly && !singleLine) extensions.push(highlightActiveLine());
   extensions.push(highlightSelectionMatches(), keymap.of(keys));

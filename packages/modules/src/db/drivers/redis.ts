@@ -178,6 +178,15 @@ export class RedisDriver implements RedisDriverApi {
     return { cursor: next, done: next === '0', keys: infos };
   }
 
+  async scanNames(pattern: string, cursor: string, count: number): Promise<{ cursor: string; keys: string[] }> {
+    try {
+      const [next, keys] = await this.c().scan(cursor, 'MATCH', pattern || '*', 'COUNT', count);
+      return { cursor: next, keys };
+    } catch (err) {
+      throw wrapError(err);
+    }
+  }
+
   async keyDetail(key: string, limit: number): Promise<RedisKeyDetail> {
     const client = this.c();
     const type = String(await this.call(['TYPE', key]));

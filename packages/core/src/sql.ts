@@ -472,6 +472,9 @@ const REDIS_READ_COMMANDS = new Set([
   'FT.SEARCH', 'FT.INFO', 'FT._LIST', 'TS.GET', 'TS.RANGE', 'TS.INFO',
 ]);
 
+/** The commands `redisCommandIsReadOnly` lets through (some only with a subcommand of `REDIS_READ_SUBCOMMANDS`). */
+export const REDIS_READ_COMMAND_NAMES: ReadonlySet<string> = REDIS_READ_COMMANDS;
+
 /**
  * The subcommands that only read, for the read commands that also have subcommands acting on the server: any other
  * subcommand (CLIENT KILL or UNBLOCK, DEBUG RELOAD, LOADAOF or PANIC, MEMORY PURGE, one added in a later Redis) writes.

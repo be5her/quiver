@@ -42,6 +42,7 @@ import { ExportMenu, type ExportSource } from './export-menu';
 import { firstLine, formatCount, formatDuration } from './db-format';
 import { KindIcon } from './kind-icon';
 import { QueryResultView } from './query-result-view';
+import { RedisCompleter, redisHintAt } from './redis-completion';
 
 const MAX_ROWS_OPTIONS = [100, 500, 1000, 5000];
 
@@ -161,6 +162,11 @@ export class QueryTab implements TabComponent, OnInit {
       : 'SELECT * FROM table_name WHERE id = {{id}} LIMIT 100;\n\nCtrl+Enter runs the selection, or everything when nothing is selected; Ctrl+Shift+Enter runs the statement under the cursor.',
   );
   protected readonly editorDialect = computed<SqlKind | 'standard'>(() => this.sqlKind() ?? 'standard');
+  /** The editor's cursor, for the Redis signature hint. */
+  protected readonly cursor = signal(0);
+  private readonly redisCompleter = new RedisCompleter(this.host, () => untracked(this.connectionId));
+  protected readonly completions = computed(() => (this.kind() === 'redis' ? this.redisCompleter.source : null));
+  protected readonly redisHint = computed(() => (this.kind() === 'redis' ? redisHintAt(this.text(), Math.min(this.cursor(), this.text().length)) : null));
 
   constructor() {
     // Fall back to the first connection so a fresh tab is immediately runnable.
@@ -212,6 +218,7 @@ export class QueryTab implements TabComponent, OnInit {
   protected pickConnection(event: Event): void {
     this.connectionId.set((event.target as HTMLSelectElement).value || null);
     this.database.set(null);
+    this.redisCompleter.clear();
   }
 
   protected pickDatabase(event: Event): void {
@@ -262,6 +269,7 @@ export class QueryTab implements TabComponent, OnInit {
       const out = await this.host.invoke<DbQueryResult[]>('db.query.run', { connectionId, query, database: this.database() || undefined, maxRows: this.maxRows() });
       this.results.set(out);
       this.lastRun.set(query);
+      if (writes) this.redisCompleter.clear();
       this.activeResult.set(String(Math.max(0, out.length - 1)));
     } catch (err) {
       const payload = toErrorPayload(err);
