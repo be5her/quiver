@@ -1,7 +1,7 @@
 import { NgTemplateOutlet } from '@angular/common';
-import { Component, computed, inject, input, linkedSignal, signal, untracked } from '@angular/core';
+import { Component, ElementRef, computed, inject, input, linkedSignal, signal, untracked, viewChild } from '@angular/core';
 import { FormField, form } from '@angular/forms/signals';
-import { PALETTES, isAutoRenewOn, isInAppSignInOn, resolvePalette, workspaceRulesFor, type AgentPermissionMode, type AgentPermissionRule, type GlobalConfig, type TeleportStatus, type Variable } from '@quiver/core';
+import { PALETTES, isAutoRenewOn, type BackgroundConfig, type BackgroundStatus, isInAppSignInOn, resolvePalette, workspaceRulesFor, type AgentPermissionMode, type AgentPermissionRule, type GlobalConfig, type TeleportStatus, type Variable } from '@quiver/core';
 import {
   AppState,
   Button,
@@ -33,12 +33,29 @@ interface NetworkView {
   hasPassword: boolean;
 }
 
-/** Settings: appearance, the MCP server and agent permissions, the command line, Teleport, the network, global variables and About. Saved in the global config. */
+/** The page's sections, in order; the navigation on the left lists them. */
+const SECTIONS = [
+  { key: 'appearance', title: 'Appearance' },
+  { key: 'background', title: 'Startup & background' },
+  { key: 'agents', title: 'Agents & MCP' },
+  { key: 'cli', title: 'Command line' },
+  { key: 'network', title: 'Network' },
+  { key: 'teleport', title: 'Teleport' },
+  { key: 'variables', title: 'Global variables' },
+  { key: 'about', title: 'Updates & about' },
+] as const;
+type SectionKey = (typeof SECTIONS)[number]['key'];
+
+/**
+ * Settings, one page of sections with a navigation beside it: appearance, startup and background, the MCP server and
+ * agent permissions, the command line, the network, Teleport, global variables, and updates and About. Saved in the
+ * global config.
+ */
 @Component({
   selector: 'q-settings-tab',
   imports: [AboutPanel, AgentRulesEditor, Button, CliPanel, Checkbox, FormField, Input, KeyValueEditor, Label, NgTemplateOutlet, Select],
   templateUrl: './settings-tab.html',
-  host: { class: 'flex-1 overflow-auto p-6' },
+  host: { class: 'flex-1 flex min-h-0 min-w-0 overflow-hidden' },
 })
 export class SettingsTab implements TabComponent {
   private readonly app = inject(AppState);
@@ -50,6 +67,11 @@ export class SettingsTab implements TabComponent {
   readonly scope = input.required<string>();
 
   protected readonly icons = { Copy, X };
+  protected readonly sections = SECTIONS;
+  /** The section at the top of the page, marked in the navigation. */
+  protected readonly activeSection = signal<SectionKey>('appearance');
+  private readonly scroller = viewChild<ElementRef<HTMLElement>>('scroller');
+  protected readonly background = invokeResource<BackgroundStatus>('app.background.status', () => ({}), { workspaceId: null, refreshOnEvents: ['config.changed'] });
   protected readonly palettes = PALETTES;
   protected readonly variableSyntax = '{{name}}';
   protected readonly config = this.app.config;
@@ -91,6 +113,30 @@ export class SettingsTab implements TabComponent {
     if (status?.tsh) return `using ${status.tsh.join(' ')}${status.tshVersion ? ` (v${status.tshVersion})` : ''}`;
     return status ? 'tsh not found' : '';
   });
+
+  protected scrollToSection(key: SectionKey): void {
+    this.scroller()?.nativeElement.querySelector(`[data-settings-section="${key}"]`)?.scrollIntoView({ block: 'start' });
+    this.activeSection.set(key);
+  }
+
+  /** The last section whose top has reached the top of the page, or the last one once the page is scrolled to the end. */
+  protected followScroll(): void {
+    const el = this.scroller()?.nativeElement;
+    if (!el) return;
+    const top = el.getBoundingClientRect().top;
+    const nodes = [...el.querySelectorAll<HTMLElement>('[data-settings-section]')];
+    let active = nodes[0]?.dataset['settingsSection'];
+    for (const node of nodes) if (node.getBoundingClientRect().top - top <= 32) active = node.dataset['settingsSection'];
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 4) active = nodes.at(-1)?.dataset['settingsSection'];
+    if (active) this.activeSection.set(active as SectionKey);
+  }
+
+  protected setBackground(patch: Partial<BackgroundConfig>): void {
+    this.host
+      .invoke('app.background.set', patch, null)
+      .then(() => this.background.reload())
+      .catch((err) => this.toasts.error(err));
+  }
 
   protected async update(patch: Partial<GlobalConfig>): Promise<void> {
     try {

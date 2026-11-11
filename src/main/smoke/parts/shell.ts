@@ -2,9 +2,10 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { DEFAULT_PALETTE, resolvePalette } from '@quiver/core';
-import type { UpdateState, WorkspaceInfo } from '@quiver/core';
+import { DEFAULT_PALETTE, quitsWhenAllWindowsClosed, resolvePalette } from '@quiver/core';
+import type { BackgroundStatus, UpdateState, WorkspaceInfo } from '@quiver/core';
 import { externalUrlRefused, openExternal } from '../../external';
+import { loginItemCalls } from '../fake-login-item';
 import { definePart, until } from '../part';
 
 export default definePart({
@@ -38,6 +39,58 @@ export default definePart({
     for (const tool of ['app_update_download', 'app_update_install', 'app_update_channel']) {
       const blockedUpdate = await rpc('tools/call', { name: tool, arguments: tool === 'app_update_channel' ? { channel: 'beta' } : {} });
       check(`mcp blocks ${tool} by default`, blockedUpdate.result?.isError === true && (blockedUpdate.result.content?.[0]?.text ?? '').includes('MUTATION_BLOCKED'));
+    }
+
+    // Startup & background: the two settings are saved in the global config and read back, starting at login goes
+    // through the login item (a recorder here: the smoke never registers a real one), and closing the last window
+    // only quits without Keep running.
+    {
+      const before = await run<BackgroundStatus>('app.background.status', {}, null);
+      check(
+        'background: off by default, and the login item can be registered (stubbed as an installed app)',
+        before.startAtLogin === false && before.keepRunning === false && before.loginItem === 'supported' && before.platform === process.platform,
+        before,
+      );
+      const calls = loginItemCalls.length;
+      const kept = await run<BackgroundStatus>('app.background.set', { keepRunning: true }, null);
+      const onDisk = JSON.parse(await fs.readFile(path.join(host.api.dataDir ?? '', 'config.json'), 'utf8')) as { background?: unknown };
+      check(
+        'background: Keep running is saved in the global config and read back, without touching the login item',
+        kept.keepRunning === true && kept.startAtLogin === false && JSON.stringify(onDisk.background) === JSON.stringify({ startAtLogin: false, keepRunning: true }) && loginItemCalls.length === calls,
+        { kept, onDisk: onDisk.background },
+      );
+      check(
+        'background: with Keep running on, closing the last window does not quit',
+        quitsWhenAllWindowsClosed({ platform: 'win32', keepRunning: host.config.get().background.keepRunning }) === false &&
+          quitsWhenAllWindowsClosed({ platform: 'linux', keepRunning: false }) === true &&
+          quitsWhenAllWindowsClosed({ platform: 'darwin', keepRunning: false }) === false,
+      );
+      const atLogin = await run<BackgroundStatus>('app.background.set', { startAtLogin: true }, null);
+      const registered = loginItemCalls.at(-1);
+      const expectedOn =
+        process.platform === 'linux'
+          ? registered?.kind === 'autostart' && Boolean(registered.entry?.includes('\nExec=/opt/Quiver/quiver --hidden\n'))
+          : registered?.kind === 'settings' && registered.openAtLogin === true && JSON.stringify(registered.args) === JSON.stringify(['--hidden']);
+      check(
+        'background: Start at login registers the login item to start hidden, and both settings stay saved',
+        expectedOn && loginItemCalls.length === calls + 1 && atLogin.startAtLogin && atLogin.keepRunning && host.config.get().background.startAtLogin === true,
+        { registered, atLogin },
+      );
+      const blockedLogin = await rpc('tools/call', { name: 'app_background_set', arguments: { startAtLogin: false } });
+      const agentKeep = await rpc('tools/call', { name: 'app_background_set', arguments: { keepRunning: true } });
+      check(
+        'background: agents are refused the login item by default but may read and set Keep running',
+        blockedLogin.result?.isError === true && (blockedLogin.result.content?.[0]?.text ?? '').includes('MUTATION_BLOCKED') && agentKeep.result?.isError !== true && host.config.get().background.startAtLogin === true,
+        { blockedLogin: blockedLogin.result, agentKeep: agentKeep.result },
+      );
+      await run('app.background.set', { startAtLogin: false, keepRunning: false }, null);
+      const removed = loginItemCalls.at(-1);
+      check(
+        'background: turning Start at login off removes the login item',
+        (process.platform === 'linux' ? removed?.kind === 'autostart' && removed.entry === null : removed?.kind === 'settings' && removed.openAtLogin === false) &&
+          JSON.stringify(host.config.get().background) === JSON.stringify({ startAtLogin: false, keepRunning: false }),
+        removed,
+      );
     }
 
     const revealedFolder = await run<{ path: string; revealed: boolean }>('workspace.reveal', { id: ws.id }, null);
@@ -370,6 +423,46 @@ export default definePart({
         await js(`document.documentElement.classList.remove('dark')`);
         await js(`document.querySelector('[data-testid=palette-option][data-palette=${DEFAULT_PALETTE}]').click()`);
         await wait(300);
+
+        // Settings: the page is in sections with a navigation beside it; Startup & background holds the two background switches.
+        {
+          const navItems = await js(`[...document.querySelectorAll('[data-testid=settings-nav-item]')].map((b) => b.getAttribute('data-section'))`);
+          const sectionKeys = await js(`[...document.querySelectorAll('[data-settings-section]')].map((s) => s.getAttribute('data-settings-section'))`);
+          check(
+            'ui: settings list their sections in a navigation, one per section on the page',
+            JSON.stringify(navItems) === JSON.stringify(['appearance', 'background', 'agents', 'cli', 'network', 'teleport', 'variables', 'about']) && JSON.stringify(navItems) === JSON.stringify(sectionKeys),
+            { navItems, sectionKeys },
+          );
+          await js(`document.querySelector('[data-testid=settings-nav-item][data-section=background]').click()`);
+          await wait(400);
+          const shownSection = await js(`(() => {
+            const content = document.querySelector('[data-testid=settings-content]').getBoundingClientRect();
+            const section = document.querySelector('[data-testid=settings-background]').getBoundingClientRect();
+            return { offset: Math.round(section.top - content.top), current: document.querySelector('[data-testid=settings-nav-item][aria-current=true]')?.getAttribute('data-section'), heading: document.querySelector('[data-testid=settings-background] h2')?.textContent.trim() };
+          })()`) as { offset: number; current: string; heading: string };
+          check('ui: a click in the settings navigation scrolls to its section and marks it', shownSection.offset >= 0 && shownSection.offset < 60 && shownSection.current === 'background' && shownSection.heading === 'Startup & background', shownSection);
+          await js(`document.querySelector('[data-testid=settings-keep-running] input').click()`);
+          await until(() => host.config.get().background.keepRunning === true, 2000);
+          await wait(300);
+          const switches = await js(
+            `(() => ({ keep: document.querySelector('[data-testid=settings-keep-running] input').checked, login: document.querySelector('[data-testid=settings-start-at-login] input').checked, mcp: document.querySelector('[data-testid=settings-background-mcp]')?.textContent.trim() }))()`,
+          ) as { keep: boolean; login: boolean; mcp: string };
+          check(
+            'ui: Keep running is saved from Startup & background, which shows the MCP address agents reach',
+            switches.keep === true && switches.login === false && host.config.get().background.keepRunning === true && switches.mcp.includes(`127.0.0.1:${t.mcpPort}/mcp`),
+            switches,
+          );
+          await js(`document.documentElement.classList.remove('dark')`);
+          await wait(200);
+          await shot('27f-settings-background-light');
+          await js(`document.documentElement.classList.add('dark')`);
+          await wait(200);
+          await shot('27g-settings-background-dark');
+          await js(`document.documentElement.classList.remove('dark')`);
+          await run('app.background.set', { keepRunning: false }, null);
+          await js(`document.querySelector('[data-testid=settings-nav-item][data-section=appearance]').click()`);
+          await wait(200);
+        }
 
         // Settings: agent permissions. The mode replaces the old mutations switch, and rules are added, changed and removed in a table, globally and for the workspace.
         {

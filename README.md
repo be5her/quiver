@@ -48,7 +48,9 @@ Every command is a tool over Streamable HTTP on `http://127.0.0.1:7411/mcp`. Add
 claude mcp add --transport http quiver "http://127.0.0.1:7411/mcp"
 ```
 
-Append `?workspace=<absolute folder path>` to bind a client to a specific project. Secrets are always masked for agents. Each module's README lists which of its tools are allowed and which are gated. Of the app's own tools, `app_update_check` is allowed; `app_update_download`, `app_update_install` and `app_update_channel` are gated.
+Append `?workspace=<absolute folder path>` to bind a client to a specific project. Secrets are always masked for agents. Each module's README lists which of its tools are allowed and which are gated. Of the app's own tools, `app_update_check` and `app_background_status` are allowed; `app_update_download`, `app_update_install` and `app_update_channel` are gated, and so is `app_background_set` when it changes Start at login.
+
+The server lives in Quiver itself, so agents reach it only while Quiver runs. To keep it up, turn on **Start at login** and **Keep running when the window is closed** in Settings > Startup & background: Quiver then starts hidden when you log in, reopens your workspaces, and stays in the tray (menu bar on macOS) with the MCP server listening until you quit it from there. Only one Quiver runs at a time; starting it again shows the window of the one already running.
 
 ### Agent permissions
 

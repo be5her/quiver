@@ -4,10 +4,11 @@ import { defaultGlobalConfig } from '../defaults';
 import { migrateTeleportConfig } from '../models/teleport';
 import { migrateMcpConfig } from '../permissions';
 import type { ActivityBarLayout } from '../activity-bar';
+import { normalizeBackground } from '../background';
 import type { NetworkConfig } from '../network';
 import type { GlobalConfig, UpdatesConfig } from '../types';
 
-/** Shallow merge with the nested sections merged one level deeper, so a partial `mcp`, `teleport`, `mock`, `updates`, `activityBar` or `network` patch keeps the other keys. */
+/** Shallow merge with the nested sections merged one level deeper, so a partial `mcp`, `teleport`, `mock`, `updates`, `activityBar`, `network` or `background` patch keeps the other keys. */
 function mergeConfig(base: GlobalConfig, patch: Partial<GlobalConfig>, loaded = false): GlobalConfig {
   return {
     ...base,
@@ -18,6 +19,7 @@ function mergeConfig(base: GlobalConfig, patch: Partial<GlobalConfig>, loaded = 
     updates: normalizeUpdates({ ...base.updates, ...(patch.updates ?? {}) }),
     activityBar: normalizeActivityBar({ ...base.activityBar, ...(patch.activityBar ?? {}) }),
     network: normalizeNetwork({ ...base.network, ...(patch.network ?? {}) }),
+    background: normalizeBackground({ ...base.background, ...(patch.background ?? {}) }),
   };
 }
 

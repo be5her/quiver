@@ -2,14 +2,17 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { BrowserWindow, Notification, app, dialog, safeStorage, shell } from 'electron';
-import type { PendingApproval, SecretsApi } from '@quiver/core';
+import { launchedHidden, quitsWhenAllWindowsClosed, type PendingApproval, type SecretsApi } from '@quiver/core';
+import { LoginItems, electronLoginItemDriver } from './background';
 import { Host } from './host';
 import { registerIpc } from './ipc';
 import { runSmokeTest } from './smoke';
+import { fakeLoginItemDriver } from './smoke/fake-login-item';
 import { runUpdateSmoke } from './smoke-update';
 import { Updater } from './updater';
 import { ElectronWebSessions } from './web-sessions';
-import { createMainWindow } from './window';
+import { BackgroundTray } from './tray';
+import { createMainWindow, iconPath } from './window';
 
 process.env.QUIVER_VERSION = app.getVersion();
 // Windows groups taskbar entries and notifications by this id; the installer gives the shortcut the same one.
@@ -39,6 +42,38 @@ function broadcast(message: { event: string; payload: unknown }): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) win.webContents.send('quiver:event', message);
   }
+  // The tray shows the MCP server and the approvals waiting, and comes and goes with Keep running.
+  if (message.event === 'config.changed') syncTray();
+  else if (message.event === 'mcp.status' || message.event === 'mcp.activity') tray?.refresh();
+}
+
+/** The app window (sign-in windows are BrowserWindows too, so it is tracked rather than looked up). */
+let mainWindow: BrowserWindow | null = null;
+
+/** Shows the app window, restoring it when minimized and creating it when there is none (closed, or a hidden start). */
+function showMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    const win = createMainWindow();
+    mainWindow = win;
+    win.on('closed', () => {
+      if (mainWindow === win) mainWindow = null;
+    });
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+/** This launch was started by the login item: no window until one is asked for. Known once the app is ready. */
+let startedHidden = false;
+let tray: BackgroundTray | null = null;
+
+/** The tray stays while Keep running is on, and after a hidden start (otherwise nothing on screen would reach Quiver). */
+function syncTray(): void {
+  if (!tray || !host) return;
+  if (host.api.config.get().background.keepRunning || startedHidden) tray.show();
+  else tray.hide();
 }
 
 async function pickFolder(): Promise<string | undefined> {
@@ -74,13 +109,8 @@ function notifyApproval(pending: PendingApproval): void {
   if (BrowserWindow.getFocusedWindow() || !Notification.isSupported()) return;
   const where = pending.workspace ? ` in ${pending.workspace.name}` : '';
   const notification = new Notification({ title: `${pending.agent.name} asks to run ${pending.title}`, body: `${pending.commandId}${where}. Open Quiver to allow or deny it.` });
-  notification.on('click', () => {
-    const win = BrowserWindow.getAllWindows()[0];
-    if (!win) return;
-    if (win.isMinimized()) win.restore();
-    win.show();
-    win.focus();
-  });
+  // With Quiver in the background there may be no window: the click opens one.
+  notification.on('click', () => showMainWindow());
   notification.show();
 }
 
@@ -92,6 +122,8 @@ async function main(): Promise<void> {
     app.setPath('userData', await fs.mkdtemp(path.join(os.tmpdir(), 'quiver-smoke-userdata-')));
   }
   await app.whenReady();
+  startedHidden =
+    !process.env.QUIVER_SMOKE && launchedHidden({ argv: process.argv, wasOpenedAtLogin: process.platform === 'darwin' ? app.getLoginItemSettings().wasOpenedAtLogin : false });
 
   // The smoke test checks the "no updater" path; with QUIVER_UPDATE_FEED it drives the real one against a local feed instead.
   const updates =
@@ -102,6 +134,8 @@ async function main(): Promise<void> {
           channel: () => host?.api.config.get().updates.channel ?? 'stable',
           emit: (state) => broadcast({ event: 'app.update', payload: state }),
         });
+  // The smoke must never register a real login item: a recorder stands in for the calls, posing as an installed app.
+  const loginItems = new LoginItems(process.env.QUIVER_SMOKE ? fakeLoginItemDriver() : electronLoginItemDriver());
   host = new Host({
     userDataDir: app.getPath('userData'),
     version: app.getVersion(),
@@ -117,6 +151,7 @@ async function main(): Promise<void> {
     notifyApproval: process.env.QUIVER_SMOKE ? undefined : notifyApproval,
     // The `quiver` shims electron-builder puts beside app.asar (resources/cli in this repository).
     cliShims: app.isPackaged ? path.join(process.resourcesPath, 'cli') : undefined,
+    background: loginItems,
   });
   registerIpc(host);
   await host.start();
@@ -132,7 +167,23 @@ async function main(): Promise<void> {
     return;
   }
 
-  createMainWindow();
+  // An installed app registers its login item again at each start, so it keeps pointing at this executable after an update.
+  if (host.api.config.get().background.startAtLogin) {
+    await loginItems.setStartAtLogin(true).catch((err) => console.warn(`[quiver] could not register the login item: ${(err as Error).message}`));
+  }
+  tray = new BackgroundTray({
+    icon: iconPath,
+    status: () => {
+      const mcp = host!.mcpStatus();
+      return { mcpEnabled: host!.api.config.get().mcp.enabled, listening: mcp.running, url: `http://127.0.0.1:${mcp.port}/mcp`, pending: host!.approvals.list().length };
+    },
+    open: () => showMainWindow(),
+    quit: () => app.quit(),
+  });
+  syncTray();
+  // The host has already reopened the workspaces and started the MCP server; a hidden start stops here.
+  ready = true;
+  if (!startedHidden || windowAsked) showMainWindow();
 
   // Look for a newer release shortly after launch, then every six hours, or every hour on the beta
   // channel so a merged change reaches testers soon. Nothing is downloaded until asked.
@@ -149,13 +200,15 @@ async function main(): Promise<void> {
   }
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
+    if (!mainWindow || mainWindow.isDestroyed()) showMainWindow();
   });
 }
 
 app.on('window-all-closed', () => {
-  // Smoke mode destroys its window itself and exits with the check result, not 0.
-  if (process.platform !== 'darwin' && !process.env.QUIVER_SMOKE) app.quit();
+  // Smoke mode destroys its window itself and exits with the check result, not 0. With Keep running on, Quiver stays
+  // in the tray until Quit (tray, app menu or the update installer), which goes through before-quit below.
+  const keepRunning = host?.api.config.get().background.keepRunning ?? false;
+  if (quitsWhenAllWindowsClosed({ platform: process.platform, keepRunning, smoke: Boolean(process.env.QUIVER_SMOKE) })) app.quit();
 });
 
 // Quitting waits for the host to stop (port forwards, tunnels and the processes behind them, the MCP server), at
@@ -176,7 +229,23 @@ app.on('before-quit', (event) => {
   });
 });
 
-void main().catch((err) => {
-  console.error('[quiver] fatal', err);
-  app.exit(1);
-});
+/** Startup has finished (the window may be shown); a second launch before that only asks for the window. */
+let ready = false;
+let windowAsked = false;
+
+// One Quiver per user data folder: a second one would start a second host that fights over the MCP port. A second
+// launch hands over to the first, which shows its window. Development builds share the installed app's folder and
+// are run beside it on purpose, and the smoke has its own folder, so neither takes the lock.
+const singleInstance = !app.isPackaged || Boolean(process.env.QUIVER_SMOKE) || app.requestSingleInstanceLock();
+if (!singleInstance) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (ready) showMainWindow();
+    else windowAsked = true;
+  });
+  void main().catch((err) => {
+    console.error('[quiver] fatal', err);
+    app.exit(1);
+  });
+}
