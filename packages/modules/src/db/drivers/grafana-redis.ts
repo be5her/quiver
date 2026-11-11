@@ -76,6 +76,9 @@ type Outcome = { value: RedisCliValue } | { error: string };
  * dialled, nothing to cancel, and "alive" means the session is. When the data source has its CLI turned
  * off, the key browser still reads through the plugin's fixed commands and everything else is refused.
  */
+/** The most keys one TMSCAN for names looks at: each costs the server a TYPE lookup, unlike a plain SCAN. */
+const TMSCAN_NAMES_COUNT = 100;
+
 export class GrafanaRedisDriver implements RedisDriverApi {
   readonly kind = 'redis' as const;
   private source: GrafanaRedisDatasource | null = null;
@@ -312,6 +315,18 @@ export class GrafanaRedisDriver implements RedisDriverApi {
     }
     infos.sort((a, b) => a.key.localeCompare(b.key));
     return { cursor: next, done: next === '0', keys: infos };
+  }
+
+  /** Names only: SCAN in CLI mode, the plugin's TMSCAN (which also sends types, left unused) when the CLI is off. */
+  async scanNames(pattern: string, cursor: string, count: number): Promise<{ cursor: string; keys: string[] }> {
+    if (this.readOnly) {
+      // TMSCAN looks up each scanned key's type on the server as well, so it scans fewer per call than SCAN would.
+      const frames = await this.fixedOne({ command: 'tmscan', cursor: cursor || '0', match: pattern || '*', count: Math.min(count, TMSCAN_NAMES_COUNT) });
+      return { cursor: String(grafanaFrameColumns(frames[1]).get('cursor')?.[0] ?? '0'), keys: (grafanaFrameColumns(frames[0]).get('key') ?? []).map(String) };
+    }
+    const reply = await this.cli(['SCAN', cursor || '0', 'MATCH', pattern || '*', 'COUNT', String(count)]);
+    if (!Array.isArray(reply) || typeof reply[0] !== 'string' || !Array.isArray(reply[1])) throw new QuiverError('REQUEST_FAILED', 'SCAN through Grafana gave an unexpected reply');
+    return { cursor: reply[0], keys: reply[1].map(String) };
   }
 
   async keyDetail(key: string, limit: number): Promise<RedisKeyDetail> {

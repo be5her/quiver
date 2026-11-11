@@ -7,6 +7,36 @@ type Value = { type: 'string'; value: string } | { type: 'hash'; value: Map<stri
  * connection handshake, INFO, SCAN/TYPE/TTL, strings, hashes, lists, sets, sorted sets, expiry, rename and DEL.
  * It exists so the Redis driver is exercised end to end without a Redis binary.
  */
+/** A Redis glob (`*`, `?`, `[…]` with `^` and ranges, a backslash escaping the next character) as a regular expression. */
+function globRegExp(pattern: string): RegExp {
+  const lit = (ch: string) => ch.replace(/[.*+?^${}()|[\]\\/-]/g, '\\$&');
+  let out = '';
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === '\\' && i + 1 < pattern.length) out += lit(pattern[++i]);
+    else if (ch === '*') out += '[\\s\\S]*';
+    else if (ch === '?') out += '[\\s\\S]';
+    else if (ch === '[') {
+      let j = i + 1;
+      let set = '';
+      if (pattern[j] === '^') {
+        set += '^';
+        j++;
+      }
+      for (; j < pattern.length && pattern[j] !== ']'; j++) {
+        if (pattern[j] === '\\' && j + 1 < pattern.length) set += lit(pattern[++j]);
+        else if (pattern[j + 1] === '-' && j + 2 < pattern.length && pattern[j + 2] !== ']') {
+          set += `${lit(pattern[j])}-${lit(pattern[j + 2])}`;
+          j += 2;
+        } else set += lit(pattern[j]);
+      }
+      out += `[${set}]`;
+      i = j;
+    } else out += lit(ch);
+  }
+  return new RegExp(`^${out}$`);
+}
+
 export function startFakeRedis(): Promise<{ port: number; close(): Promise<void> }> {
   const data = new Map<string, Value>();
   const expires = new Map<string, number>();
@@ -73,11 +103,18 @@ export function startFakeRedis(): Promise<{ port: number; close(): Promise<void>
       case 'DBSIZE':
         return enc.int(data.size);
       case 'SCAN': {
-        const patternIdx = argv.findIndex((a) => a.toUpperCase() === 'MATCH');
-        const pattern = patternIdx >= 0 ? argv[patternIdx + 1] : '*';
-        const re = new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`);
-        const keys = [...data.keys()].filter((k) => re.test(k));
-        return enc.array([enc.bulk('0'), enc.array(keys.map((k) => enc.bulk(k)))]);
+        // The cursor is an offset into the keys and COUNT how many it looks at, so a small COUNT pages as Redis does.
+        const option = (name: string) => {
+          const at = argv.findIndex((a, i) => i > 1 && a.toUpperCase() === name);
+          return at > 0 ? argv[at + 1] : undefined;
+        };
+        const re = globRegExp(option('MATCH') ?? '*');
+        const all = [...data.keys()];
+        const start = Number(argv[1]) || 0;
+        const count = option('COUNT');
+        const end = count === undefined ? all.length : start + Math.max(1, Number(count));
+        const keys = all.slice(start, end).filter((k) => re.test(k));
+        return enc.array([enc.bulk(end >= all.length ? '0' : String(end)), enc.array(keys.map((k) => enc.bulk(k)))]);
       }
       case 'TYPE':
         return enc.simple(entry?.type ?? 'none');

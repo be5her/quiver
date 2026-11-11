@@ -8,7 +8,7 @@ import { cn } from '../class-names';
 import { AppState } from '../state/app-state';
 import { VariableHover } from '../variables/variable-hover';
 import { injectVariables } from '../variables/variables';
-import { editorExtensions, type CodeLanguage, type SQLNamespace, type SqlDialect } from './code-editor-extensions';
+import { editorExtensions, type CodeLanguage, type CompletionSource, type SQLNamespace, type SqlDialect } from './code-editor-extensions';
 import { lineMarkerGutter, type LineMarker, type LineMarkerEvent } from './line-markers';
 
 /** Marks the editor's own updates when the value is set from outside, so they do not echo back as edits. */
@@ -47,6 +47,8 @@ export class CodeEditor implements FormValueControl<string> {
   readonly sqlDefaultTable = input<string>();
   /** GraphQL only: schema for autocompletion and lint. Without it, highlighting only. */
   readonly graphqlSchema = input<GraphQLSchema | null>();
+  /** A completion source of the caller's own, used instead of the language's (a console completing its commands). */
+  readonly completions = input<CompletionSource | null>(null);
   /**
    * A one-line field that looks like the text input: no gutters, newlines typed or pasted become
    * spaces, Enter runs (unless it picks a completion) and Tab moves focus. Size it with classes.
@@ -64,6 +66,8 @@ export class CodeEditor implements FormValueControl<string> {
   /** A right-click on a line marker; the browser's menu is left to the handler to prevent. */
   readonly lineMarkerMenu = output<LineMarkerEvent>();
   readonly touch = output<void>();
+  /** The cursor's offset, when it moves or the text changes. */
+  readonly cursorMove = output<number>();
 
   protected readonly filled = computed(() => this.fill() && !this.singleLine());
   protected readonly hostClass = computed(() =>
@@ -79,6 +83,7 @@ export class CodeEditor implements FormValueControl<string> {
     EditorView.updateListener.of((update) => {
       if (update.docChanged && !update.transactions.some((tr) => tr.annotation(External))) this.value.set(update.state.doc.toString());
       if (update.focusChanged && !update.view.hasFocus) this.touch.emit();
+      if (update.selectionSet || update.docChanged) this.cursorMove.emit(update.state.selection.main.head);
     }),
     ...editorExtensions({
       language: this.language(),
@@ -92,6 +97,7 @@ export class CodeEditor implements FormValueControl<string> {
       sqlSchema: this.sqlSchema(),
       sqlDefaultTable: this.sqlDefaultTable(),
       graphqlSchema: this.graphqlSchema(),
+      completions: this.completions(),
       theme: this.theme(),
       variables: this.variables(),
       hover: this.hover,

@@ -60,17 +60,27 @@
   <button qButton size="sm" [variant]="dirty() || !saved() ? 'secondary' : 'ghost'" [icon]="icons.Save" title="Ctrl+S" (click)="save()">{{ saved() ? 'Save' + (dirty() ? '*' : '') : 'Save as…' }}</button>
 </div>
 <div class="flex flex-col flex-1 min-h-0">
-  <div class="basis-[42%] min-h-[120px] p-2 border-b border-edge" qApiVariables>
+  <div class="basis-[42%] min-h-[120px] p-2 border-b border-edge flex flex-col gap-1" qApiVariables>
     <q-code-editor
+      class="flex-1 min-h-0"
       [(value)]="text"
       [language]="kind() === 'redis' ? 'text' : 'sql'"
       [sqlDialect]="editorDialect()"
       [sqlSchema]="sqlSchema()"
+      [completions]="completions()"
       [placeholder]="placeholder()"
       autofocus
+      (cursorMove)="cursor.set($event)"
       (run)="run()"
       (runCurrent)="run('current')"
     />
+    @if (redisHint(); as hint) {
+      <div class="flex items-baseline gap-2 px-1 h-4 shrink-0 text-[11px] leading-4 min-w-0" data-testid="db-redis-hint" [title]="hint.signature + '
+' + hint.summary">
+        <span class="font-mono truncate text-fg">{{ hint.signature }}</span>
+        <span class="text-muted truncate shrink-0 max-w-[40%]">{{ hint.summary }}</span>
+      </div>
+    }
   </div>
   <div class="flex-1 min-h-0 flex flex-col">
     <div class="flex items-center gap-2 px-3 h-8 border-b border-edge shrink-0 text-xs text-muted">

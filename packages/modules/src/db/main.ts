@@ -15,6 +15,7 @@ import {
   TABLE_EDITS_ACTIONS,
   SavedQuerySchema,
   buildTableEdits,
+  collectRedisKeys,
   dbAccessProblem,
   dbDataCollection,
   defaultPort,
@@ -804,6 +805,29 @@ const redisKeys = defineCommand({
   handler: async ({ connectionId, pattern, cursor, count }, ctx) => withDriver(ctx, connectionId, (d) => requireRedis(d).scanKeys(pattern, cursor, count)),
 });
 
+/** Key suggestions stop at the first of these: enough keys, enough SCAN calls, or enough time. */
+const SUGGEST_SCAN_COUNT = 1000;
+const SUGGEST_MAX_CALLS = 20;
+const SUGGEST_BUDGET_MS = 1500;
+
+const redisSuggest = defineCommand({
+  id: 'db.redis.suggest',
+  title: 'Suggest Redis keys',
+  description: `Key names starting with prefix, for completion: SCAN with MATCH <prefix>* (glob characters in the prefix escaped, so it matches only itself), names only, sorted. Stops at limit keys, ${SUGGEST_MAX_CALLS} SCAN calls of COUNT ${SUGGEST_SCAN_COUNT} or ${SUGGEST_BUDGET_MS} ms, so a huge keyspace never stalls; complete is true when the scan reached the end and every match is listed.`,
+  scope: 'workspace',
+  input: ConnectionIdInput.extend({ prefix: z.string().default(''), limit: z.number().int().min(1).max(1000).default(200) }),
+  // Not through retryAfterLogin: typing in the console must never start a Teleport login.
+  handler: async ({ connectionId, prefix, limit }, ctx) => {
+    const { connection, driver } = await pool.acquire(ws(ctx), ctx.host, connectionId);
+    const redis = requireRedis(driver);
+    try {
+      return await collectRedisKeys((cursor, pattern, count) => redis.scanNames(pattern, cursor, count), prefix, { limit, maxCalls: SUGGEST_MAX_CALLS, count: SUGGEST_SCAN_COUNT, budgetMs: SUGGEST_BUDGET_MS });
+    } catch (err) {
+      throw await explainAccessError(ctx.host, connection, err);
+    }
+  },
+});
+
 const redisKey = defineCommand({
   id: 'db.redis.key',
   title: 'Inspect Redis key',
@@ -867,6 +891,7 @@ export const dbModule = defineModule({
     historyList,
     historyClear,
     redisKeys,
+    redisSuggest,
     redisKey,
     redisCommand,
     redisInfo,

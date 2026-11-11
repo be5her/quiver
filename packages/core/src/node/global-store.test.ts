@@ -83,3 +83,14 @@ describe('GlobalStore agent permissions', () => {
     expect((await new GlobalStore(await tempFile()).load()).mcp.workspaceRules).toEqual({});
   });
 });
+
+describe('GlobalStore background', () => {
+  it('reads an older config with the background settings off, and keeps one setting when the other changes', async () => {
+    const file = await tempFile({ theme: 'dark' });
+    const store = new GlobalStore(file);
+    expect((await store.load()).background).toEqual({ startAtLogin: false, keepRunning: false });
+    await store.update({ background: { keepRunning: true } as never });
+    await store.update({ background: { startAtLogin: true } as never });
+    expect((await new GlobalStore(file).load()).background).toEqual({ startAtLogin: true, keepRunning: true });
+  });
+});
