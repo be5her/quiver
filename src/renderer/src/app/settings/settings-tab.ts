@@ -131,11 +131,16 @@ export class SettingsTab implements TabComponent {
     if (active) this.activeSection.set(active as SectionKey);
   }
 
-  protected setBackground(patch: Partial<BackgroundConfig>): void {
+  protected setBackground(patch: Partial<BackgroundConfig>, event: Event): void {
+    const box = event.target as HTMLInputElement;
     this.host
       .invoke('app.background.set', patch, null)
       .then(() => this.background.reload())
-      .catch((err) => this.toasts.error(err));
+      .catch((err) => {
+        // Nothing changed (a login item or autostart file that could not be written): the box goes back.
+        box.checked = !box.checked;
+        this.toasts.error(err);
+      });
   }
 
   protected async update(patch: Partial<GlobalConfig>): Promise<void> {

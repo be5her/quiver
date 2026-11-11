@@ -843,6 +843,22 @@ export default definePart({
               pickedKey === 'GET user:1',
             { commandOptions: commandOptions.slice(0, 5), pickedCommand, commandHint, keyOptions, keyHint, pickedKey },
           );
+          // Inside quotes the editor has already closed the quote: the pick replaces it rather than leaving a stray one.
+          await js(`document.execCommand('selectAll'); document.execCommand('delete')`);
+          typeText('GET "us');
+          const autoClosed = await consoleText();
+          await until(async () => (await options()).some((o) => o[0] === 'user:1'), 4000);
+          const quotedOptions = await options();
+          // CodeMirror ignores Enter for a moment after the list opens (interactionDelay).
+          await wait(200);
+          pressEnter();
+          await wait(200);
+          const pickedQuoted = await consoleText();
+          check(
+            'ui: a key picked inside quotes leaves no stray closing quote',
+            pickedQuoted === 'GET "user:1"' || pickedQuoted === 'GET user:1',
+            { autoClosed, quotedOptions, pickedQuoted },
+          );
           await js(`document.execCommand('selectAll'); document.execCommand('delete')`);
         }
         // Redis through Grafana: the connection's Access section with the sign-in state and the data source picker, then the key browser over Grafana.

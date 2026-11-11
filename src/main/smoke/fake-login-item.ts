@@ -5,11 +5,21 @@ export const loginItemCalls: ({ kind: 'settings'; openAtLogin: boolean; args: st
 
 /** Stands in for app.setLoginItemSettings and the Linux autostart file, as an installed app on this platform. */
 export function fakeLoginItemDriver(): LoginItemDriver {
+  let registered = false;
+  let autostart: string | null = null;
   return {
     platform: process.platform,
     packaged: true,
     executable: '/opt/Quiver/quiver',
-    setLoginItemSettings: (settings) => void loginItemCalls.push({ kind: 'settings', ...settings }),
-    writeAutostart: async (entry) => void loginItemCalls.push({ kind: 'autostart', entry }),
+    setLoginItemSettings: (settings) => {
+      registered = settings.openAtLogin;
+      loginItemCalls.push({ kind: 'settings', ...settings });
+    },
+    loginItemRegistered: () => registered,
+    writeAutostart: async (entry) => {
+      autostart = entry;
+      loginItemCalls.push({ kind: 'autostart', entry });
+    },
+    readAutostart: async () => autostart,
   };
 }

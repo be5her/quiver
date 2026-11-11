@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { BrowserWindow, Notification, app, dialog, safeStorage, shell } from 'electron';
-import { launchedHidden, quitsWhenAllWindowsClosed, type PendingApproval, type SecretsApi } from '@quiver/core';
+import { launchedHidden, quitsWhenMainWindowCloses, trayVisible, type PendingApproval, type SecretsApi } from '@quiver/core';
 import { LoginItems, electronLoginItemDriver } from './background';
 import { Host } from './host';
 import { registerIpc } from './ipc';
@@ -56,8 +56,14 @@ function showMainWindow(): void {
     const win = createMainWindow();
     mainWindow = win;
     win.on('closed', () => {
-      if (mainWindow === win) mainWindow = null;
+      if (mainWindow !== win) return;
+      mainWindow = null;
+      // Only the app window decides whether Quiver quits: sign-in windows close themselves when a sign-in is done.
+      const keepRunning = host?.api.config.get().background.keepRunning ?? false;
+      if (quitsWhenMainWindowCloses({ platform: process.platform, keepRunning, startedHidden, smoke: Boolean(process.env.QUIVER_SMOKE) })) app.quit();
+      else syncTray();
     });
+    syncTray();
     return;
   }
   if (mainWindow.isMinimized()) mainWindow.restore();
@@ -72,7 +78,8 @@ let tray: BackgroundTray | null = null;
 /** The tray stays while Keep running is on, and after a hidden start (otherwise nothing on screen would reach Quiver). */
 function syncTray(): void {
   if (!tray || !host) return;
-  if (host.api.config.get().background.keepRunning || startedHidden) tray.show();
+  const windowOpen = Boolean(mainWindow && !mainWindow.isDestroyed());
+  if (trayVisible({ keepRunning: host.api.config.get().background.keepRunning, startedHidden, windowOpen })) tray.show();
   else tray.hide();
 }
 
@@ -167,10 +174,9 @@ async function main(): Promise<void> {
     return;
   }
 
-  // An installed app registers its login item again at each start, so it keeps pointing at this executable after an update.
-  if (host.api.config.get().background.startAtLogin) {
-    await loginItems.setStartAtLogin(true).catch((err) => console.warn(`[quiver] could not register the login item: ${(err as Error).message}`));
-  }
+  // An installed app makes its login item match the setting at each start: it follows the executable after an update,
+  // and one left behind (turned off from a development build) goes. Nothing is written when it already matches.
+  await loginItems.sync(host.api.config.get().background.startAtLogin).catch((err) => console.warn(`[quiver] could not update the login item: ${(err as Error).message}`));
   tray = new BackgroundTray({
     icon: iconPath,
     status: () => {
@@ -180,10 +186,10 @@ async function main(): Promise<void> {
     open: () => showMainWindow(),
     quit: () => app.quit(),
   });
-  syncTray();
   // The host has already reopened the workspaces and started the MCP server; a hidden start stops here.
   ready = true;
   if (!startedHidden || windowAsked) showMainWindow();
+  syncTray();
 
   // Look for a newer release shortly after launch, then every six hours, or every hour on the beta
   // channel so a merged change reaches testers soon. Nothing is downloaded until asked.
@@ -204,12 +210,10 @@ async function main(): Promise<void> {
   });
 }
 
-app.on('window-all-closed', () => {
-  // Smoke mode destroys its window itself and exits with the check result, not 0. With Keep running on, Quiver stays
-  // in the tray until Quit (tray, app menu or the update installer), which goes through before-quit below.
-  const keepRunning = host?.api.config.get().background.keepRunning ?? false;
-  if (quitsWhenAllWindowsClosed({ platform: process.platform, keepRunning, smoke: Boolean(process.env.QUIVER_SMOKE) })) app.quit();
-});
+// Closing the app window decides whether Quiver quits (see showMainWindow); the last sign-in window closing never
+// does. The listener stays, since without one Electron quits whenever every window is closed. The smoke destroys its
+// window itself and exits with the check result.
+app.on('window-all-closed', () => {});
 
 // Quitting waits for the host to stop (port forwards, tunnels and the processes behind them, the MCP server), at
 // most QUIT_STOP_MS, then quits for real: a stop left running would end with the process, and forwards and tunnels
@@ -240,7 +244,9 @@ const singleInstance = !app.isPackaged || Boolean(process.env.QUIVER_SMOKE) || a
 if (!singleInstance) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, argv) => {
+    // A second login item (two autostart entries) starting Quiver hidden again asks for nothing.
+    if (launchedHidden({ argv })) return;
     if (ready) showMainWindow();
     else windowAsked = true;
   });

@@ -2,10 +2,11 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { DEFAULT_PALETTE, quitsWhenAllWindowsClosed, resolvePalette } from '@quiver/core';
+import { DEFAULT_PALETTE, quitsWhenMainWindowCloses, resolvePalette, trayVisible } from '@quiver/core';
 import type { BackgroundStatus, UpdateState, WorkspaceInfo } from '@quiver/core';
 import { externalUrlRefused, openExternal } from '../../external';
-import { loginItemCalls } from '../fake-login-item';
+import { LoginItems } from '../../background';
+import { fakeLoginItemDriver, loginItemCalls } from '../fake-login-item';
 import { definePart, until } from '../part';
 
 export default definePart({
@@ -60,10 +61,13 @@ export default definePart({
         { kept, onDisk: onDisk.background },
       );
       check(
-        'background: with Keep running on, closing the last window does not quit',
-        quitsWhenAllWindowsClosed({ platform: 'win32', keepRunning: host.config.get().background.keepRunning }) === false &&
-          quitsWhenAllWindowsClosed({ platform: 'linux', keepRunning: false }) === true &&
-          quitsWhenAllWindowsClosed({ platform: 'darwin', keepRunning: false }) === false,
+        'background: closing the app window quits only without Keep running and after a normal start, and the tray shows whenever there is no window',
+        quitsWhenMainWindowCloses({ platform: 'win32', keepRunning: host.config.get().background.keepRunning }) === false &&
+          quitsWhenMainWindowCloses({ platform: 'linux', keepRunning: false }) === true &&
+          quitsWhenMainWindowCloses({ platform: 'win32', keepRunning: false, startedHidden: true }) === false &&
+          quitsWhenMainWindowCloses({ platform: 'darwin', keepRunning: false }) === false &&
+          trayVisible({ keepRunning: false, startedHidden: false, windowOpen: false }) &&
+          !trayVisible({ keepRunning: false, startedHidden: false, windowOpen: true }),
       );
       const atLogin = await run<BackgroundStatus>('app.background.set', { startAtLogin: true }, null);
       const registered = loginItemCalls.at(-1);
@@ -77,11 +81,18 @@ export default definePart({
         { registered, atLogin },
       );
       const blockedLogin = await rpc('tools/call', { name: 'app_background_set', arguments: { startAtLogin: false } });
-      const agentKeep = await rpc('tools/call', { name: 'app_background_set', arguments: { keepRunning: true } });
+      const blockedKeep = await rpc('tools/call', { name: 'app_background_set', arguments: { keepRunning: false } });
+      const agentStatus = await rpc('tools/call', { name: 'app_background_status', arguments: {} });
       check(
-        'background: agents are refused the login item by default but may read and set Keep running',
-        blockedLogin.result?.isError === true && (blockedLogin.result.content?.[0]?.text ?? '').includes('MUTATION_BLOCKED') && agentKeep.result?.isError !== true && host.config.get().background.startAtLogin === true,
-        { blockedLogin: blockedLogin.result, agentKeep: agentKeep.result },
+        'background: agents may read the settings but are refused changing either by default',
+        blockedLogin.result?.isError === true &&
+          (blockedLogin.result.content?.[0]?.text ?? '').includes('MUTATION_BLOCKED') &&
+          blockedKeep.result?.isError === true &&
+          (blockedKeep.result.content?.[0]?.text ?? '').includes('MUTATION_BLOCKED') &&
+          agentStatus.result?.isError !== true &&
+          host.config.get().background.startAtLogin === true &&
+          host.config.get().background.keepRunning === true,
+        { blockedLogin: blockedLogin.result, blockedKeep: blockedKeep.result },
       );
       await run('app.background.set', { startAtLogin: false, keepRunning: false }, null);
       const removed = loginItemCalls.at(-1);
@@ -90,6 +101,26 @@ export default definePart({
         (process.platform === 'linux' ? removed?.kind === 'autostart' && removed.entry === null : removed?.kind === 'settings' && removed.openAtLogin === false) &&
           JSON.stringify(host.config.get().background) === JSON.stringify({ startAtLogin: false, keepRunning: false }),
         removed,
+      );
+
+      // At each start the login item is made to match the setting, writing nothing when it already does.
+      const drift = new LoginItems(fakeLoginItemDriver());
+      const start = loginItemCalls.length;
+      await drift.sync(false);
+      const nothingToDo = loginItemCalls.length === start;
+      await drift.setStartAtLogin(true);
+      const afterOn = loginItemCalls.length;
+      await drift.sync(true);
+      const keptAsIs = loginItemCalls.length === afterOn;
+      await drift.sync(false);
+      const left = loginItemCalls.at(-1);
+      check(
+        'background: at start a login item left on while the setting is off is removed, and a matching one is not written again',
+        nothingToDo &&
+          keptAsIs &&
+          loginItemCalls.length === afterOn + 1 &&
+          (process.platform === 'linux' ? left?.kind === 'autostart' && left.entry === null : left?.kind === 'settings' && left.openAtLogin === false),
+        { nothingToDo, keptAsIs, left },
       );
     }
 

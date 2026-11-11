@@ -119,8 +119,11 @@ export class RedisCompleter {
     const keys = found.keys.filter((k) => k.startsWith(ctx.prefix));
     // Typed bare, the list filters itself as more is typed; inside quotes or escapes it is already the match.
     const bare = !ctx.quote && context.state.sliceDoc(ctx.from, context.pos) === ctx.prefix;
+    // Typing an opening quote has the editor add its closing one (closeBrackets): the quoted key replaces both.
+    const closing = ctx.quote && context.state.sliceDoc(context.pos, context.pos + 1) === ctx.quote ? 1 : 0;
     return {
       from: ctx.from,
+      ...(closing ? { to: context.pos + closing } : {}),
       options: keys.map((key) => ({ label: key, type: 'variable', apply: quoteRedisArgument(key) })),
       ...(bare ? (found.complete ? { validFor: /^[^\s"'\\]*$/ } : {}) : { filter: false }),
     };
@@ -145,8 +148,15 @@ export class RedisCompleter {
   }
 
   private scan(connectionId: string, prefix: string, id: string): Promise<RedisKeySuggestions> {
-    const result = this.host.invoke<RedisKeySuggestions>('db.redis.suggest', { connectionId, prefix, limit: KEY_LIMIT }).catch((): RedisKeySuggestions => ({ keys: [], complete: false }));
-    this.cache.set(id, { at: Date.now(), result });
+    const entry: CacheEntry = { at: Date.now(), result: Promise.resolve({ keys: [], complete: false }) };
+    // A lookup that fails (signed out of Grafana, a broken connection) offers no keys and is not kept, so the next
+    // keystroke after signing in asks again.
+    entry.result = this.host.invoke<RedisKeySuggestions>('db.redis.suggest', { connectionId, prefix, limit: KEY_LIMIT }).catch((): RedisKeySuggestions => {
+      if (this.cache.get(id) === entry) this.cache.delete(id);
+      return { keys: [], complete: false };
+    });
+    this.cache.set(id, entry);
+    const result = entry.result;
     return result;
   }
 }

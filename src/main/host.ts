@@ -632,8 +632,10 @@ export class Host {
         description:
           'Starts Quiver hidden at login (registers a login item on this machine; a development build only saves the setting) and keeps it running in the tray when its window is closed, so agents always reach the MCP server.',
         scope: 'global',
-        // Registering or removing the login item changes this machine outside Quiver.
-        mutating: (input) => input.startAtLogin !== undefined,
+        // Registering or removing the login item changes this machine outside Quiver, and Keep running decides whether
+        // Quiver outlives its window (turned off while in the tray, it would leave Quiver with no way back but the tray
+        // it keeps): both are the user's call.
+        mutating: true,
         input: z.object({ startAtLogin: z.boolean().optional(), keepRunning: z.boolean().optional() }),
         handler: async ({ startAtLogin, keepRunning }) => {
           const current = this.config.get().background;
