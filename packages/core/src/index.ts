@@ -4,6 +4,7 @@ export * from './errors';
 export * from './ids';
 export * from './arrays';
 export * from './activity-bar';
+export * from './background';
 export * from './registry';
 export * from './permissions';
 export * from './approvals';

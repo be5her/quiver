@@ -1,4 +1,5 @@
 import { defaultActivityBarLayout } from './activity-bar';
+import { defaultBackgroundConfig } from './background';
 import { defaultNetworkConfig } from './network';
 import { DEFAULT_PALETTE } from './palettes';
 import type { GlobalConfig } from './types';
@@ -18,5 +19,6 @@ export function defaultGlobalConfig(): GlobalConfig {
     updates: { channel: 'stable' },
     activityBar: defaultActivityBarLayout(),
     network: defaultNetworkConfig(),
+    background: defaultBackgroundConfig(),
   };
 }

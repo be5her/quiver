@@ -23,12 +23,14 @@ import {
   workspaceRulesFor,
   type AgentActivityEntry,
   type AgentPermissionRule,
+  type BackgroundStatus,
   type Caller,
   type ErrorPayload,
   type GlobalConfig,
   type HostApi,
   type HostEventName,
   type HostEvents,
+  type LoginItemSupport,
   type PendingApproval,
   type RecentWorkspace,
   type SecretsApi,
@@ -64,6 +66,16 @@ export interface HostOptions {
   serve?: boolean;
   /** The folder of the packaged `quiver` shims, for Settings; absent in development. */
   cliShims?: string;
+  /** Starting at login on this machine; absent for the headless CLI, which saves the setting without applying it. */
+  background?: BackgroundApi;
+}
+
+/** The login item, as the Electron side registers it (a stub in smoke runs, which must never register a real one). */
+export interface BackgroundApi {
+  /** Whether this build can register a login item here: only an installed app does. */
+  readonly loginItem: LoginItemSupport;
+  /** Registers or removes the login item; called only when loginItem is `supported`. */
+  setStartAtLogin(enabled: boolean): Promise<void>;
 }
 
 const ruleSchema = z.object({
@@ -271,6 +283,10 @@ export class Host {
     this.mcp = null;
     await this.cli.withdraw();
     this.emit('mcp.status', { running: false, port: this.config.get().mcp.port });
+  }
+
+  backgroundStatus(): BackgroundStatus {
+    return { ...this.config.get().background, loginItem: this.opts.background?.loginItem ?? 'unsupported', platform: process.platform };
   }
 
   mcpStatus(): HostEvents['mcp.status'] {
@@ -601,6 +617,30 @@ export class Host {
         scope: 'global',
         input: z.object({}),
         handler: async () => ({ version: this.opts.version, platform: process.platform, mcp: this.mcpStatus(), secretsAvailable: this.opts.secrets.available, update: this.updateState() }),
+      }),
+      defineCommand({
+        id: 'app.background.status',
+        title: 'Background settings',
+        description: 'Whether Quiver starts at login and keeps running (with its MCP server) when its window is closed, and whether this build can register a login item.',
+        scope: 'global',
+        input: z.object({}),
+        handler: async () => this.backgroundStatus(),
+      }),
+      defineCommand({
+        id: 'app.background.set',
+        title: 'Change background settings',
+        description:
+          'Starts Quiver hidden at login (registers a login item on this machine; a development build only saves the setting) and keeps it running in the tray when its window is closed, so agents always reach the MCP server.',
+        scope: 'global',
+        // Registering or removing the login item changes this machine outside Quiver.
+        mutating: (input) => input.startAtLogin !== undefined,
+        input: z.object({ startAtLogin: z.boolean().optional(), keepRunning: z.boolean().optional() }),
+        handler: async ({ startAtLogin, keepRunning }) => {
+          const current = this.config.get().background;
+          if (startAtLogin !== undefined && this.opts.background?.loginItem === 'supported') await this.opts.background.setStartAtLogin(startAtLogin);
+          await this.config.update({ background: { ...current, ...(startAtLogin !== undefined ? { startAtLogin } : {}), ...(keepRunning !== undefined ? { keepRunning } : {}) } });
+          return this.backgroundStatus();
+        },
       }),
       defineCommand({
         id: 'app.update.check',

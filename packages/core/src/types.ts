@@ -1,6 +1,7 @@
 import type { NetScanHost } from './net-scan';
 import type { NetworkConfig } from './network';
 import type { ActivityBarLayout } from './activity-bar';
+import type { BackgroundConfig } from './background';
 import type { McpAgent, McpRecordingStatus } from './models/mcp-recording';
 import type { AgentCallDecision, ApprovalOutcome, ApprovalRequest, PendingApproval } from './approvals';
 import type { AgentPermissionRule, AgentPermissions } from './permissions';
@@ -126,6 +127,8 @@ export interface GlobalConfig {
   activityBar: ActivityBarLayout;
   /** How the API client, realtime connections and GraphQL introspection reach the network: the proxy. */
   network: NetworkConfig;
+  /** Start at login and keep running with no window, on this machine. */
+  background: BackgroundConfig;
 }
 
 /** Which releases the in-app updater follows. `beta` adds the Windows prereleases built from every merge to main. */
