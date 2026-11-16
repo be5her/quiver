@@ -1451,10 +1451,11 @@ export default definePart({
         { ok: viaCurl.ok || viaCurl.error.message, echo: curlEcho?.url, auth: curlEcho?.headers.authorization, sent: curlResponse?.sent?.url },
       );
       check(
-        'quick request: its history entry has no requestId, is named Quick request, keeps its response and masks the typed credentials',
-        curlEntry.requestId === null && curlEntry.request.name === 'Quick request' && curlEntry.request.id.startsWith('quick-') && curlEntry.status === 200 && curlEntry.hasResponse === true &&
+        'quick request: its history entry has no requestId, is named after the command, follows no redirects without -L, keeps its response and masks the typed credentials',
+        curlEntry.requestId === null && curlEntry.request.name === 'POST /quick' && curlEntry.request.id.startsWith('quick-') && curlEntry.status === 200 && curlEntry.hasResponse === true &&
+          JSON.stringify(curlEntry.request.options) === '{"followRedirects":false}' &&
           curlEntry.request.auth.type === 'bearer' && curlEntry.request.auth.token === REDACTED && curlEntry.url === `http://127.0.0.1:${echoPort}/quick?api_key=${REDACTED}&page=1`,
-        { requestId: curlEntry.requestId, name: curlEntry.request.name, url: curlEntry.url, auth: curlEntry.request.auth, hasResponse: curlEntry.hasResponse },
+        { requestId: curlEntry.requestId, name: curlEntry.request.name, options: curlEntry.request.options, url: curlEntry.url, auth: curlEntry.request.auth, hasResponse: curlEntry.hasResponse },
       );
       // Only method and url are needed inline; the rest takes the defaults, and the send is a quick request too.
       const inline = await host.invoke('api.request.send', { request: { method: 'GET', url: '{{baseUrl}}/inline?ref={{token}}' } }, agent);
@@ -1486,6 +1487,36 @@ export default definePart({
       // Compare and a listing by request leave quick sends out: they belong to no saved request.
       const byQuickId = await run<HistoryEntry[]>('api.history.list', { requestId: curlEntry.request.id }, ws.id);
       check('quick request: a listing by requestId does not find quick sends', byQuickId.length === 0, byQuickId.length);
+
+      // curl's own options: -L follows redirects (curl does not without it), -k skips the TLS check and --max-time sets the timeout;
+      // options that send the request somewhere else, or as someone else, are refused rather than dropped.
+      const redirectUrl = `'{{baseUrl}}/redirect/302?to=/landing'`;
+      const unfollowed = await host.invoke('api.request.send', { curl: `curl ${redirectUrl}` }, agent);
+      const followed = await host.invoke('api.request.send', { curl: `curl -k -L --max-time 5 ${redirectUrl}` }, agent);
+      const followedEntry = (await run<HistoryEntry[]>('api.history.list', { limit: 1 }, ws.id))[0];
+      const routed = await host.invoke('api.request.send', { curl: `curl -k -L --max-time 5 --resolve api.prod:443:127.0.0.1 -x http://proxy:8080 --cert c.pem https://api.prod/x` }, agent);
+      const routedMessage = routed.ok ? '' : routed.error.message;
+      check(
+        'quick request: a curl send follows redirects only with -L, takes -k and --max-time as options, and refuses --resolve, -x and --cert with the reason',
+        unfollowed.ok && (unfollowed.result as ApiResponse).status === 302 &&
+          followed.ok && (followed.result as ApiResponse).status === 200 && JSON.stringify(followedEntry.request.options) === '{"insecure":true,"timeoutMs":5000}' &&
+          !routed.ok && routed.error.code === 'INVALID_INPUT' && ['--resolve', '-x', '--cert'].every((f) => routedMessage.includes(f)) && routedMessage.includes('proxy'),
+        { unfollowed: unfollowed.ok ? (unfollowed.result as ApiResponse).status : unfollowed.error.message, followed: followed.ok ? (followed.result as ApiResponse).status : followed.error.message, options: followedEntry.request.options, routed: routedMessage },
+      );
+
+      // The prefixes of unsaved tabs are reserved: a history entry opened again is tied to no saved request either, and no new saved request may take one.
+      await run('api.request.send', { request: { method: 'GET', url: '{{baseUrl}}/again', id: 'history-smoke-entry', name: 'again' } }, ws.id);
+      const againEntry = (await run<HistoryEntry[]>('api.history.list', { limit: 1 }, ws.id))[0];
+      const ts = new Date().toISOString();
+      const savedQuick = await host.invoke('api.request.save', { request: { ...curlEntry.request, id: 'quick-made-up', createdAt: ts, updatedAt: ts } }, { caller: 'ui', workspaceId: ws.id });
+      const savedHistory = await host.invoke('api.request.save', { request: { ...curlEntry.request, id: 'history-made-up', createdAt: ts, updatedAt: ts } }, { caller: 'ui', workspaceId: ws.id });
+      check(
+        'quick request: a reopened history entry is sent with no requestId, and api.request.save refuses a new request with a quick- or history- id',
+        againEntry.requestId === null && againEntry.url.endsWith('/again') &&
+          !savedQuick.ok && savedQuick.error.code === 'INVALID_INPUT' && !savedHistory.ok && savedHistory.error.code === 'INVALID_INPUT' &&
+          (await run<ApiRequest[]>('api.request.list', {}, ws.id)).length === requestsBefore,
+        { againRequestId: againEntry.requestId, savedQuick: savedQuick.ok || savedQuick.error.code, savedHistory: savedHistory.ok || savedHistory.error.code },
+      );
     }
 
     return {
@@ -1852,7 +1883,7 @@ export default definePart({
           const activeTitle = () => js(`document.querySelector('[data-testid=tab][aria-selected=true]')?.getAttribute('data-title') ?? null`);
           const badge = () => js(`${visible('[data-testid=api-unsaved-badge]')}?.textContent.trim() ?? null`);
           const opened = { title: await activeTitle(), badge: await badge(), saveTo: await js(`Boolean(${visible('[data-testid=api-save-to-collection]')})`) };
-          const command = `curl -X POST '{{baseUrl}}/quick-ui?from=paste' -H 'X-Quick: yes' --data-raw '{"ui":true}'`;
+          const command = `curl -X POST '{{baseUrl}}/quick-ui?from=paste' -H 'X-Quick: yes' --data-raw '{"ui":true}' -x http://proxy.invalid:8080 --retry 2`;
           await js(
             `(() => { const i = ${visible('[data-testid=api-url]')}; const data = new DataTransfer(); data.setData('text/plain', ${JSON.stringify(command)}); i.focus(); i.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true })); })()`,
           );
@@ -1861,11 +1892,13 @@ export default definePart({
             url: await js(`${visible('[data-testid=api-url]')}?.value ?? null`),
             method: await js(`${visible('[data-testid=api-url]')}?.closest('div.flex')?.querySelector('select')?.value ?? null`),
             params: await js(`[...document.querySelectorAll('button')].find((b) => b.offsetParent !== null && b.textContent.trim().startsWith('Params'))?.textContent.trim() ?? null`),
+            settings: await js(`${visible('[data-testid=api-section-settings]')}?.textContent.trim() ?? null`),
+            notice: await js(`document.body.innerText.includes('-x not applied') && document.body.innerText.includes('--retry ignored')`),
           };
           check(
-            'ui: Quick request opens an unsaved tab, and a curl command pasted into the URL fills the method, URL and params',
+            'ui: Quick request opens an unsaved tab, and a curl command pasted into the URL fills the method, URL, params and settings (no -L: no redirects), saying which options it left out',
             opened.title === 'Quick request' && opened.badge === 'Quick request · not saved' && opened.saveTo === true &&
-              filled.url === '{{baseUrl}}/quick-ui' && filled.method === 'POST' && filled.params === 'Params1',
+              filled.url === '{{baseUrl}}/quick-ui' && filled.method === 'POST' && filled.params === 'Params1' && filled.settings === 'Settings1' && filled.notice === true,
             { opened, filled },
           );
           await shot('03ta-quick-request-light');
@@ -1897,7 +1930,7 @@ export default definePart({
           check(
             'ui: a quick request is sent into the history with no saved request, asks before closing only while it has edits not sent, and writes no request file',
             typeof askedBeforeSend === 'string' && String(status).startsWith('200') &&
-              entry.requestId === null && entry.method === 'POST' && entry.url.endsWith('/quick-ui?from=paste') && entry.request.name === 'Quick request' &&
+              entry.requestId === null && entry.method === 'POST' && entry.url.endsWith('/quick-ui?from=paste') && entry.request.name === 'POST /quick-ui' &&
               askedAfterSend === null && stillOpen === false && requestsAfterSend === requestsBefore,
             { askedBeforeSend, status, entry: { requestId: entry.requestId, method: entry.method, url: entry.url }, askedAfterSend, stillOpen, requests: [requestsBefore, requestsAfterSend] },
           );
@@ -1910,6 +1943,27 @@ export default definePart({
           await js(`[...document.querySelectorAll('[data-testid=context-menu] button')].find((b) => b.textContent.trim() === 'Open')?.click()`);
           await wait(900);
           const reopened = { title: await activeTitle(), badge: await badge(), url: await js(`${visible('[data-testid=api-url]')}?.value ?? null`) };
+          // An entry opened again holds nothing the history does not: it closes without a question until it is edited.
+          await closeActive();
+          await wait(400);
+          const askedUntouched = await confirmShown();
+          const untouchedClosed = !(await js(`[...document.querySelectorAll('[data-testid=tab]')].some((t) => t.getAttribute('data-title') === 'POST /quick-ui')`));
+          await js(`document.querySelector('[data-testid=api-history-entry]')?.click()`);
+          await wait(900);
+          await js(
+            `(() => { const i = ${visible('[data-testid=api-url]')}; const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(i, '{{baseUrl}}/quick-ui2'); i.dispatchEvent(new Event('input', { bubbles: true })); })()`,
+          );
+          await wait(300);
+          await closeActive();
+          await wait(400);
+          const askedEdited = await confirmShown();
+          await js(`[...document.querySelectorAll('div.fixed button')].find((b) => b.textContent.trim() === 'Cancel')?.click()`);
+          await wait(300);
+          check(
+            'ui: a history entry opened again closes without a question while untouched, and asks once edited',
+            askedUntouched === null && untouchedClosed && typeof askedEdited === 'string',
+            { askedUntouched, untouchedClosed, askedEdited },
+          );
           await js(`${visible('[data-testid=api-save-to-collection]')}?.click()`);
           await wait(500);
           const dialogChoices = (await js(`[...(document.querySelector('div.fixed form select')?.options ?? [])].map((o) => o.textContent.trim())`)) as string[];
@@ -1924,9 +1978,9 @@ export default definePart({
           check(
             'ui: a quick entry in the history has no Compare, opens again unsaved, and Save to collection keeps it as a normal request',
             entryMenu.includes('Open') && entryMenu.includes('Save as request') && !entryMenu.some((l) => l.startsWith('Compare')) &&
-              reopened.title === 'Quick request' && reopened.badge === 'From the history · not saved' && reopened.url === '{{baseUrl}}/quick-ui' &&
+              reopened.title === 'POST /quick-ui' && reopened.badge === 'From the history · not saved' && reopened.url === '{{baseUrl}}/quick-ui' &&
               dialogChoices[0] === 'Top level' &&
-              kept !== undefined && !/^(quick|history)-/.test(kept.id) && kept.collectionId === null && kept.method === 'POST' && kept.url === '{{baseUrl}}/quick-ui' &&
+              kept !== undefined && !/^(quick|history)-/.test(kept.id) && kept.collectionId === null && kept.method === 'POST' && kept.url === '{{baseUrl}}/quick-ui2' &&
               afterSave.title === 'kept quick' && afterSave.badge === null && afterSave.save === 'Save',
             { entryMenu, reopened, dialogChoices, kept: kept ? { id: kept.id, url: kept.url } : null, afterSave },
           );

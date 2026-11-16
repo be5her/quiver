@@ -1,5 +1,5 @@
 import { Component, DestroyRef, computed, effect, inject, signal } from '@angular/core';
-import { historyStatusLabel, matchesHistory, matchesRequest, shortRelativeTime, type ApiCollection, type ApiRequest, type ApiRun, type Environment, type HistoryEntry } from '@quiver/core';
+import { historyStatusLabel, isUnsavedRequestId, matchesHistory, matchesRequest, shortRelativeTime, type ApiCollection, type ApiRequest, type ApiRun, type Environment, type HistoryEntry } from '@quiver/core';
 import { AppState, ContextMenu, Icon, IconButton, METHOD_COLORS, SectionHeader, Toasts, TreeState, injectHostEvent, invokeResource, statusColor } from '@quiver/ui';
 import { Braces, Check, ChevronDown, ChevronRight, Cookie, FolderPlus, Import, Plus, Search, ShieldCheck, Trash2, X, Zap } from 'lucide';
 import { ApiActions } from './api-actions';
@@ -123,7 +123,7 @@ export class ApiSidebar {
     this.contextMenu.open(event, [
       { label: 'Open', select: () => this.api.openHistoryEntry(entry) },
       ...(entry.hasResponse ? [{ label: 'Open response', select: () => void this.api.openHistoryResponse(entry).catch((err) => this.toasts.error(err)), testId: 'api-history-open-response' }] : []),
-      ...(entry.hasResponse && entry.requestId && !entry.requestId.startsWith('history-')
+      ...(entry.hasResponse && entry.requestId && !isUnsavedRequestId(entry.requestId)
         ? [{ label: 'Compare…', select: () => this.api.openDiff({ id: entry.requestId!, name: entry.request.name }, entry.id), testId: 'api-history-compare' }]
         : []),
       { label: 'Save as request', select: () => this.api.saveHistoryEntry(entry).catch((err) => this.toasts.error(err)), testId: 'api-history-save' },

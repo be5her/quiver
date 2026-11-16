@@ -28,9 +28,9 @@ import {
   nowIso,
   isSecretName,
   parseCurl,
-  isQuickRequestId,
+  readCurl,
+  isUnsavedRequestId,
   newQuickRequest,
-  QUICK_REQUEST_NAME,
   redactHistoryEntry,
   redactLiteral,
   redactRequest,
@@ -335,7 +335,13 @@ const requestSave = defineCommand({
   description: 'Saves a full request definition (creates or replaces by id).',
   scope: 'workspace',
   input: z.object({ request: ApiRequestSchema }),
-  handler: async ({ request }, ctx) => ws(ctx).store.put(COLLECTIONS.requests, { ...request, updatedAt: nowIso() }),
+  handler: async ({ request }, ctx) => {
+    // Those prefixes mark a request that lives only in a tab (its sends tied to no saved request), so no new saved request may take one.
+    if (isUnsavedRequestId(request.id) && !(await ws(ctx).store.get<ApiRequest>(COLLECTIONS.requests, request.id))) {
+      throw new QuiverError('INVALID_INPUT', `A new request's id may not start with "quick-" or "history-"; leave those to unsaved tabs`);
+    }
+    return ws(ctx).store.put(COLLECTIONS.requests, { ...request, updatedAt: nowIso() });
+  },
 });
 
 const requestDuplicate = defineCommand({
@@ -388,7 +394,9 @@ const SendInput = z.object({
     .string()
     .min(4)
     .optional()
-    .describe('A curl command (bash, cmd.exe or PowerShell quoting, detected) to send as it is, without saving it, like running curl but with the variables, cookie jar, proxy, certificates and history of Quiver'),
+    .describe(
+      "A curl command (bash, cmd.exe or PowerShell quoting, detected) to send as it is, without saving it, like running curl but with the variables, cookie jar, proxy, certificates and history of Quiver. -k, -L (curl follows no redirects without it) and --max-time apply; options that decide where the request goes or who sends it (--resolve, --connect-to, --unix-socket, -x/--proxy, --cert/--key, --cacert, --digest and the like) are refused, since Quiver's own proxy and certificate settings decide those; output and other curl-only options are ignored.",
+    ),
   environmentId: z.string().nullable().optional(),
   options: RequestOptionsSchema.optional().describe('Overrides for this send only: timeoutMs, followRedirects, insecure, maxBodyBytes'),
   /** Record the call in workspace history. Defaults to true. */
@@ -398,15 +406,32 @@ const SendInput = z.object({
   dialect: z.enum(['auto', 'posix', 'cmd', 'powershell']).optional().describe('With curl: the shell the command was written for; auto (the default) detects it.'),
 });
 
+/** The saved request an inline request stands for: its id, unless it is an unsaved tab's (a saved one from before the prefixes were reserved still counts). */
+async function savedRequestId(w: WorkspaceApi, id: string): Promise<string | null> {
+  if (!id) return null;
+  if (!isUnsavedRequestId(id)) return id;
+  return (await w.store.get<ApiRequest>(COLLECTIONS.requests, id)) ? id : null;
+}
+
 /** The request a send names: a saved one by id, one given inline (a quick request when it has no id), or a curl command read as one. */
 async function requestToSend(w: WorkspaceApi, input: Pick<z.infer<typeof SendInput>, 'requestId' | 'request' | 'curl' | 'dialect'>): Promise<ApiRequest> {
   if (input.curl !== undefined) {
     if (input.request || input.requestId) throw new QuiverError('INVALID_INPUT', 'Provide curl alone, without requestId or request');
+    let reading;
     try {
-      return { ...parseCurl(input.curl, { dialect: input.dialect }), id: newQuickRequest().id, name: QUICK_REQUEST_NAME };
+      reading = readCurl(input.curl, { dialect: input.dialect });
     } catch (err) {
       throw new QuiverError('INVALID_INPUT', (err as Error).message);
     }
+    if (reading.routing.length) {
+      throw new QuiverError(
+        'INVALID_INPUT',
+        `The curl command uses ${reading.routing.join(', ')}, which decide${reading.routing.length === 1 ? 's' : ''} where the request goes or who sends it; a send through Quiver goes where its URL says, with Quiver's own proxy and client certificate settings. Remove ${reading.routing.length === 1 ? 'it' : 'them'} to send it.`,
+      );
+    }
+    // Named after the command (POST /users), like an imported one; -k, -L and --max-time become its options.
+    const options = Object.keys(reading.options).length ? { options: reading.options } : {};
+    return { ...reading.request, ...options, id: newQuickRequest().id };
   }
   if (input.request) {
     const { id, name, createdAt, updatedAt, ...rest } = input.request;
@@ -442,8 +467,8 @@ async function sendRequest(ctx: CommandContext, input: z.infer<typeof SendInput>
   const entry: HistoryEntry = {
     id: newId(),
     at: nowIso(),
-    // A quick request is tied to no saved request, so Compare and a listing by requestId leave it out.
-    requestId: input.requestId ?? (request.id && !isQuickRequestId(request.id) ? request.id : null),
+    // A request that lives only in a tab (a quick request, a history entry opened again) is tied to no saved request, so Compare and a listing by requestId leave it out.
+    requestId: input.requestId ?? ((await savedRequestId(w, request.id)) || null),
     method: prepared.method,
     url: prepared.url,
     status: null,

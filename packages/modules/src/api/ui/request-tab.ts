@@ -11,7 +11,7 @@ import {
   looksLikeCurl,
   newApiRequest,
   newId,
-  parseCurl,
+  readCurl,
   toErrorPayload,
   type ApiCollection,
   type ApiRequest,
@@ -118,7 +118,8 @@ export class RequestTab implements TabComponent {
     if (this.unsaved()) return JSON.stringify(this.request()) !== JSON.stringify(this.inHistory());
     return JSON.stringify(this.request()) !== JSON.stringify(this.saved());
   });
-  protected readonly unsavedTitle = 'Not saved in a collection. Every send is kept in the request history; Save to collection… keeps the request.';
+  protected readonly unsavedTitle =
+    'Not saved in a collection. Every send is kept in the request history, with credentials typed into it masked there: closing the tab loses those. Save to collection… keeps the request as it is.';
   protected readonly section = signal<Section>('params');
   protected readonly response = signal<ApiResponse | null>(null);
   protected readonly sendError = signal<string | null>(null);
@@ -261,15 +262,23 @@ export class RequestTab implements TabComponent {
     }
   }
 
-  /** A curl command pasted into the URL fills the request (method, URL, params, headers, body, auth) instead of landing in the URL. */
+  /**
+   * A curl command pasted into the URL fills the request (method, URL, params, headers, body, auth,
+   * and the TLS check, redirects and timeout) instead of landing in the URL, saying which of its
+   * options the request cannot carry.
+   */
   protected pasteUrl(event: ClipboardEvent): void {
     const text = event.clipboardData?.getData('text/plain') ?? '';
     if (!looksLikeCurl(text)) return;
     event.preventDefault();
     try {
-      const parsed = parseCurl(text);
-      this.request.update((request) => applyCurl(request, parsed));
-      this.toasts.notify('Filled from the curl command', 'success');
+      const reading = readCurl(text);
+      this.request.update((request) => applyCurl(request, reading));
+      const notes = [
+        reading.routing.length ? `${reading.routing.join(', ')} not applied: Quiver's own proxy and certificate settings decide where it goes` : '',
+        reading.ignored.length ? `${reading.ignored.join(', ')} ignored` : '',
+      ].filter(Boolean);
+      this.toasts.notify(notes.length ? `Filled from the curl command. ${notes.join('; ')}.` : 'Filled from the curl command', notes.length ? 'info' : 'success');
     } catch (err) {
       this.toasts.error(err);
     }

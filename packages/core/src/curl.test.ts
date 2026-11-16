@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseCurl, toCurl, tokenizeShell, type CurlInput } from './curl';
+import { parseCurl, readCurl, toCurl, tokenizeShell, type CurlInput } from './curl';
 import { detectShellDialect } from './shell';
 import type { ApiRequest } from './models/api';
 
@@ -339,5 +339,32 @@ describe('toCurl', () => {
     // One for another shell is not mistaken for bash.
     expect(detectShellDialect(cmd)).toBe('cmd');
     expect(detectShellDialect(powershell)).toBe('powershell');
+  });
+});
+
+describe('readCurl', () => {
+  it('maps -k, -L and --max-time to send options, and no -L to not following redirects', () => {
+    expect(readCurl('curl https://x.test/').options).toEqual({ followRedirects: false });
+    expect(readCurl('curl -sSLk --max-time 5 https://x.test/').options).toEqual({ insecure: true, timeoutMs: 5000 });
+    expect(readCurl('curl -L --no-location -m 0.25 https://x.test/').options).toEqual({ followRedirects: false, timeoutMs: 250 });
+    expect(readCurl('curl --location-trusted --max-time=0 https://x.test/').options).toEqual({});
+    expect(() => readCurl('curl --max-time soon https://x.test/')).toThrow(/needs a number of seconds/);
+  });
+
+  it('lists the routing and identity options apart from the other ignored ones, leaving out output and progress', () => {
+    const r = readCurl('curl -k -L --max-time 5 --resolve api.prod:443:127.0.0.1 -x http://proxy:8080 --cert c.pem --key k.pem --unix-socket /s --connect-to a:1:b:2 --retry 3 --http2 --compressed -s -o out.json https://api.prod/x');
+    expect(r.routing).toEqual(['--resolve', '-x', '--cert', '--key', '--unix-socket', '--connect-to']);
+    expect(r.ignored).toEqual(['--retry', '--http2']);
+    expect(r.request.url).toBe('https://api.prod/x');
+    expect(readCurl('curl --proxy=http://p:1 -E c.pem --digest -u a:b https://x.test/').routing).toEqual(['--proxy', '-E', '--digest']);
+    expect(readCurl('curl -s https://x.test/')).toMatchObject({ routing: [], ignored: [] });
+  });
+
+  it('reads the request as parseCurl does', () => {
+    const command = `curl -X POST 'https://api.example.com/u?a=1' -H 'Authorization: Bearer t' --data-raw '{"a":1}'`;
+    const { id: _a, createdAt: _b, updatedAt: _c, ...read } = readCurl(command).request;
+    const { id: _d, createdAt: _e, updatedAt: _f, ...parsed } = parseCurl(command);
+    const strip = (r: typeof read) => JSON.stringify({ ...r, params: r.params.map((p) => [p.key, p.value]), headers: r.headers.map((h) => [h.key, h.value]) });
+    expect(strip(read)).toBe(strip(parsed));
   });
 });

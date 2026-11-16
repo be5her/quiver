@@ -92,8 +92,10 @@ export class ApiActions {
     });
     if (!result) return null;
     const ts = nowIso();
+    // A history entry carries its request's place among the requests of its old collection; it is new where it goes.
+    const { order: _order, ...rest } = request;
     const saved = await this.host.invoke<ApiRequest>('api.request.save', {
-      request: { ...request, id: newId(), name: result.value.trim() || request.name, collectionId: result.choice || null, createdAt: ts, updatedAt: ts },
+      request: { ...rest, id: newId(), name: result.value.trim() || request.name, collectionId: result.choice || null, createdAt: ts, updatedAt: ts },
     });
     if (saved.collectionId) this.tree.expand(`api/collection/${saved.collectionId}`);
     return saved;
