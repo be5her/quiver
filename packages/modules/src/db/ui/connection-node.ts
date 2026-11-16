@@ -1,10 +1,12 @@
 import { Component, computed, inject, input } from '@angular/core';
+import { hasSchemaFilter, schemaNoun } from '@quiver/core';
 import { ContextMenu, Icon, IconButton, TreeState } from '@quiver/ui';
-import { ChevronDown, ChevronRight, Ellipsis, KeyRound, Terminal } from 'lucide';
+import { ChevronDown, ChevronRight, Ellipsis, Funnel, KeyRound, Terminal } from 'lucide';
 import { DatabaseList } from './database-list';
 import { DbActions, type DbConnectionRow } from './db-actions';
 import { DbRow } from './db-row';
 import { AccessBadge, KindIcon } from './kind-icon';
+import { DbSchemaFilterState } from './schema-filter-state';
 import { TableList } from './table-list';
 
 /**
@@ -20,13 +22,17 @@ import { TableList } from './table-list';
 export class ConnectionNode {
   private readonly tree = inject(TreeState);
   private readonly contextMenu = inject(ContextMenu);
+  private readonly filters = inject(DbSchemaFilterState);
   protected readonly db = inject(DbActions);
 
   readonly connection = input.required<DbConnectionRow>();
 
-  protected readonly icons = { ChevronDown, ChevronRight, Ellipsis, KeyRound, Terminal };
+  protected readonly icons = { ChevronDown, ChevronRight, Ellipsis, Funnel, KeyRound, Terminal };
   protected readonly open = computed(() => this.tree.isExpanded(`conn/${this.connection().id}`));
   protected readonly openLabel = computed(() => (this.connection().kind === 'redis' ? 'Browse keys' : 'New query'));
+  /** The schemas picked to show under this connection, null when it shows them all. */
+  protected readonly schemaFilter = computed(() => (hasSchemaFilter(this.connection().kind) ? this.filters.pickedFor(this.connection().id) : null));
+  protected readonly noun = computed(() => schemaNoun(this.connection().kind));
 
   protected toggle(): void {
     this.tree.toggle(`conn/${this.connection().id}`);
@@ -35,6 +41,11 @@ export class ConnectionNode {
   protected openMain(event: MouseEvent): void {
     event.stopPropagation();
     this.db.openConnection(this.connection());
+  }
+
+  protected editFilter(event: MouseEvent): void {
+    event.stopPropagation();
+    this.filters.open(this.connection());
   }
 
   protected menu(event: MouseEvent): void {

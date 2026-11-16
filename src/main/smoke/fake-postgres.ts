@@ -1,13 +1,14 @@
 import { createServer, type Socket } from 'node:net';
 
 /**
- * Just enough of PostgreSQL's wire protocol for the database picker and a table's details: a password check, then
- * `SELECT version()` and the list from pg_database as plain queries, and the catalog queries behind db.schema.table as
- * prepared ones, about one table, whichever is asked for. `missing` databases answer 3D000 (does not exist), `denied`
- * ones 42501. Columns carry the type a real server gives them: `array_agg` of a `name` column is `name[]` unless cast,
- * which pg leaves as the text `{a,b}`.
+ * Just enough of PostgreSQL's wire protocol for the database picker, the schemas in the tree and a table's details: a
+ * password check, then `SELECT version()`, the list from pg_database and the schemas from pg_namespace (`schemas`,
+ * public alone by default) as plain queries, and the catalog queries behind db.schema.table as prepared ones, about one
+ * table, whichever is asked for. `missing` databases answer 3D000 (does not exist), `denied` ones 42501. Columns carry
+ * the type a real server gives them: `array_agg` of a `name` column is `name[]` unless cast, which pg leaves as the
+ * text `{a,b}`.
  */
-export async function startFakePostgres(options: { password: string; databases: string[]; missing?: string[]; denied?: string[] }) {
+export async function startFakePostgres(options: { password: string; databases: string[]; schemas?: string[]; missing?: string[]; denied?: string[] }) {
   const seen: { connects: { database: string; user: string }[]; passwords: string[] } = { connects: [], passwords: [] };
   const sockets = new Set<Socket>();
 
@@ -128,6 +129,7 @@ export async function startFakePostgres(options: { password: string; databases: 
       if (type === 'Q') {
         const sql = body.toString('utf8');
         if (/pg_database/.test(sql)) return void socket.write(rows('datname', options.databases));
+        if (/FROM pg_namespace/.test(sql)) return void socket.write(rows('nspname', options.schemas ?? ['public']));
         if (/version\(\)/.test(sql)) return void socket.write(rows('version', ['PostgreSQL 16.0-fake']));
         return void socket.write(Buffer.concat([failure('42601', `The fake does not know: ${sql}`), ready]));
       }

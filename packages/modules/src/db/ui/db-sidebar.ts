@@ -8,11 +8,13 @@ import { DbActions, type DbConnectionRow } from './db-actions';
 import { firstLine } from './db-format';
 import { DbRow } from './db-row';
 import { NewConnectionMenu } from './new-connection-menu';
+import { SchemaFilterDialog } from './schema-filter-dialog';
+import { DbSchemaFilterState } from './schema-filter-state';
 
 /** Connections with their schema, saved queries and the latest queries; the history tab has the rest. */
 @Component({
   selector: 'q-db-sidebar',
-  imports: [ConnectionNode, DbRow, DropMarker, Icon, IconButton, NewConnectionMenu, SectionHeader, Spinner],
+  imports: [ConnectionNode, DbRow, DropMarker, Icon, IconButton, NewConnectionMenu, SchemaFilterDialog, SectionHeader, Spinner],
   templateUrl: './db-sidebar.html',
   host: { class: 'relative flex flex-col h-full min-h-0 overflow-y-auto text-sm' },
 })
@@ -23,6 +25,7 @@ export class DbSidebar {
   private readonly element = inject<ElementRef<HTMLElement>>(ElementRef);
   protected readonly db = inject(DbActions);
   protected readonly order = inject(DbConnectionOrder);
+  protected readonly schemaFilters = inject(DbSchemaFilterState);
 
   protected readonly icons = { ArrowUpDown, ChevronDown, ChevronRight, Clock, Pencil, Plus, Search, Terminal, Trash2 };
   protected readonly firstLine = firstLine;
@@ -56,6 +59,13 @@ export class DbSidebar {
     inject(DestroyRef).onDestroy(() => {
       el.removeEventListener('click', swallow, true);
       detach();
+      // The filter dialog is drawn here: it goes with the sidebar, and with its connection when that is deleted.
+      this.schemaFilters.close();
+    });
+    effect(() => {
+      const editing = this.schemaFilters.editing();
+      const list = this.connections.current();
+      if (editing && list && !list.some((c) => c.id === editing.id)) untracked(() => this.schemaFilters.close());
     });
     // Once the list (which comes in the manual order) reads back in the order that was dropped, it shows itself.
     effect(() => {

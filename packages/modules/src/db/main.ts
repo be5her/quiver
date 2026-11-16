@@ -1,7 +1,11 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import {
+<<<<<<< HEAD
   DB_CONNECTION_ORDER_KEY,
+=======
+  DB_SCHEMA_FILTER_KEY,
+>>>>>>> origin/feat/db-schema-filter
   DbConnectionDraftSchema,
   DbConnectionSchema,
   DbKindSchema,
@@ -29,6 +33,7 @@ import {
   newSavedQuery,
   normalizeGrafanaUrl,
   nowIso,
+  parseSchemaFilters,
   redisCommandIsReadOnly,
   redisCommandsAction,
   redisScriptIsReadOnly,
@@ -36,6 +41,7 @@ import {
   scriptAction,
   scriptIsReadOnly,
   tableEditsAction,
+  withSchemaFilter,
   type CommandContext,
   type DbConnection,
   type DbConnectionDraft,
@@ -237,7 +243,7 @@ const connectionReorder = defineCommand({
 const connectionDelete = defineCommand({
   id: 'db.connection.delete',
   title: 'Delete database connection',
-  description: 'Deletes a saved connection and its stored password.',
+  description: 'Deletes a saved connection, its stored password and which of its schemas the tree shows on this machine.',
   scope: 'workspace',
   mutating: true,
   input: z.object({ id: z.string() }),
@@ -245,6 +251,8 @@ const connectionDelete = defineCommand({
     const w = ws(ctx);
     await pool.close(w.id, id, ctx.host);
     await writePassword(w, ctx.host, id, null);
+    const filters = parseSchemaFilters(await w.getState<unknown>(DB_SCHEMA_FILTER_KEY, null));
+    if (id in filters) await w.setState(DB_SCHEMA_FILTER_KEY, withSchemaFilter(filters, id, null));
     return { deleted: await w.store.remove(COLLECTIONS.connections, id) };
   },
 });

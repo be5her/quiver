@@ -1,5 +1,5 @@
 @let conn = connection();
-<div qDbRow [label]="conn.name" bold data-testid="db-connection-row" data-drag-handle (click)="toggle()" (keydown.enter)="toggle()" (contextmenu)="menu($event)">
+<div qDbRow [label]="conn.name" bold data-testid="db-connection-row" data-drag-handle [attr.aria-expanded]="open()" (click)="toggle()" (keydown.enter)="toggle()" (contextmenu)="menu($event)">
   <svg rowPrefix [qIcon]="open() ? icons.ChevronDown : icons.ChevronRight" class="size-3.5 text-muted shrink-0"></svg>
   <svg rowPrefix [qKindIcon]="conn.kind"></svg>
   <q-access-badge rowBadge [access]="conn.access" />
@@ -10,6 +10,9 @@
     <span rowBadge class="size-1.5 rounded-full bg-warning shrink-0" title="A transaction is open on this connection"></span>
   } @else if (conn.connected) {
     <span rowBadge class="size-1.5 rounded-full bg-success shrink-0" title="Connected"></span>
+  }
+  @if (schemaFilter(); as picked) {
+    <button rowBadge type="button" class="flex items-center shrink-0 text-accent hover:text-fg" [title]="'Showing ' + picked.length + ' picked ' + noun() + '. Click to change.'" [attr.aria-label]="'Filter ' + noun() + ' (' + picked.length + ' shown)'" data-testid="db-schema-filter-badge" (click)="editFilter($event)" (keydown.enter)="$event.stopPropagation()"><svg [qIcon]="icons.Funnel" class="size-3"></svg></button>
   }
   <button qIconButton [label]="openLabel()" size="sm" (click)="openMain($event)"><svg [qIcon]="conn.kind === 'redis' ? icons.KeyRound : icons.Terminal" class="size-3.5"></svg></button>
   <button qIconButton label="More actions" size="sm" data-testid="db-connection-menu" (click)="menu($event)"><svg [qIcon]="icons.Ellipsis" class="size-3.5"></svg></button>

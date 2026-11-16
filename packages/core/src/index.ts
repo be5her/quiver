@@ -44,6 +44,7 @@ export * from './redis-completion';
 export * from './sql';
 export * from './db-url';
 export * from './db-export';
+export * from './db-schema-filter';
 export * from './palettes';
 export { defaultGlobalConfig, DEFAULT_MCP_PORT } from './defaults';
 export * from './json-path';
