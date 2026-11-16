@@ -1,6 +1,6 @@
 import { Component, DestroyRef, computed, effect, inject, input, output, signal, untracked } from '@angular/core';
 import { FormField, form } from '@angular/forms/signals';
-import type { GitBranch, GitFileChange, GitStash, GitStatus } from '@quiver/core';
+import type { GitAccountInfo, GitBranch, GitFileChange, GitStash, GitStatus } from '@quiver/core';
 import { AppState, Button, Checkbox, ContextMenu, EmptyState, HostBridge, Icon, IconButton, SectionHeader, Spinner, TextArea, TreeState, invokeResource } from '@quiver/ui';
 import {
   Archive,
@@ -23,6 +23,7 @@ import {
   RefreshCw,
   Trash2,
   Undo2,
+  UserRound,
 } from 'lucide';
 import { GitFileLayoutToggle, GitFileRowDef, GitFileTree, GitFolderActionsDef } from './file-tree';
 import { GitActions } from './git-actions';
@@ -224,6 +225,11 @@ function withOrigin(files: readonly GitFileChange[]): string[] {
             <svg [qIcon]="icons.ArrowUp" class="size-3"></svg>{{ s.ahead }} <svg [qIcon]="icons.ArrowDown" class="size-3"></svg>{{ s.behind }}
           </span>
         }
+        <!-- The login itself is in the status bar, where the branch name does not compete for the room. -->
+        @let login = account.current()?.account ?? '';
+        <button qIconButton [label]="accountLabel()" size="sm" data-testid="git-account" [attr.data-account]="login" (click)="actions.accountMenu($event)">
+          <svg [qIcon]="icons.UserRound" class="size-3.5" [class.text-accent]="login"></svg>
+        </button>
         <button qIconButton label="Fetch" size="sm" data-testid="git-fetch" [disabled]="busy().has('fetch')" (click)="actions.fetch()">
           @if (busy().has('fetch')) {
             <svg qSpinner class="size-3.5"></svg>
@@ -414,14 +420,20 @@ export class GitSidebar {
   private readonly app = inject(AppState);
   protected readonly modKey = inject(HostBridge).modKey;
 
-  protected readonly icons = { Archive, ArchiveRestore, ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, CloudOff, CloudUpload, Download, GitBranchIcon, GitPullRequest, History, ListTree, PackageOpen, RefreshCw, Plus, Trash2 };
+  protected readonly icons = { Archive, ArchiveRestore, ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, CloudOff, CloudUpload, Download, GitBranchIcon, GitPullRequest, History, ListTree, PackageOpen, RefreshCw, Plus, Trash2, UserRound };
   protected readonly status = invokeResource<GitStatus>('git.status');
+  /** The GitHub account the workspace's git and gh calls use, shown by the branch. */
+  protected readonly account = invokeResource<GitAccountInfo>('git.account.get', () => ({ accounts: false }), { refreshOnState: ['git.githubAccount'], enabled: () => Boolean(this.current()) });
   // The same sidebar serves every workspace with Git on screen, so another repository's files never show here.
   /** The status of the workspace on screen, once read. */
   protected readonly current = this.status.current;
   protected readonly statusError = this.status.currentError;
   protected readonly branchesOpen = computed(() => this.tree.isExpanded('git/branches', true));
   protected readonly branches = invokeResource<GitBranch[]>('git.branch.list', () => ({}), { enabled: () => this.branchesOpen() && Boolean(this.current()) });
+  protected readonly accountLabel = computed(() => {
+    const login = this.account.current()?.account;
+    return login ? `Git and gh in this workspace run as ${login} on github.com. Click to change.` : "GitHub account: gh's active account. Click to pick one for this workspace.";
+  });
   protected readonly busy = this.actions.busy;
   protected readonly stashesOpen = computed(() => this.tree.isExpanded('git/stashes', true));
   protected readonly stashes = invokeResource<GitStash[]>('git.stash.list', () => ({}), { enabled: () => this.stashesOpen() && Boolean(this.current()) });

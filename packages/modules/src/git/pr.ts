@@ -4,8 +4,10 @@ import {
   GH_PR_DETAIL_FIELDS,
   GH_PR_FIELDS,
   QuiverError,
+  githubAccountGitEnv,
   failedLogExcerpt,
   jobIdFromCheckUrl,
+  parseAuthAccounts,
   parseAuthStatus,
   parseChecks,
   parseGhJson,
@@ -17,17 +19,21 @@ import {
   repoArg,
   repoName,
   tokenizeShell,
+  type GhAccount,
   type GhStatus,
   type GitDiffFile,
   type GitHubRepoRef,
   type GitPrCheckWithLog,
   type GitPullRequest,
   type GitPullRequestDetail,
+  type WorkspaceApi,
 } from '@quiver/core';
 import { runToEnd, whichSync, type RunToEndResult } from '@quiver/core/node';
+import { accountOf, currentAccount } from './account';
 import * as local from './local';
 
-// Pull requests through the GitHub CLI (`gh`), signed in as the user: Quiver never sees or stores a token. Every call
+// Pull requests through the GitHub CLI (`gh`), signed in as the user: Quiver stores no token (a workspace that chose a
+// GitHub account has that account's token read from gh and kept in memory, to hand to gh; see below). Every call
 // runs in the repository root with prompts and update notices off, names the repository with --repo (picked from the
 // configured remotes, as gh itself would), and asks for --json, which @quiver/core's gh-parse reads.
 
@@ -129,26 +135,90 @@ interface GhRunOptions {
   maxBytes?: number;
   allowFailure?: boolean;
   env?: Record<string, string>;
+  /** Run with gh's own sign-in rather than the workspace's account: for reading that sign-in (its accounts, a token). */
+  ownSignIn?: boolean;
 }
 
-/** Run gh in a folder. A non-zero exit throws: AUTH_REQUIRED when gh is signed out, REQUEST_FAILED with gh's message otherwise. */
+/**
+ * Run gh in a folder. A non-zero exit throws: AUTH_REQUIRED when gh is signed out, REQUEST_FAILED with gh's message
+ * otherwise. In a workspace that chose a GitHub account, gh gets that account's token (GH_TOKEN) and the git it runs
+ * (`pr checkout`) its credential username, for this process only.
+ */
 export async function gh(cwd: string, args: string[], options: GhRunOptions = {}): Promise<RunToEndResult> {
   const argv = ghCommand();
   if (!argv) throw notInstalled();
   const [program, ...fixed] = argv;
   const timeoutMs = options.timeoutMs ?? READ_TIMEOUT_MS;
-  const result = await runToEnd(program, [...fixed, ...args], { cwd, env: { ...ENV, ...options.env }, input: options.input, timeoutMs, maxBytes: options.maxBytes ?? MAX_OUTPUT_BYTES });
+  const account = options.ownSignIn ? null : currentAccount();
+  const accountEnv = account ? { ...githubAccountGitEnv(account, process.env), GH_TOKEN: await accountToken(cwd, account) } : {};
+  const result = await runToEnd(program, [...fixed, ...args], { cwd, env: { ...ENV, ...accountEnv, ...options.env }, input: options.input, timeoutMs, maxBytes: options.maxBytes ?? MAX_OUTPUT_BYTES });
   if (result.error) throw new QuiverError('NOT_FOUND', `gh could not be started: ${result.error}. ${INSTALL_HINT}`, { reason: 'no-gh' });
   if (result.timedOut) throw new QuiverError('REQUEST_FAILED', `gh ${args.slice(0, 2).join(' ')} took longer than ${Math.round(timeoutMs / 1000)}s and was stopped`);
+  // A token gh refused (signed out since, or revoked) is read again next time.
+  if (account && isAuthFailure(result)) tokens.delete(account);
   // Output over the cap kills gh, so its exit code says nothing; the caller gets what arrived, marked truncated.
-  if (result.code !== 0 && !result.truncated && !options.allowFailure) throw failure(result, args);
+  if (result.code !== 0 && !result.truncated && !options.allowFailure) throw failure(result, args, account);
   return result;
 }
 
-function failure(result: RunToEndResult, args: string[]): QuiverError {
+function failure(result: RunToEndResult, args: string[], account: string | null = null): QuiverError {
   const message = result.stderr.trim() || result.stdout.trim() || `gh ${args.slice(0, 2).join(' ')} exited with code ${result.code}`;
-  if (isAuthFailure(result)) return new QuiverError('AUTH_REQUIRED', `gh is not signed in: ${message.split(/\r?\n/)[0]}. Run "gh auth login" in a terminal.`, { reason: 'gh-signed-out' });
+  if (isAuthFailure(result)) {
+    const who = account ? `gh could not sign in as ${account}, the GitHub account this workspace uses` : 'gh is not signed in';
+    return new QuiverError('AUTH_REQUIRED', `${who}: ${message.split(/\r?\n/)[0]}. Run "gh auth login" in a terminal.`, { reason: 'gh-signed-out' });
+  }
   return new QuiverError('REQUEST_FAILED', message.replace(/^(?:error|fatal|X): /i, ''), { exitCode: result.code });
+}
+
+// ---------- the workspace's account ----------
+
+/** How long a token read from gh is used before it is read again; one gh refuses is dropped at once. */
+const TOKEN_TTL_MS = 10 * 60_000;
+/** Tokens of the accounts workspaces chose, read from gh's own store (`gh auth token --user`): in memory only, never shown. */
+const tokens = new Map<string, { token: string; at: number }>();
+
+/** The github.com token gh keeps for `account`, or AUTH_REQUIRED naming the account when gh has none for it. */
+export async function accountToken(cwd: string, account: string): Promise<string> {
+  const kept = tokens.get(account);
+  if (kept && Date.now() - kept.at < TOKEN_TTL_MS) return kept.token;
+  const result = await gh(cwd, ['auth', 'token', '--hostname', 'github.com', '--user', account], { ownSignIn: true, allowFailure: true });
+  const token = result.code === 0 ? result.stdout.trim() : '';
+  if (!token || /\s/.test(token)) {
+    tokens.delete(account);
+    throw new QuiverError(
+      'AUTH_REQUIRED',
+      `gh is not signed in to github.com as ${account}, the GitHub account this workspace uses. Run "gh auth login" in a terminal and sign in as ${account}, or pick another account for this workspace.`,
+      { reason: 'gh-account-signed-out', account },
+    );
+  }
+  tokens.set(account, { token, at: Date.now() });
+  return token;
+}
+
+/**
+ * For a process Quiver starts in a workspace other than git and gh themselves (a Runner task): the environment that
+ * makes the git and gh it runs use the workspace's GitHub account, its credential username and token. Empty when the
+ * workspace chose none. `note` hears which account it is, and when gh has no token for it (git still gets the username).
+ */
+export async function githubAccountEnv(ws: WorkspaceApi, cwd: string, note: (line: string) => void): Promise<Record<string, string>> {
+  const account = await accountOf(ws);
+  if (!account) return {};
+  const env = githubAccountGitEnv(account, process.env);
+  try {
+    const token = await accountToken(cwd, account);
+    note(`GitHub account ${account} (git and gh)`);
+    return { ...env, GH_TOKEN: token };
+  } catch (err) {
+    note(`GitHub account ${account} for git only: ${(err as Error).message}`);
+    return env;
+  }
+}
+
+/** The accounts gh is signed in to on github.com, gh's active one marked. Empty when it is signed in to none. */
+export async function accounts(cwd: string): Promise<GhAccount[]> {
+  let result = await gh(cwd, ['auth', 'status', '--hostname', 'github.com', '--json', 'hosts'], { ownSignIn: true, allowFailure: true });
+  if (/unknown flag/i.test(result.stderr)) result = await gh(cwd, ['auth', 'status', '--hostname', 'github.com'], { ownSignIn: true, allowFailure: true });
+  return parseAuthAccounts(result.stdout.trim().startsWith('{') ? result.stdout : `${result.stdout}\n${result.stderr}`, 'github.com');
 }
 
 // ---------- the repository ----------

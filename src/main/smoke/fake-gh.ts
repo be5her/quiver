@@ -30,8 +30,13 @@ export interface FakeGhPr {
 }
 
 export interface FakeGhState {
-  /** The signed-in account, or null when signed out. */
+  /** The signed-in account, gh's active one, or null when signed out. */
   login: string | null;
+  /**
+   * Further accounts signed in on github.com besides `login`, as `gh auth login` adds them. Each one's token, for `gh
+   * auth token --user` and GH_TOKEN, is `fake-token-<login>`; a GH_TOKEN of an account not signed in is refused.
+   */
+  others?: string[];
   /**
    * `owner/name` on github.com: the only repository the fake answers for. --repo (the argument of `repo view`) must
    * be `github.com/owner/name`, host included, so a call without it, or without the host, fails.
@@ -57,6 +62,10 @@ export interface FakeGhCall {
   cwd: string;
   /** What arrived on stdin, for --body-file -. */
   stdin: string | null;
+  /** The GH_TOKEN the call had, or null. */
+  token: string | null;
+  /** The credential username the git it runs would use (`credential.https://github.com.username` in GIT_CONFIG_*), or null. */
+  gitUser: string | null;
 }
 
 export interface FakeGh {
@@ -70,9 +79,10 @@ export interface FakeGh {
 
 /**
  * A stand-in for the GitHub CLI, written as a Node script so the smoke can exercise pull requests without GitHub or
- * the user's own sign-in. It answers the subcommands Quiver runs (`auth status`, `pr list|view|checks|diff|checkout|
+ * the user's own sign-in. It answers the subcommands Quiver runs (`auth status|token`, `pr list|view|checks|diff|checkout|
  * create|comment`, `run view --log-failed`, `repo view`, `label list`) from a JSON state file, exits like gh (4 when signed out, 1 or 8 from
- * `pr checks` for failed or pending checks), refuses any repository but its own, and logs every argv with its stdin.
+ * `pr checks` for failed or pending checks), refuses any repository but its own, acts as the account of a GH_TOKEN it is given, and logs every argv with its
+ * stdin, its token and the credential username its git would use.
  */
 export async function writeFakeGh(dir: string, state: FakeGhState): Promise<FakeGh> {
   const stateFile = path.join(dir, 'fake-gh-state.json');
@@ -111,9 +121,22 @@ function readStdin() {
   try { return fs.readFileSync(0, 'utf8'); } catch { return ''; }
 }
 const stdin = argv.includes('--body-file') ? readStdin() : null;
-fs.appendFileSync(CALLS_FILE, JSON.stringify({ argv, cwd: process.cwd(), stdin }) + '\n');
+function gitUser() {
+  let user = null;
+  for (let i = 0; i < Number(process.env.GIT_CONFIG_COUNT || 0); i++) {
+    if (process.env['GIT_CONFIG_KEY_' + i] === 'credential.https://github.com.username') user = process.env['GIT_CONFIG_VALUE_' + i];
+  }
+  return user;
+}
+const token = process.env.GH_TOKEN || null;
+fs.appendFileSync(CALLS_FILE, JSON.stringify({ argv, cwd: process.cwd(), stdin, token, gitUser: gitUser() }) + '\n');
 
 const state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+const signedIn = state.login ? [state.login, ...(state.others || [])] : [];
+// Who the call is: the account of GH_TOKEN, else gh's active account.
+const tokenUser = token && token.startsWith('fake-token-') ? token.slice('fake-token-'.length) : null;
+if (token && !signedIn.includes(tokenUser)) fail('HTTP 401: Bad credentials (https://api.github.com/graphql)\nTry authenticating with:  gh auth login', 4);
+const me = tokenUser || state.login;
 const save = () => fs.writeFileSync(STATE_FILE, JSON.stringify(state));
 function fail(message, code) {
   process.stderr.write(message + '\n');
@@ -147,15 +170,22 @@ if (cmd === '--version') {
   process.stdout.write('gh version 2.100.0 (fake)\n');
   process.exit(0);
 }
+if (cmd === 'auth' && sub === 'token') {
+  const user = flag('user') || state.login;
+  if (!signedIn.includes(user)) fail('no oauth token found for github.com account ' + user);
+  process.stdout.write('fake-token-' + user + '\n');
+  process.exit(0);
+}
 if (cmd === 'auth' && sub === 'status') {
   const host = flag('hostname') || 'github.com';
-  const accounts = state.login ? [{ state: 'success', active: true, host, login: state.login, tokenSource: 'keyring', scopes: 'repo', gitProtocol: 'https' }] : [];
+  const account = (login, active, tokenSource) => ({ state: 'success', active, host, login, tokenSource, scopes: 'repo', gitProtocol: 'https' });
+  const accounts = [...(tokenUser ? [account(tokenUser, true, 'GH_TOKEN')] : []), ...signedIn.map((login) => account(login, !tokenUser && login === state.login, 'keyring'))];
   if (has('json')) process.stdout.write(JSON.stringify({ hosts: accounts.length ? { [host]: accounts } : {} }) + '\n');
-  else if (accounts.length) process.stdout.write(host + '\n  ✓ Logged in to ' + host + ' account ' + state.login + ' (keyring)\n  - Active account: true\n');
+  else if (accounts.length) process.stdout.write(host + '\n' + accounts.map((a) => '  ✓ Logged in to ' + host + ' account ' + a.login + ' (' + a.tokenSource + ')\n  - Active account: ' + a.active + '\n').join('\n'));
   else process.stderr.write('You are not logged into any GitHub hosts. To log in, run: gh auth login\n');
   process.exit(accounts.length ? 0 : 1);
 }
-if (!state.login) fail('To get started with GitHub CLI, please run:  gh auth login\nAlternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.', 4);
+if (!me) fail('To get started with GitHub CLI, please run:  gh auth login\nAlternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.', 4);
 const repoGiven = cmd === 'repo' ? argv[2] : flag('repo');
 if (repoGiven !== 'github.com/' + state.repo) fail('GraphQL: Could not resolve to a Repository with the name \'' + repoGiven + '\'. (repository)');
 
@@ -172,8 +202,8 @@ if (cmd === 'label' && sub === 'list') {
 if (cmd === 'pr' && sub === 'list') {
   const wanted = { open: ['OPEN'], closed: ['CLOSED', 'MERGED'], merged: ['MERGED'], all: ['OPEN', 'CLOSED', 'MERGED'] }[flag('state') || 'open'];
   let list = state.prs.filter((p) => wanted.includes(p.state));
-  if (flag('author') === '@me') list = list.filter((p) => p.author.login === state.login);
-  if (flag('search') === 'review-requested:@me') list = list.filter((p) => p.reviewRequested.includes(state.login));
+  if (flag('author') === '@me') list = list.filter((p) => p.author.login === me);
+  if (flag('search') === 'review-requested:@me') list = list.filter((p) => p.reviewRequested.includes(me));
   list = list.sort((a, b) => b.number - a.number).slice(0, Number(flag('limit') || 30));
   process.stdout.write(JSON.stringify(list.map((p) => pick(p, flag('json')))) + '\n');
   process.exit(0);
@@ -221,7 +251,7 @@ if (cmd === 'pr' && sub === 'create') {
   const now = new Date().toISOString();
   const head = flag('head');
   const pr = {
-    number, title: flag('title'), state: 'OPEN', isDraft: has('draft'), author: { login: state.login },
+    number, title: flag('title'), state: 'OPEN', isDraft: has('draft'), author: { login: me },
     headRefName: head.includes(':') ? head.split(':')[1] : head, baseRefName: flag('base') || 'main',
     url: 'https://github.com/' + state.repo + '/pull/' + number, createdAt: now, updatedAt: now, reviewDecision: '',
     labels: all('label').map((name) => ({ name })), statusCheckRollup: [], body: stdin || '', additions: 0, deletions: 0,
@@ -235,7 +265,7 @@ if (cmd === 'pr' && sub === 'create') {
 }
 if (cmd === 'pr' && sub === 'comment') {
   const pr = prOf(argv[2]);
-  pr.comments.push({ author: { login: state.login }, createdAt: new Date().toISOString(), body: stdin || '' });
+  pr.comments.push({ author: { login: me }, createdAt: new Date().toISOString(), body: stdin || '' });
   pr.updatedAt = new Date().toISOString();
   save();
   process.stdout.write(pr.url + '#issuecomment-' + pr.comments.length + '\n');
