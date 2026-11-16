@@ -2,7 +2,7 @@
  * Version arithmetic for the two release lines, kept free of git and GitHub calls so it is unit
  * tested (versioning.test.ts). scripts/release/plan.mjs feeds it the tags and pull requests.
  *
- *   beta    every push to main       X.Y.(Z+1)-beta.N  after the last stable X.Y.Z, N = commits since it
+ *   beta    run by hand on main      X.Y.(Z+1)-beta.N  after the last stable X.Y.Z, N = commits since it
  *   stable  every merge into stable  the last stable bumped by the largest change merged since it
  */
 

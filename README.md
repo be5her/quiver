@@ -12,7 +12,7 @@ Download the build for your platform from the [latest release](https://github.co
 | macOS    | `Quiver-<version>-mac-arm64.dmg` (Apple silicon), `Quiver-<version>-mac-x64.dmg` (Intel) | Drag Quiver to Applications. The first launch is blocked; open _System Settings → Privacy & Security_ and click _Open Anyway_, or run `xattr -dr com.apple.quarantine /Applications/Quiver.app`. The app announces new versions but, until builds are signed, links to the download instead of replacing itself. |
 | Linux    | `Quiver-<version>-linux-x64.AppImage` or `Quiver-<version>-linux-x64.deb`             | `chmod +x` the AppImage and run it; it updates in place. The `.deb` announces new versions and links to the download.                                                                                                                                       |
 
-Quiver looks for a newer release on GitHub shortly after launch and every six hours. When there is one, the status bar shows "Update to vX" (or "vX available" where the build cannot replace itself); nothing is downloaded until you click. Settings → About has "Check for updates", the release notes and a "Restart to install" button once the download is verified. On Windows, **Beta builds** in the same place also offers the build made from every pull request merged into `main`; turning it off never downgrades.
+Quiver looks for a newer release on GitHub shortly after launch and every six hours. When there is one, the status bar shows "Update to vX" (or "vX available" where the build cannot replace itself); nothing is downloaded until you click. Settings → About has "Check for updates", the release notes and a "Restart to install" button once the download is verified. On Windows, **Beta builds** in the same place also offers the betas built from `main` whenever the owner runs the Beta workflow; turning it off never downgrades.
 
 ## What is in the box
 
@@ -106,7 +106,7 @@ Every change is a branch and a pull request against `main`. CI ([.github/workflo
 
 Label each pull request before merging: `breaking`, `enhancement` (New), `design` (Look and feel), `bug` (Fixes) or `documentation`. The labels group the release notes and decide the next version; `skip-changelog` leaves a pull request out of the notes.
 
-[CLAUDE.md](CLAUDE.md) spells this out for Claude Code: start a session in this folder, ask for a feature or a fix, and it comes back as a pull request ready for review. Every merge ships as a Windows beta; once enough have merged, release them as stable. How the betas and stable releases are built and published is in [docs/releasing.md](docs/releasing.md).
+[CLAUDE.md](CLAUDE.md) spells this out for Claude Code: start a session in this folder, ask for a feature or a fix, and it comes back as a pull request ready for review. Run the Beta workflow to ship what has merged as a Windows beta; once it has been tried, release it as stable. How the betas and stable releases are built and published is in [docs/releasing.md](docs/releasing.md).
 
 ## License
 

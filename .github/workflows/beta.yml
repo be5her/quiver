@@ -1,16 +1,16 @@
 name: Beta
 
-# Every push to main (every merged pull request) becomes a Windows beta: vX.Y.(Z+1)-beta.N after
-# the last stable vX.Y.Z, where N counts the commits since it. It is published as a GitHub
-# prerelease, which only copies that opted in (Settings -> About -> Beta builds) pick up. Stable
-# copies ask for the latest release, which never is a prerelease.
+# Run by hand (Actions -> Beta -> Run workflow, on main): builds main as it is into a Windows beta,
+# vX.Y.(Z+1)-beta.N after the last stable vX.Y.Z, where N counts the commits since it. Merges to main
+# no longer start it, so several merges can go out as one beta; CI still checks every pull request
+# and every push to main. It is published as a GitHub prerelease, which only copies that opted in
+# (Settings -> About -> Beta builds) pick up. Stable copies ask for the latest release, which never
+# is a prerelease. Running it again with no new commit on main does nothing: that beta exists.
 #
 # The version is stamped into package.json during the build and never committed; the tags are the
 # record. Only the newest KEEP_BETAS beta releases are kept, older ones are deleted with their tags.
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -26,13 +26,17 @@ env:
 jobs:
   plan:
     name: Plan and draft
-    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.plan.outputs.version }}
       tag: ${{ steps.plan.outputs.tag }}
       skip: ${{ steps.draft.outputs.skip }}
     steps:
+      - name: Betas are built from main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Betas are built from main; this run was started on ${GITHUB_REF#refs/heads/}. Pick main in Run workflow."
+          exit 1
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
