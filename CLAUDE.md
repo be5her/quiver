@@ -4,7 +4,7 @@ Quiver is a per-project developer toolbelt: Electron + Angular in an npm workspa
 
 ## One branch and one pull request per change
 
-Every feature, fix or chore is its own branch and its own pull request against `main`. Never commit to `main` or `stable`, never push tags, never create, edit or publish releases: every merge to `main` ships as a Windows beta, and the owner releases stable by merging `main` into `stable` (`docs/releasing.md`).
+Every feature, fix or chore is its own branch and its own pull request against `main`. Never commit to `main` or `stable`, never push tags, never create, edit or publish releases, and never run the Beta or Stable workflows: the owner ships `main` as a Windows beta by running the Beta workflow by hand, and releases stable by merging `main` into `stable` (`docs/releasing.md`).
 
 1. Start from a fresh `main`: `git checkout main && git pull --ff-only origin main`.
 2. Branch: `git checkout -b feat/<short-name>` or `fix/<short-name>`.
@@ -28,4 +28,4 @@ Every feature, fix or chore is its own branch and its own pull request against `
 
 ## Releasing (owner only)
 
-Merging to `main` publishes a Windows beta (`.github/workflows/beta.yml`). Merging a pull request from `main` into `stable` with a merge commit bumps the version from the merged pull requests' labels and publishes a stable release for all three platforms (`.github/workflows/stable.yml`, `scripts/release/`). Versions live in tags, not in committed `package.json`. Details in `docs/releasing.md`.
+Running the Beta workflow by hand (Actions → Beta → Run workflow, on `main`) publishes `main` as a Windows beta (`.github/workflows/beta.yml`); merging to `main` only runs CI. Merging a pull request from `main` into `stable` with a merge commit bumps the version from the merged pull requests' labels and publishes a stable release for all three platforms (`.github/workflows/stable.yml`, `scripts/release/`). Versions live in tags, not in committed `package.json`. Details in `docs/releasing.md`.

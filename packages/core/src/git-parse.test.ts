@@ -14,6 +14,9 @@ import {
   operationArgs,
   parseBlamePorcelain,
   parseBranches,
+  parseBranchTracking,
+  planBranchSync,
+  remotesToFetch,
   parseConflictMarkers,
   parseDecorations,
   parseDiffSummary,
@@ -691,14 +694,68 @@ describe('worktrees', () => {
   it('names the worktree of a branch checked out in another one, but not the current branch', () => {
     const line = (f: string[]) => f.join('\0');
     const out = [
-      line(['refs/heads/feat/x', 'feat/x', '*', '', '', 'h1', 'a', '', `${W}/with space`]),
-      line(['refs/heads/main', 'main', ' ', '', '', 'h2', 'm', '', `${W}/repo`]),
-      line(['refs/heads/free', 'free', ' ', '', '', 'h3', 'f', '', '']),
+      line(['refs/heads/feat/x', 'feat/x', '*', '', '', 'h1', 'a', '', '', '', '', `${W}/with space`]),
+      line(['refs/heads/main', 'main', ' ', '', '', 'h2', 'm', '', '', '', '', `${W}/repo`]),
+      line(['refs/heads/free', 'free', ' ', '', '', 'h3', 'f', '', '', '', '', '']),
     ].join('\n');
     expect(parseBranches(out).map((b) => [b.name, b.worktreePath])).toEqual([
       ['feat/x', undefined],
       ['main', `${W}/repo`],
       ['free', undefined],
     ]);
+  });
+});
+
+describe('branch tracking and sync plans', () => {
+  const row = (...fields: string[]) => fields.join('\0');
+  const out = [
+    row('refs/heads/feat', '*', 'aaa', 'refs/remotes/origin/feat', 'origin', 'refs/heads/feat', '[ahead 1]', 'refs/remotes/origin/feat', 'origin', '[ahead 1]', 'D:/repo'),
+    row('refs/heads/main', ' ', 'bbb', 'refs/remotes/origin/main', 'origin', 'refs/heads/main', '[behind 3]', 'refs/remotes/origin/main', 'origin', '[behind 3]', 'D:/repo-main'),
+    row('refs/heads/old', ' ', 'ccc', 'refs/remotes/origin/old', 'origin', 'refs/heads/old', '[gone]', 'refs/remotes/origin/old', 'origin', '[gone]', ''),
+    row('refs/heads/both', ' ', 'ddd', 'refs/remotes/up/other', 'up', 'refs/heads/other', '[ahead 2, behind 1]', '', 'up', '', ''),
+    row('refs/heads/loc', ' ', 'eee', 'refs/heads/main', '.', 'refs/heads/main', '[ahead 1]', '', '.', '', ''),
+    row('refs/heads/none', ' ', 'fff', '', '', '', '', '', '', '', ''),
+    // Made from origin/main: git (push.default=simple) would push it nowhere.
+    row('refs/heads/frommain', ' ', 'ggg', 'refs/remotes/origin/main', 'origin', 'refs/heads/main', '[ahead 1]', '', 'origin', '', ''),
+    // Pulls from upstream/main, pushes to its fork, where it is not yet (push.default=current, remote.pushDefault=fork).
+    row('refs/heads/tri', ' ', 'hhh', 'refs/remotes/upstream/main', 'upstream', 'refs/heads/main', '', 'refs/remotes/fork/tri', 'fork', '[gone]', ''),
+    row('refs/remotes/origin/main', ' ', 'bbb', '', '', '', '', '', '', '', ''),
+  ].join('\n');
+  const list = parseBranchTracking(out);
+
+  it('reads each local branch with its upstream, where git would push it and where it is checked out', () => {
+    expect(list.map((b) => b.name)).toEqual(['feat', 'main', 'old', 'both', 'loc', 'none', 'frommain', 'tri']);
+    expect(list[0]).toEqual({
+      name: 'feat',
+      current: true,
+      head: 'aaa',
+      upstream: { ref: 'refs/remotes/origin/feat', short: 'origin/feat', remote: 'origin', remoteRef: 'refs/heads/feat' },
+      gone: false,
+      ahead: 1,
+      behind: 0,
+      push: { remote: 'origin', branch: 'feat', short: 'origin/feat', exists: true, ahead: 1, behind: 0 },
+    });
+    expect(list[1]).toMatchObject({ current: false, behind: 3, worktreePath: 'D:/repo-main' });
+    expect(list[3].upstream).toMatchObject({ short: 'up/other', remoteRef: 'refs/heads/other' });
+    expect(list[3].push).toBeUndefined();
+    expect(list[4].upstream).toMatchObject({ short: 'main', remote: '.' });
+    expect(list[5].upstream).toBeUndefined();
+    expect(list[6].push).toBeUndefined();
+    expect(list[7].push).toEqual({ remote: 'fork', branch: 'tri', short: 'fork/tri', exists: false, ahead: 0, behind: 0 });
+  });
+
+  it('plans a fast-forward, a push to where git would push, or nothing it could do without the branch checked out', () => {
+    const plans = (push: boolean) => Object.fromEntries(list.map((b) => [b.name, planBranchSync(b, push)]));
+    expect(plans(false)).toEqual({ feat: 'ahead', main: 'fast-forward', old: 'gone', both: 'diverged', loc: 'ahead', none: 'no-upstream', frommain: 'ahead', tri: 'ahead' });
+    // Never to main for a branch made from it, nor to a local upstream; a first push to the fork is a push.
+    expect(plans(true)).toMatchObject({ feat: 'push', main: 'fast-forward', loc: 'ahead', frommain: 'ahead', tri: 'push' });
+    expect(planBranchSync({ ...list[1], behind: 0, push: { ...list[1].push!, behind: 0 } }, true)).toBe('up-to-date');
+    // Ahead of its upstream, but its push target has commits it lacks: never pushed over them.
+    expect(planBranchSync({ ...list[0], push: { ...list[0].push!, behind: 2 } }, true)).toBe('diverged');
+  });
+
+  it('fetches each remote once, and none for a local upstream', () => {
+    expect(remotesToFetch(list)).toEqual(['origin', 'up', 'upstream', 'fork']);
+    expect(remotesToFetch([list[4], list[5]])).toEqual([]);
   });
 });

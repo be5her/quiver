@@ -131,7 +131,7 @@ export interface GlobalConfig {
   background: BackgroundConfig;
 }
 
-/** Which releases the in-app updater follows. `beta` adds the Windows prereleases built from every merge to main. */
+/** Which releases the in-app updater follows. `beta` adds the Windows prereleases built from main when the Beta workflow is run. */
 export type UpdateChannel = 'stable' | 'beta';
 
 export interface UpdatesConfig {

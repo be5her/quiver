@@ -79,7 +79,9 @@ export function parseDecorations(d: string): string[] {
 }
 
 /** The `--format` that `parseBranches` reads, for `git for-each-ref refs/heads refs/remotes`. */
-export const GIT_BRANCH_FORMAT = '%(refname)%00%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track)%00%(objectname)%00%(contents:subject)%00%(committerdate:iso-strict)%00%(worktreepath)';
+// `%(worktreepath)` stays last: on a git without it, the branch list drops that field from the end (local.ts).
+export const GIT_BRANCH_FORMAT =
+  '%(refname)%00%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track)%00%(objectname)%00%(contents:subject)%00%(committerdate:iso-strict)%00%(upstream:remotename)%00%(push)%00%(push:remotename)%00%(worktreepath)';
 
 export interface BranchMergeInfo {
   /** Full ref names (`refs/heads/x`) from `git for-each-ref --merged=<base>`. */
@@ -97,7 +99,7 @@ export function parseBranches(out: string, info: BranchMergeInfo = { merged: new
   const branches: GitBranch[] = [];
   for (const line of out.split('\n')) {
     if (!line.trim()) continue;
-    const [refname, name, head, upstream, track, objectname, subject, date, worktreePath] = line.replace(/\r$/, '').split('\0');
+    const [refname, name, head, upstream, track, objectname, subject, date, upstreamRemote, push, pushRemote, worktreePath] = line.replace(/\r$/, '').split('\0');
     const remote = refname.startsWith('refs/remotes/');
     if (remote && refname.endsWith('/HEAD')) continue;
     if (!remote && !refname.startsWith('refs/heads/')) continue;
@@ -109,6 +111,8 @@ export function parseBranches(out: string, info: BranchMergeInfo = { merged: new
       current: head === '*',
       remote,
       ...(upstream ? { upstream } : {}),
+      ...(upstream && upstreamRemote ? { upstreamRemote } : {}),
+      ...(!remote && pushTarget(push ?? '', pushRemote ?? '', '') ? { push: pushTarget(push ?? '', pushRemote ?? '', '')!.short } : {}),
       ahead: ahead ? Number(ahead[1]) : 0,
       behind: behind ? Number(behind[1]) : 0,
       head: objectname,
@@ -752,4 +756,120 @@ export function defaultWorktreePath(mainPath: string, branch: string): string {
 export function worktreeRefusal(message: string): { branch: string; path: string } | null {
   const m = /'([^']+)' is already (?:checked out|used by worktree) at '(.+)'[ \t\r]*$/m.exec(message) ?? /branch '([^']+)' (?:used by worktree|checked out) at '(.+)'[ \t\r]*$/im.exec(message);
   return m ? { branch: m[1], path: m[2] } : null;
+}
+
+// ---------- bringing branches up to date with their upstream ----------
+
+/**
+ * The `--format` that `parseBranchTracking` reads, for `git for-each-ref refs/heads`: each local branch with its
+ * upstream as a full ref (`refs/remotes/origin/main`), the remote and the branch's name there, where git would push it
+ * (`%(push)`, as `git push` with no arguments would, following push.default, pushRemote and remote.pushDefault), and
+ * where it is checked out. `%(upstream:remotename)` and `%(upstream:remoteref)` need git 2.22.
+ */
+export const GIT_TRACKING_FORMAT =
+  '%(refname)%00%(HEAD)%00%(objectname)%00%(upstream)%00%(upstream:remotename)%00%(upstream:remoteref)%00%(upstream:track)%00%(push)%00%(push:remotename)%00%(push:track)%00%(worktreepath)';
+
+export interface BranchTracking {
+  name: string;
+  /** Checked out in this worktree. */
+  current: boolean;
+  head: string;
+  upstream?: {
+    /** The full ref git compares against: `refs/remotes/origin/main`, or `refs/heads/main` for a local upstream. */
+    ref: string;
+    /** `origin/main`, as the branch list shows it. */
+    short: string;
+    /** The remote's name; `.` for a local upstream. */
+    remote: string;
+    /** The branch's name on the remote: `refs/heads/main`. */
+    remoteRef: string;
+  };
+  /** The upstream was deleted on the remote (a fetch pruned it). */
+  gone: boolean;
+  /** Against the upstream. */
+  ahead: number;
+  behind: number;
+  /**
+   * Where a plain `git push` of it would go, when that is a branch of a configured remote: none for a branch tracking
+   * one of another name under push.default=simple (made from `origin/main`), which git refuses to push there.
+   */
+  push?: PushTarget;
+  /** The other worktree it is checked out in. */
+  worktreePath?: string;
+}
+
+export interface PushTarget {
+  remote: string;
+  /** The branch's name on that remote. */
+  branch: string;
+  /** `origin/feat`. */
+  short: string;
+  /** False when the remote has no such branch yet (as of the last fetch): a first push. */
+  exists: boolean;
+  ahead: number;
+  behind: number;
+}
+
+/**
+ * `%(push)` (`refs/remotes/<remote>/<branch>`) and `%(push:remotename)` as a push target; null when git would push it
+ * nowhere, to a URL or to a remote with no remote-tracking branches. (`%(push:remoteref)` is left empty by git unless
+ * the remote has a push refspec, so the branch is read from the tracking ref.)
+ */
+export function pushTarget(ref: string, remote: string, track: string): PushTarget | null {
+  const prefix = `refs/remotes/${remote}/`;
+  if (!ref || !remote || !ref.startsWith(prefix) || ref.length === prefix.length) return null;
+  const branch = ref.slice(prefix.length);
+  const ahead = /ahead (\d+)/.exec(track);
+  const behind = /behind (\d+)/.exec(track);
+  return { remote, branch, short: `${remote}/${branch}`, exists: track !== '[gone]', ahead: ahead ? Number(ahead[1]) : 0, behind: behind ? Number(behind[1]) : 0 };
+}
+
+/** `git for-each-ref --format=<GIT_TRACKING_FORMAT> refs/heads`. */
+export function parseBranchTracking(out: string): BranchTracking[] {
+  const list: BranchTracking[] = [];
+  for (const line of out.split('\n')) {
+    if (!line.trim()) continue;
+    const [refname, head, objectname, upstream, remote, remoteRef, track, push, pushRemote, pushTrack, worktreePath] = line.replace(/\r$/, '').split('\0');
+    if (!refname?.startsWith('refs/heads/')) continue;
+    const ahead = /ahead (\d+)/.exec(track ?? '');
+    const behind = /behind (\d+)/.exec(track ?? '');
+    const current = head === '*';
+    const target = pushTarget(push ?? '', pushRemote ?? '', pushTrack ?? '');
+    list.push({
+      name: refname.slice('refs/heads/'.length),
+      current,
+      head: objectname,
+      ...(upstream && remote && remoteRef ? { upstream: { ref: upstream, short: upstream.replace(/^refs\/(?:remotes|heads)\//, ''), remote, remoteRef } } : {}),
+      gone: track === '[gone]',
+      ahead: ahead ? Number(ahead[1]) : 0,
+      behind: behind ? Number(behind[1]) : 0,
+      ...(target ? { push: target } : {}),
+      ...(worktreePath && !current ? { worktreePath } : {}),
+    });
+  }
+  return list;
+}
+
+/**
+ * What bringing a branch up to date takes, once its remotes have been fetched: a fast-forward when it is only behind
+ * its upstream; with `push` (sync), a push when it is not behind and git's push target lacks some of its commits (or
+ * does not exist yet), never past commits the target has that it lacks; otherwise nothing that can be done without
+ * the branch checked out (`diverged`) or nothing at all. A branch git would push nowhere (`push` undefined: it tracks a
+ * branch of another name) is never pushed, which keeps a branch made from `origin/main` from going to main.
+ */
+export function planBranchSync(b: BranchTracking, push: boolean): 'fast-forward' | 'push' | 'up-to-date' | 'ahead' | 'diverged' | 'no-upstream' | 'gone' {
+  if (!b.upstream) return 'no-upstream';
+  if (b.gone) return 'gone';
+  if (b.ahead && b.behind) return 'diverged';
+  if (b.behind) return 'fast-forward';
+  const target = b.push;
+  if (push && target && (!target.exists || (target.ahead > 0 && target.behind === 0))) return 'push';
+  if (push && target?.ahead && target.behind) return 'diverged';
+  if (b.ahead || (target && (!target.exists || target.ahead))) return 'ahead';
+  return 'up-to-date';
+}
+
+/** The remotes to fetch before bringing `branches` up to date (upstreams and push targets), in the order first named. */
+export function remotesToFetch(branches: BranchTracking[]): string[] {
+  return [...new Set(branches.flatMap((b) => [...(b.upstream && b.upstream.remote !== '.' ? [b.upstream.remote] : []), ...(b.push ? [b.push.remote] : [])]))];
 }

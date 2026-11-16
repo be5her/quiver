@@ -24,6 +24,7 @@ import {
 } from '@quiver/core';
 import { killTree, spawnTree } from '@quiver/core/node';
 import { findProfileFile } from '../env/files';
+import { githubAccountEnv } from '../git/pr';
 
 // The process supervisor: runs saved tasks as whole process trees, keeps their output, tells when they are ready,
 // restarts crashed ones when asked to and stops everything when the workspace closes or the app quits.
@@ -57,6 +58,8 @@ interface Run {
   ws: WorkspaceApi;
   host: HostApi;
   task: RunnerTask;
+  /** Values never shown in the output: the GitHub token the task got from the workspace's account. */
+  secrets?: string[];
   proc: RunnerProc;
   out: RingBuffer<RunnerOutputLine>;
   child: ChildProcess | null;
@@ -216,7 +219,11 @@ function scheduleOutputEvent(run: Run): void {
   }, OUTPUT_EVENT_MS);
 }
 
-function record(run: Run, stream: RunnerOutputLine['stream'], text: string): void {
+function record(run: Run, stream: RunnerOutputLine['stream'], raw: string): void {
+  // A task that prints its environment (printenv, a crash report) would otherwise put the token in the output, which
+  // the panel shows and agents can read.
+  let text = raw;
+  for (const secret of run.secrets ?? []) text = text.split(secret).join('***');
   const line: RunnerOutputLine = { seq: run.out.last + 1, stream, text, at: nowIso() };
   run.out.push(line);
   if (stream !== 'system' && run.ready && !run.ended && run.proc.state === 'starting' && run.ready.test(stripAnsi(text))) markReady(run);
@@ -334,7 +341,10 @@ async function launch(run: Run): Promise<void> {
   let portHeld = false;
   try {
     const cwd = insideWorkspace(ws, task.cwd);
-    const env: Record<string, string> = task.envProfile ? await profileEnv(ws, cwd, task.envProfile) : {};
+    // The GitHub account the workspace chose comes first, so a task's own GH_TOKEN or git settings still win.
+    const accountEnv = await githubAccountEnv(ws, cwd, (line) => record(run, 'system', line));
+    if (accountEnv.GH_TOKEN) run.secrets = [accountEnv.GH_TOKEN];
+    const env: Record<string, string> = { ...accountEnv, ...(task.envProfile ? await profileEnv(ws, cwd, task.envProfile) : {}) };
     for (const kv of task.env) if (kv.enabled && kv.key) env[kv.key] = kv.value;
     portHeld = task.port !== undefined && (await portOpen(task.port));
     // A stop that came while the environment was read (an auto restart) wins.

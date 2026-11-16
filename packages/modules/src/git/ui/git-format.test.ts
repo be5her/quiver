@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { applyPatch, checksSummary, cleanupCandidates, groupChanges, isPushRejected, languageForPath, parsePatch, refMatches, remotesOf, splitPath, splitRemoteBranch, splitRows } from './git-format';
-import type { GitBranch } from '@quiver/core';
+import { applyPatch, checksSummary, cleanupCandidates, groupChanges, isPushRejected, languageForPath, parsePatch, refMatches, remotesOf, splitPath, splitRemoteBranch, splitRows, syncSummary, tracksRemote } from './git-format';
+import type { GitBranch, GitBranchSyncItem } from '@quiver/core';
 import { blameBefore, blameKey, blameMarkers, blameText, blameTitle } from './git-format';
 import type { GitBlameCommit } from '@quiver/core';
 
@@ -202,5 +202,37 @@ describe('blame', () => {
   it('gives the editor one line per blamed line, a lone CR inside a line drawn rather than breaking it', () => {
     expect(blameText([{ text: 'one\rtwo' }, { text: '\tthree' }, { text: '' }])).toBe('one␍two\n\tthree\n');
     expect(blameText([])).toBe('');
+  });
+});
+
+describe('syncSummary', () => {
+  const item = (name: string, outcome: GitBranchSyncItem['outcome'], extra: Partial<GitBranchSyncItem> = {}): GitBranchSyncItem => ({ name, upstream: `origin/${name}`, outcome, ahead: 0, behind: 0, ...extra });
+
+  it('says what became of one branch', () => {
+    expect(syncSummary([item('main', 'updated', { behind: 3 })])).toEqual({ message: 'Pulled 3 commits into main', kind: 'success' });
+    expect(syncSummary([item('feat', 'pushed', { ahead: 1 })])).toEqual({ message: 'Pushed 1 commit of feat to origin/feat', kind: 'success' });
+    expect(syncSummary([item('main', 'diverged', { ahead: 2, behind: 1 })])).toEqual({
+      message: 'main and origin/main have diverged (2 ahead, 1 behind); switch to it and pull to merge or rebase',
+      kind: 'info',
+    });
+    expect(syncSummary([item('main', 'failed', { message: 'Not possible to fast-forward' })])).toEqual({ message: 'main: Not possible to fast-forward', kind: 'error' });
+  });
+
+  it('sums up several: what moved, what needs a hand, how many had nothing to do', () => {
+    const many = [item('main', 'updated', { behind: 2 }), item('stable', 'updated', { behind: 1 }), item('feat', 'pushed', { ahead: 1 }), item('old', 'gone'), item('a', 'up-to-date'), item('b', 'ahead', { ahead: 1 })];
+    expect(syncSummary(many)).toEqual({ message: 'Pulled into main, stable · Pushed feat · origin/old was deleted on the remote · 2 up to date', kind: 'info' });
+    expect(syncSummary([item('a', 'up-to-date'), item('b', 'up-to-date')])).toEqual({ message: 'All 2 branches are up to date', kind: 'success' });
+    expect(syncSummary([])).toEqual({ message: 'No branch tracks a remote branch', kind: 'info' });
+  });
+
+  it('names a branch git would not push, and where a push went', () => {
+    const fromMain = item('feat', 'ahead', { upstream: 'origin/main', ahead: 1, message: 'git would not push it: it tracks origin/main, a branch of another name (push.default). Push it to publish it under its own name' });
+    expect(syncSummary([fromMain, item('a', 'up-to-date')])).toEqual({ message: `feat: ${fromMain.message} · 1 up to date`, kind: 'info' });
+    expect(syncSummary([item('tri', 'pushed', { ahead: 2, upstream: 'upstream/main', pushTarget: 'fork/tri' })]).message).toBe('Pushed 2 commits of tri to fork/tri');
+  });
+
+  it('tells a remote upstream from a local one, also one with a slash', () => {
+    const b = (upstream: string | undefined, upstreamRemote?: string) => ({ upstream, upstreamRemote }) as GitBranch;
+    expect([b('origin/main', 'origin'), b('feature/base', '.'), b(undefined), b('origin/x')].map(tracksRemote)).toEqual([true, false, false, true]);
   });
 });

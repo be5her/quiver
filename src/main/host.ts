@@ -656,7 +656,7 @@ export class Host {
         id: 'app.update.channel',
         title: 'Switch update channel',
         description:
-          'Follows stable releases only, or also the beta builds published for Windows from every change merged to main, then checks for updates. Leaving beta never downgrades: this copy stays on its version until a newer stable release ships.',
+          'Follows stable releases only, or also the beta builds published for Windows from main when one is released, then checks for updates. Leaving beta never downgrades: this copy stays on its version until a newer stable release ships.',
         scope: 'global',
         mutating: true,
         input: z.object({ channel: z.enum(['stable', 'beta']) }),

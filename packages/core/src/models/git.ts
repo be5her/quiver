@@ -32,6 +32,13 @@ export interface GitBranch {
   current: boolean;
   remote: boolean;
   upstream?: string;
+  /** The upstream's remote; `.` when it is a local branch. */
+  upstreamRemote?: string;
+  /**
+   * Where a plain `git push` of this local branch goes (`origin/feat`), following push.default and pushRemote. None
+   * when git would push it nowhere, as for a branch tracking one of another name (made from `origin/main`).
+   */
+  push?: string;
   ahead: number;
   behind: number;
   head: string;
@@ -156,6 +163,58 @@ export const GitBranchCreateInputSchema = z.object({ name: GitArgSchema, from: G
 export const GitRemoteInputSchema = z.object({ remote: GitArgSchema.optional(), branch: GitArgSchema.optional() });
 export const GitPushInputSchema = GitRemoteInputSchema.extend({ setUpstream: z.boolean().default(false), forceWithLease: z.boolean().default(false) });
 
+/** Which local branches `git.branch.pull` and `git.branch.sync` bring up to date with their upstream. */
+export const GitBranchSyncInputSchema = z.object({
+  names: z
+    .array(GitArgSchema)
+    .min(1)
+    .optional()
+    .describe('Local branch names, current or not. Default: every local branch with an upstream that still exists on its remote'),
+});
+export const GitBranchPushInputSchema = z.object({
+  name: GitArgSchema.describe('A local branch, current or not'),
+  forceWithLease: z.boolean().default(false),
+  publish: z
+    .boolean()
+    .default(false)
+    .describe('Push it under its own name to its push remote (origin by default) and track that from then on, as `git push -u origin <name>`'),
+});
+
+/**
+ * What became of one branch in `git.branch.pull` or `git.branch.sync`: `updated` fast-forwarded to its upstream,
+ * `pushed` (sync only) sent its commits to its push target, `up-to-date` had nothing to do, `ahead` (pull only) has commits to push,
+ * `diverged` has commits of its own and its upstream has others (needs a merge or rebase, on the branch itself),
+ * `no-upstream` tracks nothing, `gone` tracks a branch deleted on the remote, `failed` was refused by git (`message`).
+ */
+export type GitBranchSyncOutcome = 'updated' | 'pushed' | 'up-to-date' | 'ahead' | 'diverged' | 'no-upstream' | 'gone' | 'failed';
+
+export interface GitBranchSyncItem {
+  name: string;
+  /** Its upstream, short (`origin/main`). */
+  upstream?: string;
+  outcome: GitBranchSyncOutcome;
+  /** Commits it had that its upstream did not, and the reverse, after the fetch and before anything moved. */
+  ahead: number;
+  behind: number;
+  /** The commits it moved between, when it was fast-forwarded. */
+  from?: string;
+  to?: string;
+  /** Where a push of it goes (`origin/feat`), when git would push it anywhere. */
+  pushTarget?: string;
+  /** The other worktree it is checked out in, where the fast-forward ran. */
+  worktreePath?: string;
+  message?: string;
+}
+
+export interface GitBranchSyncResult {
+  branches: GitBranchSyncItem[];
+  /** The remotes fetched first. */
+  fetched: string[];
+  /** What git printed. */
+  output: string;
+  status: GitStatus;
+}
+
 export const GitBranchDeleteInputSchema = z.object({
   name: GitArgSchema,
   force: z.boolean().default(false).describe('Delete it even when its commits are not merged anywhere (git branch -D); they are then only in the reflog.'),
@@ -275,7 +334,26 @@ export interface GhStatus {
   message?: string;
 }
 
-export type GitPrCheckState = 'pending' | 'success' | 'failure' | 'skipped' | 'neutral';
+/** A GitHub login as GitHub allows it: letters, digits and single hyphens, at most 39 characters. */
+export const GitHubLoginSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/, 'Not a GitHub login');
+
+export const GitAccountSetInputSchema = z.object({
+  account: GitHubLoginSchema.nullable().describe("The github.com account this workspace's git and gh calls use, one gh is signed in to (gh auth login); null goes back to gh's active account"),
+});
+
+/** The GitHub account a workspace works as, and the accounts it can pick from. */
+export interface GitAccountInfo {
+  /** The github.com account this workspace's git and gh calls use; null: gh's active account and whatever Git Credential Manager picks. */
+  account: string | null;
+  /** The accounts gh is signed in to on github.com, in gh's order, gh's active one marked. */
+  accounts: { login: string; active: boolean }[];
+  /** Why the accounts could not be listed, or that the chosen one is not signed in. */
+  message?: string;
+}
+
+export type GitPrCheckState ='pending' | 'success' | 'failure' | 'skipped' | 'neutral';
 
 export interface GitPrCheck {
   name: string;

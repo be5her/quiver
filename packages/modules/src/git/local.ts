@@ -5,10 +5,12 @@ import {
   GIT_LOG_FORMAT,
   GIT_STASH_FORMAT,
   GIT_TAG_FORMAT,
+  GIT_TRACKING_FORMAT,
   QuiverError,
   attachPatches,
   conflictedPaths,
   detectOperation,
+  parseBranchTracking,
   parseBranches,
   parseDiffSummary,
   parseLog,
@@ -19,6 +21,7 @@ import {
   sameWorktreePath,
   splitPatch,
   worktreeRefusal,
+  type BranchTracking,
   type GitBranch,
   type GitCommit,
   type GitDiffFile,
@@ -33,6 +36,7 @@ import {
   type WorkspaceApi,
 } from '@quiver/core';
 import { runToEnd, whichSync, type RunToEndResult } from '@quiver/core/node';
+import { accountGitEnv, accountNetworkEnv } from './account';
 
 // The git CLI, run in the workspace folder. Every call is a separate process with stdin closed and prompts turned
 // off, so nothing waits on a terminal; output is parsed by @quiver/core's git-parse.
@@ -107,7 +111,8 @@ interface GitRunOptions {
  * repository's root (`repoDirs().root`), so the paths git prints and the paths it is given mean the same thing.
  */
 export async function git(cwd: string, args: string[], options: GitRunOptions = {}): Promise<RunToEndResult> {
-  const result = await runToEnd(gitProgram(), [...BASE_ARGS, ...args], { cwd, env: { ...ENV, ...options.env }, input: options.input, timeoutMs: options.timeoutMs ?? READ_TIMEOUT_MS, maxBytes: MAX_OUTPUT_BYTES });
+  // accountGitEnv: the GitHub account the workspace chose, for the credential helper of a fetch, pull or push.
+  const result = await runToEnd(gitProgram(), [...BASE_ARGS, ...args], { cwd, env: { ...ENV, ...accountGitEnv(), ...options.env }, input: options.input, timeoutMs: options.timeoutMs ?? READ_TIMEOUT_MS, maxBytes: MAX_OUTPUT_BYTES });
   if (result.error) {
     gitPath = null;
     throw new QuiverError('NOT_FOUND', `git could not be started: ${result.error}`, { reason: 'no-git' });
@@ -443,8 +448,23 @@ export function requireBranchName(name: string): string {
 export async function remoteOp(cwd: string, args: string[], remote: string | undefined, interactive: boolean): Promise<GitRemoteResult> {
   const root = await repoRoot(cwd);
   if (remote !== undefined) await requireRemote(root, remote);
-  const result = await git(root, args, { timeoutMs: NETWORK_TIMEOUT_MS, env: interactive ? undefined : NON_INTERACTIVE_ENV });
+  const result = await network(root, args, interactive);
   return { output: output(result), status: await status(root) };
+}
+
+/**
+ * A git call that talks to a remote: the network timeout, the workspace account's token for gh as a credential helper
+ * (`accountNetworkEnv`), and no credential window for an agent's call (see `remoteOp`).
+ */
+export async function network(root: string, args: string[], interactive: boolean, options: { allowFailure?: boolean } = {}): Promise<RunToEndResult> {
+  const env = { ...(await accountNetworkEnv(root)), ...(interactive ? {} : NON_INTERACTIVE_ENV) };
+  return git(root, args, { timeoutMs: NETWORK_TIMEOUT_MS, env, allowFailure: options.allowFailure });
+}
+
+/** Every local branch with its upstream, ahead/behind as of the last fetch, and the other worktree it is checked out in. */
+export async function tracking(root: string): Promise<BranchTracking[]> {
+  const list = await git(root, ['for-each-ref', `--format=${GIT_TRACKING_FORMAT}`, 'refs/heads']);
+  return parseBranchTracking(list.stdout).map((b) => (b.worktreePath ? { ...b, worktreePath: path.normalize(b.worktreePath) } : b));
 }
 
 /**
@@ -455,7 +475,7 @@ export async function remoteDefaultBranch(root: string, remote: string, interact
   const local = await git(root, ['symbolic-ref', '--quiet', `refs/remotes/${remote}/HEAD`], { allowFailure: true });
   const prefix = `refs/remotes/${remote}/`;
   if (local.code === 0 && local.stdout.trim().startsWith(prefix)) return local.stdout.trim().slice(prefix.length);
-  const asked = await git(root, ['ls-remote', '--symref', remote, 'HEAD'], { timeoutMs: NETWORK_TIMEOUT_MS, env: interactive ? undefined : NON_INTERACTIVE_ENV });
+  const asked = await network(root, ['ls-remote', '--symref', remote, 'HEAD'], interactive);
   const m = /^ref: refs\/heads\/(\S+)\tHEAD$/m.exec(asked.stdout);
   return m ? m[1] : null;
 }
