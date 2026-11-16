@@ -545,8 +545,50 @@ export default definePart({
       await run('db.connection.save', { connection: base }, ws.id);
     }
 
+    // Connection order: a manual order committed with the connections, which the list follows and new ones join at the end.
+    const ordered: Record<'a' | 'b' | 'c', DbConnectionSummary> = {
+      c: await run<DbConnectionSummary>('db.connection.save', { connection: { kind: 'sqlite', name: 'order c', file: 'data/order-c.db' } }, ws.id),
+      a: await run<DbConnectionSummary>('db.connection.save', { connection: { kind: 'sqlite', name: 'order a', file: 'data/order-a.db' } }, ws.id),
+      b: await run<DbConnectionSummary>('db.connection.save', { connection: { kind: 'redis', name: 'order b', host: '127.0.0.1', port: fakeRedis.port } }, ws.id),
+    };
+    const orderIds = [ordered.a.id, ordered.b.id, ordered.c.id];
+    const listedIds = async () => (await run<DbConnectionSummary[]>('db.connection.list', {}, ws.id)).map((c) => c.id);
+    const placedBefore = await listedIds();
+    const byNameFirst = placedBefore.filter((id) => orderIds.includes(id)).join() === orderIds.join();
+    const reordered = await outcome('db.connection.reorder', { connectionIds: [ordered.c.id, ordered.a.id, ordered.b.id] }, 'mcp');
+    const placed = await listedIds();
+    const cOnDisk = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'db-connections', `${ordered.c.id}.json`), 'utf8')) as DbConnectionSummary;
+    const joiner = await run<DbConnectionSummary>('db.connection.save', { connection: { kind: 'sqlite', name: 'aaa order new', file: 'data/order-new.db' } }, ws.id);
+    const afterNew = await listedIds();
+    // An editor holding a copy from before the reorder saves it: the place stays the reorder's.
+    await run('db.connection.save', { connection: { ...ordered.c, name: 'order c', order: 7 } }, ws.id);
+    const afterStaleSave = await listedIds();
+    const unknown = await outcome('db.connection.reorder', { connectionIds: [ordered.a.id, 'nope'] });
+    check(
+      'db: connections list by name until reordered, an agent may reorder them, the order is committed without touching updatedAt, a new one goes last and a stale save keeps the place',
+      byNameFirst &&
+        names.includes('db_connection_reorder') &&
+        reordered.ok &&
+        placed.slice(0, 3).join() === [ordered.c.id, ordered.a.id, ordered.b.id].join() &&
+        cOnDisk.order === 0 &&
+        cOnDisk.updatedAt === ordered.c.updatedAt &&
+        afterNew[3] === joiner.id &&
+        joiner.order === 3 &&
+        afterStaleSave.slice(0, 4).join() === afterNew.slice(0, 4).join() &&
+        !unknown.ok &&
+        unknown.code === 'NOT_FOUND',
+      { byNameFirst, reordered: said(reordered), placed: placed.slice(0, 4), cOnDisk: { order: cOnDisk.order, updatedAt: cOnDisk.updatedAt, was: ordered.c.updatedAt }, joiner: joiner.order, afterNew: afterNew.slice(0, 4), afterStaleSave: afterStaleSave.slice(0, 4), unknown: said(unknown) },
+    );
+    await run('db.connection.delete', { id: joiner.id }, ws.id);
+    const removeOrdered = async () => {
+      for (const c of Object.values(ordered)) await run('db.connection.delete', { id: c.id }, ws.id).catch(() => {});
+    };
+
     return {
-      after: () => fakePg.close(),
+      after: async () => {
+        await removeOrdered();
+        await fakePg.close();
+      },
       ui: async (u) => {
         const { win, js, wait, shot } = u;
         // Databases module: sidebar tree, table browser, query editor, redis keys.
@@ -958,6 +1000,97 @@ export default definePart({
           await wait(300);
           await js(`[...document.querySelectorAll('[role=dialog] button, [data-testid=dialog] button')].find((b) => /discard|don.t save|close/i.test(b.textContent))?.click()`);
           await wait(200);
+        }
+        // The Connections header sorts the tree by name or type, and in the manual order a connection is dragged to its place.
+        {
+          await js(`[...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.title || '').includes('Databases'))?.click()`);
+          await wait(300);
+          const sidebarNames = async () => (await js(`[...document.querySelectorAll('q-db-sidebar [data-testid=db-connection-row]')].map((r) => r.getAttribute('title'))`)) as string[];
+          const ours = (list: string[]) => list.filter((n) => n.startsWith('order '));
+          const pickSort = async (sort: string, menuShot?: string) => {
+            // Clicked where it is, so the menu opens under the button as it does for the mouse.
+            await js(
+              `(() => { const b = document.querySelector('[data-testid=db-connection-sort]'); const r = b.getBoundingClientRect(); b.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: r.left + r.width / 2, clientY: r.bottom })); })()`,
+            );
+            await wait(150);
+            const items = (await js(`[...document.querySelectorAll('[data-testid=context-menu] [role=menuitemcheckbox]')].map((b) => [b.textContent.trim(), b.getAttribute('aria-checked')])`)) as [string, string][];
+            if (menuShot) await shot(menuShot);
+            await js(`document.querySelector('[data-testid=db-connection-sort-${sort}]')?.click()`);
+            await wait(300);
+            return items;
+          };
+          // Collapse every connection, so the rows sit one under the other at the top.
+          await js(`document.querySelector('q-db-sidebar').scrollTop = 0`);
+          for (let i = 0; i < 12; i++) {
+            const open = await js(`(() => { const row = [...document.querySelectorAll('q-db-sidebar [data-testid=db-connection-row]')].find((r) => r.nextElementSibling); if (row) row.click(); return Boolean(row); })()`);
+            if (!open) break;
+            await wait(80);
+          }
+          const manualBefore = await sidebarNames();
+          const menu = await pickSort('name', '09-db-sort-menu');
+          const byName = await sidebarNames();
+          const savedName = await run<{ value: unknown }>('workspace.state.get', { key: 'db.connectionSort' }, ws.id);
+          await shot('09a-db-sort-by-name');
+          await pickSort('kind');
+          const byKind = await sidebarNames();
+          // While sorted, a drag moves nothing.
+          const rowCenter = async (name: string) =>
+            (await js(`(() => { const r = [...document.querySelectorAll('q-db-sidebar [data-testid=db-connection-row]')].find((el) => el.getAttribute('title') === ${JSON.stringify(name)})?.getBoundingClientRect(); return r ? { x: Math.round(r.left + 40), y: Math.round(r.top + r.height / 2) } : null; })()`)) as { x: number; y: number } | null;
+          const dragRow = async (name: string, toName: string, offset: number, onDrag?: () => Promise<void>) => {
+            const from = await rowCenter(name);
+            const target = await rowCenter(toName);
+            if (!from || !target) return false;
+            const toY = target.y + offset;
+            win.webContents.sendInputEvent({ type: 'mouseMove', x: from.x, y: from.y });
+            win.webContents.sendInputEvent({ type: 'mouseDown', x: from.x, y: from.y, button: 'left', clickCount: 1 });
+            for (let step = 1; step <= 8; step++) {
+              win.webContents.sendInputEvent({ type: 'mouseMove', x: from.x, y: Math.round(from.y + ((toY - from.y) * step) / 8), button: 'left', modifiers: ['leftbuttondown'] });
+              await wait(30);
+            }
+            await wait(150);
+            const marker = (await js(`Boolean(document.querySelector('[data-testid=db-connection-drop-marker]'))`)) === true;
+            await onDrag?.();
+            win.webContents.sendInputEvent({ type: 'mouseUp', x: from.x, y: toY, button: 'left', clickCount: 1 });
+            await wait(700);
+            return marker;
+          };
+          const sortedMarker = await dragRow('order a', 'order c', -10);
+          const afterSortedDrag = await sidebarNames();
+          check(
+            'ui: the sort menu ticks the manual order, lists the connections by name or grouped by type, remembers the choice, and a drag moves nothing while sorted',
+            JSON.stringify(menu) === JSON.stringify([['Manual order', 'true'], ['Name', 'false'], ['Type', 'false'], ['Recently used', 'false']]) &&
+              ours(manualBefore).join() === 'order c,order a,order b' &&
+              ours(byName).join() === 'order a,order b,order c' &&
+              JSON.stringify(byName) === JSON.stringify([...byName].sort((x, y) => x.localeCompare(y, undefined, { numeric: true, sensitivity: 'base' }))) &&
+              // Redis before SQLite; within a type the manual order holds, so the placed ones lead their group.
+              ours(byKind).join() === 'order b,order c,order a' &&
+              byKind.indexOf('order a') < byKind.indexOf('smoke sqlite') &&
+              byKind.indexOf('order b') < byKind.indexOf('order c') &&
+              savedName.value === 'name' &&
+              !sortedMarker &&
+              JSON.stringify(afterSortedDrag) === JSON.stringify(byKind),
+            { menu, manualBefore, byName, byKind, saved: savedName.value, sortedMarker },
+          );
+          // Recently used: the connection of the latest query in the history comes first.
+          await pickSort('recent');
+          await wait(300);
+          const byRecent = await sidebarNames();
+          const saved = await run<DbConnectionSummary[]>('db.connection.list', {}, ws.id);
+          const latest = (await run<DbHistoryEntry[]>('db.history.list', { limit: 200 }, ws.id)).find((e) => saved.some((c) => c.id === e.connectionId));
+          const latestName = saved.find((c) => c.id === latest?.connectionId)?.name;
+          check('ui: sorted by last use, the connection of the latest query comes first', Boolean(latestName) && byRecent[0] === latestName, { first: byRecent[0], latestName });
+          await pickSort('manual');
+          // Drag "order b" above "order c", the first: the marker shows, the tree and the saved order follow, and the row stays collapsed.
+          const marker = await dragRow('order b', 'order c', -10, () => shot('09b-db-connection-drag'));
+          const shown = ours(await sidebarNames());
+          const listed = (await run<DbConnectionSummary[]>('db.connection.list', {}, ws.id)).map((c) => c.name).slice(0, 3);
+          const stillClosed = await js(`!([...document.querySelectorAll('q-db-sidebar [data-testid=db-connection-row]')].find((r) => r.getAttribute('title') === 'order b')?.nextElementSibling)`);
+          check(
+            'ui: dragging a connection in the manual order moves it there, saves the order and does not expand the row',
+            marker && shown.join() === 'order b,order c,order a' && listed.join() === 'order b,order c,order a' && stillClosed === true,
+            { marker, shown, listed, stillClosed },
+          );
+          await shot('09c-db-connection-reordered');
         }
       },
     };

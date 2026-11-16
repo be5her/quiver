@@ -10,6 +10,7 @@ import {
   newId,
   parseDotenv,
   resolveConnectionTemplate,
+  sortDbConnections,
   type DbConnection,
   type DbConnectionSummary,
   type HostApi,
@@ -64,11 +65,13 @@ export async function hasPassword(ws: WorkspaceApi, connectionId: string): Promi
 
 // ---------- connections ----------
 
+/** The saved connections in their manual order (see `db.connection.reorder`), the ones never placed by name. */
 export async function listConnections(ws: WorkspaceApi): Promise<DbConnectionSummary[]> {
   const [items, withPassword] = await Promise.all([ws.store.list<DbConnection>(COLLECTIONS.connections), hasPasswordSet(ws)]);
-  return items
-    .map((c) => ({ ...DbConnectionSchema.parse(c), hasPassword: withPassword.has(c.id) }))
-    .sort((a, b) => a.name.localeCompare(b.name));
+  return sortDbConnections(
+    items.map((c) => ({ ...DbConnectionSchema.parse(c), hasPassword: withPassword.has(c.id) })),
+    'manual',
+  );
 }
 
 export async function getConnection(ws: WorkspaceApi, id: string): Promise<DbConnectionSummary> {
