@@ -32,6 +32,13 @@ export interface GitBranch {
   current: boolean;
   remote: boolean;
   upstream?: string;
+  /** The upstream's remote; `.` when it is a local branch. */
+  upstreamRemote?: string;
+  /**
+   * Where a plain `git push` of this local branch goes (`origin/feat`), following push.default and pushRemote. None
+   * when git would push it nowhere, as for a branch tracking one of another name (made from `origin/main`).
+   */
+  push?: string;
   ahead: number;
   behind: number;
   head: string;
@@ -167,11 +174,15 @@ export const GitBranchSyncInputSchema = z.object({
 export const GitBranchPushInputSchema = z.object({
   name: GitArgSchema.describe('A local branch, current or not'),
   forceWithLease: z.boolean().default(false),
+  publish: z
+    .boolean()
+    .default(false)
+    .describe('Push it under its own name to its push remote (origin by default) and track that from then on, as `git push -u origin <name>`'),
 });
 
 /**
  * What became of one branch in `git.branch.pull` or `git.branch.sync`: `updated` fast-forwarded to its upstream,
- * `pushed` (sync only) sent its commits up, `up-to-date` had nothing to do, `ahead` (pull only) has commits to push,
+ * `pushed` (sync only) sent its commits to its push target, `up-to-date` had nothing to do, `ahead` (pull only) has commits to push,
  * `diverged` has commits of its own and its upstream has others (needs a merge or rebase, on the branch itself),
  * `no-upstream` tracks nothing, `gone` tracks a branch deleted on the remote, `failed` was refused by git (`message`).
  */
@@ -188,6 +199,8 @@ export interface GitBranchSyncItem {
   /** The commits it moved between, when it was fast-forwarded. */
   from?: string;
   to?: string;
+  /** Where a push of it goes (`origin/feat`), when git would push it anywhere. */
+  pushTarget?: string;
   /** The other worktree it is checked out in, where the fast-forward ran. */
   worktreePath?: string;
   message?: string;

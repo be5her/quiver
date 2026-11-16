@@ -48,6 +48,8 @@ async function fastForward(root: string, b: BranchTracking): Promise<string> {
     if (!existsSync(where)) throw new QuiverError('INVALID_INPUT', `${b.name} is checked out in the worktree at ${where}, which is missing; prune it or open that folder`);
     const state = await local.status(where, { files: false });
     if (state.operation) throw new QuiverError('INVALID_INPUT', `a ${state.operation} is in progress${b.current ? '' : ` in the worktree at ${where}`}; finish or abort it first`);
+    // The list was read before the fetch; had the worktree switched to another branch since, the merge would move that one.
+    if (state.branch !== b.name) throw new QuiverError('INVALID_INPUT', `${where} has switched to ${state.branch ?? 'a detached HEAD'} since; pull again`);
     return local.output(await local.git(where, ['merge', '--ff-only', upstream.ref], { env: local.NO_EDITOR_ENV }));
   }
   return local.output(await local.git(root, ['fetch', '--no-tags', '--no-prune', '.', `${upstream.ref}:refs/heads/${b.name}`]));
@@ -75,20 +77,29 @@ async function syncBranches(ctx: CommandContext, names: string[] | undefined, pu
     for (const before of targets) {
       const b = after.get(before.name) ?? before;
       const plan = planBranchSync(b, push);
+      const target = b.push;
       const item: GitBranchSyncItem = {
         name: b.name,
         ...(b.upstream ? { upstream: b.upstream.short } : {}),
         outcome: plan === 'fast-forward' ? 'updated' : plan === 'push' ? 'pushed' : plan,
-        ahead: b.ahead,
+        // What is pushed counts against the push target (a first push: everything ahead of the upstream).
+        ahead: plan === 'push' && target?.exists ? target.ahead : b.ahead,
         behind: b.behind,
+        ...(target ? { pushTarget: target.short } : {}),
         ...(b.worktreePath ? { worktreePath: b.worktreePath } : {}),
       };
+      if (push && plan === 'ahead' && !target && b.upstream) {
+        item.message = `git would not push it: it tracks ${b.upstream.short}, a branch of another name (push.default). Push it to publish it under its own name`;
+      } else if (push && plan === 'diverged' && !(b.ahead && b.behind) && target) {
+        item.message = `${target.short}, where it is pushed, has commits it does not`;
+      }
       try {
         if (plan === 'fast-forward') {
           printed.push(await fastForward(root, b));
           Object.assign(item, { from: b.head, to: (await local.git(root, ['rev-parse', '--verify', `refs/heads/${b.name}`])).stdout.trim() });
-        } else if (plan === 'push') {
-          printed.push(local.output(await local.network(root, ['push', b.upstream!.remote, `refs/heads/${b.name}:${b.upstream!.remoteRef}`], interactive(ctx))));
+        } else if (plan === 'push' && target) {
+          // Where `git push` itself would send it, never to an upstream of another name.
+          printed.push(local.output(await local.network(root, ['push', target.remote, `refs/heads/${b.name}:refs/heads/${target.branch}`], interactive(ctx))));
         }
       } catch (err) {
         Object.assign(item, { outcome: 'failed', message: reason(err) });
@@ -116,7 +127,7 @@ const branchSync = defineCommand({
   id: 'git.branch.sync',
   title: 'Sync git branches',
   description:
-    'git.branch.pull, and then pushes each branch that is only ahead of its upstream (outcome "pushed"), without switching to it. A diverged branch is neither pulled nor pushed, and nothing is ever force pushed.',
+    'git.branch.pull, and then pushes each branch that is not behind and has commits its push target lacks (outcome "pushed"), without switching to it. The push target is where a plain `git push` of it would go (push.default, pushRemote): a branch tracking one of another name (made from origin/main) is never pushed there, and comes back "ahead" with a message. A diverged branch is neither pulled nor pushed, and nothing is ever force pushed.',
   scope: 'workspace',
   mutating: true,
   input: GitBranchSyncInputSchema,
@@ -127,7 +138,7 @@ const branchPush = defineCommand({
   id: 'git.branch.push',
   title: 'Push git branch',
   description:
-    'Pushes a local branch, current or not, to its upstream (its remote, under the name it has there). A branch with no upstream is published to origin under its own name and tracks it from then on. forceWithLease overwrites the remote branch only if it is where it was last fetched.',
+    'Pushes a local branch, current or not, where a plain `git push` of it would go (push.default, pushRemote, remote.pushDefault): usually its upstream of the same name. A branch tracking one of another name (made from origin/main) has no such place and is refused (details.reason "no-push-target") rather than pushed there, as is one whose upstream was deleted on the remote ("gone"); publish: true pushes it under its own name to origin (or its push remote) and tracks that from then on, which is also what happens to a branch with no upstream. forceWithLease overwrites the remote branch only if it is where it was last fetched.',
   scope: 'workspace',
   mutating: true,
   actions: {
@@ -136,17 +147,27 @@ const branchPush = defineCommand({
     describe: { push: 'A plain push, which the remote refuses unless it fast-forwards', force: 'A push with forceWithLease, which can overwrite commits on the remote branch' },
   },
   input: GitBranchPushInputSchema,
-  handler: async ({ name, forceWithLease }, ctx): Promise<local.GitRemoteResult> => {
+  handler: async ({ name, forceWithLease, publish }, ctx): Promise<local.GitRemoteResult> => {
     const ws = workspace(ctx);
     const root = await local.repoRoot(ws.path);
     const [b] = pick(await local.tracking(root), [name]);
-    if (b.upstream?.remote === '.') throw new QuiverError('INVALID_INPUT', `${name} tracks the local branch ${b.upstream.short}, not a remote one; there is nothing to push it to`);
     const lease = forceWithLease ? ['--force-with-lease'] : [];
-    const args = b.upstream
-      ? ['push', ...lease, b.upstream.remote, `refs/heads/${name}:${b.upstream.remoteRef}`]
-      : ['push', '--set-upstream', ...lease, 'origin', `refs/heads/${name}:refs/heads/${name}`];
+    let args: string[];
+    let remote: string;
+    if (publish || !b.upstream) {
+      remote = b.push?.remote ?? 'origin';
+      args = ['push', '--set-upstream', ...lease, remote, `refs/heads/${name}:refs/heads/${name}`];
+    } else if (b.gone) {
+      throw new QuiverError('INVALID_INPUT', `${b.upstream.short}, which ${name} tracks, was deleted on the remote; pushing would bring it back. Publish it to push it anyway`, { reason: 'gone' });
+    } else if (!b.push) {
+      const why = b.upstream.remote === '.' ? `tracks the local branch ${b.upstream.short}` : `tracks ${b.upstream.short}, a branch of another name`;
+      throw new QuiverError('INVALID_INPUT', `git would not push ${name} anywhere: it ${why}. Publish it to push it under its own name`, { reason: 'no-push-target', upstream: b.upstream.short });
+    } else {
+      remote = b.push.remote;
+      args = ['push', ...lease, remote, `refs/heads/${name}:refs/heads/${b.push.branch}`];
+    }
     try {
-      return await local.remoteOp(root, args, b.upstream?.remote ?? 'origin', interactive(ctx));
+      return await local.remoteOp(root, args, remote, interactive(ctx));
     } finally {
       changed(ctx, ws, 'branches', 'status');
     }

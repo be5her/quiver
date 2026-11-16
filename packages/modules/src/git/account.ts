@@ -40,3 +40,26 @@ export function asWorkspaceAccount(commands: CommandDefinition[]): CommandDefini
     handler: async (input, ctx) => (ctx.workspace ? withAccount(await accountOf(ctx.workspace), () => command.handler(input, ctx)) : command.handler(input, ctx)),
   }));
 }
+
+/** Where `accountNetworkEnv` reads an account's token: gh's own store, set by pr.ts (which runs gh) when it loads. */
+let tokenSource: ((cwd: string, account: string) => Promise<string>) | null = null;
+
+export function setAccountTokenSource(source: (cwd: string, account: string) => Promise<string>): void {
+  tokenSource = source;
+}
+
+/**
+ * For a git process of the command under way that talks to a remote: the account's token as GH_TOKEN, on top of the
+ * credential username every git process gets. Git Credential Manager picks the account by that username alone, but gh
+ * as git's credential helper (`gh auth setup-git`) answers only for its active account unless GH_TOKEN names one.
+ * Best effort: with no account, no gh, or no token for it, git goes on with the username alone.
+ */
+export async function accountNetworkEnv(cwd: string): Promise<Record<string, string>> {
+  const account = currentAccount();
+  if (!account || !tokenSource) return {};
+  try {
+    return { GH_TOKEN: await tokenSource(cwd, account) };
+  } catch {
+    return {};
+  }
+}

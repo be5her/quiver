@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyPatch, checksSummary, cleanupCandidates, groupChanges, isPushRejected, languageForPath, parsePatch, refMatches, remotesOf, splitPath, splitRemoteBranch, splitRows, syncSummary } from './git-format';
+import { applyPatch, checksSummary, cleanupCandidates, groupChanges, isPushRejected, languageForPath, parsePatch, refMatches, remotesOf, splitPath, splitRemoteBranch, splitRows, syncSummary, tracksRemote } from './git-format';
 import type { GitBranch, GitBranchSyncItem } from '@quiver/core';
 import { blameBefore, blameKey, blameMarkers, blameText, blameTitle } from './git-format';
 import type { GitBlameCommit } from '@quiver/core';
@@ -223,5 +223,16 @@ describe('syncSummary', () => {
     expect(syncSummary(many)).toEqual({ message: 'Pulled into main, stable · Pushed feat · origin/old was deleted on the remote · 2 up to date', kind: 'info' });
     expect(syncSummary([item('a', 'up-to-date'), item('b', 'up-to-date')])).toEqual({ message: 'All 2 branches are up to date', kind: 'success' });
     expect(syncSummary([])).toEqual({ message: 'No branch tracks a remote branch', kind: 'info' });
+  });
+
+  it('names a branch git would not push, and where a push went', () => {
+    const fromMain = item('feat', 'ahead', { upstream: 'origin/main', ahead: 1, message: 'git would not push it: it tracks origin/main, a branch of another name (push.default). Push it to publish it under its own name' });
+    expect(syncSummary([fromMain, item('a', 'up-to-date')])).toEqual({ message: `feat: ${fromMain.message} · 1 up to date`, kind: 'info' });
+    expect(syncSummary([item('tri', 'pushed', { ahead: 2, upstream: 'upstream/main', pushTarget: 'fork/tri' })]).message).toBe('Pushed 2 commits of tri to fork/tri');
+  });
+
+  it('tells a remote upstream from a local one, also one with a slash', () => {
+    const b = (upstream: string | undefined, upstreamRemote?: string) => ({ upstream, upstreamRemote }) as GitBranch;
+    expect([b('origin/main', 'origin'), b('feature/base', '.'), b(undefined), b('origin/x')].map(tracksRemote)).toEqual([true, false, false, true]);
   });
 });

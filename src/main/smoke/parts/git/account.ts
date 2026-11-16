@@ -47,7 +47,8 @@ function initialState(): FakeGhState {
 
 /**
  * A credential helper that writes down the github.com username git's configuration gives it ("none" without one),
- * asked of git from inside the helper as any helper would see it, and answers with a password.
+ * asked of git from inside the helper as any helper would see it, and the GH_TOKEN it was started with ("notoken"),
+ * which is what gh as a credential helper answers with; it answers with a password.
  */
 const HELPER = String.raw`
 const fs = require('fs');
@@ -56,7 +57,7 @@ const action = process.argv[process.argv.length - 1];
 if (action !== 'get') process.exit(0);
 fs.readFileSync(0, 'utf8');
 const user = spawnSync('git', ['config', '--get', 'credential.https://github.com.username'], { encoding: 'utf8' }).stdout.trim() || 'none';
-fs.appendFileSync(__CRED_LOG__, user + '\n');
+fs.appendFileSync(__CRED_LOG__, user + ' ' + (process.env.GH_TOKEN || 'notoken') + '\n');
 process.stdout.write('username=smoke\npassword=smoke\n');
 `;
 
@@ -154,8 +155,8 @@ const section: SmokeSection = async (t) => {
     const outsideUsed = await used();
     const config = (await sh('config', '--get-regexp', 'username')).stdout.trim();
     check(
-      'git account: fetch and push are signed in as the chosen account, through their own environment only',
-      quiverUsed.length >= 2 && quiverUsed.every((u) => u === 'smoke-home') && outsideUsed.length >= 1 && outsideUsed.every((u) => u === 'none') && !config,
+      'git account: fetch and push are signed in as the chosen account, with its token for gh as a credential helper, through their own environment only',
+      quiverUsed.length >= 2 && quiverUsed.every((u) => u === 'smoke-home fake-token-smoke-home') && outsideUsed.length >= 1 && outsideUsed.every((u) => u === 'none notoken') && !config,
       { quiverUsed, outsideUsed, config },
     );
 
@@ -168,12 +169,16 @@ const section: SmokeSection = async (t) => {
       autoRestart: false,
       source: 'saved',
       env: [{ id: 'n', key: 'ELECTRON_RUN_AS_NODE', value: '1', enabled: true }],
-      command: `${node} -e "const e=process.env,n=Number(e.GIT_CONFIG_COUNT)-1;console.log('token='+e.GH_TOKEN+' git='+e['GIT_CONFIG_VALUE_'+n])"`,
+      command: `${node} -e "const e=process.env,n=Number(e.GIT_CONFIG_COUNT)-1;console.log('token='+e.GH_TOKEN+' ok='+(e.GH_TOKEN==='fake-token-smoke-home')+' git='+e['GIT_CONFIG_VALUE_'+n])"`,
     } satisfies RunnerTask);
     await run('runner.proc.start', { taskId: 'smoke-account' }, id);
     await run('runner.proc.wait', { taskId: 'smoke-account', pattern: 'token=', timeoutMs: 15_000 }, id);
     const taskOut = (await run<RunnerOutputChunk>('runner.proc.output', { taskId: 'smoke-account', after: 0, limit: 50 }, id)).lines.map((l) => l.text).join('\n');
-    check('git account: a Runner task gets the account for its git and gh, and says so', taskOut.includes('token=fake-token-smoke-home git=smoke-home') && taskOut.includes('GitHub account smoke-home'), taskOut);
+    check(
+      'git account: a Runner task gets the account for its git and gh, and says so, while the token never shows in its output',
+      taskOut.includes('token=*** ok=true git=smoke-home') && taskOut.includes('GitHub account smoke-home') && !taskOut.includes('fake-token-smoke-home'),
+      taskOut,
+    );
 
     // Agents read the account and cannot change it.
     const agentGet = await rpc('tools/call', { name: 'git_account_get', arguments: {} });

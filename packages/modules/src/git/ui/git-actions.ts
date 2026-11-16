@@ -1,7 +1,7 @@
 import { Service, inject, signal, untracked } from '@angular/core';
 import { toErrorPayload, type GitAccountInfo, type GitBranch, type GitBranchSyncResult, type GitCommit, type GitOperationResult, type GitStash, type GitStatus, type GitPullRequest, type GitTag, type TodoItem } from '@quiver/core';
 import { AppState, ContextMenu, Dialogs, HostBridge, TabsState, Toasts, type ContextMenuItem } from '@quiver/ui';
-import { blameKey, blameTitle, errorReason, groupChanges, isPushRejected, remotesOf, splitPath, splitRemoteBranch, syncSummary, type BlameAt, type DiffSource, type GitLogPage, type GitRemoteResult, type PrFilter } from './git-format';
+import { blameKey, blameTitle, errorReason, groupChanges, isPushRejected, remotesOf, splitPath, splitRemoteBranch, syncSummary, tracksRemote, type BlameAt, type DiffSource, type GitLogPage, type GitRemoteResult, type PrFilter } from './git-format';
 import { GitWorktreeActions } from './worktree-actions';
 
 /** A ref to pick in `pickRef`: a branch or tag name, and how the list shows it. */
@@ -704,7 +704,7 @@ export class GitActions {
   async syncBranchFromPalette(push: boolean): Promise<void> {
     const branches = await this.loadBranches();
     if (!branches) return;
-    const tracking = branches.filter((b) => !b.remote && b.upstream?.includes('/') && !b.gone);
+    const tracking = branches.filter((b) => !b.remote && tracksRemote(b) && !b.gone);
     if (!tracking.length) {
       await this.dialogs.notice({ title: 'No branch to pull', message: 'No local branch tracks a branch on a remote. Push one to publish it.' });
       return;
@@ -718,22 +718,24 @@ export class GitActions {
    * Pushes a branch, current or not, to its upstream, or publishes it to origin. When the remote branch has moved on,
    * offers a force push with lease, as `push` does for the current branch.
    */
-  async pushBranch(branch: GitBranch): Promise<void> {
+  async pushBranch(branch: GitBranch, publish = false): Promise<void> {
+    // Publishing goes under its own name, so a rejection there means a branch of that name with other commits: no force.
+    const target = publish || !branch.upstream ? null : branch.push;
     let rejected = false;
     const done = await this.onBranches([branch.name], async () => {
       try {
-        return await this.host.invoke('git.branch.push', { name: branch.name });
+        return await this.host.invoke('git.branch.push', { name: branch.name, ...(publish ? { publish } : {}) });
       } catch (err) {
-        if (!branch.upstream || !isPushRejected(toErrorPayload(err).message)) throw err;
+        if (!target || !isPushRejected(toErrorPayload(err).message)) throw err;
         rejected = true;
         return null;
       }
     });
-    if (done) this.toasts.notify(branch.upstream ? `Pushed ${branch.name} to ${branch.upstream}` : `Published ${branch.name} to origin`, 'success');
+    if (done) this.toasts.notify(target ? `Pushed ${branch.name} to ${target}` : `Published ${branch.name}`, 'success');
     if (!rejected) return;
     const ok = await this.dialogs.confirm({
       title: `Force push ${branch.name}?`,
-      message: `${branch.upstream} has commits ${branch.name} does not, for example after an amend or a rebase. A force push with lease replaces them, and only if nobody pushed there since your last fetch. Pull instead to keep them.`,
+      message: `${target} has commits ${branch.name} does not, for example after an amend or a rebase. A force push with lease replaces them, and only if nobody pushed there since your last fetch. Pull instead to keep them.`,
       confirmLabel: 'Force push',
       danger: true,
     });
@@ -894,7 +896,7 @@ export class GitActions {
       'separator',
       { label: 'Delete…', testId: 'git-menu-delete', danger: true, disabled: branch.current, select: () => void this.deleteBranch(branch.name) },
       // Only an upstream on a remote (`origin/x`); a local branch as upstream has nothing to delete there.
-      ...(branch.upstream?.includes('/') && !branch.gone ? [{ label: `Delete ${branch.upstream} on the remote…`, testId: 'git-menu-delete-remote', danger: true, select: () => void this.deleteRemoteBranch(branch.upstream!) }] : []),
+      ...(tracksRemote(branch) && !branch.gone ? [{ label: `Delete ${branch.upstream} on the remote…`, testId: 'git-menu-delete-remote', danger: true, select: () => void this.deleteRemoteBranch(branch.upstream!) }] : []),
       copy,
     ];
   }
@@ -906,13 +908,22 @@ export class GitActions {
    */
   private remoteItems(branch: GitBranch): ContextMenuItem[] {
     const up = branch.upstream;
-    // `origin/x`; a local upstream has no slash and nothing to pull from the network or push to.
-    const onRemote = Boolean(up?.includes('/')) && !branch.gone;
+    const onRemote = tracksRemote(branch) && !branch.gone;
+    // Push goes where `git push` would send it (`push`); a branch git would push nowhere, as one made from origin/main
+    // that tracks it, is offered a publish under its own name instead, never a push to main.
+    const push: ContextMenuItem = branch.push
+      ? {
+          label: `Push to ${branch.push}`,
+          testId: 'git-menu-push',
+          // Nothing to push when it is not ahead of the same branch (as of the last fetch); a push of a branch that is
+          // behind would only be rejected and lead to the force push question.
+          disabled: branch.gone || (branch.push === up && !branch.ahead),
+          select: () => void this.pushBranch(branch),
+        }
+      : { label: up ? `Publish to origin/${branch.name}` : 'Publish to origin', testId: 'git-menu-push', select: () => void this.pushBranch(branch, true) };
     return [
       { label: onRemote ? `Pull from ${up}` : 'Pull', testId: 'git-menu-pull', disabled: !onRemote, select: () => void (branch.current ? this.pull() : this.syncBranches([branch.name], false)) },
-      // Nothing to push when it is not ahead (as of the last fetch); a push then would at best do nothing, and for a
-      // branch that is behind be rejected and lead to the force push question.
-      { label: up ? `Push to ${up}` : 'Publish to origin', testId: 'git-menu-push', disabled: Boolean(up) && (!onRemote || !branch.ahead), select: () => void this.pushBranch(branch) },
+      push,
       { label: 'Sync (pull, then push)', testId: 'git-menu-sync', disabled: !onRemote, select: () => void this.syncBranches([branch.name], true) },
     ];
   }

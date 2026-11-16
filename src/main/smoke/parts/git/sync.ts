@@ -146,15 +146,36 @@ const section: SmokeSection = async (t) => {
     await sh(wt, 'checkout', '--', 'side.txt');
 
     // ---- Sync: pull, then push ----
-    const synced = by(await run<GitBranchSyncResult>('git.branch.sync', { names: ['ahead', 'mine', 'stable', 'diverge'] }, ws.id));
+    // frommain is made from origin/main, as `git checkout -b frommain origin/main` does, and tracks it.
+    await sh(repo, 'branch', '--track', 'frommain', 'origin/main');
+    await sh(repo, 'checkout', '-q', 'frommain');
+    await commitIn(repo, 'frommain.txt', 'from main\n');
+    await sh(repo, 'checkout', '-q', 'feat');
+    const bareMain = await rev(bare, 'main');
+    const synced = by(await run<GitBranchSyncResult>('git.branch.sync', { names: ['ahead', 'mine', 'frommain', 'stable', 'diverge'] }, ws.id));
     check(
-      'git sync: Sync pushes a branch that is only ahead, to the name its upstream has on the remote',
-      synced.ahead.outcome === 'pushed' &&
-        (await rev(bare, 'ahead')) === (await rev(repo, 'ahead')) &&
-        synced.mine.outcome === 'pushed' &&
-        (await rev(bare, 'their-name')) === (await rev(repo, 'mine')) &&
+      'git sync: Sync pushes a branch that is only ahead to where git push would send it',
+      synced.ahead.outcome === 'pushed' && synced.ahead.pushTarget === 'origin/ahead' && (await rev(bare, 'ahead')) === (await rev(repo, 'ahead')),
+      synced.ahead,
+    );
+    check(
+      'git sync: a branch made from origin/main, or tracking another name, is never pushed there; it is ahead with a message',
+      synced.frommain.outcome === 'ahead' &&
+        /another name/.test(synced.frommain.message ?? '') &&
+        (await rev(bare, 'main')) === bareMain &&
+        synced.mine.outcome === 'ahead' &&
+        (await rev(bare, 'their-name')) !== (await rev(repo, 'mine')) &&
         !(await sh(bare, 'branch', '--list', 'mine')),
-      synced,
+      { frommain: synced.frommain, mine: synced.mine },
+    );
+    // With push.default=upstream, git itself pushes a branch to its upstream of another name, and so does Sync.
+    await sh(repo, 'config', 'push.default', 'upstream');
+    const upstreamMode = by(await run<GitBranchSyncResult>('git.branch.sync', { names: ['mine'] }, ws.id));
+    await sh(repo, 'config', '--unset', 'push.default');
+    check(
+      'git sync: under push.default=upstream, Sync pushes to the upstream of another name, as git push would',
+      upstreamMode.mine.outcome === 'pushed' && upstreamMode.mine.pushTarget === 'origin/their-name' && (await rev(bare, 'their-name')) === (await rev(repo, 'mine')) && !(await sh(bare, 'branch', '--list', 'mine')),
+      upstreamMode.mine,
     );
     check(
       'git sync: Sync leaves an up-to-date branch alone and never pushes a diverged one',
@@ -167,6 +188,18 @@ const section: SmokeSection = async (t) => {
     check(
       'git sync: pushing a branch with no upstream publishes it to origin and tracks it',
       Boolean(published) && (await rev(bare, 'nobody')) === (await rev(repo, 'nobody')) && (await sh(repo, 'rev-parse', '--abbrev-ref', 'nobody@{u}')) === 'origin/nobody',
+    );
+    const noTarget = await failure(() => run('git.branch.push', { name: 'frommain' }, ws!.id));
+    const goneRefused = await failure(() => run('git.branch.push', { name: 'gone' }, ws!.id));
+    check(
+      'git sync: a push of a branch tracking origin/main under another name, or of one deleted on the remote, is refused and nothing moves',
+      noTarget.includes('would not push frommain') && goneRefused.includes('deleted on the remote') && (await rev(bare, 'main')) === bareMain && !(await sh(bare, 'branch', '--list', 'gone')),
+      { noTarget, goneRefused },
+    );
+    await run('git.branch.push', { name: 'frommain', publish: true }, ws.id);
+    check(
+      'git sync: publish pushes it under its own name and tracks that, main untouched',
+      (await rev(bare, 'frommain')) === (await rev(repo, 'frommain')) && (await sh(repo, 'rev-parse', '--abbrev-ref', 'frommain@{u}')) === 'origin/frommain' && (await rev(bare, 'main')) === bareMain,
     );
     const rejected = await failure(() => run('git.branch.push', { name: 'diverge' }, ws!.id));
     check('git sync: pushing a diverged branch is rejected by the remote, which keeps its commit', /rejected|non-fast-forward|fetch first/i.test(rejected) && (await sh(bare, 'log', '--format=%s', '-1', 'diverge')) === 'diverge.txt: theirs', rejected);
@@ -190,6 +223,11 @@ const section: SmokeSection = async (t) => {
     const list = await run<GitBranch[]>('git.branch.list', {}, ws.id);
     const row = (n: string) => list.find((b) => b.name === n && !b.remote);
     check('git sync: the branch list shows main and side caught up', row('main')?.behind === 0 && row('side')?.behind === 1 && row('stable')?.behind === 0, list.filter((b) => !b.remote).map((b) => `${b.name} +${b.ahead} -${b.behind}`));
+    check(
+      'git sync: the branch list gives where each branch is pushed, none for one tracking another name, and the upstream remote',
+      row('ahead')?.push === 'origin/ahead' && row('ahead')?.upstreamRemote === 'origin' && row('mine')?.upstream === 'origin/their-name' && row('mine')?.push === undefined && row('frommain')?.push === 'origin/frommain' && row('nobody')?.push === 'origin/nobody',
+      list.filter((b) => !b.remote).map((b) => `${b.name} up=${b.upstream} remote=${b.upstreamRemote} push=${b.push}`),
+    );
 
     // ---- Agents ----
     const mcpUrl = `http://127.0.0.1:${mcpPort}/mcp?workspace=${encodeURIComponent(repo)}`;
@@ -291,6 +329,16 @@ const section: SmokeSection = async (t) => {
         await shot('32v-git-branches-pull-all-light');
         check('git sync ui: Pull all fetches and fast-forwards every branch that is behind, and sums it up', pulledAll && (await rev(uiRepo, 'stable')) === (await rev(uiBare, 'stable')), await toast());
         await dismissToasts();
+
+        // A branch made from origin/main, which tracks it: the menu offers to publish it under its own name, never a push to main.
+        await sh(uiRepo, 'branch', '--track', 'ui/from-main', 'origin/main');
+        await click('[data-testid=git-branches-refresh]');
+        await waitFor(`Boolean(document.querySelector('[data-testid=git-branches-row][data-kind=local][data-name="ui/from-main"] [data-testid=git-branches-menu]'))`, 4000);
+        await js(`document.querySelector('[data-testid=git-branches-row][data-kind=local][data-name="ui/from-main"] [data-testid=git-branches-menu]').click()`);
+        await waitFor(`Boolean(document.querySelector('[data-testid=context-menu] [data-testid=git-menu-push]'))`, 2000);
+        const pushLabel = (await js(`(() => { const e = document.querySelector('[data-testid=context-menu] [data-testid=git-menu-push]'); return e.textContent.trim() + (e.disabled ? ' (disabled)' : ''); })()`)) as string;
+        await js(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
+        check('git sync ui: a branch tracking origin/main under another name is offered Publish to origin/<its name>, not a push to main', pushLabel === 'Publish to origin/ui/from-main', pushLabel);
       } finally {
         await js(`document.querySelector('[data-testid=context-menu]') && document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`).catch(() => {});
         await click(`[data-testid=workspace-tab][data-drag-id="${t.ws.id}"]`);

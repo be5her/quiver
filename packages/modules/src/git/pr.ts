@@ -29,7 +29,7 @@ import {
   type WorkspaceApi,
 } from '@quiver/core';
 import { runToEnd, whichSync, type RunToEndResult } from '@quiver/core/node';
-import { accountOf, currentAccount } from './account';
+import { accountOf, currentAccount, setAccountTokenSource } from './account';
 import * as local from './local';
 
 // Pull requests through the GitHub CLI (`gh`), signed in as the user: Quiver stores no token (a workspace that chose a
@@ -213,6 +213,9 @@ export async function githubAccountEnv(ws: WorkspaceApi, cwd: string, note: (lin
     return env;
   }
 }
+
+// The git that fetches, pulls and pushes reads tokens from here too (account.ts cannot import this file: it imports local.ts).
+setAccountTokenSource(accountToken);
 
 /** The accounts gh is signed in to on github.com, gh's active one marked. Empty when it is signed in to none. */
 export async function accounts(cwd: string): Promise<GhAccount[]> {

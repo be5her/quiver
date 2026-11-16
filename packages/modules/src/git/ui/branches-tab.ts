@@ -6,7 +6,7 @@ import { ArrowDown, ArrowDownToLine, ArrowUp, Brush, Check, Cloud, CloudOff, Ell
 import { GitActions } from './git-actions';
 import { GitWorktreeActions } from './worktree-actions';
 import { injectGitChanged } from './git-events';
-import { ago, cleanupCandidates, refMatches } from './git-format';
+import { ago, cleanupCandidates, refMatches, tracksRemote } from './git-format';
 
 /**
  * Every branch and tag of the repository: local branches with their upstream, ahead/behind, last commit and the
@@ -229,7 +229,7 @@ export class GitBranchesTab implements TabComponent {
   protected readonly currentName = computed(() => this.all().find((b) => b.current)?.name ?? null);
   protected readonly local = computed(() => this.all().filter((b) => !b.remote && refMatches(b, this.filter())));
   /** How many local branches Pull all would bring up to date: those tracking a remote branch that still exists. */
-  protected readonly tracking = computed(() => this.all().filter((b) => !b.remote && b.upstream?.includes('/') && !b.gone).length);
+  protected readonly tracking = computed(() => this.all().filter((b) => !b.remote && tracksRemote(b) && !b.gone).length);
   protected readonly remote = computed(() => this.all().filter((b) => b.remote && refMatches(b, this.filter())));
   /** What git knows was deleted on the remote: the upstreams of local branches, as of the last fetch that pruned. */
   protected readonly deletedOnRemote = computed(() => this.local().filter((b) => b.gone && b.upstream));

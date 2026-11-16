@@ -292,6 +292,12 @@ export function isPushRejected(message: string): boolean {
   return /non-fast-forward|fetch first|\[rejected\]/i.test(message);
 }
 
+/** Whether a local branch tracks a branch on a remote (`origin/x`) rather than a local one or none. */
+export function tracksRemote(b: GitBranch): boolean {
+  if (!b.upstream) return false;
+  return b.upstreamRemote ? b.upstreamRemote !== '.' : b.upstream.includes('/');
+}
+
 /** "1 commit", "3 commits". */
 function commits(n: number): string {
   return `${n} commit${n === 1 ? '' : 's'}`;
@@ -304,13 +310,13 @@ export function syncItemText(item: GitBranchSyncItem): string {
     case 'updated':
       return `Pulled ${commits(item.behind)} into ${item.name}`;
     case 'pushed':
-      return `Pushed ${commits(item.ahead)} of ${item.name} to ${up}`;
+      return `Pushed ${commits(item.ahead)} of ${item.name} to ${item.pushTarget ?? up}`;
     case 'up-to-date':
       return `${item.name} is up to date with ${up}`;
     case 'ahead':
-      return `${item.name} has nothing to pull; it has ${commits(item.ahead)} to push`;
+      return item.message ? `${item.name}: ${item.message}` : `${item.name} has nothing to pull; it has ${commits(item.ahead)} to push`;
     case 'diverged':
-      return `${item.name} and ${up} have diverged (${item.ahead} ahead, ${item.behind} behind); switch to it and pull to merge or rebase`;
+      return item.message ? `${item.name}: ${item.message}` : `${item.name} and ${up} have diverged (${item.ahead} ahead, ${item.behind} behind); switch to it and pull to merge or rebase`;
     case 'no-upstream':
       return `${item.name} tracks no remote branch; push it to publish it`;
     case 'gone':
@@ -327,13 +333,13 @@ export function syncItemText(item: GitBranchSyncItem): string {
  */
 export function syncSummary(items: GitBranchSyncItem[]): { message: string; kind: 'success' | 'info' | 'error' } {
   const of = (...outcomes: GitBranchSyncItem['outcome'][]) => items.filter((i) => outcomes.includes(i.outcome));
-  const problems = of('diverged', 'gone', 'no-upstream', 'failed');
+  const problems = items.filter((i) => ['diverged', 'gone', 'no-upstream', 'failed'].includes(i.outcome) || (i.outcome === 'ahead' && i.message));
   const kind = of('failed').length ? 'error' : problems.length ? 'info' : 'success';
   if (!items.length) return { message: 'No branch tracks a remote branch', kind: 'info' };
   if (items.length === 1) return { message: syncItemText(items[0]), kind };
   const updated = of('updated').map((i) => i.name);
   const pushed = of('pushed').map((i) => i.name);
-  const quiet = of('up-to-date', 'ahead').length;
+  const quiet = items.filter((i) => i.outcome === 'up-to-date' || (i.outcome === 'ahead' && !i.message)).length;
   const parts = [
     ...(updated.length ? [`Pulled into ${updated.join(', ')}`] : []),
     ...(pushed.length ? [`Pushed ${pushed.join(', ')}`] : []),
