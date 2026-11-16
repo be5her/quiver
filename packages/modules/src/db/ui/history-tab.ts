@@ -1,5 +1,5 @@
 import { Component, computed, inject, input, signal } from '@angular/core';
-import type { DbHistoryEntry } from '@quiver/core';
+import { DB_CONNECTION_ORDER_KEY, type DbHistoryEntry } from '@quiver/core';
 import { Autofocus, Button, EmptyState, Icon, IconButton, Input, Select, Spinner, Toasts, invokeResource, type Tab, type TabComponent } from '@quiver/ui';
 import { Copy, Play, Save, Search, Trash2 } from 'lucide';
 import { DbConnectionOrder } from './connection-order';
@@ -31,7 +31,7 @@ export class HistoryTab implements TabComponent {
   protected readonly formatAgo = formatAgo;
   protected readonly formatDuration = formatDuration;
   protected readonly formatCount = formatCount;
-  protected readonly connections = invokeResource<DbConnectionRow[]>('db.connection.list', () => ({}), { refreshOn: ['db-connections'] });
+  protected readonly connections = invokeResource<DbConnectionRow[]>('db.connection.list', () => ({}), { refreshOn: ['db-connections'], refreshOnState: [DB_CONNECTION_ORDER_KEY] });
   /** The filter's connections, in the order the sidebar lists them. */
   protected readonly connectionOptions = computed(() => this.order.sorted(this.connections.value() ?? []));
   protected readonly entries = invokeResource<DbHistoryEntry[]>(

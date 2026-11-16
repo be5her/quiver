@@ -545,7 +545,8 @@ export default definePart({
       await run('db.connection.save', { connection: base }, ws.id);
     }
 
-    // Connection order: a manual order committed with the connections, which the list follows and new ones join at the end.
+    // Connection order: a manual order kept per machine in workspace state, which the list follows; connections never
+    // placed (new ones, a teammate's) follow by name.
     const ordered: Record<'a' | 'b' | 'c', DbConnectionSummary> = {
       c: await run<DbConnectionSummary>('db.connection.save', { connection: { kind: 'sqlite', name: 'order c', file: 'data/order-c.db' } }, ws.id),
       a: await run<DbConnectionSummary>('db.connection.save', { connection: { kind: 'sqlite', name: 'order a', file: 'data/order-a.db' } }, ws.id),
@@ -555,31 +556,35 @@ export default definePart({
     const listedIds = async () => (await run<DbConnectionSummary[]>('db.connection.list', {}, ws.id)).map((c) => c.id);
     const placedBefore = await listedIds();
     const byNameFirst = placedBefore.filter((id) => orderIds.includes(id)).join() === orderIds.join();
+    const connectionFile = (id: string) => fs.readFile(path.join(folder, '.quiver', 'db-connections', `${id}.json`), 'utf8');
+    const filesBefore = await Promise.all(orderIds.map(connectionFile));
     const reordered = await outcome('db.connection.reorder', { connectionIds: [ordered.c.id, ordered.a.id, ordered.b.id] }, 'mcp');
     const placed = await listedIds();
-    const cOnDisk = JSON.parse(await fs.readFile(path.join(folder, '.quiver', 'db-connections', `${ordered.c.id}.json`), 'utf8')) as DbConnectionSummary;
+    const filesAfter = await Promise.all(orderIds.map(connectionFile));
+    const stored = await run<{ value: unknown }>('workspace.state.get', { key: 'db.connectionOrder' }, ws.id);
     const joiner = await run<DbConnectionSummary>('db.connection.save', { connection: { kind: 'sqlite', name: 'aaa order new', file: 'data/order-new.db' } }, ws.id);
     const afterNew = await listedIds();
-    // An editor holding a copy from before the reorder saves it: the place stays the reorder's.
-    await run('db.connection.save', { connection: { ...ordered.c, name: 'order c', order: 7 } }, ws.id);
-    const afterStaleSave = await listedIds();
+    // Naming only some ids puts those first and keeps the others placed in the order they had.
+    await run('db.connection.reorder', { connectionIds: [ordered.b.id] }, ws.id);
+    const partial = await listedIds();
     const unknown = await outcome('db.connection.reorder', { connectionIds: [ordered.a.id, 'nope'] });
     check(
-      'db: connections list by name until reordered, an agent may reorder them, the order is committed without touching updatedAt, a new one goes last and a stale save keeps the place',
+      'db: connections list by name until reordered, an agent may reorder them, the order is kept in workspace state with the files untouched, a new one follows the placed ones and a partial reorder keeps the rest in order',
       byNameFirst &&
         names.includes('db_connection_reorder') &&
         reordered.ok &&
         placed.slice(0, 3).join() === [ordered.c.id, ordered.a.id, ordered.b.id].join() &&
-        cOnDisk.order === 0 &&
-        cOnDisk.updatedAt === ordered.c.updatedAt &&
+        JSON.stringify(filesAfter) === JSON.stringify(filesBefore) &&
+        filesAfter.every((f) => !('order' in JSON.parse(f))) &&
+        JSON.stringify(stored.value) === JSON.stringify([ordered.c.id, ordered.a.id, ordered.b.id]) &&
         afterNew[3] === joiner.id &&
-        joiner.order === 3 &&
-        afterStaleSave.slice(0, 4).join() === afterNew.slice(0, 4).join() &&
+        partial.slice(0, 4).join() === [ordered.b.id, ordered.c.id, ordered.a.id, joiner.id].join() &&
         !unknown.ok &&
         unknown.code === 'NOT_FOUND',
-      { byNameFirst, reordered: said(reordered), placed: placed.slice(0, 4), cOnDisk: { order: cOnDisk.order, updatedAt: cOnDisk.updatedAt, was: ordered.c.updatedAt }, joiner: joiner.order, afterNew: afterNew.slice(0, 4), afterStaleSave: afterStaleSave.slice(0, 4), unknown: said(unknown) },
+      { byNameFirst, reordered: said(reordered), placed: placed.slice(0, 4), filesUntouched: JSON.stringify(filesAfter) === JSON.stringify(filesBefore), stored: stored.value, afterNew: afterNew.slice(0, 4), partial: partial.slice(0, 4), unknown: said(unknown) },
     );
     await run('db.connection.delete', { id: joiner.id }, ws.id);
+    await run('db.connection.reorder', { connectionIds: [ordered.c.id, ordered.a.id, ordered.b.id] }, ws.id);
     const removeOrdered = async () => {
       for (const c of Object.values(ordered)) await run('db.connection.delete', { id: c.id }, ws.id).catch(() => {});
     };
@@ -1031,8 +1036,11 @@ export default definePart({
           const byName = await sidebarNames();
           const savedName = await run<{ value: unknown }>('workspace.state.get', { key: 'db.connectionSort' }, ws.id);
           await shot('09a-db-sort-by-name');
-          await pickSort('kind');
+          // A sort set from elsewhere (another window, the state command) shows without a reload, after one picked here.
+          await run('workspace.state.set', { key: 'db.connectionSort', value: 'kind' }, ws.id);
+          await wait(500);
           const byKind = await sidebarNames();
+          const sortShown = await js(`document.querySelector('[data-testid=db-connection-sort]')?.getAttribute('data-sort')`);
           // While sorted, a drag moves nothing.
           const rowCenter = async (name: string) =>
             (await js(`(() => { const r = [...document.querySelectorAll('q-db-sidebar [data-testid=db-connection-row]')].find((el) => el.getAttribute('title') === ${JSON.stringify(name)})?.getBoundingClientRect(); return r ? { x: Math.round(r.left + 40), y: Math.round(r.top + r.height / 2) } : null; })()`)) as { x: number; y: number } | null;
@@ -1057,7 +1065,7 @@ export default definePart({
           const sortedMarker = await dragRow('order a', 'order c', -10);
           const afterSortedDrag = await sidebarNames();
           check(
-            'ui: the sort menu ticks the manual order, lists the connections by name or grouped by type, remembers the choice, and a drag moves nothing while sorted',
+            'ui: the sort menu ticks the manual order, lists the connections by name or grouped by type, remembers the choice, follows a sort set elsewhere, and a drag moves nothing while sorted',
             JSON.stringify(menu) === JSON.stringify([['Manual order', 'true'], ['Name', 'false'], ['Type', 'false'], ['Recently used', 'false']]) &&
               ours(manualBefore).join() === 'order c,order a,order b' &&
               ours(byName).join() === 'order a,order b,order c' &&
@@ -1067,9 +1075,10 @@ export default definePart({
               byKind.indexOf('order a') < byKind.indexOf('smoke sqlite') &&
               byKind.indexOf('order b') < byKind.indexOf('order c') &&
               savedName.value === 'name' &&
+              sortShown === 'kind' &&
               !sortedMarker &&
               JSON.stringify(afterSortedDrag) === JSON.stringify(byKind),
-            { menu, manualBefore, byName, byKind, saved: savedName.value, sortedMarker },
+            { menu, manualBefore, byName, byKind, sortShown, saved: savedName.value, sortedMarker },
           );
           // Recently used: the connection of the latest query in the history comes first.
           await pickSort('recent');
@@ -1091,6 +1100,45 @@ export default definePart({
             { marker, shown, listed, stillClosed },
           );
           await shot('09c-db-connection-reordered');
+          // The keyboard's way: Move up and Move down in a connection's menu, the first one unable to go up.
+          const connectionMenu = async (name: string) => {
+            await js(
+              `(() => { const row = [...document.querySelectorAll('q-db-sidebar [data-testid=db-connection-row]')].find((r) => r.getAttribute('title') === ${JSON.stringify(name)}); const r = row.getBoundingClientRect(); row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: r.left + 60, clientY: r.bottom })); })()`,
+            );
+            await wait(150);
+            return (await js(`[...document.querySelectorAll('[data-testid=context-menu] button')].filter((b) => /^Move /.test(b.textContent.trim())).map((b) => [b.textContent.trim(), b.disabled])`)) as [string, boolean][];
+          };
+          const firstMoves = await connectionMenu('order b');
+          await js(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+          await wait(100);
+          const lastMoves = await connectionMenu('order a');
+          await shot('09d-db-connection-move-menu');
+          await js(`document.querySelector('[data-testid=db-connection-move-up]')?.click()`);
+          await wait(700);
+          const movedUp = ours(await sidebarNames());
+          // A reorder made elsewhere (an agent) shows without a reload: the order is announced as workspace state.
+          await run('db.connection.reorder', { connectionIds: [ordered.a.id, ordered.b.id, ordered.c.id] }, ws.id);
+          await wait(600);
+          const fromAgent = ours(await sidebarNames());
+          check(
+            'ui: Move up and Move down arrange a connection from its menu, and a reorder made elsewhere shows at once',
+            JSON.stringify(firstMoves) === JSON.stringify([['Move up', true], ['Move down', false]]) &&
+              lastMoves.length === 2 &&
+              lastMoves[0][1] === false &&
+              movedUp.join() === 'order b,order a,order c' &&
+              fromAgent.join() === 'order a,order b,order c',
+            { firstMoves, lastMoves, movedUp, fromAgent },
+          );
+          // Ctrl+Shift+Q opens a query on the first connection as the sidebar lists them, in the sort chosen.
+          await run('workspace.state.set', { key: 'db.connectionSort', value: 'name' }, ws.id);
+          await wait(400);
+          const firstByName = (await sidebarNames())[0];
+          await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Q', ctrlKey: true, shiftKey: true, bubbles: true }))`);
+          await until(() => js(`Boolean([...document.querySelectorAll('[data-testid=db-query-connection]')].find((s) => s.offsetParent !== null))`) as Promise<boolean>, 4000).catch(() => {});
+          await wait(300);
+          const picked = await js(`[...document.querySelectorAll('[data-testid=db-query-connection]')].find((s) => s.offsetParent !== null)?.selectedOptions[0]?.textContent.trim() ?? null`);
+          check('ui: New query (Ctrl+Shift+Q) takes the first connection in the chosen sort', firstByName !== 'order a' && picked === firstByName, { picked, firstByName });
+          await run('workspace.state.set', { key: 'db.connectionSort', value: 'manual' }, ws.id);
         }
       },
     };

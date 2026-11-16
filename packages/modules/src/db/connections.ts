@@ -1,7 +1,9 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import {
+  DB_CONNECTION_ORDER_KEY,
   DbConnectionSchema,
+  dbConnectionOrderOf,
   QuiverError,
   clusterLabel,
   dotenvToMap,
@@ -65,12 +67,18 @@ export async function hasPassword(ws: WorkspaceApi, connectionId: string): Promi
 
 // ---------- connections ----------
 
-/** The saved connections in their manual order (see `db.connection.reorder`), the ones never placed by name. */
+/** This machine's manual order of the connections (ids), set by `db.connection.reorder`. */
+export async function connectionOrder(ws: WorkspaceApi): Promise<string[]> {
+  return dbConnectionOrderOf(await ws.getState<unknown>(DB_CONNECTION_ORDER_KEY, []));
+}
+
+/** The saved connections in this machine's manual order (see `db.connection.reorder`), the ones never placed by name. */
 export async function listConnections(ws: WorkspaceApi): Promise<DbConnectionSummary[]> {
-  const [items, withPassword] = await Promise.all([ws.store.list<DbConnection>(COLLECTIONS.connections), hasPasswordSet(ws)]);
+  const [items, withPassword, order] = await Promise.all([ws.store.list<DbConnection>(COLLECTIONS.connections), hasPasswordSet(ws), connectionOrder(ws)]);
   return sortDbConnections(
     items.map((c) => ({ ...DbConnectionSchema.parse(c), hasPassword: withPassword.has(c.id) })),
     'manual',
+    { order },
   );
 }
 

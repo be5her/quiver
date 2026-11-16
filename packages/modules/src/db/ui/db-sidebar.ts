@@ -1,5 +1,5 @@
 import { Component, DestroyRef, ElementRef, computed, effect, inject, signal, untracked } from '@angular/core';
-import { moveDbConnection, sortDbConnections, type DbHistoryEntry, type SavedQuery } from '@quiver/core';
+import { DB_CONNECTION_ORDER_KEY, moveDbConnection, type DbHistoryEntry, type SavedQuery } from '@quiver/core';
 import { DropMarker, HostBridge, Icon, IconButton, SectionHeader, Spinner, Toasts, TreeState, dragReorder, invokeResource } from '@quiver/ui';
 import { ArrowUpDown, ChevronDown, ChevronRight, Clock, Pencil, Plus, Search, Terminal, Trash2 } from 'lucide';
 import { ConnectionNode } from './connection-node';
@@ -26,7 +26,7 @@ export class DbSidebar {
 
   protected readonly icons = { ArrowUpDown, ChevronDown, ChevronRight, Clock, Pencil, Plus, Search, Terminal, Trash2 };
   protected readonly firstLine = firstLine;
-  protected readonly connections = invokeResource<DbConnectionRow[]>('db.connection.list', () => ({}), { refreshOn: ['db-connections'] });
+  protected readonly connections = invokeResource<DbConnectionRow[]>('db.connection.list', () => ({}), { refreshOn: ['db-connections'], refreshOnState: [DB_CONNECTION_ORDER_KEY] });
   /** The ids in the order a drop just asked for, shown until the host has written it. */
   private readonly dropped = signal<string[] | null>(null);
   protected readonly shown = computed(() => {
@@ -52,22 +52,24 @@ export class DbSidebar {
     };
     const el = this.element.nativeElement;
     el.addEventListener('click', swallow, true);
-    inject(DestroyRef).onDestroy(() => el.removeEventListener('click', swallow, true));
-    // Once the list reads back in the order that was dropped, the list itself shows it.
+    const detach = this.order.attach({ shown: this.shown, move: (id, to) => this.move(id, to) });
+    inject(DestroyRef).onDestroy(() => {
+      el.removeEventListener('click', swallow, true);
+      detach();
+    });
+    // Once the list (which comes in the manual order) reads back in the order that was dropped, it shows itself.
     effect(() => {
       const dropped = this.dropped();
       const rows = this.connections.value();
       if (!dropped || !rows) return;
-      const listed = sortDbConnections(rows, 'manual')
-        .map((c) => c.id)
-        .filter((id) => dropped.includes(id));
+      const listed = rows.map((c) => c.id).filter((id) => dropped.includes(id));
       if (listed.join() === dropped.filter((id) => rows.some((c) => c.id === id)).join()) this.dropped.set(null);
     });
   }
 
-  /** Start dragging a connection by its own row, not by the tables and keys underneath it. */
+  /** Start dragging a connection by its own row (its drag handle), not by the tables and keys underneath it. */
   protected dragStart(event: PointerEvent, id: string): void {
-    if (!this.order.manual() || !(event.target as HTMLElement).closest('[data-testid=db-connection-row]')) return;
+    if (!this.order.manual() || !(event.target as HTMLElement).closest('[data-drag-handle]')) return;
     this.reorder.pointerDown(event, id);
   }
 

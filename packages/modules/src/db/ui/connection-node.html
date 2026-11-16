@@ -1,5 +1,5 @@
 @let conn = connection();
-<div qDbRow [label]="conn.name" bold data-testid="db-connection-row" (click)="toggle()" (keydown.enter)="toggle()" (contextmenu)="menu($event)">
+<div qDbRow [label]="conn.name" bold data-testid="db-connection-row" data-drag-handle (click)="toggle()" (keydown.enter)="toggle()" (contextmenu)="menu($event)">
   <svg rowPrefix [qIcon]="open() ? icons.ChevronDown : icons.ChevronRight" class="size-3.5 text-muted shrink-0"></svg>
   <svg rowPrefix [qKindIcon]="conn.kind"></svg>
   <q-access-badge rowBadge [access]="conn.access" />
