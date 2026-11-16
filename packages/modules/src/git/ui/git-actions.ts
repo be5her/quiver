@@ -1,6 +1,6 @@
 import { Service, inject, signal, untracked } from '@angular/core';
-import { toErrorPayload, type GitBranch, type GitBranchSyncResult, type GitCommit, type GitOperationResult, type GitStash, type GitStatus, type GitPullRequest, type GitTag, type TodoItem } from '@quiver/core';
-import { AppState, Dialogs, HostBridge, TabsState, Toasts, type ContextMenuItem } from '@quiver/ui';
+import { toErrorPayload, type GitAccountInfo, type GitBranch, type GitBranchSyncResult, type GitCommit, type GitOperationResult, type GitStash, type GitStatus, type GitPullRequest, type GitTag, type TodoItem } from '@quiver/core';
+import { AppState, ContextMenu, Dialogs, HostBridge, TabsState, Toasts, type ContextMenuItem } from '@quiver/ui';
 import { blameKey, blameTitle, errorReason, groupChanges, isPushRejected, remotesOf, splitPath, splitRemoteBranch, syncSummary, type BlameAt, type DiffSource, type GitLogPage, type GitRemoteResult, type PrFilter } from './git-format';
 import { GitWorktreeActions } from './worktree-actions';
 
@@ -21,6 +21,7 @@ export class GitActions {
   private readonly dialogs = inject(Dialogs);
   private readonly toasts = inject(Toasts);
   private readonly worktrees = inject(GitWorktreeActions);
+  private readonly contextMenu = inject(ContextMenu);
 
   /** Fetch, pull and push under way, so their buttons spin and are not pressed twice. */
   readonly busy = signal<ReadonlySet<RemoteOp>>(new Set());
@@ -738,6 +739,50 @@ export class GitActions {
     });
     if (!ok) return;
     if (await this.onBranches([branch.name], () => this.host.invoke('git.branch.push', { name: branch.name, forceWithLease: true }))) this.toasts.notify(`Force pushed ${branch.name}`, 'success');
+  }
+
+  // ---- GitHub account ----
+
+  /**
+   * The workspace's GitHub account, picked in a menu at the click from the accounts gh is signed in to: every fetch,
+   * pull, push, pull request call and Runner task of the workspace then runs as it, without asking.
+   */
+  async accountMenu(event: MouseEvent): Promise<void> {
+    // Under the button that was clicked, read before the await (currentTarget is gone after it); else at the pointer.
+    const anchor = (event.currentTarget as HTMLElement | null)?.getBoundingClientRect();
+    const at = anchor ? new MouseEvent('click', { clientX: anchor.left, clientY: anchor.bottom + 2 }) : event;
+    let info: GitAccountInfo;
+    try {
+      info = await this.host.invoke<GitAccountInfo>('git.account.get', {});
+    } catch (err) {
+      this.toasts.error(err);
+      return;
+    }
+    if (!info.accounts.length) {
+      this.toasts.notify(info.message ?? 'gh is not signed in to github.com. Run "gh auth login" in a terminal, once per account.', 'error');
+      return;
+    }
+    const active = info.accounts.find((a) => a.active)?.login;
+    const items: ContextMenuItem[] = info.accounts.map((a) => ({
+      label: a.login,
+      checked: info.account?.toLowerCase() === a.login.toLowerCase(),
+      testId: 'git-account-option',
+      select: () => void this.setAccount(a.login),
+    }));
+    if (info.account && !info.accounts.some((a) => a.login.toLowerCase() === info.account!.toLowerCase())) {
+      items.unshift({ label: `${info.account} (not signed in to gh)`, checked: true, disabled: true, select: () => undefined });
+    }
+    items.push('separator', { label: `gh's active account${active ? ` (${active})` : ''}`, checked: !info.account, testId: 'git-account-default', select: () => void this.setAccount(null) });
+    this.contextMenu.open(at, items);
+  }
+
+  async setAccount(account: string | null): Promise<void> {
+    try {
+      await this.host.invoke('git.account.set', { account });
+      this.toasts.notify(account ? `Git and gh in this workspace now run as ${account}` : "Git and gh in this workspace now run as gh's active account", 'success');
+    } catch (err) {
+      this.toasts.error(err);
+    }
   }
 
   // ---- Pull requests ----

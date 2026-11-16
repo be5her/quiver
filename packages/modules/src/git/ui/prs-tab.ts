@@ -60,7 +60,10 @@ export class GitGhMissing {
         <svg [qIcon]="icons.GitPullRequestIcon" class="size-4 text-accent shrink-0"></svg>
         <span class="font-medium text-sm">Pull requests</span>
         @if (gh.value()?.repo; as repo) {
-          <span class="text-xs text-muted truncate" data-testid="git-prs-repo">{{ repo }}{{ gh.value()?.user ? ' · signed in as ' + gh.value()?.user : '' }}</span>
+          <span class="text-xs text-muted truncate" data-testid="git-prs-repo">{{ repo }}</span>
+          @if (gh.value()?.user; as user) {
+            <button type="button" class="text-xs text-muted hover:text-fg hover:underline shrink-0" title="The GitHub account of this workspace. Click to change." data-testid="git-prs-account" (click)="actions.accountMenu($event)">as {{ user }}</button>
+          }
         }
         <span class="flex-1"></span>
         @if (ready()) {
@@ -238,7 +241,7 @@ export class GitPrsTab implements TabComponent {
   readonly scope = input.required<string>();
 
   protected readonly icons = { CloudUpload, FilePen, GitPullRequestCreate, GitPullRequestIcon, MessageSquare, Plus, RefreshCw };
-  protected readonly gh = invokeResource<GhStatus>('git.pr.status');
+  protected readonly gh = invokeResource<GhStatus>('git.pr.status', () => ({}), { refreshOnState: ['git.githubAccount'] });
   protected readonly ready = computed(() => {
     const s = this.gh.value();
     return Boolean(s?.installed && s.authenticated && s.repo);

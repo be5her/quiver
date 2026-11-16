@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  GITHUB_CREDENTIAL_USERNAME,
   failedLogExcerpt,
+  githubAccountGitEnv,
   jobIdFromCheckUrl,
+  parseAuthAccounts,
   parseAuthStatus,
   parseChecks,
   parsePatchFiles,
@@ -13,6 +16,7 @@ import {
   repoName,
   rollupChecks,
 } from './gh-parse';
+import { GitHubLoginSchema } from './models/git';
 
 // The fixtures are what gh 2.100 printed, trimmed to the fields that are read.
 
@@ -48,6 +52,55 @@ describe('parseAuthStatus', () => {
     expect(parseAuthStatus(text, 'github.com')).toEqual({ authenticated: true, user: 'first' });
     expect(parseAuthStatus('github.com\n  ✓ Logged in to github.com as old (oauth_token)\n', 'github.com')).toEqual({ authenticated: true, user: 'old' });
     expect(parseAuthStatus('You are not logged into any GitHub hosts. To log in, run: gh auth login', 'github.com')).toEqual({ authenticated: false });
+  });
+});
+
+describe('parseAuthAccounts', () => {
+  it('lists every signed-in account on the host from the JSON, the active one marked', () => {
+    const out = JSON.stringify({
+      hosts: {
+        'github.com': [
+          { state: 'success', active: true, host: 'github.com', login: 'Besher-Karam', tokenSource: 'keyring' },
+          { state: 'success', active: false, host: 'github.com', login: 'be5her', tokenSource: 'keyring' },
+          { state: 'error', active: false, host: 'github.com', login: 'expired', tokenSource: 'keyring' },
+        ],
+        'ghe.example.com': [{ state: 'success', active: true, login: 'work' }],
+      },
+    });
+    expect(parseAuthAccounts(out, 'github.com')).toEqual([
+      { login: 'Besher-Karam', active: true },
+      { login: 'be5her', active: false },
+    ]);
+    expect(parseAuthAccounts(out, 'ghe.example.com')).toEqual([{ login: 'work', active: true }]);
+    expect(parseAuthAccounts('{"hosts":', 'github.com')).toEqual([]);
+  });
+
+  it('reads the accounts from the text of older versions', () => {
+    const text = ['github.com', '  ✓ Logged in to github.com account first (keyring)', '  - Active account: true', '', '  ✓ Logged in to github.com account second (keyring)', '  - Active account: false'].join('\r\n');
+    expect(parseAuthAccounts(text, 'github.com')).toEqual([
+      { login: 'first', active: true },
+      { login: 'second', active: false },
+    ]);
+    expect(parseAuthAccounts('You are not logged into any GitHub hosts.', 'github.com')).toEqual([]);
+  });
+});
+
+describe('githubAccountGitEnv', () => {
+  it('adds the credential username as the first config pair', () => {
+    expect(githubAccountGitEnv('be5her')).toEqual({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'credential.https://github.com.username', GIT_CONFIG_VALUE_0: 'be5her' });
+  });
+
+  it('comes after pairs the environment already has, and ignores a count that is not one', () => {
+    expect(githubAccountGitEnv('x', { GIT_CONFIG_COUNT: '2' })).toEqual({ GIT_CONFIG_COUNT: '3', GIT_CONFIG_KEY_2: GITHUB_CREDENTIAL_USERNAME, GIT_CONFIG_VALUE_2: 'x' });
+    expect(githubAccountGitEnv('x', { GIT_CONFIG_COUNT: 'many' }).GIT_CONFIG_COUNT).toBe('1');
+    expect(githubAccountGitEnv('x', { GIT_CONFIG_COUNT: '-3' }).GIT_CONFIG_COUNT).toBe('1');
+  });
+});
+
+describe('GitHubLoginSchema', () => {
+  it('takes GitHub logins and refuses anything that could carry more than a name', () => {
+    for (const ok of ['be5her', 'Besher-Karam', 'a', 'a-b-c', 'x'.repeat(39)]) expect(GitHubLoginSchema.safeParse(ok).success, ok).toBe(true);
+    for (const bad of ['', '-a', 'a-', 'a--b', 'x'.repeat(40), 'a b', 'a\nb', 'user@host', '../x']) expect(GitHubLoginSchema.safeParse(bad).success, bad).toBe(false);
   });
 });
 

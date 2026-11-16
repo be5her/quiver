@@ -1,4 +1,5 @@
 import { definePart, runSections } from '../part';
+import account from './git/account';
 import blame from './git/blame';
 import conflict from './git/conflict';
 import draft from './git/draft';
@@ -12,6 +13,6 @@ import worktrees from './git/worktrees';
 
 export default definePart({
   name: 'git',
-  summary: 'Git: local repository, branch management, pulling and pushing branches without switching to them, pull requests through gh and their drafts, blame, the conflict editor, worktrees and changed files as a tree',
-  run: (t) => runSections(t, [local, manage, sync, pr, ui, blame, conflict, draft, worktrees, tree]),
+  summary: 'Git: local repository, branch management, pulling and pushing branches without switching to them, pull requests through gh and their drafts, the GitHub account per workspace, blame, the conflict editor, worktrees and changed files as a tree',
+  run: (t) => runSections(t, [local, manage, sync, pr, account, ui, blame, conflict, draft, worktrees, tree]),
 });

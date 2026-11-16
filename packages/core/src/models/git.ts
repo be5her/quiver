@@ -321,7 +321,26 @@ export interface GhStatus {
   message?: string;
 }
 
-export type GitPrCheckState = 'pending' | 'success' | 'failure' | 'skipped' | 'neutral';
+/** A GitHub login as GitHub allows it: letters, digits and single hyphens, at most 39 characters. */
+export const GitHubLoginSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/, 'Not a GitHub login');
+
+export const GitAccountSetInputSchema = z.object({
+  account: GitHubLoginSchema.nullable().describe("The github.com account this workspace's git and gh calls use, one gh is signed in to (gh auth login); null goes back to gh's active account"),
+});
+
+/** The GitHub account a workspace works as, and the accounts it can pick from. */
+export interface GitAccountInfo {
+  /** The github.com account this workspace's git and gh calls use; null: gh's active account and whatever Git Credential Manager picks. */
+  account: string | null;
+  /** The accounts gh is signed in to on github.com, in gh's order, gh's active one marked. */
+  accounts: { login: string; active: boolean }[];
+  /** Why the accounts could not be listed, or that the chosen one is not signed in. */
+  message?: string;
+}
+
+export type GitPrCheckState ='pending' | 'success' | 'failure' | 'skipped' | 'neutral';
 
 export interface GitPrCheck {
   name: string;

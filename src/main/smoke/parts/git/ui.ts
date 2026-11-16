@@ -409,6 +409,35 @@ const section: SmokeSection = async ({ check, run, ws: mainWs }) => ({
         rows,
       );
       await shot('32g-git-prs-light');
+
+      // The GitHub account of the workspace: picked from gh's accounts in a menu by the branch, shown there and in the
+      // pull requests header, and given back to gh's active account afterwards so the checks below work as smoke-user.
+      await fake.update((s) => {
+        s.others = ['smoke-home'];
+      });
+      const accountNone = await waitFor(`document.querySelector('[data-testid=git-sidebar] [data-testid=git-account]')?.getAttribute('data-account') === ''`);
+      await click('[data-testid=git-sidebar] [data-testid=git-account]');
+      const accountMenu = await waitFor(`document.querySelectorAll('[data-testid=context-menu] [data-testid=git-account-option]').length === 2 && Boolean(document.querySelector('[data-testid=context-menu] [data-testid=git-account-default]'))`, 6000);
+      const menuItems = await js(`[...document.querySelectorAll('[data-testid=context-menu] [data-testid^=git-account]')].map((e) => e.textContent.replace(/\\s+/g, ' ').trim())`);
+      check('git ui: the account button by the branch lists gh\'s accounts and its active one', accountNone && accountMenu, menuItems);
+      await shot('32s-git-account-menu-light');
+      await js(`[...document.querySelectorAll('[data-testid=context-menu] [data-testid=git-account-option]')].find((e) => e.textContent.includes('smoke-home'))?.click()`);
+      const accountShown = await waitFor(
+        `document.querySelector('[data-testid=git-sidebar] [data-testid=git-account]')?.getAttribute('data-account') === 'smoke-home' && document.querySelector('[data-testid=git-status-account]')?.textContent.trim() === 'smoke-home' && (${visible('[data-testid=git-prs-account]')})?.textContent.trim() === 'as smoke-home'`,
+        8000,
+      );
+      check(
+        'git ui: the chosen account marks the sidebar button and shows in the status bar and the pull requests header',
+        accountShown,
+        await js(`({ status: document.querySelector('[data-testid=git-status-account]')?.textContent.trim(), header: (${visible('[data-testid=git-prs-account]')})?.textContent.trim() })`),
+      );
+      await shot('32t-git-account-chosen-light');
+      await run('git.account.set', { account: null }, id);
+      const accountGone = await waitFor(
+        `document.querySelector('[data-testid=git-sidebar] [data-testid=git-account]')?.getAttribute('data-account') === '' && !document.querySelector('[data-testid=git-status-account]') && (${visible('[data-testid=git-prs-account]')})?.textContent.trim() === 'as smoke-user'`,
+        8000,
+      );
+      check("git ui: back on gh's active account, the status bar shows no account", accountGone);
       await js(`${visible('[data-testid=git-prs-filter-review]')}?.click()`);
       const filtered = await waitFor(`[...(${visible('[data-testid=git-prs-tab]')}?.querySelectorAll('[data-testid=git-pr-row]') ?? [])].map((r) => r.getAttribute('data-number')).join() === '2'`, 6000);
       check('git ui: Review requested lists only the pull requests waiting on me', filtered);

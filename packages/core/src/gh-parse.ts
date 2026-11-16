@@ -35,29 +35,57 @@ export interface GhAuth {
   user?: string;
 }
 
+/** One account gh is signed in to on a host. */
+export interface GhAccount {
+  login: string;
+  /** gh's active account on the host: the one it uses when nothing names another. */
+  active: boolean;
+}
+
 /**
- * `gh auth status --json hosts` (gh 2.60 and later), or the text older versions print, for one host. With several
- * accounts on a host, the active one is the user. The JSON never holds the token; the text is only read for its
- * "Logged in to <host> account <user>" (or older "as <user>") lines.
+ * The accounts of `gh auth status --json hosts` (gh 2.60 and later), or of the text older versions print, on one
+ * host, in gh's order; only the ones signed in successfully. The JSON never holds the token; the text is only read
+ * for its "Logged in to <host> account <user>" (or older "as <user>") lines and their "Active account" line.
  */
-export function parseAuthStatus(output: string, host: string): GhAuth {
+export function parseAuthAccounts(output: string, host: string): GhAccount[] {
   const trimmed = output.trim();
   if (trimmed.startsWith('{')) {
     try {
       const hosts = (JSON.parse(trimmed) as Json).hosts as Json | undefined;
-      const accounts = arr(hosts?.[host]).filter((a) => a.state === 'success');
-      const active = accounts.find((a) => a.active === true) ?? accounts[0];
-      return active ? { authenticated: true, user: str(active.login) || undefined } : { authenticated: false };
+      return arr(hosts?.[host])
+        .filter((a) => a.state === 'success' && str(a.login))
+        .map((a) => ({ login: str(a.login), active: a.active === true }));
     } catch {
-      return { authenticated: false };
+      return [];
     }
   }
   const escaped = host.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const re = new RegExp(`Logged in to ${escaped}(?: account| as) (\\S+)[^\\n]*(?:\\n(?![^\\n]*Logged in to)[^\\n]*)*`, 'g');
-  const blocks = [...output.replace(/\r\n/g, '\n').matchAll(re)];
-  if (!blocks.length) return { authenticated: false };
-  const active = blocks.find((b) => /Active account: true/.test(b[0])) ?? blocks[0];
-  return { authenticated: true, user: active[1] };
+  return [...output.replace(/\r\n/g, '\n').matchAll(re)].map((b) => ({ login: b[1], active: /Active account: true/.test(b[0]) }));
+}
+
+/**
+ * `gh auth status` for one host, as `parseAuthAccounts` reads it. With several accounts on a host, the active one is
+ * the user (the first when none is marked, as older versions print it).
+ */
+export function parseAuthStatus(output: string, host: string): GhAuth {
+  const accounts = parseAuthAccounts(output, host);
+  const active = accounts.find((a) => a.active) ?? accounts[0];
+  return active ? { authenticated: true, user: active.login } : { authenticated: false };
+}
+
+/** The git setting that names the account a credential helper (Git Credential Manager, gh) signs in to github.com with. */
+export const GITHUB_CREDENTIAL_USERNAME = 'credential.https://github.com.username';
+
+/**
+ * Environment that sets `credential.https://github.com.username` to `account` for one git process and the ones it
+ * starts (GIT_CONFIG_COUNT, git 2.31 and later), after the pairs `env` already carries: no config file changes, so
+ * nothing else that runs git is affected. Git Credential Manager then signs in as that account without asking.
+ */
+export function githubAccountGitEnv(account: string, env: Record<string, string | undefined> = {}): Record<string, string> {
+  const given = Number(env.GIT_CONFIG_COUNT);
+  const n = Number.isInteger(given) && given > 0 ? given : 0;
+  return { GIT_CONFIG_COUNT: String(n + 1), [`GIT_CONFIG_KEY_${n}`]: GITHUB_CREDENTIAL_USERNAME, [`GIT_CONFIG_VALUE_${n}`]: account };
 }
 
 // ---------- remotes ----------

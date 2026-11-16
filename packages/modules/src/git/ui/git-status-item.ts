@@ -1,10 +1,13 @@
 import { Component, computed, inject } from '@angular/core';
-import type { GitStatus } from '@quiver/core';
+import type { GitAccountInfo, GitStatus } from '@quiver/core';
 import { AppState, Icon, invokeResource } from '@quiver/ui';
-import { ArrowDown, ArrowUp, FolderGit2, GitBranch } from 'lucide';
+import { ArrowDown, ArrowUp, FolderGit2, GitBranch, UserRound } from 'lucide';
 import { injectGitChanged } from './git-events';
 
-/** The status bar's branch: the current branch (or the detached commit) with ahead and behind; a click opens Git. Nothing outside a repository. */
+/**
+ * The status bar's branch: the current branch (or the detached commit) with ahead and behind, and the GitHub account
+ * the workspace chose, if any; a click opens Git. Nothing outside a repository.
+ */
 @Component({
   selector: 'q-git-status-item',
   imports: [Icon],
@@ -26,6 +29,9 @@ import { injectGitChanged } from './git-events';
         @if (s.behind) {
           <span class="flex items-center shrink-0"><svg [qIcon]="icons.ArrowDown" class="size-3"></svg>{{ s.behind }}</span>
         }
+        @if (account(); as login) {
+          <span class="flex items-center gap-0.5 min-w-0 text-accent" data-testid="git-status-account"><svg [qIcon]="icons.UserRound" class="size-3 shrink-0"></svg><span class="truncate max-w-32">{{ login }}</span></span>
+        }
       </button>
     }
   `,
@@ -33,18 +39,22 @@ import { injectGitChanged } from './git-events';
 })
 export class GitStatusItem {
   private readonly app = inject(AppState);
-  protected readonly icons = { ArrowDown, ArrowUp, FolderGit2, GitBranch };
+  protected readonly icons = { ArrowDown, ArrowUp, FolderGit2, GitBranch, UserRound };
   // Only the branch: git leaves out the untracked files and submodules, the bulk of a status in a big repository.
   private readonly status = invokeResource<GitStatus>('git.status', () => ({ files: false }));
   /** The status of the workspace on screen; nothing while another's is the latest, or outside a repository. */
   protected readonly current = computed(() => (this.status.currentError() ? undefined : this.status.current()));
+  // The chosen account only: listing gh's accounts would cost a network call per account.
+  private readonly accountInfo = invokeResource<GitAccountInfo>('git.account.get', () => ({ accounts: false }), { refreshOnState: ['git.githubAccount'], enabled: () => Boolean(this.current()) });
+  protected readonly account = computed(() => this.accountInfo.current()?.account ?? null);
   protected readonly title = computed(() => {
     const s = this.current();
     if (!s) return '';
     const where = s.branch ? `On ${s.branch}` : `Detached at ${s.head?.slice(0, 7) ?? 'no commit'}`;
     const tracking = s.upstream ? `tracking ${s.upstream}: ${s.ahead} ahead, ${s.behind} behind` : 'no upstream';
     const worktree = s.worktree?.linked ? `In a linked worktree of ${s.worktree.mainPath}` : '';
-    return [where, tracking, worktree, s.operation ? `A ${s.operation} is in progress` : '', 'Click to open Git'].filter(Boolean).join('\n');
+    const account = this.account() ? `Git and gh run as ${this.account()} on github.com` : '';
+    return [where, tracking, worktree, s.operation ? `A ${s.operation} is in progress` : '', account, 'Click to open Git'].filter(Boolean).join('\n');
   });
 
   constructor() {

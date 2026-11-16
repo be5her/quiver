@@ -36,6 +36,7 @@ import {
   type WorkspaceApi,
 } from '@quiver/core';
 import { runToEnd, whichSync, type RunToEndResult } from '@quiver/core/node';
+import { accountGitEnv } from './account';
 
 // The git CLI, run in the workspace folder. Every call is a separate process with stdin closed and prompts turned
 // off, so nothing waits on a terminal; output is parsed by @quiver/core's git-parse.
@@ -110,7 +111,8 @@ interface GitRunOptions {
  * repository's root (`repoDirs().root`), so the paths git prints and the paths it is given mean the same thing.
  */
 export async function git(cwd: string, args: string[], options: GitRunOptions = {}): Promise<RunToEndResult> {
-  const result = await runToEnd(gitProgram(), [...BASE_ARGS, ...args], { cwd, env: { ...ENV, ...options.env }, input: options.input, timeoutMs: options.timeoutMs ?? READ_TIMEOUT_MS, maxBytes: MAX_OUTPUT_BYTES });
+  // accountGitEnv: the GitHub account the workspace chose, for the credential helper of a fetch, pull or push.
+  const result = await runToEnd(gitProgram(), [...BASE_ARGS, ...args], { cwd, env: { ...ENV, ...accountGitEnv(), ...options.env }, input: options.input, timeoutMs: options.timeoutMs ?? READ_TIMEOUT_MS, maxBytes: MAX_OUTPUT_BYTES });
   if (result.error) {
     gitPath = null;
     throw new QuiverError('NOT_FOUND', `git could not be started: ${result.error}`, { reason: 'no-git' });

@@ -24,6 +24,7 @@ import {
 } from '@quiver/core';
 import { killTree, spawnTree } from '@quiver/core/node';
 import { findProfileFile } from '../env/files';
+import { githubAccountEnv } from '../git/pr';
 
 // The process supervisor: runs saved tasks as whole process trees, keeps their output, tells when they are ready,
 // restarts crashed ones when asked to and stops everything when the workspace closes or the app quits.
@@ -334,7 +335,8 @@ async function launch(run: Run): Promise<void> {
   let portHeld = false;
   try {
     const cwd = insideWorkspace(ws, task.cwd);
-    const env: Record<string, string> = task.envProfile ? await profileEnv(ws, cwd, task.envProfile) : {};
+    // The GitHub account the workspace chose comes first, so a task's own GH_TOKEN or git settings still win.
+    const env: Record<string, string> = { ...(await githubAccountEnv(ws, cwd, (line) => record(run, 'system', line))), ...(task.envProfile ? await profileEnv(ws, cwd, task.envProfile) : {}) };
     for (const kv of task.env) if (kv.enabled && kv.key) env[kv.key] = kv.value;
     portHeld = task.port !== undefined && (await portOpen(task.port));
     // A stop that came while the environment was read (an auto restart) wins.
