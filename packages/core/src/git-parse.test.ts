@@ -14,6 +14,9 @@ import {
   operationArgs,
   parseBlamePorcelain,
   parseBranches,
+  parseBranchTracking,
+  planBranchSync,
+  remotesToFetch,
   parseConflictMarkers,
   parseDecorations,
   parseDiffSummary,
@@ -700,5 +703,41 @@ describe('worktrees', () => {
       ['main', `${W}/repo`],
       ['free', undefined],
     ]);
+  });
+});
+
+describe('branch tracking and sync plans', () => {
+  const row = (...fields: string[]) => fields.join('\0');
+  const out = [
+    row('refs/heads/feat', '*', 'aaa', 'refs/remotes/origin/feat', 'origin', 'refs/heads/feat', '[ahead 1]', 'D:/repo'),
+    row('refs/heads/main', ' ', 'bbb', 'refs/remotes/origin/main', 'origin', 'refs/heads/main', '[behind 3]', 'D:/repo-main'),
+    row('refs/heads/old', ' ', 'ccc', 'refs/remotes/origin/old', 'origin', 'refs/heads/old', '[gone]', ''),
+    row('refs/heads/both', ' ', 'ddd', 'refs/remotes/up/other', 'up', 'refs/heads/other', '[ahead 2, behind 1]', ''),
+    row('refs/heads/loc', ' ', 'eee', 'refs/heads/main', '.', 'refs/heads/main', '[ahead 1]', ''),
+    row('refs/heads/none', ' ', 'fff', '', '', '', '', ''),
+    row('refs/remotes/origin/main', ' ', 'bbb', '', '', '', '', ''),
+  ].join('\n');
+  const list = parseBranchTracking(out);
+
+  it('reads each local branch with its upstream and where it is checked out', () => {
+    expect(list.map((b) => b.name)).toEqual(['feat', 'main', 'old', 'both', 'loc', 'none']);
+    expect(list[0]).toEqual({ name: 'feat', current: true, head: 'aaa', upstream: { ref: 'refs/remotes/origin/feat', short: 'origin/feat', remote: 'origin', remoteRef: 'refs/heads/feat' }, gone: false, ahead: 1, behind: 0 });
+    expect(list[1]).toMatchObject({ current: false, behind: 3, worktreePath: 'D:/repo-main' });
+    expect(list[3].upstream).toMatchObject({ short: 'up/other', remoteRef: 'refs/heads/other' });
+    expect(list[4].upstream).toMatchObject({ short: 'main', remote: '.' });
+    expect(list[5].upstream).toBeUndefined();
+  });
+
+  it('plans a fast-forward, a push, or nothing it could do without the branch checked out', () => {
+    const plans = (push: boolean) => Object.fromEntries(list.map((b) => [b.name, planBranchSync(b, push)]));
+    expect(plans(false)).toEqual({ feat: 'ahead', main: 'fast-forward', old: 'gone', both: 'diverged', loc: 'ahead', none: 'no-upstream' });
+    // A local upstream is never pushed to: that would be a merge into another branch.
+    expect(plans(true)).toMatchObject({ feat: 'push', main: 'fast-forward', loc: 'ahead' });
+    expect(planBranchSync({ ...list[1], behind: 0 }, true)).toBe('up-to-date');
+  });
+
+  it('fetches each remote once, and none for a local upstream', () => {
+    expect(remotesToFetch(list)).toEqual(['origin', 'up']);
+    expect(remotesToFetch([list[4], list[5]])).toEqual([]);
   });
 });

@@ -2,7 +2,7 @@ import { Component, computed, inject, input, linkedSignal, signal } from '@angul
 import { FormField, form } from '@angular/forms/signals';
 import type { GitBranch, GitTag } from '@quiver/core';
 import { Badge, Button, Checkbox, ContextMenu, EmptyState, Icon, IconButton, Input, Spinner, invokeResource, type Tab, type TabComponent } from '@quiver/ui';
-import { ArrowDown, ArrowUp, Brush, Check, Cloud, CloudOff, Ellipsis, FolderGit2, GitBranch as GitBranchIcon, RefreshCw, Tag } from 'lucide';
+import { ArrowDown, ArrowDownToLine, ArrowUp, Brush, Check, Cloud, CloudOff, Ellipsis, FolderGit2, GitBranch as GitBranchIcon, RefreshCw, Tag } from 'lucide';
 import { GitActions } from './git-actions';
 import { GitWorktreeActions } from './worktree-actions';
 import { injectGitChanged } from './git-events';
@@ -43,6 +43,22 @@ import { ago, cleanupCandidates, refMatches } from './git-format';
             (click)="openCleanup()"
           >
             Clean up{{ candidates().length ? ' (' + candidates().length + ')' : '' }}
+          </button>
+        }
+        @if (view() === 'list') {
+          <button
+            qButton
+            size="sm"
+            variant="ghost"
+            class="shrink-0 whitespace-nowrap"
+            [icon]="icons.ArrowDownToLine"
+            [loading]="actions.syncing().has('*')"
+            [disabled]="!tracking()"
+            [title]="tracking() ? 'Fetch, then fast-forward every branch that is only behind its upstream, without switching to it. Branches with commits of their own are left as they are.' : 'No local branch tracks a remote branch'"
+            data-testid="git-branches-pull-all"
+            (click)="actions.syncBranches(undefined, false)"
+          >
+            Pull all
           </button>
         }
         <button qButton size="sm" variant="ghost" class="shrink-0" [icon]="icons.RefreshCw" [loading]="branches.isLoading() || tags.isLoading()" data-testid="git-branches-refresh" (click)="reload()">Refresh</button>
@@ -123,6 +139,9 @@ import { ago, cleanupCandidates, refMatches } from './git-format';
               }
               <span class="flex-1 truncate text-xs text-muted min-w-0" [title]="b.subject">{{ b.subject }}</span>
               <span class="text-[11px] text-muted shrink-0" [title]="b.date">{{ ago(b.date) }}</span>
+              @if (actions.syncing().has(b.name) || (actions.syncing().has('*') && b.upstream)) {
+                <svg qSpinner class="size-3.5 shrink-0" data-testid="git-branches-syncing"></svg>
+              }
               <button qIconButton label="Actions" size="sm" data-testid="git-branches-menu" (click)="branchMenu($event, b)"><svg [qIcon]="icons.Ellipsis" class="size-3.5"></svg></button>
             </div>
           } @empty {
@@ -196,7 +215,7 @@ export class GitBranchesTab implements TabComponent {
   readonly scope = input.required<string>();
 
   protected readonly worktrees = inject(GitWorktreeActions);
-  protected readonly icons = { ArrowDown, ArrowUp, Brush, Check, Cloud, CloudOff, Ellipsis, FolderGit2, GitBranchIcon, RefreshCw, Tag };
+  protected readonly icons = { ArrowDown, ArrowDownToLine, ArrowUp, Brush, Check, Cloud, CloudOff, Ellipsis, FolderGit2, GitBranchIcon, RefreshCw, Tag };
   protected readonly branches = invokeResource<GitBranch[]>('git.branch.list');
   protected readonly tags = invokeResource<GitTag[]>('git.tag.list');
   protected readonly ago = ago;
@@ -209,6 +228,8 @@ export class GitBranchesTab implements TabComponent {
   private readonly all = computed(() => this.branches.value() ?? []);
   protected readonly currentName = computed(() => this.all().find((b) => b.current)?.name ?? null);
   protected readonly local = computed(() => this.all().filter((b) => !b.remote && refMatches(b, this.filter())));
+  /** How many local branches Pull all would bring up to date: those tracking a remote branch that still exists. */
+  protected readonly tracking = computed(() => this.all().filter((b) => !b.remote && b.upstream?.includes('/') && !b.gone).length);
   protected readonly remote = computed(() => this.all().filter((b) => b.remote && refMatches(b, this.filter())));
   /** What git knows was deleted on the remote: the upstreams of local branches, as of the last fetch that pruned. */
   protected readonly deletedOnRemote = computed(() => this.local().filter((b) => b.gone && b.upstream));

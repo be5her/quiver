@@ -5,10 +5,11 @@ import { draftCommands } from './commands-draft';
 import { localCommands, localLifecycle } from './commands-local';
 import { manageCommands } from './commands-manage';
 import { prCommands } from './commands-pr';
+import { syncCommands } from './commands-sync';
 import { worktreeCommands } from './commands-worktree';
 
 export const gitModule = defineModule({
   id: 'git',
-  commands: [...localCommands, ...manageCommands, ...prCommands, ...draftCommands, ...blameCommands, ...conflictCommands, ...worktreeCommands],
+  commands: [...localCommands, ...syncCommands, ...manageCommands, ...prCommands, ...draftCommands, ...blameCommands, ...conflictCommands, ...worktreeCommands],
   ...localLifecycle,
 });

@@ -156,6 +156,52 @@ export const GitBranchCreateInputSchema = z.object({ name: GitArgSchema, from: G
 export const GitRemoteInputSchema = z.object({ remote: GitArgSchema.optional(), branch: GitArgSchema.optional() });
 export const GitPushInputSchema = GitRemoteInputSchema.extend({ setUpstream: z.boolean().default(false), forceWithLease: z.boolean().default(false) });
 
+/** Which local branches `git.branch.pull` and `git.branch.sync` bring up to date with their upstream. */
+export const GitBranchSyncInputSchema = z.object({
+  names: z
+    .array(GitArgSchema)
+    .min(1)
+    .optional()
+    .describe('Local branch names, current or not. Default: every local branch with an upstream that still exists on its remote'),
+});
+export const GitBranchPushInputSchema = z.object({
+  name: GitArgSchema.describe('A local branch, current or not'),
+  forceWithLease: z.boolean().default(false),
+});
+
+/**
+ * What became of one branch in `git.branch.pull` or `git.branch.sync`: `updated` fast-forwarded to its upstream,
+ * `pushed` (sync only) sent its commits up, `up-to-date` had nothing to do, `ahead` (pull only) has commits to push,
+ * `diverged` has commits of its own and its upstream has others (needs a merge or rebase, on the branch itself),
+ * `no-upstream` tracks nothing, `gone` tracks a branch deleted on the remote, `failed` was refused by git (`message`).
+ */
+export type GitBranchSyncOutcome = 'updated' | 'pushed' | 'up-to-date' | 'ahead' | 'diverged' | 'no-upstream' | 'gone' | 'failed';
+
+export interface GitBranchSyncItem {
+  name: string;
+  /** Its upstream, short (`origin/main`). */
+  upstream?: string;
+  outcome: GitBranchSyncOutcome;
+  /** Commits it had that its upstream did not, and the reverse, after the fetch and before anything moved. */
+  ahead: number;
+  behind: number;
+  /** The commits it moved between, when it was fast-forwarded. */
+  from?: string;
+  to?: string;
+  /** The other worktree it is checked out in, where the fast-forward ran. */
+  worktreePath?: string;
+  message?: string;
+}
+
+export interface GitBranchSyncResult {
+  branches: GitBranchSyncItem[];
+  /** The remotes fetched first. */
+  fetched: string[];
+  /** What git printed. */
+  output: string;
+  status: GitStatus;
+}
+
 export const GitBranchDeleteInputSchema = z.object({
   name: GitArgSchema,
   force: z.boolean().default(false).describe('Delete it even when its commits are not merged anywhere (git branch -D); they are then only in the reflog.'),

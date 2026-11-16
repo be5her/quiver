@@ -5,12 +5,13 @@ import draft from './git/draft';
 import local from './git/local';
 import manage from './git/manage';
 import pr from './git/pr';
+import sync from './git/sync';
 import tree from './git/tree';
 import ui from './git/ui';
 import worktrees from './git/worktrees';
 
 export default definePart({
   name: 'git',
-  summary: 'Git: local repository, branch management, pull requests through gh and their drafts, blame, the conflict editor, worktrees and changed files as a tree',
-  run: (t) => runSections(t, [local, manage, pr, ui, blame, conflict, draft, worktrees, tree]),
+  summary: 'Git: local repository, branch management, pulling and pushing branches without switching to them, pull requests through gh and their drafts, blame, the conflict editor, worktrees and changed files as a tree',
+  run: (t) => runSections(t, [local, manage, sync, pr, ui, blame, conflict, draft, worktrees, tree]),
 });

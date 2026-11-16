@@ -1,4 +1,4 @@
-import { isUnmerged, shortRelativeTime, type GitBlame, type GitBlameCommit, type GitBranch, type GitCommit, type GitDiffFile, type GitFileChange, type GitPrCheckState, type GitPullRequest, type GitStash, type GitStatus, type GitTag } from '@quiver/core';
+import { isUnmerged, shortRelativeTime, type GitBlame, type GitBlameCommit, type GitBranch, type GitBranchSyncItem, type GitCommit, type GitDiffFile, type GitFileChange, type GitPrCheckState, type GitPullRequest, type GitStash, type GitStatus, type GitTag } from '@quiver/core';
 import type { CodeLanguage, LineMarker } from '@quiver/ui';
 
 // What the Git panel shows, worked out from what the host commands give back. No Angular here.
@@ -290,6 +290,57 @@ export function splitRemoteBranch(name: string): { remote: string; branch: strin
  */
 export function isPushRejected(message: string): boolean {
   return /non-fast-forward|fetch first|\[rejected\]/i.test(message);
+}
+
+/** "1 commit", "3 commits". */
+function commits(n: number): string {
+  return `${n} commit${n === 1 ? '' : 's'}`;
+}
+
+/** What became of one branch of a pull or sync, as a sentence. */
+export function syncItemText(item: GitBranchSyncItem): string {
+  const up = item.upstream ?? 'its upstream';
+  switch (item.outcome) {
+    case 'updated':
+      return `Pulled ${commits(item.behind)} into ${item.name}`;
+    case 'pushed':
+      return `Pushed ${commits(item.ahead)} of ${item.name} to ${up}`;
+    case 'up-to-date':
+      return `${item.name} is up to date with ${up}`;
+    case 'ahead':
+      return `${item.name} has nothing to pull; it has ${commits(item.ahead)} to push`;
+    case 'diverged':
+      return `${item.name} and ${up} have diverged (${item.ahead} ahead, ${item.behind} behind); switch to it and pull to merge or rebase`;
+    case 'no-upstream':
+      return `${item.name} tracks no remote branch; push it to publish it`;
+    case 'gone':
+      return `${up} was deleted on the remote`;
+    case 'failed':
+      return `${item.name}: ${item.message ?? 'git refused'}`;
+  }
+}
+
+/**
+ * The toast for a pull or sync of branches: one branch in a sentence; several as what moved, then each one that
+ * needs a hand, and how many had nothing to do. An error when git refused one, information when one needs a hand
+ * (diverged, deleted on the remote, tracking nothing), else a success.
+ */
+export function syncSummary(items: GitBranchSyncItem[]): { message: string; kind: 'success' | 'info' | 'error' } {
+  const of = (...outcomes: GitBranchSyncItem['outcome'][]) => items.filter((i) => outcomes.includes(i.outcome));
+  const problems = of('diverged', 'gone', 'no-upstream', 'failed');
+  const kind = of('failed').length ? 'error' : problems.length ? 'info' : 'success';
+  if (!items.length) return { message: 'No branch tracks a remote branch', kind: 'info' };
+  if (items.length === 1) return { message: syncItemText(items[0]), kind };
+  const updated = of('updated').map((i) => i.name);
+  const pushed = of('pushed').map((i) => i.name);
+  const quiet = of('up-to-date', 'ahead').length;
+  const parts = [
+    ...(updated.length ? [`Pulled into ${updated.join(', ')}`] : []),
+    ...(pushed.length ? [`Pushed ${pushed.join(', ')}`] : []),
+    ...problems.map(syncItemText),
+    ...(quiet === items.length ? [`All ${quiet} branches are up to date`] : quiet ? [`${quiet} up to date`] : []),
+  ];
+  return { message: parts.join(' · '), kind };
 }
 
 /** The remotes the branches mention, for picking one to push a tag to. */
