@@ -7,9 +7,16 @@
   <div class="flex flex-col h-full min-h-0">
     <div class="flex items-center gap-2 px-3 py-2 border-b border-edge shrink-0">
       <input qInput [formField]="requestForm.name" class="w-56 h-7 text-sm font-medium border-transparent bg-transparent hover:border-edge" placeholder="Request name" />
+      @if (unsaved()) {
+        <span class="text-[10px] rounded-full border border-edge px-2 py-0.5 text-muted shrink-0" [title]="unsavedTitle" data-testid="api-unsaved-badge">{{ quick() ? 'Quick request · not saved' : 'From the history · not saved' }}</span>
+      }
       <div class="flex-1"></div>
       <button qButton size="sm" variant="ghost" [icon]="icons.Code" title="Copy this request as code, or show it" data-testid="api-code-menu" (click)="codeMenu($event)">Code</button>
-      <button qButton size="sm" [variant]="dirty() ? 'secondary' : 'ghost'" [icon]="icons.Save" title="Ctrl+S" (click)="save()">Save{{ dirty() ? '*' : '' }}</button>
+      @if (unsaved()) {
+        <button qButton size="sm" variant="secondary" class="shrink-0 whitespace-nowrap" [icon]="icons.Save" title="Keep this request in a collection (Ctrl+S)" data-testid="api-save-to-collection" (click)="save()">Save to collection…</button>
+      } @else {
+        <button qButton size="sm" [variant]="dirty() ? 'secondary' : 'ghost'" [icon]="icons.Save" title="Ctrl+S" (click)="save()">Save{{ dirty() ? '*' : '' }}</button>
+      }
     </div>
 
     <div class="flex items-center gap-2 px-3 py-2 shrink-0">
@@ -18,7 +25,7 @@
           <option [value]="m">{{ m }}</option>
         }
       </select>
-      <q-variable-input [formField]="requestForm.url" [placeholder]="urlPlaceholder" inputClass="font-mono" [autofocus]="!current.url" />
+      <q-variable-input [formField]="requestForm.url" [placeholder]="urlPlaceholder" inputClass="font-mono" testId="api-url" [autofocus]="!current.url" (paste)="pasteUrl($event)" />
       <select qSelect class="w-36 shrink-0 text-xs" [title]="envPickerTitle" data-testid="api-env-picker" (change)="setEnvironment($event)">
         <option value="" [selected]="!activeEnvironmentId()">No environment</option>
         @for (env of environments.value() ?? []; track env.id) {

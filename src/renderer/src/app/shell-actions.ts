@@ -147,6 +147,7 @@ export class ShellActions {
     if (key === ',') return run('settings.open');
     if (key === 'w') return run('tab.close');
     if (key === 'j') return run('panel.toggle');
+    if (e.shiftKey && key === 'n') return run('api.request.quick');
     if (key === 'n') return run('api.request.new');
     if (e.shiftKey && key === 'q') return run('db.query.new');
     if (/^[1-9]$/.test(key)) {

@@ -11,6 +11,7 @@ export * from './approvals';
 export * from './variables';
 export * from './redact';
 export * from './curl';
+export * from './quick-request';
 export * from './command-score';
 export * from './shell';
 export * from './json';

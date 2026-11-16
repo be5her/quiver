@@ -1431,6 +1431,63 @@ export default definePart({
       );
     }
 
+    // Quick requests: a curl command or an inline request sent without saving anything, kept in the history like any send.
+    {
+      const historyFile = path.join(folder, '.quiver', 'local', 'history.jsonl');
+      const requestsBefore = (await run<ApiRequest[]>('api.request.list', {}, ws.id)).length;
+      const logLines = async () => (await fs.readFile(historyFile, 'utf8')).trim().split('\n').length;
+      const historyBefore = await logLines();
+      const agent = { caller: 'mcp' as const, workspaceId: ws.id };
+      const curl = `curl -X POST '{{baseUrl}}/quick?api_key=quick-key-111&page=1' -H 'Authorization: Bearer quick-token-222' -H 'Content-Type: application/json' --data-raw '{"q":1}'`;
+      const viaCurl = await host.invoke('api.request.send', { curl }, agent);
+      const curlResponse = viaCurl.ok ? (viaCurl.result as ApiResponse) : null;
+      const curlEcho = curlResponse ? (JSON.parse(curlResponse.body) as { method: string; url: string; headers: Record<string, string>; body: string }) : null;
+      const curlEntry = (await run<HistoryEntry[]>('api.history.list', { limit: 1 }, ws.id))[0];
+      check(
+        'quick request: an agent sends a curl command with the variables resolved and nothing saved, the typed credentials masked in all it gets back (the echo of them too)',
+        curlEcho?.method === 'POST' && curlEcho.url === `/quick?api_key=${REDACTED}&page=1` && curlEcho.headers.authorization === `Bearer ${REDACTED}` && curlEcho.body === '{"q":1}' &&
+          curlResponse?.sent.url === `http://127.0.0.1:${echoPort}/quick?api_key=${REDACTED}&page=1` &&
+          !JSON.stringify(curlResponse).includes('quick-token-222') && !JSON.stringify(curlResponse).includes('quick-key-111'),
+        { ok: viaCurl.ok || viaCurl.error.message, echo: curlEcho?.url, auth: curlEcho?.headers.authorization, sent: curlResponse?.sent?.url },
+      );
+      check(
+        'quick request: its history entry has no requestId, is named Quick request, keeps its response and masks the typed credentials',
+        curlEntry.requestId === null && curlEntry.request.name === 'Quick request' && curlEntry.request.id.startsWith('quick-') && curlEntry.status === 200 && curlEntry.hasResponse === true &&
+          curlEntry.request.auth.type === 'bearer' && curlEntry.request.auth.token === REDACTED && curlEntry.url === `http://127.0.0.1:${echoPort}/quick?api_key=${REDACTED}&page=1`,
+        { requestId: curlEntry.requestId, name: curlEntry.request.name, url: curlEntry.url, auth: curlEntry.request.auth, hasResponse: curlEntry.hasResponse },
+      );
+      // Only method and url are needed inline; the rest takes the defaults, and the send is a quick request too.
+      const inline = await host.invoke('api.request.send', { request: { method: 'GET', url: '{{baseUrl}}/inline?ref={{token}}' } }, agent);
+      const inlineEntry = (await run<HistoryEntry[]>('api.history.list', { limit: 1 }, ws.id))[0];
+      const mixed = await host.invoke('api.request.send', { curl: 'curl https://example.com', requestId: saved.id }, agent);
+      const broken = await host.invoke('api.request.send', { curl: `curl 'https://example.com` }, agent);
+      // A file a curl command sends is checked like any file an agent sends: inside the project only.
+      const outside = path.join(os.tmpdir(), `quiver-smoke-quick-${Date.now()}.json`);
+      await fs.writeFile(outside, '{"secret":"outside"}');
+      const outsideSend = await host.invoke('api.request.send', { curl: `curl -X POST '{{baseUrl}}/f' --data-binary '@${outside.replace(/\\/g, '/')}'` }, agent);
+      await fs.rm(outside, { force: true });
+      const requestsAfter = (await run<ApiRequest[]>('api.request.list', {}, ws.id)).length;
+      const historyAfter = await logLines();
+      check(
+        'quick request: an inline request needs only method and url, curl goes alone, a broken command and a file outside the project are refused, and no request file is written',
+        inline.ok && inlineEntry.requestId === null && inlineEntry.url === `http://127.0.0.1:${echoPort}/inline?ref=${REDACTED}` &&
+          !mixed.ok && mixed.error.code === 'INVALID_INPUT' && !broken.ok && broken.error.code === 'INVALID_INPUT' && !outsideSend.ok && outsideSend.error.message.includes('inside the project') &&
+          requestsAfter === requestsBefore && historyAfter === historyBefore + 2 && !(await fs.readFile(historyFile, 'utf8')).includes('quick-token-222'),
+        {
+          inline: inline.ok || inline.error.message,
+          inlineUrl: inlineEntry.url,
+          mixed: mixed.ok || mixed.error.code,
+          broken: broken.ok || broken.error.code,
+          outside: outsideSend.ok || outsideSend.error.message,
+          requests: [requestsBefore, requestsAfter],
+          history: [historyBefore, historyAfter],
+        },
+      );
+      // Compare and a listing by request leave quick sends out: they belong to no saved request.
+      const byQuickId = await run<HistoryEntry[]>('api.history.list', { requestId: curlEntry.request.id }, ws.id);
+      check('quick request: a listing by requestId does not find quick sends', byQuickId.length === 0, byQuickId.length);
+    }
+
     return {
       ui: async (u) => {
         const { win, js, wait, shot } = u;
@@ -1783,6 +1840,100 @@ export default definePart({
           await js(`(() => { for (const tab of document.querySelectorAll('[data-testid=tab]')) if (!/^echo/.test(tab.getAttribute('data-title') ?? '')) tab.querySelector('[aria-label="Close tab"]')?.click(); })()`);
           await wait(300);
           await run('api.collection.delete', { id: target.id }, ws.id);
+          await js(`[...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('echo'))?.click()`);
+          await wait(600);
+        }
+
+        // Quick request: an unsaved tab that a pasted curl command fills, sent into the history only, closed without a question once sent, reopened from the history and saved to a collection.
+        {
+          const requestsBefore = (await run<ApiRequest[]>('api.request.list', {}, ws.id)).length;
+          await js(`document.querySelector('[data-testid=api-quick-request]')?.click()`);
+          await wait(900);
+          const activeTitle = () => js(`document.querySelector('[data-testid=tab][aria-selected=true]')?.getAttribute('data-title') ?? null`);
+          const badge = () => js(`${visible('[data-testid=api-unsaved-badge]')}?.textContent.trim() ?? null`);
+          const opened = { title: await activeTitle(), badge: await badge(), saveTo: await js(`Boolean(${visible('[data-testid=api-save-to-collection]')})`) };
+          const command = `curl -X POST '{{baseUrl}}/quick-ui?from=paste' -H 'X-Quick: yes' --data-raw '{"ui":true}'`;
+          await js(
+            `(() => { const i = ${visible('[data-testid=api-url]')}; const data = new DataTransfer(); data.setData('text/plain', ${JSON.stringify(command)}); i.focus(); i.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true })); })()`,
+          );
+          await wait(500);
+          const filled = {
+            url: await js(`${visible('[data-testid=api-url]')}?.value ?? null`),
+            method: await js(`${visible('[data-testid=api-url]')}?.closest('div.flex')?.querySelector('select')?.value ?? null`),
+            params: await js(`[...document.querySelectorAll('button')].find((b) => b.offsetParent !== null && b.textContent.trim().startsWith('Params'))?.textContent.trim() ?? null`),
+          };
+          check(
+            'ui: Quick request opens an unsaved tab, and a curl command pasted into the URL fills the method, URL and params',
+            opened.title === 'Quick request' && opened.badge === 'Quick request · not saved' && opened.saveTo === true &&
+              filled.url === '{{baseUrl}}/quick-ui' && filled.method === 'POST' && filled.params === 'Params1',
+            { opened, filled },
+          );
+          await shot('03ta-quick-request-light');
+          // Edits not sent yet are not in the history: closing from the tab's menu (as Close Others, closing the workspace or an update would) asks first.
+          const closeActive = async () => {
+            await js(
+              `(() => { const t = document.querySelector('[data-testid=tab][aria-selected=true]'); const r = t.getBoundingClientRect(); t.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 10, clientY: r.top + 5 })); })()`,
+            );
+            await wait(250);
+            await js(`document.querySelector('[data-testid=tab-menu-close]')?.click()`);
+          };
+          const confirmShown = () => js(`[...document.querySelectorAll('div.fixed h2')].map((h) => h.textContent.trim()).find((t) => t.startsWith('Close')) ?? null`);
+          await closeActive();
+          await wait(400);
+          const askedBeforeSend = await confirmShown();
+          await js(`[...document.querySelectorAll('div.fixed button')].find((b) => b.textContent.trim() === 'Cancel')?.click()`);
+          await wait(300);
+          await js(`[...document.querySelectorAll('button')].find((b) => b.offsetParent !== null && b.textContent.trim() === 'Send')?.click()`);
+          await until(() => js(`Boolean(${visible('[data-testid=api-response-status]')})`).then(Boolean), 5000).catch(() => undefined);
+          await wait(300);
+          const status = await js(`${visible('[data-testid=api-response-status]')}?.textContent.trim() ?? null`);
+          const entry = (await run<HistoryEntry[]>('api.history.list', { limit: 1 }, ws.id))[0];
+          await shot('03tb-quick-request-sent-light');
+          await closeActive();
+          await wait(400);
+          const askedAfterSend = await confirmShown();
+          const stillOpen = await js(`[...document.querySelectorAll('[data-testid=tab]')].some((t) => t.getAttribute('data-title') === 'Quick request')`);
+          const requestsAfterSend = (await run<ApiRequest[]>('api.request.list', {}, ws.id)).length;
+          check(
+            'ui: a quick request is sent into the history with no saved request, asks before closing only while it has edits not sent, and writes no request file',
+            typeof askedBeforeSend === 'string' && String(status).startsWith('200') &&
+              entry.requestId === null && entry.method === 'POST' && entry.url.endsWith('/quick-ui?from=paste') && entry.request.name === 'Quick request' &&
+              askedAfterSend === null && stillOpen === false && requestsAfterSend === requestsBefore,
+            { askedBeforeSend, status, entry: { requestId: entry.requestId, method: entry.method, url: entry.url }, askedAfterSend, stillOpen, requests: [requestsBefore, requestsAfterSend] },
+          );
+          // The sidebar's entry has no Compare (no saved request to compare with) and opens again as an unsaved tab.
+          await js(
+            `(() => { const e = document.querySelector('[data-testid=api-history-entry]'); const r = e.getBoundingClientRect(); e.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.top + 5 })); })()`,
+          );
+          await wait(300);
+          const entryMenu = (await js(`[...document.querySelectorAll('[data-testid=context-menu] button')].map((b) => b.textContent.trim())`)) as string[];
+          await js(`[...document.querySelectorAll('[data-testid=context-menu] button')].find((b) => b.textContent.trim() === 'Open')?.click()`);
+          await wait(900);
+          const reopened = { title: await activeTitle(), badge: await badge(), url: await js(`${visible('[data-testid=api-url]')}?.value ?? null`) };
+          await js(`${visible('[data-testid=api-save-to-collection]')}?.click()`);
+          await wait(500);
+          const dialogChoices = (await js(`[...(document.querySelector('div.fixed form select')?.options ?? [])].map((o) => o.textContent.trim())`)) as string[];
+          await shot('03tc-save-to-collection-light');
+          await js(
+            `(() => { const i = document.querySelector('div.fixed form input'); if (!i) return; const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(i, 'kept quick'); i.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('div.fixed form button[type=submit]')?.click(); })()`,
+          );
+          await wait(1000);
+          const kept = (await run<ApiRequest[]>('api.request.list', {}, ws.id)).find((r) => r.name === 'kept quick');
+          const afterSave = { title: await activeTitle(), badge: await badge(), save: await saveButtonLabel() };
+          await shot('03td-quick-request-saved-light');
+          check(
+            'ui: a quick entry in the history has no Compare, opens again unsaved, and Save to collection keeps it as a normal request',
+            entryMenu.includes('Open') && entryMenu.includes('Save as request') && !entryMenu.some((l) => l.startsWith('Compare')) &&
+              reopened.title === 'Quick request' && reopened.badge === 'From the history · not saved' && reopened.url === '{{baseUrl}}/quick-ui' &&
+              dialogChoices[0] === 'Top level' &&
+              kept !== undefined && !/^(quick|history)-/.test(kept.id) && kept.collectionId === null && kept.method === 'POST' && kept.url === '{{baseUrl}}/quick-ui' &&
+              afterSave.title === 'kept quick' && afterSave.badge === null && afterSave.save === 'Save',
+            { entryMenu, reopened, dialogChoices, kept: kept ? { id: kept.id, url: kept.url } : null, afterSave },
+          );
+          await closeActive();
+          await wait(300);
+          if (kept) await run('api.request.delete', { id: kept.id }, ws.id);
+          await wait(300);
           await js(`[...document.querySelectorAll('[role=button]')].find((r) => r.textContent.includes('echo'))?.click()`);
           await wait(600);
         }

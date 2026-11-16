@@ -23,6 +23,7 @@
 
 <div [attr.data-drop-target]="rootTarget" data-testid="api-tree-root" class="rounded-sm pb-1" [class]="drag.dnd.drag()?.target === rootTarget ? 'bg-accent/10 outline outline-1 outline-accent/60' : ''">
   <q-section-header title="Collections">
+    <button qIconButton label="Quick request: send without saving, kept in the history (Ctrl+Shift+N)" size="sm" data-testid="api-quick-request" (click)="api.openQuickRequest()"><svg [qIcon]="icons.Zap" class="size-3.5"></svg></button>
     <button qIconButton label="New request" size="sm" (click)="api.createRequest()"><svg [qIcon]="icons.Plus" class="size-3.5"></svg></button>
     <button qIconButton label="New GraphQL request" size="sm" (click)="api.createGraphqlRequest()"><svg [qIcon]="icons.Braces" class="size-3.5"></svg></button>
     <button qIconButton label="New collection" size="sm" (click)="api.newCollection(null)"><svg [qIcon]="icons.FolderPlus" class="size-3.5"></svg></button>

@@ -8,6 +8,7 @@ import {
   detectImportFormat,
   detectShellDialect,
   newId,
+  newQuickRequest,
   nowIso,
   responseFromHistory,
   type ApiCollection,
@@ -60,6 +61,42 @@ export class ApiActions {
   async createRequest(collectionId: string | null = null): Promise<void> {
     const created = await this.host.invoke<ApiRequest>('api.request.create', { collectionId });
     this.openRequestTab(created);
+  }
+
+  /**
+   * A request that lives only in its tab, as a curl command lives in a terminal: sent like any other
+   * and kept in the history, never written to a collection unless saved there.
+   */
+  openQuickRequest(): void {
+    const request = newQuickRequest();
+    this.openRequestTab(request, request);
+  }
+
+  /**
+   * Keep an unsaved request (a quick request, a history entry opened again) as a new saved request,
+   * named and placed where the user picks. Null when the dialog is cancelled.
+   */
+  async saveToCollection(request: ApiRequest): Promise<ApiRequest | null> {
+    const collections = await this.host.invoke<ApiCollection[]>('api.collection.list', {});
+    const places = collections.map((c) => ({ value: c.id, label: collectionPath(collections, c.id) })).sort((a, b) => a.label.localeCompare(b.label));
+    const result = await this.dialogs.promptWithChoice({
+      title: 'Save to collection',
+      label: 'Name',
+      defaultValue: request.name,
+      confirmLabel: 'Save',
+      choice: {
+        label: 'Collection',
+        options: [{ value: '', label: 'Top level' }, ...places],
+        defaultValue: request.collectionId && collections.some((c) => c.id === request.collectionId) ? request.collectionId : '',
+      },
+    });
+    if (!result) return null;
+    const ts = nowIso();
+    const saved = await this.host.invoke<ApiRequest>('api.request.save', {
+      request: { ...request, id: newId(), name: result.value.trim() || request.name, collectionId: result.choice || null, createdAt: ts, updatedAt: ts },
+    });
+    if (saved.collectionId) this.tree.expand(`api/collection/${saved.collectionId}`);
+    return saved;
   }
 
   async createGraphqlRequest(collectionId: string | null = null): Promise<void> {
