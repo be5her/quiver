@@ -1,12 +1,22 @@
 <q-section-header title="Connections">
   <button qIconButton label="Search tables and columns" size="sm" (click)="db.openSearchTab()"><svg [qIcon]="icons.Search" class="size-3.5"></svg></button>
+  <button qIconButton [label]="order.label()" size="sm" data-testid="db-connection-sort" [attr.data-sort]="order.sort()" (click)="order.openMenu($event)"><svg [qIcon]="icons.ArrowUpDown" class="size-3.5"></svg></button>
   <q-db-new-connection-menu />
 </q-section-header>
 @if (connections.isLoading() && !connections.value()) {
   <div class="px-3 py-2"><svg qSpinner></svg></div>
 }
-@for (conn of connections.value() ?? []; track conn.id) {
-  <q-db-connection-node [connection]="conn" />
+@if (reorder.drag(); as drag) {
+  <q-drop-marker axis="y" [at]="drag.marker" testId="db-connection-drop-marker" />
+}
+@for (conn of shown(); track conn.id) {
+  <q-db-connection-node
+    [connection]="conn"
+    [attr.data-drag-id]="conn.id"
+    [class.select-none]="order.manual()"
+    [class.opacity-50]="reorder.drag()?.id === conn.id"
+    (pointerdown)="dragStart($event, conn.id)"
+  />
 }
 @if (connections.value()?.length === 0) {
   <p class="px-3 py-2 text-xs text-muted">No connections yet. Add a MySQL, PostgreSQL, SQLite or Redis connection for this project, or paste a connection URL.</p>

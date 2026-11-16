@@ -1,5 +1,6 @@
 import { Component, computed, effect, inject, input, signal, untracked, viewChild, type OnInit } from '@angular/core';
 import {
+  DB_CONNECTION_ORDER_KEY,
   DB_QUERY_CANCELLED,
   findVariableSpans,
   isDynamicVariable,
@@ -35,6 +36,7 @@ import {
 } from '@quiver/ui';
 import { Check, CircleStop, GitBranch, Play, Save, Undo2 } from 'lucide';
 import { ApiVariables } from '../../api/ui/api-variables';
+import { DbConnectionOrder } from './connection-order';
 import { DbActions, type DbConnectionRow } from './db-actions';
 import { DbError } from './db-error';
 import { AccessBadge } from './kind-icon';
@@ -99,6 +101,7 @@ export class QueryTab implements TabComponent, OnInit {
   private readonly toasts = inject(Toasts);
   private readonly dialogs = inject(Dialogs);
   private readonly db = inject(DbActions);
+  private readonly order = inject(DbConnectionOrder);
   private readonly editor = viewChild(CodeEditor);
 
   readonly tab = input.required<Tab>();
@@ -123,7 +126,9 @@ export class QueryTab implements TabComponent, OnInit {
   private readonly lastRun = signal<string | null>(null);
   private queryId: string | undefined;
 
-  protected readonly connections = invokeResource<DbConnectionRow[]>('db.connection.list', () => ({}), { refreshOn: ['db-connections'] });
+  protected readonly connections = invokeResource<DbConnectionRow[]>('db.connection.list', () => ({}), { refreshOn: ['db-connections'], refreshOnState: [DB_CONNECTION_ORDER_KEY] });
+  /** The picker's connections, in the order the sidebar lists them. */
+  protected readonly connectionOptions = computed(() => this.order.sorted(this.connections.value() ?? []));
   protected readonly connection = computed(() => this.connections.value()?.find((c) => c.id === this.connectionId()) ?? null);
   protected readonly kind = computed(() => this.connection()?.kind ?? null);
   protected readonly sqlKind = computed<SqlKind | null>(() => {
@@ -171,7 +176,7 @@ export class QueryTab implements TabComponent, OnInit {
   constructor() {
     // Fall back to the first connection so a fresh tab is immediately runnable.
     effect(() => {
-      const first = this.connections.value()?.[0];
+      const first = this.connectionOptions()[0];
       if (!this.connectionId() && first) this.connectionId.set(first.id);
     });
     // Keep the editor's state in the tab (debounced), so it is restored with the workspace.

@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import {
+  DB_CONNECTION_ORDER_KEY,
   DbConnectionDraftSchema,
   DbConnectionSchema,
   DbKindSchema,
@@ -31,6 +32,7 @@ import {
   redisCommandIsReadOnly,
   redisCommandsAction,
   redisScriptIsReadOnly,
+  reorderDbConnections,
   scriptAction,
   scriptIsReadOnly,
   tableEditsAction,
@@ -53,7 +55,7 @@ import {
   type WorkspaceApi,
 } from '@quiver/core';
 import { z } from 'zod';
-import { COLLECTIONS, DriverPool, HISTORY_LOG, explainAccessError, getConnection, hasPassword, listConnections, readPassword, withTemporaryDriver, writePassword } from './connections';
+import { COLLECTIONS, DriverPool, HISTORY_LOG, connectionOrder, explainAccessError, getConnection, hasPassword, listConnections, readPassword, withTemporaryDriver, writePassword } from './connections';
 import { grafanaSessions } from '../grafana/sessions';
 import { loginForUse } from '../teleport/runtime';
 import { grafanaRedisDatasources, type Driver, type RedisDriverApi } from './drivers';
@@ -160,7 +162,7 @@ const connectionList = defineCommand({
   id: 'db.connection.list',
   title: 'List database connections',
   description:
-    'Lists saved MySQL, PostgreSQL, SQLite and Redis connections. Passwords are never returned; hasPassword says whether one is stored on this machine, connected whether a driver is open, inTransaction whether db.transaction began one. access says how the server is reached; a Redis connection with access.type grafana goes through a Grafana Redis data source, and its commands run with the permissions of the Grafana user signed in on this machine.',
+    'Lists saved MySQL, PostgreSQL, SQLite and Redis connections in the manual order kept on this machine (db.connection.reorder), the ones never placed by name. Passwords are never returned; hasPassword says whether one is stored on this machine, connected whether a driver is open, inTransaction whether db.transaction began one. access says how the server is reached; a Redis connection with access.type grafana goes through a Grafana Redis data source, and its commands run with the permissions of the Grafana user signed in on this machine.',
   scope: 'workspace',
   input: z.object({ kind: DbKindSchema.optional() }),
   handler: async ({ kind }, ctx) => {
@@ -211,6 +213,24 @@ const connectionSave = defineCommand({
     else if (password !== undefined) await writePassword(w, ctx.host, merged.id, password);
     await pool.close(w.id, merged.id, ctx.host, { immediate: false });
     return getConnection(w, merged.id);
+  },
+});
+
+const connectionReorder = defineCommand({
+  id: 'db.connection.reorder',
+  title: 'Reorder database connections',
+  description:
+    'Sets the manual order of the saved connections, which db.connection.list and the sidebar follow. The order is kept on this machine (workspace state), not committed. The ids given go first, in that order; connections placed before and not given keep their order after them, and connections never placed follow by name. Every id must be a saved connection.',
+  scope: 'workspace',
+  input: z.object({ connectionIds: z.array(z.string()).min(1).describe('Connection ids, first to last') }),
+  handler: async ({ connectionIds }, ctx) => {
+    const w = ws(ctx);
+    const existing = (await w.store.list<DbConnection>(COLLECTIONS.connections)).map((c) => c.id);
+    for (const id of connectionIds) if (!existing.includes(id)) throw new QuiverError('NOT_FOUND', `Connection ${id} not found`);
+    const order = reorderDbConnections(await connectionOrder(w), connectionIds, existing);
+    // Announced as state.changed, which the connection lists reload on.
+    await w.setState(DB_CONNECTION_ORDER_KEY, order);
+    return { order };
   },
 });
 
@@ -869,6 +889,7 @@ export const dbModule = defineModule({
     connectionList,
     connectionGet,
     connectionSave,
+    connectionReorder,
     connectionDelete,
     connectionTest,
     connectionDatabases,
