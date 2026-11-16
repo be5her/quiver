@@ -1,11 +1,8 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import {
-<<<<<<< HEAD
   DB_CONNECTION_ORDER_KEY,
-=======
   DB_SCHEMA_FILTER_KEY,
->>>>>>> origin/feat/db-schema-filter
   DbConnectionDraftSchema,
   DbConnectionSchema,
   DbKindSchema,
@@ -243,7 +240,7 @@ const connectionReorder = defineCommand({
 const connectionDelete = defineCommand({
   id: 'db.connection.delete',
   title: 'Delete database connection',
-  description: 'Deletes a saved connection, its stored password and which of its schemas the tree shows on this machine.',
+  description: 'Deletes a saved connection, its stored password, and its place in the manual order and the schemas the tree shows for it on this machine.',
   scope: 'workspace',
   mutating: true,
   input: z.object({ id: z.string() }),
@@ -253,6 +250,8 @@ const connectionDelete = defineCommand({
     await writePassword(w, ctx.host, id, null);
     const filters = parseSchemaFilters(await w.getState<unknown>(DB_SCHEMA_FILTER_KEY, null));
     if (id in filters) await w.setState(DB_SCHEMA_FILTER_KEY, withSchemaFilter(filters, id, null));
+    const order = await connectionOrder(w);
+    if (order.includes(id)) await w.setState(DB_CONNECTION_ORDER_KEY, order.filter((placed) => placed !== id));
     return { deleted: await w.store.remove(COLLECTIONS.connections, id) };
   },
 });
