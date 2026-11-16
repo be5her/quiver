@@ -28,6 +28,9 @@ import {
   nowIso,
   isSecretName,
   parseCurl,
+  readCurl,
+  isUnsavedRequestId,
+  newQuickRequest,
   redactHistoryEntry,
   redactLiteral,
   redactRequest,
@@ -332,7 +335,13 @@ const requestSave = defineCommand({
   description: 'Saves a full request definition (creates or replaces by id).',
   scope: 'workspace',
   input: z.object({ request: ApiRequestSchema }),
-  handler: async ({ request }, ctx) => ws(ctx).store.put(COLLECTIONS.requests, { ...request, updatedAt: nowIso() }),
+  handler: async ({ request }, ctx) => {
+    // Those prefixes mark a request that lives only in a tab (its sends tied to no saved request), so no new saved request may take one.
+    if (isUnsavedRequestId(request.id) && !(await ws(ctx).store.get<ApiRequest>(COLLECTIONS.requests, request.id))) {
+      throw new QuiverError('INVALID_INPUT', `A new request's id may not start with "quick-" or "history-"; leave those to unsaved tabs`);
+    }
+    return ws(ctx).store.put(COLLECTIONS.requests, { ...request, updatedAt: nowIso() });
+  },
 });
 
 const requestDuplicate = defineCommand({
@@ -370,16 +379,68 @@ const requestDelete = defineCommand({
   handler: async ({ id }, ctx) => ({ deleted: await ws(ctx).store.remove(COLLECTIONS.requests, id) }),
 });
 
+/** An inline request needs no identity: one without an id is a quick request, sent and kept in the history but tied to no saved request. */
+const InlineRequestSchema = ApiRequestSchema.extend({
+  id: z.string().optional(),
+  name: z.string().optional(),
+  createdAt: z.string().optional(),
+  updatedAt: z.string().optional(),
+});
+
 const SendInput = z.object({
-  requestId: z.string().optional(),
-  request: ApiRequestSchema.optional(),
+  requestId: z.string().optional().describe('A saved request'),
+  request: InlineRequestSchema.optional().describe('A request given inline, not saved; only method and url are needed. Sent without an id, it is a quick request: in the history with no requestId.'),
+  curl: z
+    .string()
+    .min(4)
+    .optional()
+    .describe(
+      "A curl command (bash, cmd.exe or PowerShell quoting, detected) to send as it is, without saving it, like running curl but with the variables, cookie jar, proxy, certificates and history of Quiver. -k, -L (curl follows no redirects without it) and --max-time apply; options that decide where the request goes or who sends it (--resolve, --connect-to, --unix-socket, -x/--proxy, --cert/--key, --cacert, --digest and the like) are refused, since Quiver's own proxy and certificate settings decide those; output and other curl-only options are ignored.",
+    ),
   environmentId: z.string().nullable().optional(),
   options: RequestOptionsSchema.optional().describe('Overrides for this send only: timeoutMs, followRedirects, insecure, maxBodyBytes'),
   /** Record the call in workspace history. Defaults to true. */
   record: z.boolean().optional(),
   sendId: z.string().min(1).max(100).optional().describe('Any id of your choosing; api.request.cancel with the same id stops this send'),
   stream: z.boolean().optional().describe('Read the body as a live stream of lines (NDJSON); an event stream streams without it. Shorthand for options.stream.'),
+  dialect: z.enum(['auto', 'posix', 'cmd', 'powershell']).optional().describe('With curl: the shell the command was written for; auto (the default) detects it.'),
 });
+
+/** The saved request an inline request stands for: its id, unless it is an unsaved tab's (a saved one from before the prefixes were reserved still counts). */
+async function savedRequestId(w: WorkspaceApi, id: string): Promise<string | null> {
+  if (!id) return null;
+  if (!isUnsavedRequestId(id)) return id;
+  return (await w.store.get<ApiRequest>(COLLECTIONS.requests, id)) ? id : null;
+}
+
+/** The request a send names: a saved one by id, one given inline (a quick request when it has no id), or a curl command read as one. */
+async function requestToSend(w: WorkspaceApi, input: Pick<z.infer<typeof SendInput>, 'requestId' | 'request' | 'curl' | 'dialect'>): Promise<ApiRequest> {
+  if (input.curl !== undefined) {
+    if (input.request || input.requestId) throw new QuiverError('INVALID_INPUT', 'Provide curl alone, without requestId or request');
+    let reading;
+    try {
+      reading = readCurl(input.curl, { dialect: input.dialect });
+    } catch (err) {
+      throw new QuiverError('INVALID_INPUT', (err as Error).message);
+    }
+    if (reading.routing.length) {
+      throw new QuiverError(
+        'INVALID_INPUT',
+        `The curl command uses ${reading.routing.join(', ')}, which decide${reading.routing.length === 1 ? 's' : ''} where the request goes or who sends it; a send through Quiver goes where its URL says, with Quiver's own proxy and client certificate settings. Remove ${reading.routing.length === 1 ? 'it' : 'them'} to send it.`,
+      );
+    }
+    // Named after the command (POST /users), like an imported one; -k, -L and --max-time become its options.
+    const options = Object.keys(reading.options).length ? { options: reading.options } : {};
+    return { ...reading.request, ...options, id: newQuickRequest().id };
+  }
+  if (input.request) {
+    const { id, name, createdAt, updatedAt, ...rest } = input.request;
+    const quick = newQuickRequest();
+    return { ...quick, ...rest, id: id || quick.id, name: name ?? quick.name, createdAt: createdAt ?? quick.createdAt, updatedAt: updatedAt ?? quick.updatedAt };
+  }
+  if (input.requestId) return requireRequest(w, input.requestId);
+  throw new QuiverError('INVALID_INPUT', 'Provide requestId, request or curl');
+}
 
 /**
  * Send a request: resolve, apply OAuth, send through the cookie jar, run captures and checks, and
@@ -391,8 +452,7 @@ const SendInput = z.object({
  */
 async function sendRequest(ctx: CommandContext, input: z.infer<typeof SendInput>, signal?: AbortSignal, recorded?: (entry: HistoryEntry, secretValues: string[]) => void, streams = true): Promise<ApiResponse> {
   const w = ws(ctx);
-  const request = input.request ?? (input.requestId ? await requireRequest(w, input.requestId) : null);
-  if (!request) throw new QuiverError('INVALID_INPUT', 'Provide requestId or request');
+  const request = await requestToSend(w, input);
   const options = effectiveSendOptions(request.options, { ...input.options, ...(input.stream !== undefined ? { stream: input.stream } : {}) });
   const { resolved, vars } = await resolveRequest(ctx, request, input.environmentId);
   // The proxy and client certificates, read once for the token request and every hop of the send.
@@ -407,7 +467,8 @@ async function sendRequest(ctx: CommandContext, input: z.infer<typeof SendInput>
   const entry: HistoryEntry = {
     id: newId(),
     at: nowIso(),
-    requestId: input.requestId ?? (request.id || null),
+    // A request that lives only in a tab (a quick request, a history entry opened again) is tied to no saved request, so Compare and a listing by requestId leave it out.
+    requestId: input.requestId ?? ((await savedRequestId(w, request.id)) || null),
     method: prepared.method,
     url: prepared.url,
     status: null,
@@ -498,7 +559,7 @@ const requestSend = defineCommand({
   id: 'api.request.send',
   title: 'Send API request',
   description:
-    'Sends an HTTP request and returns status, headers, body and timings. Pass a saved requestId or an inline request. A request\'s `capture` entries write values from the response (a JSON path into the body, a header, a cookie, the status) into the environment; `captured` reports each, secret ones masked for agents. Variables like {{baseUrl}} resolve from global variables and the active (or given) environment. A request\'s `checks` (assertions on the status, a header, the body, a JSON path, the time or the size) are run on the response and reported in `checks`. Send options are the defaults, then the request\'s own `options`, then the `options` given here. Pass a `sendId` to be able to stop the send with api.request.cancel. For agents, the credentials and secret variables in `sent` (what went on the wire) are masked, and the same secrets (what a secret capture read among them) are scrubbed from the response\'s headers and body.',
+    'Sends an HTTP request and returns status, headers, body and timings. Pass a saved requestId, an inline request (only method and url are needed) or a curl command (`curl`): an inline request without an id, or a curl command, is a quick request, sent like any other and kept in the history (with no requestId) but never saved. A request\'s `capture` entries write values from the response (a JSON path into the body, a header, a cookie, the status) into the environment; `captured` reports each, secret ones masked for agents. Variables like {{baseUrl}} resolve from global variables and the active (or given) environment. A request\'s `checks` (assertions on the status, a header, the body, a JSON path, the time or the size) are run on the response and reported in `checks`. Send options are the defaults, then the request\'s own `options`, then the `options` given here. Pass a `sendId` to be able to stop the send with api.request.cancel. For agents, the credentials and secret variables in `sent` (what went on the wire) are masked, and the same secrets (what a secret capture read among them) are scrubbed from the response\'s headers and body.',
   scope: 'workspace',
   input: SendInput,
   handler: (input, ctx) => sendRequest(ctx, input),
