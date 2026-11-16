@@ -7,11 +7,13 @@ import { DbActions, type DbConnectionRow } from './db-actions';
 import { firstLine } from './db-format';
 import { DbRow } from './db-row';
 import { NewConnectionMenu } from './new-connection-menu';
+import { SchemaFilterDialog } from './schema-filter-dialog';
+import { DbSchemaFilterState } from './schema-filter-state';
 
 /** Connections with their schema, saved queries and the latest queries; the history tab has the rest. */
 @Component({
   selector: 'q-db-sidebar',
-  imports: [ConnectionNode, DbRow, Icon, IconButton, NewConnectionMenu, SectionHeader, Spinner],
+  imports: [ConnectionNode, DbRow, Icon, IconButton, NewConnectionMenu, SchemaFilterDialog, SectionHeader, Spinner],
   templateUrl: './db-sidebar.html',
   host: { class: 'flex flex-col h-full min-h-0 overflow-y-auto text-sm' },
 })
@@ -19,6 +21,7 @@ export class DbSidebar {
   private readonly tree = inject(TreeState);
   private readonly toasts = inject(Toasts);
   protected readonly db = inject(DbActions);
+  protected readonly schemaFilters = inject(DbSchemaFilterState);
 
   protected readonly icons = { ChevronDown, ChevronRight, Clock, Pencil, Plus, Search, Terminal, Trash2 };
   protected readonly firstLine = firstLine;

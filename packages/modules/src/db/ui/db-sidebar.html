@@ -58,3 +58,6 @@
     }
   }
 </div>
+@if (schemaFilters.editing(); as conn) {
+  <q-db-schema-filter-dialog [connection]="conn" (closed)="schemaFilters.close()" />
+}

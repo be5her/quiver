@@ -446,7 +446,8 @@ export default definePart({
     }
 
     // ---------- the databases on a server, for the connection form: the fake PostgreSQL ----------
-    const fakePg = await startFakePostgres({ password: 'pg-secret', databases: ['analytics', 'app', 'postgres'], missing: ['nope'], denied: ['locked'] });
+    const pgSchemas = ['public', 'analytics', 'audit', 'billing', 'crm', 'events', 'finance', 'hr', 'inventory', 'reporting', 'reporting_archive', 'sales', 'staging', 'tmp'];
+    const fakePg = await startFakePostgres({ password: 'pg-secret', databases: ['analytics', 'app', 'postgres'], schemas: pgSchemas, missing: ['nope'], denied: ['locked'] });
     const pgDraft = (database: string) => ({ kind: 'postgres', name: '', host: '127.0.0.1', port: fakePg.port, user: 'dev', database });
     const listed = async (input: unknown) => {
       const before = fakePg.seen.connects.length;
@@ -496,6 +497,22 @@ export default definePart({
         Boolean(pgOrdersDetail?.ddl?.includes('PRIMARY KEY ("tenant_id", "id")')),
       pgOrders.ok ? pgOrdersDetail : said(pgOrders),
     );
+    // The tree's schema filter is a view preference in the workspace state: what the schema commands return is unchanged, and deleting a connection drops its entry.
+    {
+      const filters = async () => (await run<{ value: Record<string, string[]> | null }>('workspace.state.get', { key: 'db.schemaFilter' }, ws.id)).value ?? {};
+      const throwaway = await run<DbConnectionSummary>('db.connection.save', { connection: { ...pgDraft('app'), name: 'throwaway postgres' }, password: 'pg-secret' }, ws.id);
+      await run('workspace.state.set', { key: 'db.schemaFilter', value: { ...(await filters()), [pgSaved.id]: ['public'], [throwaway.id]: ['public', 'hr'] } }, ws.id);
+      const forAgents = await outcome('db.schema.databases', { connectionId: pgSaved.id }, 'mcp');
+      await run('db.connection.delete', { id: throwaway.id }, ws.id);
+      const left = await filters();
+      check(
+        'db: a schema filter leaves db.schema.databases whole for agents, and deleting a connection drops its filter but no other',
+        forAgents.ok && JSON.stringify(forAgents.value) === JSON.stringify(pgSchemas) && !(throwaway.id in left) && JSON.stringify(left[pgSaved.id]) === '["public"]',
+        { forAgents: forAgents.ok ? forAgents.value : said(forAgents), left },
+      );
+      delete left[pgSaved.id];
+      await run('workspace.state.set', { key: 'db.schemaFilter', value: left }, ws.id);
+    }
     const notServer = await outcome('db.connection.databases', { id: sqlite.id });
     check('db: SQLite has no databases to pick from', !notServer.ok && /no databases to pick/.test(said(notServer)), said(notServer));
     const agentById = await outcome('db.connection.databases', { id: pgSaved.id }, 'mcp');
@@ -957,6 +974,97 @@ export default definePart({
           await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
           await wait(300);
           await js(`[...document.querySelectorAll('[role=dialog] button, [data-testid=dialog] button')].find((b) => /discard|don.t save|close/i.test(b.textContent))?.click()`);
+          await wait(200);
+        }
+        // Filter schemas: a long list gets a quick filter; the dialog picks which schemas the tree shows under one connection, marked on the row and cleared from the tree.
+        {
+          const row = `[...document.querySelectorAll('[data-testid=db-connection-row]')].find((r) => r.textContent.includes('fake postgres'))`;
+          const visibleAll = (s: string) => `[...document.querySelectorAll('${s}')].filter((e) => e.offsetParent !== null)`;
+          const schemaRows = () => js(`${visibleAll('[data-testid=db-schema-row]')}.map((r) => r.textContent.trim())`) as Promise<string[]>;
+          const setValue = (selector: string, value: string) =>
+            js(
+              `(() => { const el = ${visibleAll(selector)}[0]; if (!el) return false; const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(el, ${JSON.stringify(value)}); el.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`,
+            );
+          const saved = async () => (await run<{ value: Record<string, string[]> | null }>('workspace.state.get', { key: 'db.schemaFilter' }, ws.id)).value?.[pgSaved.id] ?? null;
+          if ((await schemaRows()).length === 0) await js(`${row}?.click()`);
+          await until(async () => (await schemaRows()).length === pgSchemas.length, 6000);
+          const all = await schemaRows();
+          const quickShown = await js(`${visibleAll('[data-testid=db-schema-quick-filter]')}.length === 1`);
+          await setValue('[data-testid=db-schema-quick-filter]', 'report');
+          await wait(150);
+          const quick = await schemaRows();
+          await setValue('[data-testid=db-schema-quick-filter]', '');
+          await wait(150);
+          check(
+            'ui: a connection with many schemas lists them all, public first, with a quick filter that narrows them',
+            JSON.stringify(all) === JSON.stringify(pgSchemas) && quickShown === true && quick.join() === 'reporting,reporting_archive',
+            { all, quickShown, quick },
+          );
+
+          await js(`${row}?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 200, clientY: 200 }))`);
+          await wait(150);
+          await js(`document.querySelector('[data-testid=db-schema-filter-menu]')?.click()`);
+          await until(async () => (await js(`document.querySelectorAll('[data-testid=db-schema-filter-option]').length`)) === pgSchemas.length, 6000);
+          const options = () => js(`[...document.querySelectorAll('[data-testid=db-schema-filter-option]')].map((o) => [o.textContent.trim(), o.querySelector('input').checked])`) as Promise<[string, boolean][]>;
+          const opened = await options();
+          await js(`document.querySelector('[data-testid=db-schema-filter-none]')?.click()`);
+          await setValue('[data-testid=db-schema-filter-search]', 'report');
+          await wait(150);
+          const searched = (await options()).map((o) => o[0]);
+          await js(`document.querySelector('[data-testid=db-schema-filter-all]')?.click()`);
+          await setValue('[data-testid=db-schema-filter-search]', '');
+          await wait(150);
+          await js(`[...document.querySelectorAll('[data-testid=db-schema-filter-option]')].find((o) => o.textContent.trim() === 'public')?.querySelector('input').click()`);
+          await wait(150);
+          const count = await js(`document.querySelector('[data-testid=db-schema-filter-count]')?.textContent.trim()`);
+          await shot('08g-db-schema-filter-dialog-light');
+          await js(`document.querySelector('[data-testid=db-schema-filter-apply]')?.click()`);
+          await wait(300);
+          const filtered = await schemaRows();
+          const marker = await js(`${visibleAll('[data-testid=db-schema-filter-row]')}[0]?.textContent.trim() ?? null`);
+          const badge = await js(`Boolean(${row}?.querySelector('[data-testid=db-schema-filter-badge]'))`);
+          const quickGone = await js(`${visibleAll('[data-testid=db-schema-quick-filter]')}.length === 0`);
+          await until(async () => (await saved()) !== null, 3000);
+          const stored = await saved();
+          await js(`document.documentElement.classList.add('dark')`);
+          await wait(200);
+          await shot('08h-db-schema-filter-tree-dark');
+          check(
+            'ui: the filter dialog starts with every schema ticked; search, Select none and Select all matching pick a few, and the tree then shows only those, marked',
+            opened.length === pgSchemas.length &&
+              opened.every((o) => o[1]) &&
+              searched.join() === 'reporting,reporting_archive' &&
+              count === '3 of 14 shown' &&
+              filtered.join() === 'public,reporting,reporting_archive' &&
+              marker === '3 of 14 schemas' &&
+              badge === true &&
+              quickGone === true &&
+              JSON.stringify(stored) === '["public","reporting","reporting_archive"]',
+            { opened: opened.length, searched, count, filtered, marker, badge, quickGone, stored },
+          );
+
+          // The badge reopens the dialog with the saved picks; Escape leaves them as they were.
+          await js(`${row}?.querySelector('[data-testid=db-schema-filter-badge]')?.click()`);
+          await until(async () => (await js(`document.querySelectorAll('[data-testid=db-schema-filter-option]').length`)) === pgSchemas.length, 6000);
+          const reopened = (await options()).filter((o) => o[1]).map((o) => o[0]);
+          await js(`document.querySelector('[data-testid=db-schema-filter-dialog]')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+          await wait(200);
+          const closed = await js(`!document.querySelector('[data-testid=db-schema-filter-dialog]')`);
+          // Show all on the marker row brings every schema back and forgets the filter.
+          // The button shows on hover; a click reaches it all the same.
+          await js(`${visibleAll('[data-testid=db-schema-filter-row]')}[0]?.querySelector('[data-testid=db-schema-filter-clear-row]')?.click()`);
+          await until(async () => (await schemaRows()).length === pgSchemas.length, 3000);
+          const restored = await schemaRows();
+          const badgeAfter = await js(`Boolean(${row}?.querySelector('[data-testid=db-schema-filter-badge]'))`);
+          await until(async () => (await saved()) === null, 3000);
+          const storedAfter = await saved();
+          check(
+            'ui: the badge reopens the filter with the saved picks, and Show all in the tree removes it',
+            reopened.join() === 'public,reporting,reporting_archive' && closed === true && restored.length === pgSchemas.length && badgeAfter === false && storedAfter === null,
+            { reopened, closed, restored: restored.length, badgeAfter, storedAfter },
+          );
+          await js(`document.documentElement.classList.remove('dark')`);
+          await js(`${row}?.click()`);
           await wait(200);
         }
       },
