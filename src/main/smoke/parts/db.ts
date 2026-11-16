@@ -601,6 +601,8 @@ export default definePart({
       { byNameFirst, reordered: said(reordered), placed: placed.slice(0, 4), filesUntouched: JSON.stringify(filesAfter) === JSON.stringify(filesBefore), stored: stored.value, afterNew: afterNew.slice(0, 4), partial: partial.slice(0, 4), unknown: said(unknown) },
     );
     await run('db.connection.delete', { id: joiner.id }, ws.id);
+    const orderAfterDelete = (await run<{ value: string[] | null }>('workspace.state.get', { key: 'db.connectionOrder' }, ws.id)).value ?? [];
+    check('db: deleting a connection drops its place in the manual order and keeps the others', !orderAfterDelete.includes(joiner.id) && orderAfterDelete.slice(0, 3).join() === [ordered.b.id, ordered.c.id, ordered.a.id].join(), orderAfterDelete);
     await run('db.connection.reorder', { connectionIds: [ordered.c.id, ordered.a.id, ordered.b.id] }, ws.id);
     const removeOrdered = async () => {
       for (const c of Object.values(ordered)) await run('db.connection.delete', { id: c.id }, ws.id).catch(() => {});
@@ -1155,6 +1157,9 @@ export default definePart({
           await wait(300);
           const picked = await js(`[...document.querySelectorAll('[data-testid=db-query-connection]')].find((s) => s.offsetParent !== null)?.selectedOptions[0]?.textContent.trim() ?? null`);
           check('ui: New query (Ctrl+Shift+Q) takes the first connection in the chosen sort', firstByName !== 'order a' && picked === firstByName, { picked, firstByName });
+          // Close the query it opened, so later parts don't meet a second "Query" tab.
+          await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+          await wait(200);
           await run('workspace.state.set', { key: 'db.connectionSort', value: 'manual' }, ws.id);
         }
         // Filter schemas: a long list gets a quick filter; the dialog picks which schemas the tree shows under one connection, marked on the row and cleared from the tree.

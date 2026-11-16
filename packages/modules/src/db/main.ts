@@ -248,11 +248,13 @@ const connectionDelete = defineCommand({
     const w = ws(ctx);
     await pool.close(w.id, id, ctx.host);
     await writePassword(w, ctx.host, id, null);
+    // The connection goes first, so a list reloaded on the state writes below never shows it unplaced.
+    const deleted = await w.store.remove(COLLECTIONS.connections, id);
     const filters = parseSchemaFilters(await w.getState<unknown>(DB_SCHEMA_FILTER_KEY, null));
     if (id in filters) await w.setState(DB_SCHEMA_FILTER_KEY, withSchemaFilter(filters, id, null));
     const order = await connectionOrder(w);
     if (order.includes(id)) await w.setState(DB_CONNECTION_ORDER_KEY, order.filter((placed) => placed !== id));
-    return { deleted: await w.store.remove(COLLECTIONS.connections, id) };
+    return { deleted };
   },
 });
 
