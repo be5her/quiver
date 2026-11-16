@@ -3,7 +3,7 @@
     <svg [qKindIcon]="kind" class="size-4"></svg>
   }
   <select qSelect class="h-7 text-xs max-w-56" data-testid="db-query-connection" (change)="pickConnection($event)">
-    @for (c of connections.value() ?? []; track c.id) {
+    @for (c of connectionOptions(); track c.id) {
       <option [value]="c.id" [selected]="c.id === connectionId()">{{ c.name }}</option>
     } @empty {
       <option value="">No connections</option>

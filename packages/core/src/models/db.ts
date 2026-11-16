@@ -352,6 +352,99 @@ export function newDbConnection(kind: DbKind, partial: Partial<DbConnection> = {
   });
 }
 
+// ---------- the order connections are listed in ----------
+
+/** How the connections are listed: your manual order, by name, grouped by type, or by last query run here. */
+export const DB_CONNECTION_SORTS = ['manual', 'name', 'kind', 'recent'] as const;
+export type DbConnectionSort = (typeof DB_CONNECTION_SORTS)[number];
+export const DB_CONNECTION_SORT_LABELS: Record<DbConnectionSort, string> = { manual: 'Manual order', name: 'Name', kind: 'Type', recent: 'Recently used' };
+
+/** Workspace state keys (per machine): the manual order, an array of connection ids, and the sort picked in the sidebar. */
+export const DB_CONNECTION_ORDER_KEY = 'db.connectionOrder';
+export const DB_CONNECTION_SORT_KEY = 'db.connectionSort';
+
+export function isDbConnectionSort(value: unknown): value is DbConnectionSort {
+  return typeof value === 'string' && (DB_CONNECTION_SORTS as readonly string[]).includes(value);
+}
+
+/** A stored manual order as it is read back: the strings of an array; anything else is no order. */
+export function dbConnectionOrderOf(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : [];
+}
+
+type Sortable = Pick<DbConnection, 'id' | 'name' | 'kind'>;
+
+const byName = (a: Sortable, b: Sortable) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }) || a.id.localeCompare(b.id);
+
+/** The manual order as a comparator: the ids in `order` first, by their place, then the rest (never placed) by name. */
+function manualComparator(order: readonly string[]): (a: Sortable, b: Sortable) => number {
+  const at = new Map(order.map((id, i) => [id, i]));
+  return (a, b) => {
+    const ai = at.get(a.id) ?? Number.POSITIVE_INFINITY;
+    const bi = at.get(b.id) ?? Number.POSITIVE_INFINITY;
+    if (ai !== bi) return ai < bi ? -1 : 1;
+    return byName(a, b);
+  };
+}
+
+/**
+ * The connections in the order `sort` lists them. `order` is the manual order (connection ids, see
+ * `DB_CONNECTION_ORDER_KEY`) and `lastUsed` maps an id to the time of its latest query (see `dbConnectionsLastUsed`).
+ * `name` is by name alone; `kind` groups by type (by its label) and `recent` puts the latest used first, each keeping
+ * the manual order within a group and for connections never used.
+ */
+export function sortDbConnections<C extends Sortable>(
+  connections: readonly C[],
+  sort: DbConnectionSort,
+  { order = [], lastUsed = {} }: { order?: readonly string[]; lastUsed?: Readonly<Record<string, string>> } = {},
+): C[] {
+  const manual = manualComparator(order);
+  const list = [...connections];
+  switch (sort) {
+    case 'name':
+      return list.sort(byName);
+    case 'kind':
+      return list.sort((a, b) => DB_KIND_LABELS[a.kind].localeCompare(DB_KIND_LABELS[b.kind]) || manual(a, b));
+    case 'recent':
+      return list.sort((a, b) => {
+        const at = lastUsed[a.id] ?? '';
+        const bt = lastUsed[b.id] ?? '';
+        if (at !== bt) return at > bt ? -1 : 1;
+        return manual(a, b);
+      });
+    default:
+      return list.sort(manual);
+  }
+}
+
+/** When each connection last ran a query, from the query history (any order): id to the newest `at`. */
+export function dbConnectionsLastUsed(history: readonly Pick<DbHistoryEntry, 'connectionId' | 'at'>[]): Record<string, string> {
+  const last: Record<string, string> = {};
+  for (const entry of history) if (!last[entry.connectionId] || entry.at > last[entry.connectionId]) last[entry.connectionId] = entry.at;
+  return last;
+}
+
+/**
+ * The connection ids, given in their manual order, after moving `id` to index `to` among the others (where a drag
+ * drops it, or one step up or down), for `db.connection.reorder`. An unknown id leaves the order as it is.
+ */
+export function moveDbConnection(ids: readonly string[], id: string, to: number): string[] {
+  if (!ids.includes(id)) return [...ids];
+  const others = ids.filter((other) => other !== id);
+  others.splice(Math.max(0, Math.min(to, others.length)), 0, id);
+  return others;
+}
+
+/**
+ * The manual order after `db.connection.reorder` with `ids`: those first, in that order, then the ones placed before
+ * and not named, in the order they had. Ids not among `existing` (deleted connections) are dropped.
+ */
+export function reorderDbConnections(stored: readonly string[], ids: readonly string[], existing: readonly string[]): string[] {
+  const known = new Set(existing);
+  const named = [...new Set(ids)].filter((id) => known.has(id));
+  return [...named, ...[...new Set(stored)].filter((id) => known.has(id) && !named.includes(id))];
+}
+
 export function newSavedQuery(partial: Partial<SavedQuery> = {}): SavedQuery {
   const ts = nowIso();
   return SavedQuerySchema.parse({ id: newId(), name: 'New query', createdAt: ts, updatedAt: ts, ...partial });

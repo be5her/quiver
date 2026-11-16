@@ -446,7 +446,8 @@ export default definePart({
     }
 
     // ---------- the databases on a server, for the connection form: the fake PostgreSQL ----------
-    const fakePg = await startFakePostgres({ password: 'pg-secret', databases: ['analytics', 'app', 'postgres'], missing: ['nope'], denied: ['locked'] });
+    const pgSchemas = ['public', 'analytics', 'audit', 'billing', 'crm', 'events', 'finance', 'hr', 'inventory', 'reporting', 'reporting_archive', 'sales', 'staging', 'tmp'];
+    const fakePg = await startFakePostgres({ password: 'pg-secret', databases: ['analytics', 'app', 'postgres'], schemas: pgSchemas, missing: ['nope'], denied: ['locked'] });
     const pgDraft = (database: string) => ({ kind: 'postgres', name: '', host: '127.0.0.1', port: fakePg.port, user: 'dev', database });
     const listed = async (input: unknown) => {
       const before = fakePg.seen.connects.length;
@@ -496,6 +497,22 @@ export default definePart({
         Boolean(pgOrdersDetail?.ddl?.includes('PRIMARY KEY ("tenant_id", "id")')),
       pgOrders.ok ? pgOrdersDetail : said(pgOrders),
     );
+    // The tree's schema filter is a view preference in the workspace state: what the schema commands return is unchanged, and deleting a connection drops its entry.
+    {
+      const filters = async () => (await run<{ value: Record<string, string[]> | null }>('workspace.state.get', { key: 'db.schemaFilter' }, ws.id)).value ?? {};
+      const throwaway = await run<DbConnectionSummary>('db.connection.save', { connection: { ...pgDraft('app'), name: 'throwaway postgres' }, password: 'pg-secret' }, ws.id);
+      await run('workspace.state.set', { key: 'db.schemaFilter', value: { ...(await filters()), [pgSaved.id]: ['public'], [throwaway.id]: ['public', 'hr'] } }, ws.id);
+      const forAgents = await outcome('db.schema.databases', { connectionId: pgSaved.id }, 'mcp');
+      await run('db.connection.delete', { id: throwaway.id }, ws.id);
+      const left = await filters();
+      check(
+        'db: a schema filter leaves db.schema.databases whole for agents, and deleting a connection drops its filter but no other',
+        forAgents.ok && JSON.stringify(forAgents.value) === JSON.stringify(pgSchemas) && !(throwaway.id in left) && JSON.stringify(left[pgSaved.id]) === '["public"]',
+        { forAgents: forAgents.ok ? forAgents.value : said(forAgents), left },
+      );
+      delete left[pgSaved.id];
+      await run('workspace.state.set', { key: 'db.schemaFilter', value: left }, ws.id);
+    }
     const notServer = await outcome('db.connection.databases', { id: sqlite.id });
     check('db: SQLite has no databases to pick from', !notServer.ok && /no databases to pick/.test(said(notServer)), said(notServer));
     const agentById = await outcome('db.connection.databases', { id: pgSaved.id }, 'mcp');
@@ -545,8 +562,57 @@ export default definePart({
       await run('db.connection.save', { connection: base }, ws.id);
     }
 
+    // Connection order: a manual order kept per machine in workspace state, which the list follows; connections never
+    // placed (new ones, a teammate's) follow by name.
+    const ordered: Record<'a' | 'b' | 'c', DbConnectionSummary> = {
+      c: await run<DbConnectionSummary>('db.connection.save', { connection: { kind: 'sqlite', name: 'order c', file: 'data/order-c.db' } }, ws.id),
+      a: await run<DbConnectionSummary>('db.connection.save', { connection: { kind: 'sqlite', name: 'order a', file: 'data/order-a.db' } }, ws.id),
+      b: await run<DbConnectionSummary>('db.connection.save', { connection: { kind: 'redis', name: 'order b', host: '127.0.0.1', port: fakeRedis.port } }, ws.id),
+    };
+    const orderIds = [ordered.a.id, ordered.b.id, ordered.c.id];
+    const listedIds = async () => (await run<DbConnectionSummary[]>('db.connection.list', {}, ws.id)).map((c) => c.id);
+    const placedBefore = await listedIds();
+    const byNameFirst = placedBefore.filter((id) => orderIds.includes(id)).join() === orderIds.join();
+    const connectionFile = (id: string) => fs.readFile(path.join(folder, '.quiver', 'db-connections', `${id}.json`), 'utf8');
+    const filesBefore = await Promise.all(orderIds.map(connectionFile));
+    const reordered = await outcome('db.connection.reorder', { connectionIds: [ordered.c.id, ordered.a.id, ordered.b.id] }, 'mcp');
+    const placed = await listedIds();
+    const filesAfter = await Promise.all(orderIds.map(connectionFile));
+    const stored = await run<{ value: unknown }>('workspace.state.get', { key: 'db.connectionOrder' }, ws.id);
+    const joiner = await run<DbConnectionSummary>('db.connection.save', { connection: { kind: 'sqlite', name: 'aaa order new', file: 'data/order-new.db' } }, ws.id);
+    const afterNew = await listedIds();
+    // Naming only some ids puts those first and keeps the others placed in the order they had.
+    await run('db.connection.reorder', { connectionIds: [ordered.b.id] }, ws.id);
+    const partial = await listedIds();
+    const unknown = await outcome('db.connection.reorder', { connectionIds: [ordered.a.id, 'nope'] });
+    check(
+      'db: connections list by name until reordered, an agent may reorder them, the order is kept in workspace state with the files untouched, a new one follows the placed ones and a partial reorder keeps the rest in order',
+      byNameFirst &&
+        names.includes('db_connection_reorder') &&
+        reordered.ok &&
+        placed.slice(0, 3).join() === [ordered.c.id, ordered.a.id, ordered.b.id].join() &&
+        JSON.stringify(filesAfter) === JSON.stringify(filesBefore) &&
+        filesAfter.every((f) => !('order' in JSON.parse(f))) &&
+        JSON.stringify(stored.value) === JSON.stringify([ordered.c.id, ordered.a.id, ordered.b.id]) &&
+        afterNew[3] === joiner.id &&
+        partial.slice(0, 4).join() === [ordered.b.id, ordered.c.id, ordered.a.id, joiner.id].join() &&
+        !unknown.ok &&
+        unknown.code === 'NOT_FOUND',
+      { byNameFirst, reordered: said(reordered), placed: placed.slice(0, 4), filesUntouched: JSON.stringify(filesAfter) === JSON.stringify(filesBefore), stored: stored.value, afterNew: afterNew.slice(0, 4), partial: partial.slice(0, 4), unknown: said(unknown) },
+    );
+    await run('db.connection.delete', { id: joiner.id }, ws.id);
+    const orderAfterDelete = (await run<{ value: string[] | null }>('workspace.state.get', { key: 'db.connectionOrder' }, ws.id)).value ?? [];
+    check('db: deleting a connection drops its place in the manual order and keeps the others', !orderAfterDelete.includes(joiner.id) && orderAfterDelete.slice(0, 3).join() === [ordered.b.id, ordered.c.id, ordered.a.id].join(), orderAfterDelete);
+    await run('db.connection.reorder', { connectionIds: [ordered.c.id, ordered.a.id, ordered.b.id] }, ws.id);
+    const removeOrdered = async () => {
+      for (const c of Object.values(ordered)) await run('db.connection.delete', { id: c.id }, ws.id).catch(() => {});
+    };
+
     return {
-      after: () => fakePg.close(),
+      after: async () => {
+        await removeOrdered();
+        await fakePg.close();
+      },
       ui: async (u) => {
         const { win, js, wait, shot } = u;
         // Databases module: sidebar tree, table browser, query editor, redis keys.
@@ -957,6 +1023,239 @@ export default definePart({
           await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
           await wait(300);
           await js(`[...document.querySelectorAll('[role=dialog] button, [data-testid=dialog] button')].find((b) => /discard|don.t save|close/i.test(b.textContent))?.click()`);
+          await wait(200);
+        }
+        // The Connections header sorts the tree by name or type, and in the manual order a connection is dragged to its place.
+        {
+          await js(`[...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || b.title || '').includes('Databases'))?.click()`);
+          await wait(300);
+          const sidebarNames = async () => (await js(`[...document.querySelectorAll('q-db-sidebar [data-testid=db-connection-row]')].map((r) => r.getAttribute('title'))`)) as string[];
+          const ours = (list: string[]) => list.filter((n) => n.startsWith('order '));
+          const pickSort = async (sort: string, menuShot?: string) => {
+            // Clicked where it is, so the menu opens under the button as it does for the mouse.
+            await js(
+              `(() => { const b = document.querySelector('[data-testid=db-connection-sort]'); const r = b.getBoundingClientRect(); b.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: r.left + r.width / 2, clientY: r.bottom })); })()`,
+            );
+            await wait(150);
+            const items = (await js(`[...document.querySelectorAll('[data-testid=context-menu] [role=menuitemcheckbox]')].map((b) => [b.textContent.trim(), b.getAttribute('aria-checked')])`)) as [string, string][];
+            if (menuShot) await shot(menuShot);
+            await js(`document.querySelector('[data-testid=db-connection-sort-${sort}]')?.click()`);
+            await wait(300);
+            return items;
+          };
+          // Collapse every connection, so the rows sit one under the other at the top.
+          await js(`document.querySelector('q-db-sidebar').scrollTop = 0`);
+          for (let i = 0; i < 12; i++) {
+            const open = await js(`(() => { const row = [...document.querySelectorAll('q-db-sidebar [data-testid=db-connection-row]')].find((r) => r.nextElementSibling); if (row) row.click(); return Boolean(row); })()`);
+            if (!open) break;
+            await wait(80);
+          }
+          const manualBefore = await sidebarNames();
+          const menu = await pickSort('name', '09-db-sort-menu');
+          const byName = await sidebarNames();
+          const savedName = await run<{ value: unknown }>('workspace.state.get', { key: 'db.connectionSort' }, ws.id);
+          await shot('09a-db-sort-by-name');
+          // A sort set from elsewhere (another window, the state command) shows without a reload, after one picked here.
+          await run('workspace.state.set', { key: 'db.connectionSort', value: 'kind' }, ws.id);
+          await wait(500);
+          const byKind = await sidebarNames();
+          const sortShown = await js(`document.querySelector('[data-testid=db-connection-sort]')?.getAttribute('data-sort')`);
+          // While sorted, a drag moves nothing.
+          const rowCenter = async (name: string) =>
+            (await js(`(() => { const r = [...document.querySelectorAll('q-db-sidebar [data-testid=db-connection-row]')].find((el) => el.getAttribute('title') === ${JSON.stringify(name)})?.getBoundingClientRect(); return r ? { x: Math.round(r.left + 40), y: Math.round(r.top + r.height / 2) } : null; })()`)) as { x: number; y: number } | null;
+          const dragRow = async (name: string, toName: string, offset: number, onDrag?: () => Promise<void>) => {
+            const from = await rowCenter(name);
+            const target = await rowCenter(toName);
+            if (!from || !target) return false;
+            const toY = target.y + offset;
+            win.webContents.sendInputEvent({ type: 'mouseMove', x: from.x, y: from.y });
+            win.webContents.sendInputEvent({ type: 'mouseDown', x: from.x, y: from.y, button: 'left', clickCount: 1 });
+            for (let step = 1; step <= 8; step++) {
+              win.webContents.sendInputEvent({ type: 'mouseMove', x: from.x, y: Math.round(from.y + ((toY - from.y) * step) / 8), button: 'left', modifiers: ['leftbuttondown'] });
+              await wait(30);
+            }
+            await wait(150);
+            const marker = (await js(`Boolean(document.querySelector('[data-testid=db-connection-drop-marker]'))`)) === true;
+            await onDrag?.();
+            win.webContents.sendInputEvent({ type: 'mouseUp', x: from.x, y: toY, button: 'left', clickCount: 1 });
+            await wait(700);
+            return marker;
+          };
+          const sortedMarker = await dragRow('order a', 'order c', -10);
+          const afterSortedDrag = await sidebarNames();
+          check(
+            'ui: the sort menu ticks the manual order, lists the connections by name or grouped by type, remembers the choice, follows a sort set elsewhere, and a drag moves nothing while sorted',
+            JSON.stringify(menu) === JSON.stringify([['Manual order', 'true'], ['Name', 'false'], ['Type', 'false'], ['Recently used', 'false']]) &&
+              ours(manualBefore).join() === 'order c,order a,order b' &&
+              ours(byName).join() === 'order a,order b,order c' &&
+              JSON.stringify(byName) === JSON.stringify([...byName].sort((x, y) => x.localeCompare(y, undefined, { numeric: true, sensitivity: 'base' }))) &&
+              // Redis before SQLite; within a type the manual order holds, so the placed ones lead their group.
+              ours(byKind).join() === 'order b,order c,order a' &&
+              byKind.indexOf('order a') < byKind.indexOf('smoke sqlite') &&
+              byKind.indexOf('order b') < byKind.indexOf('order c') &&
+              savedName.value === 'name' &&
+              sortShown === 'kind' &&
+              !sortedMarker &&
+              JSON.stringify(afterSortedDrag) === JSON.stringify(byKind),
+            { menu, manualBefore, byName, byKind, sortShown, saved: savedName.value, sortedMarker },
+          );
+          // Recently used: the connection of the latest query in the history comes first.
+          await pickSort('recent');
+          await wait(300);
+          const byRecent = await sidebarNames();
+          const saved = await run<DbConnectionSummary[]>('db.connection.list', {}, ws.id);
+          const latest = (await run<DbHistoryEntry[]>('db.history.list', { limit: 200 }, ws.id)).find((e) => saved.some((c) => c.id === e.connectionId));
+          const latestName = saved.find((c) => c.id === latest?.connectionId)?.name;
+          check('ui: sorted by last use, the connection of the latest query comes first', Boolean(latestName) && byRecent[0] === latestName, { first: byRecent[0], latestName });
+          await pickSort('manual');
+          // Drag "order b" above "order c", the first: the marker shows, the tree and the saved order follow, and the row stays collapsed.
+          const marker = await dragRow('order b', 'order c', -10, () => shot('09b-db-connection-drag'));
+          const shown = ours(await sidebarNames());
+          const listed = (await run<DbConnectionSummary[]>('db.connection.list', {}, ws.id)).map((c) => c.name).slice(0, 3);
+          const stillClosed = await js(`!([...document.querySelectorAll('q-db-sidebar [data-testid=db-connection-row]')].find((r) => r.getAttribute('title') === 'order b')?.nextElementSibling)`);
+          check(
+            'ui: dragging a connection in the manual order moves it there, saves the order and does not expand the row',
+            marker && shown.join() === 'order b,order c,order a' && listed.join() === 'order b,order c,order a' && stillClosed === true,
+            { marker, shown, listed, stillClosed },
+          );
+          await shot('09c-db-connection-reordered');
+          // The keyboard's way: Move up and Move down in a connection's menu, the first one unable to go up.
+          const connectionMenu = async (name: string) => {
+            await js(
+              `(() => { const row = [...document.querySelectorAll('q-db-sidebar [data-testid=db-connection-row]')].find((r) => r.getAttribute('title') === ${JSON.stringify(name)}); const r = row.getBoundingClientRect(); row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: r.left + 60, clientY: r.bottom })); })()`,
+            );
+            await wait(150);
+            return (await js(`[...document.querySelectorAll('[data-testid=context-menu] button')].filter((b) => /^Move /.test(b.textContent.trim())).map((b) => [b.textContent.trim(), b.disabled])`)) as [string, boolean][];
+          };
+          const firstMoves = await connectionMenu('order b');
+          await js(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+          await wait(100);
+          const lastMoves = await connectionMenu('order a');
+          await shot('09d-db-connection-move-menu');
+          await js(`document.querySelector('[data-testid=db-connection-move-up]')?.click()`);
+          await wait(700);
+          const movedUp = ours(await sidebarNames());
+          // A reorder made elsewhere (an agent) shows without a reload: the order is announced as workspace state.
+          await run('db.connection.reorder', { connectionIds: [ordered.a.id, ordered.b.id, ordered.c.id] }, ws.id);
+          await wait(600);
+          const fromAgent = ours(await sidebarNames());
+          check(
+            'ui: Move up and Move down arrange a connection from its menu, and a reorder made elsewhere shows at once',
+            JSON.stringify(firstMoves) === JSON.stringify([['Move up', true], ['Move down', false]]) &&
+              lastMoves.length === 2 &&
+              lastMoves[0][1] === false &&
+              movedUp.join() === 'order b,order a,order c' &&
+              fromAgent.join() === 'order a,order b,order c',
+            { firstMoves, lastMoves, movedUp, fromAgent },
+          );
+          // Ctrl+Shift+Q opens a query on the first connection as the sidebar lists them, in the sort chosen.
+          await run('workspace.state.set', { key: 'db.connectionSort', value: 'name' }, ws.id);
+          await wait(400);
+          const firstByName = (await sidebarNames())[0];
+          await js(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Q', ctrlKey: true, shiftKey: true, bubbles: true }))`);
+          await until(() => js(`Boolean([...document.querySelectorAll('[data-testid=db-query-connection]')].find((s) => s.offsetParent !== null))`) as Promise<boolean>, 4000).catch(() => {});
+          await wait(300);
+          const picked = await js(`[...document.querySelectorAll('[data-testid=db-query-connection]')].find((s) => s.offsetParent !== null)?.selectedOptions[0]?.textContent.trim() ?? null`);
+          check('ui: New query (Ctrl+Shift+Q) takes the first connection in the chosen sort', firstByName !== 'order a' && picked === firstByName, { picked, firstByName });
+          // Close the query it opened, so later parts don't meet a second "Query" tab.
+          await js(`(() => { const tab = document.querySelector('[data-testid=tab][aria-selected=true] [aria-label="Close tab"]'); if (tab) tab.click(); })()`);
+          await wait(200);
+          await run('workspace.state.set', { key: 'db.connectionSort', value: 'manual' }, ws.id);
+        }
+        // Filter schemas: a long list gets a quick filter; the dialog picks which schemas the tree shows under one connection, marked on the row and cleared from the tree.
+        {
+          const row = `[...document.querySelectorAll('[data-testid=db-connection-row]')].find((r) => r.textContent.includes('fake postgres'))`;
+          const visibleAll = (s: string) => `[...document.querySelectorAll('${s}')].filter((e) => e.offsetParent !== null)`;
+          const schemaRows = () => js(`${visibleAll('[data-testid=db-schema-row]')}.map((r) => r.textContent.trim())`) as Promise<string[]>;
+          const setValue = (selector: string, value: string) =>
+            js(
+              `(() => { const el = ${visibleAll(selector)}[0]; if (!el) return false; const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(el, ${JSON.stringify(value)}); el.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`,
+            );
+          const saved = async () => (await run<{ value: Record<string, string[]> | null }>('workspace.state.get', { key: 'db.schemaFilter' }, ws.id)).value?.[pgSaved.id] ?? null;
+          if ((await js(`${row}?.getAttribute('aria-expanded')`)) !== 'true') await js(`${row}?.click()`);
+          await until(async () => (await schemaRows()).length === pgSchemas.length, 6000);
+          const all = await schemaRows();
+          const quickShown = await js(`${visibleAll('[data-testid=db-schema-quick-filter]')}.length === 1`);
+          await setValue('[data-testid=db-schema-quick-filter]', 'report');
+          await wait(150);
+          const quick = await schemaRows();
+          await setValue('[data-testid=db-schema-quick-filter]', '');
+          await wait(150);
+          check(
+            'ui: a connection with many schemas lists them all, public first, with a quick filter that narrows them',
+            JSON.stringify(all) === JSON.stringify(pgSchemas) && quickShown === true && quick.join() === 'reporting,reporting_archive',
+            { all, quickShown, quick },
+          );
+
+          await js(`${row}?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 200, clientY: 200 }))`);
+          await wait(150);
+          await js(`document.querySelector('[data-testid=db-schema-filter-menu]')?.click()`);
+          await until(async () => (await js(`document.querySelectorAll('[data-testid=db-schema-filter-option]').length`)) === pgSchemas.length, 6000);
+          const options = () => js(`[...document.querySelectorAll('[data-testid=db-schema-filter-option]')].map((o) => [o.textContent.trim(), o.querySelector('input').checked])`) as Promise<[string, boolean][]>;
+          const opened = await options();
+          await js(`document.querySelector('[data-testid=db-schema-filter-none]')?.click()`);
+          await setValue('[data-testid=db-schema-filter-search]', 'report');
+          await wait(150);
+          const searched = (await options()).map((o) => o[0]);
+          await js(`document.querySelector('[data-testid=db-schema-filter-all]')?.click()`);
+          await setValue('[data-testid=db-schema-filter-search]', '');
+          await wait(150);
+          await js(`[...document.querySelectorAll('[data-testid=db-schema-filter-option]')].find((o) => o.textContent.trim() === 'public')?.querySelector('input').click()`);
+          await wait(150);
+          const count = await js(`document.querySelector('[data-testid=db-schema-filter-count]')?.textContent.trim()`);
+          await shot('08g-db-schema-filter-dialog-light');
+          await js(`document.querySelector('[data-testid=db-schema-filter-apply]')?.click()`);
+          await wait(300);
+          const filtered = await schemaRows();
+          const marker = await js(`${visibleAll('[data-testid=db-schema-filter-row]')}[0]?.textContent.trim() ?? null`);
+          const badge = await js(`Boolean(${row}?.querySelector('[data-testid=db-schema-filter-badge]'))`);
+          const quickGone = await js(`${visibleAll('[data-testid=db-schema-quick-filter]')}.length === 0`);
+          await until(async () => (await saved()) !== null, 3000);
+          const stored = await saved();
+          await js(`document.documentElement.classList.add('dark')`);
+          await wait(200);
+          await shot('08h-db-schema-filter-tree-dark');
+          check(
+            'ui: the filter dialog starts with every schema ticked; search, Select none and Select all matching pick a few, and the tree then shows only those, marked',
+            opened.length === pgSchemas.length &&
+              opened.every((o) => o[1]) &&
+              searched.join() === 'reporting,reporting_archive' &&
+              count === '3 of 14 shown' &&
+              filtered.join() === 'public,reporting,reporting_archive' &&
+              marker === '3 of 14 schemas' &&
+              badge === true &&
+              quickGone === true &&
+              JSON.stringify(stored) === '["public","reporting","reporting_archive"]',
+            { opened: opened.length, searched, count, filtered, marker, badge, quickGone, stored },
+          );
+
+          // The badge reopens the dialog with the saved picks; Escape leaves them as they were.
+          await js(`${row}?.querySelector('[data-testid=db-schema-filter-badge]')?.click()`);
+          await until(async () => (await js(`document.querySelectorAll('[data-testid=db-schema-filter-option]').length`)) === pgSchemas.length, 6000);
+          const reopened = (await options()).filter((o) => o[1]).map((o) => o[0]);
+          // Enter in the search does not apply (and close) it; Escape closes it even with focus outside the form, as while the list loads.
+          await js(`document.querySelector('[data-testid=db-schema-filter-search]')?.focus()`);
+          pressEnter();
+          await wait(300);
+          const openAfterEnter = await js(`Boolean(document.querySelector('[data-testid=db-schema-filter-dialog]'))`);
+          await js(`document.activeElement?.blur(); document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+          await wait(200);
+          const closed = openAfterEnter === true && (await js(`!document.querySelector('[data-testid=db-schema-filter-dialog]')`)) === true;
+          // Show all on the marker row brings every schema back and forgets the filter.
+          // The button shows on hover; a click reaches it all the same.
+          await js(`${visibleAll('[data-testid=db-schema-filter-row]')}[0]?.querySelector('[data-testid=db-schema-filter-clear-row]')?.click()`);
+          await until(async () => (await schemaRows()).length === pgSchemas.length, 3000);
+          const restored = await schemaRows();
+          const badgeAfter = await js(`Boolean(${row}?.querySelector('[data-testid=db-schema-filter-badge]'))`);
+          await until(async () => (await saved()) === null, 3000);
+          const storedAfter = await saved();
+          check(
+            'ui: the badge reopens the filter with the saved picks, Enter in its search does not apply it, Escape closes it from anywhere, and Show all in the tree removes it',
+            reopened.join() === 'public,reporting,reporting_archive' && closed && restored.length === pgSchemas.length && badgeAfter === false && storedAfter === null,
+            { reopened, openAfterEnter, closed, restored: restored.length, badgeAfter, storedAfter },
+          );
+          await js(`document.documentElement.classList.remove('dark')`);
+          if ((await js(`${row}?.getAttribute('aria-expanded')`)) === 'true') await js(`${row}?.click()`);
           await wait(200);
         }
       },

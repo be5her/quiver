@@ -1,4 +1,4 @@
-import { keyValue, newApiRequest, type ApiRequest, type FormField, type HttpMethod, type KeyValue, type RequestAuth } from './models/api';
+import { keyValue, newApiRequest, type ApiRequest, type FormField, type HttpMethod, type KeyValue, type RequestAuth, type RequestOptions } from './models/api';
 import { SHELL_DIALECT_LABELS, ShellSyntaxError, detectShellDialect, quoteForShell, tokenizeShellDialect, type ShellDialect, type ShellToken } from './shell';
 
 /** Split a shell command line into argv, honoring single/double quotes and backslash-newline. */
@@ -142,12 +142,50 @@ const HANDLED_FLAGS = new Set(['get', 'head']);
 const takesValue = (name: string) => HANDLED_WITH_VALUE.has(name) || IGNORED_WITH_VALUE.has(name) || name in UNSUPPORTED;
 
 /**
+ * Options that decide where the request goes or who sends it: another address or socket, a proxy,
+ * a client certificate or trusted CA, credentials from a file, a signing or negotiated auth. Quiver's
+ * own proxy and certificate settings decide these, so a send that reads curl cannot honour them.
+ */
+const ROUTING = new Set([
+  'resolve', 'connect-to', 'unix-socket', 'abstract-unix-socket', 'interface', 'dns-servers', 'local-port',
+  'proxy', 'proxy-user', 'noproxy', 'proxy-header', 'proxytunnel', 'proxy-insecure',
+  'cert', 'cert-type', 'key', 'key-type', 'pass', 'cacert', 'capath', 'pinnedpubkey',
+  'netrc', 'netrc-file', 'netrc-optional', 'aws-sigv4', 'digest', 'ntlm', 'negotiate', 'anyauth', 'location-trusted',
+]);
+
+/** Options about curl's own output and progress: nothing to say when they are left out. */
+const QUIET = new Set([
+  'output', 'output-dir', 'create-dirs', 'remote-name', 'remote-name-all', 'remote-header-name', 'remote-time', 'write-out', 'dump-header', 'stderr',
+  'trace', 'trace-ascii', 'silent', 'show-error', 'verbose', 'include', 'progress-bar', 'no-progress-meter', 'styled-output', 'xattr', 'compressed',
+  'fail', 'fail-with-body', 'fail-early', 'no-buffer', 'globoff', 'suppress-connect-headers',
+]);
+
+/** A curl command read for sending it: the request, and what its options say beyond it. */
+export interface CurlReading {
+  request: ApiRequest;
+  /** What -k, -L (or its absence, since curl does not follow redirects without it) and --max-time say, as options that differ from Quiver's defaults. */
+  options: RequestOptions;
+  /** Options deciding where the request goes or who sends it (a proxy, an address, a client certificate), as typed: Quiver's own settings decide these. */
+  routing: string[];
+  /** Other options that change what curl does and that the request leaves out (retries, a connect timeout, a protocol version), as typed. */
+  ignored: string[];
+}
+
+/**
  * Convert a curl command into an ApiRequest. The command is tokenized with the rules of the shell
  * it was copied for (bash/zsh, cmd.exe or PowerShell, detected or given), then mapped with curl's
  * own option semantics. Anything that cannot be imported faithfully is an error naming the shell
  * and the position, so a corrupted request is never saved.
  */
 export function parseCurl(command: string, options: ParseCurlOptions = {}): ApiRequest {
+  return readCurl(command, options).request;
+}
+
+/**
+ * Read a curl command as `parseCurl` does, and also what its options say about how it is sent: the
+ * TLS check, redirects and timeout as request options, and the options a request cannot carry.
+ */
+export function readCurl(command: string, options: ParseCurlOptions = {}): CurlReading {
   const source = command.replace(/^﻿/, '').trim();
   const dialect = !options.dialect || options.dialect === 'auto' ? detectShellDialect(source) : options.dialect;
   const tokens = tokenizeShellDialect(source, dialect);
@@ -170,6 +208,17 @@ export function parseCurl(command: string, options: ParseCurlOptions = {}): ApiR
   let json = false;
   const form: FormField[] = [];
   let auth: RequestAuth = { type: 'none' };
+  let insecure = false;
+  let followRedirects = false;
+  let timeoutMs: number | undefined;
+  const routing: string[] = [];
+  const ignored: string[] = [];
+  /** Note an option the request does not carry, once, as it was typed. */
+  const leftOut = (name: string, flag: string) => {
+    if (name === 'insecure' || name === 'location' || name === 'max-time' || QUIET.has(name)) return;
+    const list = ROUTING.has(name) ? routing : ignored;
+    if (!list.includes(flag)) list.push(flag);
+  };
 
   const addData = (text: string, separator: string) => {
     data = data === null ? text : data + separator + text;
@@ -295,6 +344,13 @@ export function parseCurl(command: string, options: ParseCurlOptions = {}): ApiR
         if (!next) throw fail(at, `${flag} needs a value`);
         valueToken = next;
       }
+      if (name === 'max-time') {
+        const seconds = Number(valueToken.value);
+        if (!Number.isFinite(seconds) || seconds < 0) throw fail(valueToken, `${flag} needs a number of seconds, got "${valueToken.value}"`);
+        // 0 means no limit to curl; Quiver always has one, so it keeps its default.
+        timeoutMs = seconds > 0 ? Math.max(1, Math.round(seconds * 1000)) : undefined;
+      }
+      if (IGNORED_WITH_VALUE.has(name)) leftOut(name, flag);
       applyValue(name, flag, valueToken);
       return;
     }
@@ -303,6 +359,11 @@ export function parseCurl(command: string, options: ParseCurlOptions = {}): ApiR
     if (inline !== undefined) throw fail(at, `${flag} takes no value`);
     if (name === 'get') get = true;
     if (name === 'head') head = true;
+    const off = !IGNORED_FLAGS.has(name) && name.startsWith('no-');
+    const base = off ? name.slice(3) : name;
+    if (base === 'insecure') insecure = !off;
+    if (base === 'location' || base === 'location-trusted') followRedirects = !off;
+    if (IGNORED_FLAGS.has(base) && !off) leftOut(base, flag);
   };
 
   let endOfOptions = false;
@@ -405,7 +466,11 @@ export function parseCurl(command: string, options: ParseCurlOptions = {}): ApiR
   if (!METHODS.includes(resolvedMethod as HttpMethod)) throw new Error(`Unsupported method ${resolvedMethod}`);
   req.method = resolvedMethod as HttpMethod;
   req.name = defaultRequestName(req);
-  return req;
+  const sendOptions: RequestOptions = {};
+  if (insecure) sendOptions.insecure = true;
+  if (!followRedirects) sendOptions.followRedirects = false;
+  if (timeoutMs !== undefined) sendOptions.timeoutMs = timeoutMs;
+  return { request: req, options: sendOptions, routing, ignored };
 }
 
 /**

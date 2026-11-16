@@ -42,6 +42,7 @@ export const apiModuleUI = defineModuleUI({
     const hasWorkspace = () => untracked(app.hasWorkspace);
     return [
       { id: 'api.request.new', title: 'New API request', group: 'API', shortcut: 'Ctrl+N', run: () => api.createRequest(), when: hasWorkspace },
+      { id: 'api.request.quick', title: 'Quick request (send without saving)', group: 'API', shortcut: 'Ctrl+Shift+N', run: () => api.openQuickRequest(), when: hasWorkspace },
       { id: 'api.request.newGraphql', title: 'New GraphQL request', group: 'API', run: () => api.createGraphqlRequest(), when: hasWorkspace },
       { id: 'api.import.curl', title: 'Import request from curl', group: 'API', run: () => api.importCurl(), when: hasWorkspace },
       { id: 'api.import.openapi', title: 'Import from OpenAPI', group: 'API', run: () => api.importFile('openapi'), when: hasWorkspace },

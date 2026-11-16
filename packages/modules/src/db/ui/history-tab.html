@@ -5,7 +5,7 @@
   </div>
   <select qSelect class="h-7 text-xs max-w-48" aria-label="Connection" (change)="pickConnection($event)">
     <option value="" [selected]="!connectionId()">All connections</option>
-    @for (c of connections.value() ?? []; track c.id) {
+    @for (c of connectionOptions(); track c.id) {
       <option [value]="c.id" [selected]="c.id === connectionId()">{{ c.name }}</option>
     }
   </select>

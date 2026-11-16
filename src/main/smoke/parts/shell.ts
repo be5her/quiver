@@ -264,7 +264,7 @@ export default definePart({
         const afterMiddle = await tabTitles();
         check(
           'ui: middle-clicking a tab closes it',
-          middleTabs.length >= 4 && middleTarget !== null && afterMiddle.length === middleTabs.length - 1 && !afterMiddle.includes(middleTarget.title),
+          middleTabs.length >= 4 && middleTarget !== null && afterMiddle.length === middleTabs.length - 1 && afterMiddle.filter((t) => t === middleTarget.title).length === middleTabs.filter((t) => t === middleTarget.title).length - 1,
           { middleTabs, middleTarget, afterMiddle },
         );
 

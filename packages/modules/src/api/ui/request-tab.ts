@@ -3,11 +3,15 @@ import { FormField, form } from '@angular/forms/signals';
 import {
   CODE_TARGETS,
   HttpMethodSchema,
+  applyCurl,
   inheritedAuth,
   inheritedBaseUrl,
   inheritedHeaders,
+  isQuickRequestId,
+  looksLikeCurl,
   newApiRequest,
   newId,
+  readCurl,
   toErrorPayload,
   type ApiCollection,
   type ApiRequest,
@@ -39,6 +43,7 @@ import {
   type TabComponent,
 } from '@quiver/ui';
 import { Code, Copy, Save, Send, Square } from 'lucide';
+import { ApiActions } from './api-actions';
 import { ApiVariables } from './api-variables';
 import { AuthEditor, type InheritedAuthInfo } from './auth-editor';
 import { BodyEditor } from './body-editor';
@@ -54,6 +59,11 @@ type Section = 'params' | 'headers' | 'body' | 'auth' | 'capture' | 'checks' | '
  * One request: name, method and URL, then params, headers, body and auth, and the last response.
  * Ctrl+Enter sends, Escape stops a send, Ctrl+S saves. While there are no unsaved edits, it follows the stored request
  * when it changes elsewhere (an agent, a git pull or branch switch, another tab).
+ *
+ * An unsaved request (a quick request, or a history entry opened again) lives only in the tab: its
+ * sends are kept in the history, Save asks where to keep it, and closing the tab asks first only
+ * when it holds edits that no send has put in the history yet. A curl command pasted into the URL
+ * fills the request.
  */
 @Component({
   selector: 'q-request-tab',
@@ -67,6 +77,7 @@ export class RequestTab implements TabComponent {
   private readonly tabs = inject(TabsState);
   private readonly toasts = inject(Toasts);
   private readonly contextMenu = inject(ContextMenu);
+  private readonly api = inject(ApiActions);
 
   readonly tab = input.required<Tab>();
   readonly scope = input.required<string>();
@@ -74,7 +85,7 @@ export class RequestTab implements TabComponent {
   protected readonly icons = { Code, Copy, Save, Send, Square };
   protected readonly methods = HttpMethodSchema.options;
   protected readonly methodColors = METHOD_COLORS;
-  protected readonly urlPlaceholder = 'https://{{baseUrl}}/path';
+  protected readonly urlPlaceholder = 'https://{{baseUrl}}/path, or paste a curl command';
   /** A history replay opens as a draft: an unsaved request with no stored version. */
   private readonly draft = computed(() => this.tab().data?.['draft'] as ApiRequest | undefined);
   private readonly requestId = computed(() => String(this.tab().data?.['id'] ?? ''));
@@ -97,11 +108,18 @@ export class RequestTab implements TabComponent {
     },
   });
   protected readonly requestForm = form(this.request);
+  /** Lives only in this tab: a quick request, or a history entry opened again. */
+  protected readonly unsaved = computed(() => Boolean(this.draft()));
+  protected readonly quick = computed(() => isQuickRequestId(this.draft()?.id));
+  /** For an unsaved request, what the history already holds: the request as opened, then as last sent. */
+  private readonly inHistory = linkedSignal(() => this.draft());
   protected readonly dirty = computed(() => {
     if (!this.loaded()) return false;
-    if (this.draft() && !this.saved()) return true;
+    if (this.unsaved()) return JSON.stringify(this.request()) !== JSON.stringify(this.inHistory());
     return JSON.stringify(this.request()) !== JSON.stringify(this.saved());
   });
+  protected readonly unsavedTitle =
+    'Not saved in a collection. Every send is kept in the request history, with credentials typed into it masked there: closing the tab loses those. Save to collection… keeps the request as it is.';
   protected readonly section = signal<Section>('params');
   protected readonly response = signal<ApiResponse | null>(null);
   protected readonly sendError = signal<string | null>(null);
@@ -195,7 +213,6 @@ export class RequestTab implements TabComponent {
    */
   private async placed(): Promise<ApiRequest> {
     const request = this.request();
-    if (this.draft()) return request;
     const current = await this.host.invoke<ApiRequest>('api.request.get', { id: request.id }).catch(() => null);
     if (!current) return request;
     const placed: ApiRequest = { ...request, collectionId: current.collectionId };
@@ -219,12 +236,49 @@ export class RequestTab implements TabComponent {
   }
 
   protected async save(): Promise<void> {
+    if (this.unsaved()) return this.saveToCollection();
     try {
       const stored = await this.host.invoke<ApiRequest>('api.request.save', { request: await this.placed() });
       this.stored.set(stored);
       this.request.set(stored);
       this.tabs.updateTab(this.scope(), this.tab().id, { title: stored.name, data: { id: stored.id } });
       this.toasts.notify('Saved', 'success');
+    } catch (err) {
+      this.toasts.error(err);
+    }
+  }
+
+  /** An unsaved request becomes a saved one, named and placed in the dialog; the tab then shows it as any saved request. */
+  private async saveToCollection(): Promise<void> {
+    try {
+      const stored = await this.api.saveToCollection(this.request());
+      if (!stored) return;
+      this.stored.set(stored);
+      this.request.set(stored);
+      this.tabs.updateTab(this.scope(), this.tab().id, { title: stored.name, data: { id: stored.id } });
+      this.toasts.notify(`Saved ${stored.name}`, 'success');
+    } catch (err) {
+      this.toasts.error(err);
+    }
+  }
+
+  /**
+   * A curl command pasted into the URL fills the request (method, URL, params, headers, body, auth,
+   * and the TLS check, redirects and timeout) instead of landing in the URL, saying which of its
+   * options the request cannot carry.
+   */
+  protected pasteUrl(event: ClipboardEvent): void {
+    const text = event.clipboardData?.getData('text/plain') ?? '';
+    if (!looksLikeCurl(text)) return;
+    event.preventDefault();
+    try {
+      const reading = readCurl(text);
+      this.request.update((request) => applyCurl(request, reading));
+      const notes = [
+        reading.routing.length ? `${reading.routing.join(', ')} not applied: Quiver's own proxy and certificate settings decide where it goes` : '',
+        reading.ignored.length ? `${reading.ignored.join(', ')} ignored` : '',
+      ].filter(Boolean);
+      this.toasts.notify(notes.length ? `Filled from the curl command. ${notes.join('; ')}.` : 'Filled from the curl command', notes.length ? 'info' : 'success');
     } catch (err) {
       this.toasts.error(err);
     }
@@ -239,8 +293,11 @@ export class RequestTab implements TabComponent {
     const sendId = newId();
     this.sendId = sendId;
     this.received.set(0);
+    const request = this.request();
     try {
-      this.response.set(await this.host.invoke<ApiResponse>('api.request.send', { request: this.request(), sendId }));
+      this.response.set(await this.host.invoke<ApiResponse>('api.request.send', { request, sendId }));
+      // In the history now, so closing the tab loses nothing that was sent.
+      if (this.unsaved()) this.inHistory.set(request);
     } catch (err) {
       this.sendError.set(toErrorPayload(err).message);
     } finally {

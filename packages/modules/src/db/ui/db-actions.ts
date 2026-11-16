@@ -1,7 +1,9 @@
 import { Service, inject, untracked } from '@angular/core';
-import { newId, type DbConnectionSummary, type DbKind, type SavedQuery } from '@quiver/core';
+import { hasSchemaFilter, newId, schemaNoun, type DbConnectionSummary, type DbKind, type SavedQuery } from '@quiver/core';
 import { AppState, Dialogs, HostBridge, TabsState, Toasts, TreeState, type ContextMenuItem } from '@quiver/ui';
+import { DbConnectionOrder } from './connection-order';
 import { firstLine } from './db-format';
+import { DbSchemaFilterState } from './schema-filter-state';
 
 export interface OpenQueryOptions {
   queryId?: string;
@@ -26,6 +28,8 @@ export class DbActions {
   private readonly tree = inject(TreeState);
   private readonly dialogs = inject(Dialogs);
   private readonly toasts = inject(Toasts);
+  private readonly order = inject(DbConnectionOrder);
+  private readonly schemaFilters = inject(DbSchemaFilterState);
 
   openConnectionTab(conn: { id: string; name: string }): void {
     this.tabs.openTab(this.scope(), { type: 'db.connection', title: conn.name, data: { id: conn.id } }, { singletonKey: `db.connection:${conn.id}` });
@@ -90,8 +94,9 @@ export class DbActions {
     this.openConnection(conn);
   }
 
+  /** A query on the first connection, as the sidebar lists them. */
   async newQueryForFirstConnection(): Promise<void> {
-    const connections = await this.host.invoke<DbConnectionSummary[]>('db.connection.list');
+    const connections = await this.order.sortedNow(await this.host.invoke<DbConnectionSummary[]>('db.connection.list'));
     this.openQueryTab({ connectionId: connections[0]?.id ?? null });
   }
 
@@ -100,8 +105,15 @@ export class DbActions {
     const items: ContextMenuItem[] = [{ label: conn.kind === 'redis' ? 'Browse keys' : 'New query', select: () => this.openConnection(conn) }];
     if (conn.kind === 'redis') items.push({ label: 'Console', select: () => this.openQueryTab({ connectionId: conn.id, title: conn.name }) });
     else items.push({ label: 'Search tables and columns', select: () => this.openSearchTab() });
+    if (hasSchemaFilter(conn.kind)) {
+      const noun = schemaNoun(conn.kind);
+      items.push({ label: `Filter ${noun}…`, testId: 'db-schema-filter-menu', select: () => this.schemaFilters.open(conn) });
+      if (this.schemaFilters.pickedFor(conn.id)) items.push({ label: `Show all ${noun}`, testId: 'db-schema-filter-menu-clear', select: () => this.schemaFilters.set(conn.id, null) });
+    }
     items.push('separator', { label: 'Edit connection', select: () => this.openConnectionTab(conn) });
     items.push({ label: 'Disconnect', disabled: !conn.connected, select: () => void this.disconnect(conn) });
+    const moves = this.order.moveItems(conn.id);
+    if (moves.length) items.push('separator', ...moves);
     items.push('separator', { label: 'Delete connection', danger: true, select: () => void this.deleteConnection(conn).catch((err) => this.toasts.error(err)) });
     return items;
   }

@@ -33,7 +33,7 @@ The smoke never registers a login item or creates a tray: the host gets a record
 
 ## Workspaces and tabs
 
-Open several folders at once and switch instantly. Each workspace has its own tabs, and the open or collapsed state of sidebar folders and sections, restored on return and after a restart (kept under `.quiver/local`). Global-scope tabs (Settings, Tools) are not persisted.
+Open several folders at once and switch instantly. Each workspace has its own tabs, and the open or collapsed state of sidebar folders and sections, restored on return and after a restart (kept under `.quiver/local`). Global-scope tabs (Settings, Tools) are not persisted, nor are unsaved API requests (a quick request, a history entry opened again), whose tabs are dropped on restore.
 
 - Drag a tab to reorder the tabs; an accent marker shows where it lands, Escape cancels, and the dropped tab becomes active. The order is restored with the rest. When the tabs do not fit, the strip scrolls with the wheel and follows the active tab instead of squeezing them.
 - Right-click a tab for Close (`Ctrl+W`), Close Others, Close to the Right, Close Saved and Close All, as in VS Code. A middle click closes the tab under the pointer (the strip stops the browser's middle-button autoscroll so the click gets through). The menu actions ask once when a tab with unsaved changes is among the ones to close.

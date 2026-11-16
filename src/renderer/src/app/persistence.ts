@@ -1,4 +1,5 @@
 import { DestroyRef, Service, effect, inject, untracked } from '@angular/core';
+import { restorableTabs } from '@quiver/core';
 import { AppState, HostBridge, TabsState, TreeState, type Tab } from '@quiver/ui';
 
 interface PersistedTabs {
@@ -47,9 +48,9 @@ export class ShellPersistence {
         .invoke<{ value: PersistedTabs | null }>('workspace.state.get', { key: TABS_KEY }, id)
         .then(({ value }) => {
           if (cancelled) return;
-          // Drafts (history replays) are not persisted, so drop tabs that would load nothing.
-          const tabs = (value?.tabs ?? []).filter((t) => !(t.type === 'api.request' && String(t.data?.['id'] ?? '').startsWith('history-')));
-          this.tabs.hydrate(id, tabs, value?.activeTabId ?? null);
+          // Drafts (history replays and quick requests) are not persisted, so drop tabs that would load nothing.
+          const { tabs, activeTabId } = restorableTabs(value?.tabs ?? [], value?.activeTabId ?? null);
+          this.tabs.hydrate(id, tabs, activeTabId);
         })
         .catch(() => this.tabs.hydrate(id, [], null));
     });
