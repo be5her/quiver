@@ -1,4 +1,4 @@
-import { Service, effect, inject, linkedSignal, signal, untracked } from '@angular/core';
+import { Service, computed, effect, inject, linkedSignal, signal, untracked } from '@angular/core';
 import { DB_SCHEMA_FILTER_KEY, parseSchemaFilters, withSchemaFilter, type DbConnectionSummary } from '@quiver/core';
 import { AppState, HostBridge, Toasts, invokeResource } from '@quiver/ui';
 
@@ -24,6 +24,8 @@ export class DbSchemaFilterState {
   private readonly editingConnection = signal<DbConnectionSummary | null>(null);
 
   readonly editing = this.editingConnection.asReadonly();
+  /** Whether the saved filters are in: `set` writes the whole map, so it waits for them rather than drop the others. */
+  readonly ready = computed(() => this.saved.current() !== undefined);
 
   constructor() {
     // The dialog belongs to a connection of the workspace on screen; switching away closes it.
@@ -44,9 +46,18 @@ export class DbSchemaFilterState {
   set(connectionId: string, picked: readonly string[] | null): void {
     const workspaceId = untracked(this.app.activeWorkspaceId);
     if (!workspaceId) return;
+    if (!untracked(this.ready)) {
+      this.toasts.notify('The schema filters are still loading; try again in a moment.', 'error');
+      return;
+    }
     const next = withSchemaFilter(untracked(this.filters), connectionId, picked);
     this.filters.set(next);
-    this.host.invoke('workspace.state.set', { key: DB_SCHEMA_FILTER_KEY, value: next }, workspaceId).catch((err) => this.toasts.error(err));
+    this.host.invoke('workspace.state.set', { key: DB_SCHEMA_FILTER_KEY, value: next }, workspaceId).catch((err) => {
+      this.toasts.error(err);
+      // Back to what is saved, so the tree does not show a filter that was never written.
+      this.filters.set(parseSchemaFilters(untracked(this.saved.current)?.value));
+      this.saved.reload();
+    });
   }
 
   open(connection: DbConnectionSummary): void {

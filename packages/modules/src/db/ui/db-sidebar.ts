@@ -1,4 +1,4 @@
-import { Component, computed, inject } from '@angular/core';
+import { Component, DestroyRef, computed, effect, inject, untracked } from '@angular/core';
 import type { DbHistoryEntry, SavedQuery } from '@quiver/core';
 import { Icon, IconButton, SectionHeader, Spinner, Toasts, TreeState, invokeResource } from '@quiver/ui';
 import { ChevronDown, ChevronRight, Clock, Pencil, Plus, Search, Terminal, Trash2 } from 'lucide';
@@ -30,6 +30,16 @@ export class DbSidebar {
   protected readonly history = invokeResource<DbHistoryEntry[]>('db.history.list', () => ({ limit: 5 }), { refreshOn: ['db-history'] });
   protected readonly queriesOpen = computed(() => this.tree.isExpanded('db/section/queries', true));
   protected readonly historyOpen = computed(() => this.tree.isExpanded('db/section/history'));
+
+  constructor() {
+    // The filter dialog is drawn here: it goes with the sidebar, and with its connection when that is deleted.
+    inject(DestroyRef).onDestroy(() => this.schemaFilters.close());
+    effect(() => {
+      const editing = this.schemaFilters.editing();
+      const list = this.connections.current();
+      if (editing && list && !list.some((c) => c.id === editing.id)) untracked(() => this.schemaFilters.close());
+    });
+  }
 
   protected toggleQueries(): void {
     this.tree.toggle('db/section/queries', true);

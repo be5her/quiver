@@ -23,7 +23,6 @@ import { DbSchemaFilterState } from './schema-filter-state';
         [attr.aria-label]="'Filter ' + noun()"
         data-testid="db-schema-filter-dialog"
         (mousedown)="$event.stopPropagation()"
-        (keydown.escape)="closed.emit()"
         (submit)="apply($event)"
       >
         <div>
@@ -47,6 +46,7 @@ import { DbSchemaFilterState } from './schema-filter-state';
               [attr.aria-label]="'Search ' + noun()"
               data-testid="db-schema-filter-search"
               (input)="typed($event)"
+              (keydown.enter)="$event.preventDefault()"
             />
           </div>
           <div class="flex items-center gap-3 text-xs">
@@ -73,7 +73,7 @@ import { DbSchemaFilterState } from './schema-filter-state';
         }
         <div class="flex items-center gap-2 mt-1">
           @if (hasFilter()) {
-            <button qButton type="button" variant="ghost" data-testid="db-schema-filter-clear" (click)="clear()">Show all</button>
+            <button qButton type="button" variant="ghost" [disabled]="!filters.ready()" data-testid="db-schema-filter-clear" (click)="clear()">Show all</button>
           }
           <span class="flex-1 text-xs text-muted text-right">
             @if (databases.value() && !ticked().size) {
@@ -81,15 +81,16 @@ import { DbSchemaFilterState } from './schema-filter-state';
             }
           </span>
           <button qButton type="button" variant="ghost" (click)="closed.emit()">Cancel</button>
-          <button qButton type="submit" variant="primary" [disabled]="!databases.value() || !ticked().size" data-testid="db-schema-filter-apply">Apply</button>
+          <button qButton type="submit" variant="primary" [disabled]="!databases.value() || !ticked().size || !filters.ready()" data-testid="db-schema-filter-apply">Apply</button>
         </div>
       </form>
     </div>
   `,
-  host: { class: 'contents' },
+  // On the document: while the list loads or failed to, focus is not in the form, and Escape must still close it.
+  host: { class: 'contents', '(document:keydown.escape)': 'closed.emit()' },
 })
 export class SchemaFilterDialog {
-  private readonly filters = inject(DbSchemaFilterState);
+  protected readonly filters = inject(DbSchemaFilterState);
 
   readonly connection = input.required<DbConnectionSummary>();
   readonly closed = output<void>();

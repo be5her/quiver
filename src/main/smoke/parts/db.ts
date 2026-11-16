@@ -986,7 +986,7 @@ export default definePart({
               `(() => { const el = ${visibleAll(selector)}[0]; if (!el) return false; const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(el, ${JSON.stringify(value)}); el.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`,
             );
           const saved = async () => (await run<{ value: Record<string, string[]> | null }>('workspace.state.get', { key: 'db.schemaFilter' }, ws.id)).value?.[pgSaved.id] ?? null;
-          if ((await schemaRows()).length === 0) await js(`${row}?.click()`);
+          if ((await js(`${row}?.getAttribute('aria-expanded')`)) !== 'true') await js(`${row}?.click()`);
           await until(async () => (await schemaRows()).length === pgSchemas.length, 6000);
           const all = await schemaRows();
           const quickShown = await js(`${visibleAll('[data-testid=db-schema-quick-filter]')}.length === 1`);
@@ -1047,9 +1047,14 @@ export default definePart({
           await js(`${row}?.querySelector('[data-testid=db-schema-filter-badge]')?.click()`);
           await until(async () => (await js(`document.querySelectorAll('[data-testid=db-schema-filter-option]').length`)) === pgSchemas.length, 6000);
           const reopened = (await options()).filter((o) => o[1]).map((o) => o[0]);
-          await js(`document.querySelector('[data-testid=db-schema-filter-dialog]')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+          // Enter in the search does not apply (and close) it; Escape closes it even with focus outside the form, as while the list loads.
+          await js(`document.querySelector('[data-testid=db-schema-filter-search]')?.focus()`);
+          pressEnter();
+          await wait(300);
+          const openAfterEnter = await js(`Boolean(document.querySelector('[data-testid=db-schema-filter-dialog]'))`);
+          await js(`document.activeElement?.blur(); document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
           await wait(200);
-          const closed = await js(`!document.querySelector('[data-testid=db-schema-filter-dialog]')`);
+          const closed = openAfterEnter === true && (await js(`!document.querySelector('[data-testid=db-schema-filter-dialog]')`)) === true;
           // Show all on the marker row brings every schema back and forgets the filter.
           // The button shows on hover; a click reaches it all the same.
           await js(`${visibleAll('[data-testid=db-schema-filter-row]')}[0]?.querySelector('[data-testid=db-schema-filter-clear-row]')?.click()`);
@@ -1059,12 +1064,12 @@ export default definePart({
           await until(async () => (await saved()) === null, 3000);
           const storedAfter = await saved();
           check(
-            'ui: the badge reopens the filter with the saved picks, and Show all in the tree removes it',
-            reopened.join() === 'public,reporting,reporting_archive' && closed === true && restored.length === pgSchemas.length && badgeAfter === false && storedAfter === null,
-            { reopened, closed, restored: restored.length, badgeAfter, storedAfter },
+            'ui: the badge reopens the filter with the saved picks, Enter in its search does not apply it, Escape closes it from anywhere, and Show all in the tree removes it',
+            reopened.join() === 'public,reporting,reporting_archive' && closed && restored.length === pgSchemas.length && badgeAfter === false && storedAfter === null,
+            { reopened, openAfterEnter, closed, restored: restored.length, badgeAfter, storedAfter },
           );
           await js(`document.documentElement.classList.remove('dark')`);
-          await js(`${row}?.click()`);
+          if ((await js(`${row}?.getAttribute('aria-expanded')`)) === 'true') await js(`${row}?.click()`);
           await wait(200);
         }
       },
